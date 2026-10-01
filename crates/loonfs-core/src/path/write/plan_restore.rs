@@ -7,8 +7,8 @@ use crate::authorize::Absence;
 use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::ensure_mutation_path;
-use loonfs_api::{AbsolutePath, AccessRight, AccessRights, InodeKind, RevisionNo};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{AbsolutePath, AccessRight, AccessRights, InodeKind, RevisionNo};
 
 pub(super) async fn plan_restore_revision<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,

@@ -9,8 +9,8 @@ use crate::namespace::state::NamespaceReadState;
 use crate::wal::{
     discover_tail, replay_discovered_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
 };
-use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]

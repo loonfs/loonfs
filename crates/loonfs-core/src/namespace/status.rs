@@ -5,11 +5,11 @@ use crate::error::CoreError;
 use crate::error::Result;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::ForkBasis;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::ForkBasis;
+use loonfs_types::{
     ActorId, ChangeSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
 };
-use loonfs_objectstore::ObjectStore;
 
 /// Decoded WAL tail usage for test assertions.
 #[cfg(any(test, feature = "test-support"))]

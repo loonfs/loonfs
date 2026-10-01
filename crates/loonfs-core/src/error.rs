@@ -12,11 +12,11 @@ use crate::manifest::ManifestLoadError;
 use crate::metadata::VisiblePathError;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalObjectError, WalTailLoadError};
-use loonfs_api::{
+use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
+use loonfs_types::{
     BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId,
     PrincipalScope, RevisionNo, UploadId, WriterEpoch, WriterId,
 };
-use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use thiserror::Error;
 
 /// Public error type returned by `loonfs-core`.
@@ -29,8 +29,8 @@ pub use self::CoreError as Error;
 /// expose this as `std::result::Result<T, Error>`.
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
-pub use loonfs_api::{ErrorCode, ErrorKind};
 pub use loonfs_objectstore::ObjectStoreErrorClass as StoreFailureClass;
+pub use loonfs_types::{ErrorCode, ErrorKind};
 
 /// Detailed core error.
 ///
@@ -153,21 +153,21 @@ pub enum CoreError {
     #[error("checkpoint unavailable: {0}")]
     CheckpointUnavailable(String),
     #[error("content `{content_id}` is not yet materialized; read through the proxied route or retry after the next fold")]
-    ContentNotMaterialized { content_id: loonfs_api::ContentId },
+    ContentNotMaterialized { content_id: loonfs_types::ContentId },
     #[error("invalid checkpoint request: {0}")]
     InvalidCheckpointRequest(String),
     #[error("checkpoint `{checkpoint_id}` was not found")]
-    CheckpointNotFound { checkpoint_id: loonfs_api::PinId },
+    CheckpointNotFound { checkpoint_id: loonfs_types::PinId },
     #[error("snapshot `{snapshot_id}` was not found")]
-    SnapshotNotFound { snapshot_id: loonfs_api::PinId },
+    SnapshotNotFound { snapshot_id: loonfs_types::PinId },
     #[error("snapshot `{snapshot_id}` has expired")]
-    SnapshotGone { snapshot_id: loonfs_api::PinId },
+    SnapshotGone { snapshot_id: loonfs_types::PinId },
     #[error(
         "namespace `{namespace_id}` already has its limit of {max_live} live snapshots; \
          delete one or wait for a snapshot to expire"
     )]
     SnapshotQuotaExceeded {
-        namespace_id: loonfs_api::NamespaceId,
+        namespace_id: loonfs_types::NamespaceId,
         max_live: usize,
     },
     #[error(
@@ -710,8 +710,8 @@ mod tests {
     use crate::commit_engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
     use crate::storage::content_admission::ContentTokenError;
-    use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId, RevisionNo, WriterEpoch};
     use loonfs_objectstore::ObjectStoreError;
+    use loonfs_types::{ChangeSeq, CommitId, InodeId, NamespaceId, RevisionNo, WriterEpoch};
 
     #[test]
     fn public_error_kind_groups_detailed_codes() {
@@ -750,7 +750,7 @@ mod tests {
         assert_eq!(error.code().as_str(), "namespace_exists");
         assert!(error.message().contains("already exists"));
 
-        let content_id = loonfs_api::ContentId::generate();
+        let content_id = loonfs_types::ContentId::generate();
         let error = CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
             content_id: content_id.clone(),
         });
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn rejected_content_token_maps_to_content_not_prepared() {
-        let content_id = loonfs_api::ContentId::generate();
+        let content_id = loonfs_types::ContentId::generate();
         let error = CoreError::from(ContentPreparationError::ContentToken(vec![(
             content_id.clone(),
             ContentTokenError::Expired,
@@ -788,7 +788,7 @@ mod tests {
         let fenced = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
             active_epoch: WriterEpoch(4),
-            active_writer_id: Some(loonfs_api::WriterId::parse("writer-b").expect("writer id")),
+            active_writer_id: Some(loonfs_types::WriterId::parse("writer-b").expect("writer id")),
             active_acquired_at_ms: Some(2_000),
         });
         let details = fenced.details().expect("fence details");

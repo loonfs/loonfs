@@ -6,11 +6,11 @@ use super::fixtures::{test_app, test_options, TestAppOptions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs::{CreateNamespaceOptions, PutFileOptions};
-use loonfs_api::{
+use loonfs_test_support::ids::namespace_id;
+use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, ApiError, ErrorCode, NamespaceAccess, PrincipalId,
     PrincipalScope, PrincipalSet, Subject, SubjectId,
 };
-use loonfs_test_support::ids::namespace_id;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::tempdir;

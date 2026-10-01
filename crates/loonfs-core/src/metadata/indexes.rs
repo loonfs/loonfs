@@ -7,7 +7,7 @@ use super::{
     TombstoneRowAction,
 };
 use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
-use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey};
+use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub(super) struct MetadataIndexes {
     latest_binding_by_child: HashMap<InodeId, DirentryBindingRecord>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
     commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
-    content_publication_by_id: HashMap<loonfs_api::ContentId, ChangeSeq>,
+    content_publication_by_id: HashMap<loonfs_types::ContentId, ChangeSeq>,
     /// What the indexed keys and records own, since each index holds its
     /// own copy of a row.
     owned_heap_bytes: usize,
@@ -187,7 +187,7 @@ impl MetadataIndexes {
 
     pub(super) fn content_publication(
         &self,
-        content_id: &loonfs_api::ContentId,
+        content_id: &loonfs_types::ContentId,
     ) -> Option<ChangeSeq> {
         self.content_publication_by_id.get(content_id).copied()
     }
@@ -262,18 +262,18 @@ fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (ChangeSeq, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::{DisplayName, NameKey};
+    use loonfs_types::{DisplayName, NameKey};
 
     fn bind(parent: u64, name: &str, child: u64, seq: u64) -> DirentryBindingRecord {
         DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("valid name key"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("valid display name"),
             },
             child_inode_id: InodeId(child),
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(seq),
             delta_index: 0,
@@ -288,7 +288,7 @@ mod tests {
 
         let mut unbound = older.clone();
         unbound.committed_seq = ChangeSeq(20);
-        unbound.state = loonfs_api::wire::manifest::DirentryBindingState::Unbound;
+        unbound.state = loonfs_types::format::manifest::DirentryBindingState::Unbound;
         indexes.record_binding(&unbound);
         indexes.record_binding(&newer);
         indexes.record_binding(&older);

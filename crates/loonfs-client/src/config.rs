@@ -3,7 +3,7 @@
 
 use crate::{ClientError, Result};
 use http::Uri;
-use loonfs_api::SecretString;
+use loonfs_types::SecretString;
 use serde::Deserialize;
 use std::fs;
 use std::net::IpAddr;

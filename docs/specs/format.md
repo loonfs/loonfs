@@ -1075,7 +1075,7 @@ The owning envelope's `format_version` governs its entire payload, including nes
 
 After the stable format is released, a change to a field's name, presence, type, tag, encoding, or governed semantics requires a new owning-family version. Collection-protocol changes can require a version gate even when most stored fields remain unchanged. An implementation must not operate on a newer protocol merely because it can deserialize a subset of its fields. The rule applies to every role that mutates durable state: publishing a successor manifest or WAL object, compacting, creating or changing pins, advancing retention, collecting, and maintaining an extension. Each of those roles loads the current manifest before it publishes, or is fenced by the epoch that a newer binary claims when it first publishes, and an unsupported version is rejected at load. A process that was running when a newer version was published therefore stops mutating durable state at its next publication attempt, and a collection pass stops at its next start.
 
-Golden fixtures pin the reference encodings in `crates/loonfs-api/tests/golden_formats.rs` and the grep fixtures. Fingerprint vectors additionally pin canonical JSON bytes and digests. Validating a new release requires preserving the meaning of retained data, not just recompiling its type definitions.
+Golden fixtures pin the reference encodings in `crates/loonfs-types/tests/golden_formats.rs` and the grep fixtures. Fingerprint vectors additionally pin canonical JSON bytes and digests. Validating a new release requires preserving the meaning of retained data, not just recompiling its type definitions.
 
 Appendix A lists the family versions. A binary rollback is valid only if the older binary supports every stored family version and its associated protocol. Downgrading the binary does not convert stored data.
 
@@ -1742,5 +1742,5 @@ For an absent or deleted core namespace, an explicit grep collection call can re
 [api-spec]: api.md
 [provider-spec]: object-storage-providers.md
 [limits-source]: ../../crates/loonfs-core/src/limits.rs
-[fingerprint-vectors]: ../../crates/loonfs-api/tests/golden/commit_fingerprints_v1.json
-[name-vectors]: ../../crates/loonfs-api/tests/golden/name_folding.v1.json
+[fingerprint-vectors]: ../../crates/loonfs-types/tests/golden/commit_fingerprints_v1.json
+[name-vectors]: ../../crates/loonfs-types/tests/golden/name_folding.v1.json

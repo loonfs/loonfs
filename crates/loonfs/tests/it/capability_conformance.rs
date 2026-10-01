@@ -1,5 +1,5 @@
 //! Pins the capability registry's three copies to each other: the constants
-//! in `loonfs-api`, the document the runtime handles advertise, and the
+//! in `loonfs-types`, the document the runtime handles advertise, and the
 //! normative text in `docs/specs/api.md`. If any copy drifts, this fails.
 //!
 //! The registry describes the reference deployment, which serves one API group
@@ -15,9 +15,9 @@
 // Spec parsing panics with precise messages when a section is missing.
 
 use loonfs::{CapabilityDocument, LoonFs, SharedObjectStore};
-use loonfs_api::API_GROUP_QUERY_V0;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
+use loonfs_types::API_GROUP_QUERY_V0;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -40,7 +40,8 @@ fn without_host_capabilities(mut document: CapabilityDocument) -> CapabilityDocu
         .features
         .retain(|key, _| !is_grep_key(key) && !is_host_feature_key(key));
     document.limits.retain(|key, _| {
-        !is_grep_key(key) && key != loonfs_api::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION
+        !is_grep_key(key)
+            && key != loonfs_types::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION
     });
     document
 }

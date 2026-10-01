@@ -6,9 +6,9 @@ use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::options::DeleteNamespaceOptions;
 use crate::time::Deadline;
-use loonfs_api::wire::control::{AcquiredWriter, NamespaceStatus};
-use loonfs_api::{DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{AcquiredWriter, NamespaceStatus};
+use loonfs_types::{DeleteNamespaceResponse, NamespaceId};
 
 pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,

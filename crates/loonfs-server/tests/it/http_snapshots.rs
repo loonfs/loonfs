@@ -4,14 +4,14 @@
 
 use crate::common::http_split_support::test_config;
 use crate::common::start_server;
-use loonfs_api::{
-    ApiError, ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, DestinationBehavior,
-    ListSnapshotsResponse, NamespaceId, SnapshotSummary,
-};
 use loonfs_client::{NamespacePath, PutFileOptions, ReadFileOptions, StatOptions};
 use loonfs_server::MaintenanceMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_types::{
+    ApiError, ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, DestinationBehavior,
+    ListSnapshotsResponse, NamespaceId, SnapshotSummary,
+};
 use serde::de::DeserializeOwned;
 use tempfile::tempdir;
 
@@ -66,7 +66,7 @@ fn delete_checkpoint(
     server_url: &str,
     namespace: &str,
     checkpoint_id: &str,
-) -> ApiResult<loonfs_api::DeleteCheckpointResponse> {
+) -> ApiResult<loonfs_types::DeleteCheckpointResponse> {
     delete_json(&format!(
         "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{checkpoint_id}"
     ))
@@ -129,7 +129,7 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -238,7 +238,7 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -295,7 +295,7 @@ async fn http_snapshots_enforce_quota_and_delete_frees_a_slot() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -335,7 +335,7 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -423,7 +423,7 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -482,7 +482,7 @@ async fn snapshot_file_read_returns_the_captured_state() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

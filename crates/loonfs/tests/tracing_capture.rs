@@ -60,7 +60,7 @@ async fn fill_wal_tail_past_threshold(root: &Path, namespace_id: &NamespaceId) {
         namespace_id,
         u64::from(writes_past_wal_tail_threshold()),
         &MutationContext {
-            writer_id: loonfs_api::WriterId::parse("tracing-tail-writer").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("tracing-tail-writer").expect("writer id"),
             now_ms: 1_000,
         },
     )

@@ -1,9 +1,9 @@
 //! Pin publication races and verification request counts.
 
 use super::*;
-use loonfs_api::wire::control::PinOwner;
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_test_support::stores::MetadataMapStore;
+use loonfs_types::format::control::PinOwner;
 
 #[tokio::test]
 async fn pin_creation_retries_after_compaction_and_collection() {
@@ -60,7 +60,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
                 .await
                 .expect("head"),
             &checkpoint.checkpoint_id,
-            loonfs_api::PageRequest {
+            loonfs_types::PageRequest {
                 cursor: None,
                 limit: loonfs_test_support::ids::page_limit(10),
             },
@@ -88,7 +88,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
     selected: &crate::namespace::control::LoadedManifest,
-) -> loonfs_api::wire::control::ManifestRef {
+) -> loonfs_types::format::control::ManifestRef {
     let report = compaction_step(
         store,
         namespace_id,

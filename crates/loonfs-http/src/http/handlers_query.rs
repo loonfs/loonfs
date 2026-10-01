@@ -8,13 +8,13 @@ use super::{AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::Json;
-use loonfs_api::v0::GrepIndex;
+use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
+use loonfs_types::api::v0::GrepIndex;
 #[cfg(feature = "openapi")]
-use loonfs_api::ApiError;
-use loonfs_api::{
+use loonfs_types::ApiError;
+use loonfs_types::{
     GrepRequest, GrepResponse, NamespaceId, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
 };
-use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError, NamespaceReads};
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,8 +103,8 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
     let path_prefix = query
         .path_prefix
         .map(|value| {
-            loonfs_api::AbsolutePath::parse(&value).map_err(|error| {
-                ApiResponseError::new(loonfs_api::ErrorCode::InvalidRequest, &error.to_string())
+            loonfs_types::AbsolutePath::parse(&value).map_err(|error| {
+                ApiResponseError::new(loonfs_types::ErrorCode::InvalidRequest, &error.to_string())
                     .with_param("path_prefix")
             })
         })
@@ -277,7 +277,7 @@ pub(super) async fn disable_grep_index(
 }
 
 pub(super) fn map_grep_error(
-    namespace_id: &loonfs_api::NamespaceId,
+    namespace_id: &loonfs_types::NamespaceId,
     error: GrepError,
 ) -> ApiResponseError {
     if let GrepError::Runtime(error) = error {
@@ -288,7 +288,7 @@ pub(super) fn map_grep_error(
 
 fn grep_publication_conflict() -> ApiResponseError {
     ApiResponseError::new(
-        loonfs_api::ErrorCode::StaleHead,
+        loonfs_types::ErrorCode::StaleHead,
         "grep index publication conflict; retry",
     )
 }

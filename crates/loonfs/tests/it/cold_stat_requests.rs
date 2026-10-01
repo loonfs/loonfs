@@ -10,11 +10,11 @@
 //! wave count.
 
 use loonfs::{LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId, Writable};
-use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
-use loonfs_api::AbsolutePath;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
+use loonfs_types::format::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
+use loonfs_types::AbsolutePath;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -157,7 +157,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .runs
         .iter()
         .filter(|run| {
-            run.tier == loonfs_api::wire::manifest::RunTier::Delta
+            run.tier == loonfs_types::format::manifest::RunTier::Delta
                 && run
                     .segments
                     .iter()
@@ -175,7 +175,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .payload()
             .runs
             .iter()
-            .filter(|run| run.tier == loonfs_api::wire::manifest::RunTier::Delta)
+            .filter(|run| run.tier == loonfs_types::format::manifest::RunTier::Delta)
             .flat_map(|run| &run.segments)
             .all(|descriptor| descriptor.filter_inline.is_some()),
         "every delta segment should carry an inline filter"

@@ -4,15 +4,15 @@
 
 use crate::common::http_split_support::*;
 use crate::common::{collect_checkpoints, collect_path_entries, start_server};
-use loonfs_api::PageRequest;
-use loonfs_api::{
-    v0::FilesystemChange, ApiError, ChangeSeq, CommitId, CreateCheckpointRequest,
-    DestinationBehavior, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
-    DEFAULT_MAX_PAGE_LIMIT,
-};
 use loonfs_client::{ClientError, MoveOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id, page_limit};
+use loonfs_types::PageRequest;
+use loonfs_types::{
+    api::v0::FilesystemChange, ApiError, ChangeSeq, CommitId, CreateCheckpointRequest,
+    DestinationBehavior, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
+    DEFAULT_MAX_PAGE_LIMIT,
+};
 use tempfile::tempdir;
 
 fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
@@ -56,7 +56,7 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
             .create_namespace(
                 namespace_id,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");
@@ -257,7 +257,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -374,7 +374,7 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -423,7 +423,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -435,7 +435,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             b"first bytes\n",
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     commit_id: Some(
                         CommitId::parse("req-restore-create").expect("valid commit id"),
                     ),
@@ -465,7 +465,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     commit_id: Some(
                         CommitId::parse("req-restore-replace").expect("valid commit id"),
                     ),
@@ -484,7 +484,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             &target,
             RevisionNo(1),
             &loonfs_test_support::test_actor(),
-            &loonfs_api::options::CommitOptions {
+            &loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: Some(CommitId::parse("req-restore-restore").expect("valid commit id")),
                 message: Some("restore revision".to_owned()),
@@ -586,7 +586,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -640,7 +640,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
             &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,
@@ -698,7 +698,7 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -719,7 +719,7 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
             &target,
             RevisionNo(99),
             &loonfs_test_support::test_actor(),
-            &loonfs_api::options::CommitOptions {
+            &loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: Some(
                     CommitId::parse("req-restore-missing-source-restore").expect("valid commit id"),

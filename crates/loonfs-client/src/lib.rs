@@ -3,7 +3,7 @@
 //! Use [`Client`] with [`ClientConfig`] and [`NamespacePath`] to access a
 //! hosted LoonFS server. Applications that embed the runtime directly should
 //! use the `loonfs` crate. Both crates share operation options from
-//! `loonfs-api`.
+//! `loonfs-types`.
 
 #![warn(missing_docs)]
 #![allow(
@@ -32,8 +32,8 @@ mod uploads;
 
 use bytes::Bytes;
 use futures::StreamExt as _;
-use loonfs_api::{
-    v0::{
+use loonfs_types::{
+    api::v0::{
         Commit, CompleteUploadBody, CompletedUploadPart, ContentToken,
         CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse,
         CreateSnapshotRequest, CreateUploadBody, DeleteSnapshotResponse, ExtendSnapshotRequest,
@@ -70,9 +70,9 @@ use transport::{SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest
 pub use transport_error::TransportError;
 pub use ClientError as Error;
 
-/// Per-operation options, defined once in `loonfs-api` and shared with the
+/// Per-operation options, defined once in `loonfs-types` and shared with the
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
-pub use loonfs_api::options::{
+pub use loonfs_types::options::{
     AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateDirectoryOptions,
     DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions,
     PutFileOptions, StatOptions, UpdateAccessOptions, UpdateAttributesOptions,
@@ -93,7 +93,7 @@ pub use uploads::staging::{
 /// cache.
 #[derive(Debug, Clone)]
 pub struct Client {
-    subject: Option<loonfs_api::Subject>,
+    subject: Option<loonfs_types::Subject>,
     base_url: String,
     auth_token: Option<SecretString>,
     transport: transport::Transport,
@@ -116,12 +116,12 @@ pub struct Client {
 impl Client {
     /// Returns the subject sent with every request, or `None` when requests
     /// carry no subject headers.
-    pub fn subject(&self) -> Option<&loonfs_api::Subject> {
+    pub fn subject(&self) -> Option<&loonfs_types::Subject> {
         self.subject.as_ref()
     }
 
     /// Clones this client with the subject sent with every request.
-    pub fn with_subject(&self, subject: loonfs_api::Subject) -> Self {
+    pub fn with_subject(&self, subject: loonfs_types::Subject) -> Self {
         Self {
             subject: Some(subject),
             ..self.clone()

@@ -1,14 +1,14 @@
 //! Manifest load errors, classified as corruption versus store trouble.
 
-use loonfs_api::wire::manifest::MetadataRowFamily;
-use loonfs_api::{ManifestNo, NamespaceId};
+use loonfs_types::format::manifest::MetadataRowFamily;
+use loonfs_types::{ManifestNo, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Coarse failure class of a manifest load: corruption versus store trouble.
 ///
 /// Deliberately not named `*ErrorKind` to avoid colliding with the wire-level
-/// caller-action concept in [`loonfs_api::ErrorKind`].
+/// caller-action concept in [`loonfs_types::ErrorKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManifestLoadFailureClass {
     Corrupt,

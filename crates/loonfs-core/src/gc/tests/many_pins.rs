@@ -45,7 +45,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
         namespace_id: namespace_id.clone(),
 
         upload_id: UploadId::generate(),
-        content_id: loonfs_api::ContentId::generate(),
+        content_id: loonfs_types::ContentId::generate(),
         subject_id: None,
         mode: UploadSessionMode::ServiceProxied {
             staging: ProxiedStaging::Idle,
@@ -59,7 +59,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
         .put_if_absent(
             &session_key,
             Bytes::from(
-                loonfs_api::wire::control::encode_control_state(
+                loonfs_types::format::control::encode_control_state(
                     ControlObjectKind::UploadSession,
                     &session,
                 )

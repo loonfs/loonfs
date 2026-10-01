@@ -2,16 +2,16 @@
 
 #![allow(dead_code)]
 
-use loonfs_api::NamespaceId;
 use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache};
 use loonfs_core::control::load_read_anchor;
 use loonfs_core::{MutationContext, NamespaceWriterEngine, RuntimeReadContext};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::NamespaceId;
 use std::sync::Arc;
 
 pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {
     MutationContext {
-        writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
+        writer_id: loonfs_types::WriterId::parse(writer_id).expect("writer id"),
         now_ms,
     }
 }
@@ -48,7 +48,7 @@ pub(crate) mod commit_split_support {
     use super::{namespace_engine, read_context};
     use async_trait::async_trait;
     use bytes::Bytes;
-    use loonfs_api::{
+    use loonfs_types::{
         AbsolutePath, ChangeSeq, CommitId, ContentRef, DestinationBehavior, NamespaceId,
     };
 
@@ -72,12 +72,12 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-    ) -> Result<loonfs_api::NamespaceMetadata, CoreError> {
+    ) -> Result<loonfs_types::NamespaceMetadata, CoreError> {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(
                 &loonfs_test_support::test_actor(),
                 &CreateNamespaceOptions {
-                    access: loonfs_api::NamespaceAccess::Unrestricted {},
+                    access: loonfs_types::NamespaceAccess::Unrestricted {},
                     allow_existing: false,
                 },
             )
@@ -88,12 +88,12 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-    ) -> Result<loonfs_api::NamespaceMetadata, CoreError> {
+    ) -> Result<loonfs_types::NamespaceMetadata, CoreError> {
         namespace_engine(store, namespace_id, context)
             .bootstrap_namespace(
                 &loonfs_test_support::test_actor(),
                 &CreateNamespaceOptions {
-                    access: loonfs_api::NamespaceAccess::Unrestricted {},
+                    access: loonfs_types::NamespaceAccess::Unrestricted {},
                     allow_existing: true,
                 },
             )
@@ -107,7 +107,7 @@ pub(crate) mod commit_split_support {
         namespace_id: &NamespaceId,
         request: CommitRequest,
         context: &MutationContext,
-    ) -> Result<loonfs_api::v0::Commit, CoreError> {
+    ) -> Result<loonfs_types::api::v0::Commit, CoreError> {
         let candidate = prepared_candidate(store, namespace_id, request).await;
         publish_namespace_commits_batch(store, namespace_id, vec![candidate], context)
             .await
@@ -123,7 +123,7 @@ pub(crate) mod commit_split_support {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
         context: &MutationContext,
-    ) -> Vec<Result<loonfs_api::v0::Commit, CoreError>> {
+    ) -> Vec<Result<loonfs_types::api::v0::Commit, CoreError>> {
         let mut candidates = Vec::with_capacity(requests.len());
         for request in requests {
             candidates.push(prepared_candidate(store, namespace_id, request).await);
@@ -179,7 +179,7 @@ pub(crate) mod commit_split_support {
         namespace_id: &NamespaceId,
         candidates: Vec<CommitCandidate>,
         context: &MutationContext,
-    ) -> Vec<Result<loonfs_api::v0::Commit, CoreError>> {
+    ) -> Vec<Result<loonfs_types::api::v0::Commit, CoreError>> {
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
         engine
             .publish_batch(
@@ -196,12 +196,12 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
-    ) -> Result<loonfs_api::v0::ListChangesResponse, CoreError> {
+    ) -> Result<loonfs_types::api::v0::ListChangesResponse, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
             .list_changes_after(
                 after_seq,
-                page_limit(loonfs_api::DEFAULT_PAGE_LIMIT),
+                page_limit(loonfs_types::DEFAULT_PAGE_LIMIT),
                 &context,
             )
             .await
@@ -211,7 +211,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         context: &MutationContext,
-    ) -> Result<loonfs_api::Checkpoint, CoreError> {
+    ) -> Result<loonfs_types::Checkpoint, CoreError> {
         namespace_engine(store, namespace_id, context)
             .create_checkpoint("test-pin".to_owned(), None)
             .await
@@ -231,7 +231,7 @@ pub(crate) mod commit_split_support {
         commit_id: CommitId,
         operation: FilesystemOperation,
         context: &MutationContext,
-    ) -> Result<loonfs_api::Commit, CoreError> {
+    ) -> Result<loonfs_types::Commit, CoreError> {
         submit_commit(
             store,
             namespace_id,
@@ -254,7 +254,7 @@ pub(crate) mod commit_split_support {
         behavior: DestinationBehavior,
         context: &MutationContext,
         commit_id: Option<&str>,
-    ) -> Result<loonfs_api::Commit, CoreError> {
+    ) -> Result<loonfs_types::Commit, CoreError> {
         let content = store_bytes_as_content(store, namespace_id, bytes).await?;
         submit_operation(
             store,
@@ -280,7 +280,7 @@ pub(crate) mod commit_split_support {
         bytes: &[u8],
         context: &MutationContext,
         commit_id: Option<&str>,
-    ) -> Result<loonfs_api::Commit, CoreError> {
+    ) -> Result<loonfs_types::Commit, CoreError> {
         put_file(
             store,
             namespace_id,
@@ -299,7 +299,7 @@ pub(crate) mod commit_split_support {
         absolute_path: &str,
         context: &MutationContext,
         commit_id: Option<&str>,
-    ) -> Result<loonfs_api::Commit, CoreError> {
+    ) -> Result<loonfs_types::Commit, CoreError> {
         submit_operation(
             store,
             namespace_id,
@@ -317,12 +317,12 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> Result<loonfs_api::PathEntry, CoreError> {
+    ) -> Result<loonfs_types::PathEntry, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
             .resolve_path(
                 absolute_path,
-                loonfs_api::options::StatOptions::default(),
+                loonfs_types::options::StatOptions::default(),
                 &context,
             )
             .await
@@ -332,7 +332,7 @@ pub(crate) mod commit_split_support {
         store: &S,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-    ) -> Result<loonfs_api::FileBytes, CoreError> {
+    ) -> Result<loonfs_types::FileBytes, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
             .get_file(absolute_path, &context, None)

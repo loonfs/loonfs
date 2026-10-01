@@ -10,9 +10,9 @@ use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::protocol::AbandonedUpload;
 use crate::storage::content::delete_unpublished_content_object;
-use loonfs_api::wire::control::{UploadSessionPayload, UploadSessionRecordStatus};
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{UploadSessionPayload, UploadSessionRecordStatus};
+use loonfs_types::NamespaceId;
 use tokio::sync::OnceCell;
 
 /// The metadata view that says whether completed content was ever

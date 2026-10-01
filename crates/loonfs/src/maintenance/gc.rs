@@ -146,7 +146,7 @@ mod tests {
         for _ in 0..3 {
             let key = loonfs_objectstore::keys::content_blob(
                 &namespace_id,
-                &loonfs_api::ContentId::generate(),
+                &loonfs_types::ContentId::generate(),
             );
             store
                 .put_if_absent(&key, bytes::Bytes::from_static(b"content"))
@@ -154,7 +154,7 @@ mod tests {
                 .expect("content");
         }
         let mut context = loonfs_core::MutationContext {
-            writer_id: loonfs_api::WriterId::parse("deleter").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("deleter").expect("writer id"),
             now_ms: 1_000,
         };
         loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone())
@@ -190,7 +190,10 @@ mod tests {
         )
         .await
         .expect("repeat pass");
-        assert_eq!(repeated.deleted, loonfs_api::DeletedObjectCounts::default());
+        assert_eq!(
+            repeated.deleted,
+            loonfs_types::DeletedObjectCounts::default()
+        );
         assert_eq!(gc_conclusion(&repeated), MaintenanceConclusion::Idle);
         assert_eq!(
             store.counts(),

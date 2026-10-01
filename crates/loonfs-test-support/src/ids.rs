@@ -1,6 +1,6 @@
 //! Small validated-value constructors used throughout tests.
 
-use loonfs_api::{
+use loonfs_types::{
     ActorId, AttributeKey, AttributeValue, ContentId, ContentRef, EffectiveLimit, NamespaceId,
     PageRequest, WriterId, DEFAULT_PAGE_LIMIT,
 };
@@ -44,7 +44,7 @@ pub fn content_id(value: &str) -> ContentId {
 /// clone the reference.
 pub fn content_ref(bytes: &[u8]) -> ContentRef {
     ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         bytes,
     )

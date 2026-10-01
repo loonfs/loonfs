@@ -59,8 +59,8 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             committed_at_ms,
                             committed_by,
                             delta_index,
-                            content_ref: loonfs_api::ContentRef {
-                                content_id: loonfs_api::ContentId::parse(
+                            content_ref: loonfs_types::ContentRef {
+                                content_id: loonfs_types::ContentId::parse(
                                     "con_00000000000000000000000000000000",
                                 )
                                 .expect("placeholder content id"),
@@ -71,12 +71,12 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             record.semantic_commit_fingerprint =
                                 serde_json::from_str(r#""<normalized>""#).expect("fingerprint");
                             for delta in &mut record.deltas {
-                                if let loonfs_api::wire::wal::WalDelta::AppendFileRevision {
+                                if let loonfs_types::format::wal::WalDelta::AppendFileRevision {
                                     content_ref,
                                     ..
                                 } = &mut delta.delta
                                 {
-                                    content_ref.content_id = loonfs_api::ContentId::parse(
+                                    content_ref.content_id = loonfs_types::ContentId::parse(
                                         "con_00000000000000000000000000000000",
                                     )
                                     .expect("placeholder content id");
@@ -85,7 +85,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             MetadataRow::Commit(record)
                         }
                         MetadataRow::ContentPublication(mut record) => {
-                            record.content_id = loonfs_api::ContentId::parse(
+                            record.content_id = loonfs_types::ContentId::parse(
                                 "con_00000000000000000000000000000000",
                             )
                             .expect("placeholder content id");
@@ -447,7 +447,7 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
         None,
         &crate::namespace::control::load_namespace_read_state(store, namespace_id).await?,
         checkpoint_id,
-        loonfs_api::PageRequest {
+        loonfs_types::PageRequest {
             cursor: None,
             limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
         },
@@ -532,7 +532,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let owner = |expires_at_ms| loonfs_api::wire::control::PinOwner::User {
+    let owner = |expires_at_ms| loonfs_types::format::control::PinOwner::User {
         name: "test-pin".to_owned(),
         expires_at_ms,
     };
@@ -616,7 +616,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
     let already_expired = crate::pin::create_pin(
         &store,
         &namespace_id,
-        loonfs_api::wire::control::PinOwner::User {
+        loonfs_types::format::control::PinOwner::User {
             name: "test-pin".to_owned(),
             expires_at_ms: Some(context.now_ms),
         },
@@ -742,7 +742,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     let error = crate::pin::create_pin_at_basis(
         &store,
         &namespace_id,
-        loonfs_api::wire::control::PinOwner::User {
+        loonfs_types::format::control::PinOwner::User {
             name: "old".to_owned(),
             expires_at_ms: None,
         },
@@ -839,7 +839,7 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
     let error = crate::pin::create_pin_at_basis(
         &store,
         &namespace_id,
-        loonfs_api::wire::control::PinOwner::User {
+        loonfs_types::format::control::PinOwner::User {
             name: "failed".to_owned(),
             expires_at_ms: None,
         },
@@ -1074,7 +1074,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
         let report = super::compaction_step(
             &store,
             &namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1160,7 +1160,7 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
     let blocked = super::compaction_step(
         &store,
         &namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         tiny_byte_policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1191,7 +1191,7 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
     let published = super::compaction_step(
         &store,
         &namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1262,7 +1262,7 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
     let first = super::compaction_step(
         &bounded_store,
         &namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         bounded_policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1342,7 +1342,7 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
     let below_trigger = super::compaction_step(
         &bounded_store,
         &namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         bounded_policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1586,7 +1586,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
     let first_report = super::compaction_step(
         &store,
         &namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -1609,7 +1609,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         let report = super::compaction_step(
             &store,
             &namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1674,7 +1674,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = MutationContext {
-        writer_id: loonfs_api::WriterId::parse("budget-test").expect("writer id"),
+        writer_id: loonfs_types::WriterId::parse("budget-test").expect("writer id"),
         now_ms: 1_000,
     };
     bootstrap_namespace(&store, &namespace_id, &context)
@@ -1725,7 +1725,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     let advanced = super::fold::fold_wal(&store, &namespace_id)
         .await
         .expect("in-budget retry succeeds");
-    assert_eq!(advanced.outcome, loonfs_api::FoldWalOutcome::Published);
+    assert_eq!(advanced.outcome, loonfs_types::FoldWalOutcome::Published);
     assert!(advanced.manifest_no > manifest_before.manifest().manifest_no);
 }
 
@@ -1735,7 +1735,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = MutationContext {
-        writer_id: loonfs_api::WriterId::parse("budget-test").expect("writer id"),
+        writer_id: loonfs_types::WriterId::parse("budget-test").expect("writer id"),
         now_ms: 1_000,
     };
     bootstrap_namespace(&store, &namespace_id, &context)
@@ -1768,7 +1768,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
     let error = super::compaction_step::compaction_step_with_deadline(
         &store,
         &namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         merge_everything,
         MetadataCompactionPolicy::default(),
         &overrun,
@@ -1789,7 +1789,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
     let report = super::compaction_step::compaction_step(
         &store,
         &namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         merge_everything,
         MetadataCompactionPolicy::default(),
     )
@@ -2255,7 +2255,7 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     let report = super::compaction_step(
         &store,
         &namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -2336,7 +2336,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
             let report = super::compaction_step(
                 &store,
                 &namespace_id,
-                loonfs_api::CompactorEpoch(0),
+                loonfs_types::CompactorEpoch(0),
                 policy,
                 MetadataCompactionPolicy::default(),
             )

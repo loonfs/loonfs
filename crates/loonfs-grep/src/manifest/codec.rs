@@ -2,7 +2,7 @@
 
 use super::error::GrepEnvelopeCodecError;
 use super::state::{GrepHint, GrepManifestState};
-use loonfs_api::wire::envelope::{
+use loonfs_types::format::envelope::{
     decode_json_envelope, encode_json_envelope, verify_kind, EncodedEnvelope, VerifiedEnvelope,
 };
 

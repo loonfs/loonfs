@@ -12,12 +12,12 @@ use super::runs::{MetadataFamilySegments, MetadataRunManifest, MANIFEST_ROW_FAMI
 use crate::metadata::MetadataState;
 use crate::store_waves::STORE_READ_WAVE;
 use futures::future::try_join_all;
-use loonfs_api::wire::manifest::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
-use loonfs_api::wire::sst_blocks::{key_range_may_intersect, string_prefix_upper_bound};
-use loonfs_api::ChangeSeq;
-use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::sst_blocks::{key_range_may_intersect, string_prefix_upper_bound};
+use loonfs_types::ChangeSeq;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -11,9 +11,9 @@ use loonfs::{
     ChangeSeq, ChecksumAlgorithm, CommitId, DestinationBehavior, ErrorCode, MetadataCache,
     NamespaceId, PutFileOptions, SharedObjectStore, UploadMode,
 };
-use loonfs_api::v0::{UploadContentClaim, UploadSessionStatus};
-use loonfs_api::Checksum;
 use loonfs_objectstore::keys::hint;
+use loonfs_types::api::v0::{UploadContentClaim, UploadSessionStatus};
+use loonfs_types::Checksum;
 
 /// What a direct-put client declares about bytes it already holds.
 fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {
@@ -350,7 +350,7 @@ fn put_file_gates_publish_on_its_own_content_write_without_probing() {
         &loonfs_test_support::test_actor(),
         &PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            commit: loonfs_api::options::CommitOptions {
+            commit: loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: None,
                 message: None,
@@ -389,7 +389,7 @@ fn put_file_retries_a_transient_content_write_failure() {
         &loonfs_test_support::test_actor(),
         &PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
-            commit: loonfs_api::options::CommitOptions {
+            commit: loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
                 message: None,
@@ -428,7 +428,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 b"alpha",
                 &loonfs_test_support::test_actor(),
                 &PutFileOptions {
-                    commit: loonfs_api::options::CommitOptions {
+                    commit: loonfs_types::options::CommitOptions {
                         preconditions: Vec::new(),
                         commit_id: Some(commit_id.clone()),
                         message: None,
@@ -669,7 +669,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         &loonfs_test_support::test_actor(),
         &PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            commit: loonfs_api::options::CommitOptions {
+            commit: loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: None,
                 message: None,

@@ -4,15 +4,15 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::ContentId;
-use loonfs_api::{
-    v0::{ContentToken, CreateUploadBody},
-    AbsolutePath, ApiError, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
-    DestinationBehavior, ErrorCode, FilesystemOperation,
-};
 use loonfs_client::NamespacePath;
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::ContentId;
+use loonfs_types::{
+    api::v0::{ContentToken, CreateUploadBody},
+    AbsolutePath, ApiError, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
+    DestinationBehavior, ErrorCode, FilesystemOperation,
+};
 use serde_json::json;
 use std::io::Read as _;
 use tempfile::tempdir;
@@ -96,7 +96,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -146,7 +146,7 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -191,7 +191,7 @@ async fn path_put_with_valid_content_token_succeeds() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -241,7 +241,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -315,7 +315,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -362,7 +362,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -377,7 +377,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
             content_token(&first),
             ContentToken {
                 content_ref: ContentRef::blob_v1(
-                    loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                    loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                     ContentId::generate(),
                     b"irrelevant",
                 ),
@@ -447,7 +447,7 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -490,7 +490,7 @@ async fn every_upload_session_route_requires_the_bearer_token() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

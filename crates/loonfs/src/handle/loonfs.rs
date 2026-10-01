@@ -6,9 +6,9 @@ use crate::publisher::PublisherRegistry;
 use crate::{
     CapabilityDocument, MetadataCache, NamespaceId, Result, SharedObjectStore, StoreConfig,
 };
-use loonfs_api::{Subject, WriterId};
 #[cfg(test)]
 use loonfs_core::cache::MetadataSegmentCache;
+use loonfs_types::{Subject, WriterId};
 use std::fmt;
 use std::sync::Arc;
 

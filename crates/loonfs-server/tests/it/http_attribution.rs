@@ -4,13 +4,13 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::PageRequest;
-use loonfs_api::{ActorId, ChangeSeq, DestinationBehavior, RevisionNo};
 use loonfs_client::AttributeChanges;
 use loonfs_client::{NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::{
     attribute_key, attribute_text, first_page, namespace_id, page_limit,
 };
+use loonfs_types::PageRequest;
+use loonfs_types::{ActorId, ChangeSeq, DestinationBehavior, RevisionNo};
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -24,7 +24,10 @@ fn path(absolute_path: &str) -> NamespacePath {
 
 /// Returns the change at `seq` so tests can compare its timestamp with the
 /// corresponding metadata rows.
-async fn change_at(harness: &crate::common::TestServer, seq: ChangeSeq) -> loonfs_api::v0::Commit {
+async fn change_at(
+    harness: &crate::common::TestServer,
+    seq: ChangeSeq,
+) -> loonfs_types::api::v0::Commit {
     harness
         .client
         .list_changes(&namespace_id("demo"), ChangeSeq(0))
@@ -52,7 +55,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

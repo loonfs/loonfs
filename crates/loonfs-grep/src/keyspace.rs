@@ -1,6 +1,6 @@
 //! Grep-owned durable object keys and their strict parser.
 
-use loonfs_api::{IndexSegmentId, ManifestNo, NamespaceId};
+use loonfs_types::{IndexSegmentId, ManifestNo, NamespaceId};
 
 const NAMESPACE_KEYSPACE_PREFIX: &str = "namespaces/";
 const GREP_EXTENSION_PREFIX: &str = "extensions/grep/";

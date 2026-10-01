@@ -58,7 +58,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, post, put, MethodRouter};
 use axum::Router;
 use loonfs::ErrorCode;
-use loonfs_api::ErrorKind;
+use loonfs_types::ErrorKind;
 
 /// Response header carrying the request's correlation id.
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -105,7 +105,7 @@ const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
 /// `ApiError.request_id` so a caller's log line and the server's trace can
 /// be joined without header plumbing.
 async fn with_request_id(request: Request, next: Next) -> Response {
-    let request_id = loonfs_api::generated_id("req");
+    let request_id = loonfs_types::generated_id("req");
     let mut response = REQUEST_ID
         .scope(request_id.clone(), next.run(request))
         .await;

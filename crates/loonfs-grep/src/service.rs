@@ -19,18 +19,18 @@ use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs::engine::Observation;
 use loonfs::{CoreError, CurrentFileState};
-use loonfs_api::wire::hex::hex_decode_bytes;
-use loonfs_api::wire::sst_blocks::{
+use loonfs_objectstore::timing::StdMonotonicTimer;
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::hex::hex_decode_bytes;
+use loonfs_types::format::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
     string_prefix_upper_bound,
 };
-use loonfs_api::{
+use loonfs_types::{
     decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EffectiveLimit, ErrorCode, GrepMatch,
     GrepPageCursor, GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId, PathEntry,
     RevisionNo,
 };
-use loonfs_objectstore::timing::StdMonotonicTimer;
-use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -1105,9 +1105,9 @@ mod tests {
     async fn a_cached_manifest_checked_longer_ago_than_the_bound_is_discovered_again() {
         use crate::manifest::{publish_grep_manifest, GrepIndexState};
         use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-        use loonfs_api::{ManifestNo, RunNo};
         use loonfs_objectstore::local_fs_store::LocalFsStore;
         use loonfs_test_support::clock::ManualClock;
+        use loonfs_types::{ManifestNo, RunNo};
 
         let directory = tempfile::tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");

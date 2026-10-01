@@ -8,11 +8,11 @@ use crate::authorize::Absence;
 use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, AttributeKey, AttributeValue, Attributes,
     AttributesRevisionNo, InodeId,
 };
-use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
@@ -25,7 +25,7 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     validate_request_shape(set, remove)?;
-    loonfs_api::v0::validate_attributes_precondition(
+    loonfs_types::api::v0::validate_attributes_precondition(
         expected_inode_id,
         expected_attributes_revision_no,
     )?;

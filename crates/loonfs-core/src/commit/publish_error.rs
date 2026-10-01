@@ -1,8 +1,8 @@
 //! Failures while publishing a numbered WAL object, and how a retry treats them.
 
 use crate::error::CoreError;
-use loonfs_api::v0::Commit;
-use loonfs_api::ErrorCode;
+use loonfs_types::api::v0::Commit;
+use loonfs_types::ErrorCode;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

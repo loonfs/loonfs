@@ -478,7 +478,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           for crate in \
-            loonfs-api \
+            loonfs-types \
             loonfs-objectstore \
             loonfs-client \
             loonfs-core \

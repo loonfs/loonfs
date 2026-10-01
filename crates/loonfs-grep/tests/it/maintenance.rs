@@ -8,7 +8,6 @@ use loonfs::{
     LoonFs, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceProbe,
     MaintenanceRegistry, MaintenanceRunner, SharedObjectStore, Writable,
 };
-use loonfs_api::{ChangeSeq, IndexSegmentId, NamespaceId};
 use loonfs_grep::keyspace::{hint_key, segment_key};
 use loonfs_grep::manifest::load_current_grep_manifest;
 use loonfs_grep::{
@@ -19,6 +18,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, KeyPredicate, MetadataMapStore, OperationClass,
 };
+use loonfs_types::{ChangeSeq, IndexSegmentId, NamespaceId};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;

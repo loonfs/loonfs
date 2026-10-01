@@ -12,9 +12,9 @@ use crate::profiles::resolve_profile;
 use crate::render::{store_probe_summary_line, store_probe_verdict, StoreProbeVerdict};
 use crate::resolve::{resolve_namespace, ResolvedTarget};
 use futures::TryStreamExt;
-use loonfs_api::v0::StoreProbeResponse;
-use loonfs_api::{CapabilityDocument, PROTOCOL_VERSION};
 use loonfs_objectstore::probe::PROBE_RUN_PREFIX;
+use loonfs_types::api::v0::StoreProbeResponse;
+use loonfs_types::{CapabilityDocument, PROTOCOL_VERSION};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,7 +438,7 @@ async fn append_write_check(
     };
     match target
         .client
-        .probe_store(&loonfs_api::v0::StoreProbeRequest {})
+        .probe_store(&loonfs_types::api::v0::StoreProbeRequest {})
         .await
     {
         Ok(response) => checks.push(store_probe_check(response)),
@@ -601,12 +601,12 @@ fn doctor_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStoreError;
     use loonfs_test_support::stores::{
         FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
     };
+    use loonfs_types::api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 

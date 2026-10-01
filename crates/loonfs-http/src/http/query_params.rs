@@ -2,7 +2,7 @@
 
 use super::error::ApiResponseError;
 use loonfs::ErrorCode;
-use loonfs_api::{
+use loonfs_types::{
     decode_cursor, GeneratedIdValidationError, LimitError, PageCursorError, PaginationPolicy,
     PublicOrdinalRangeError, RevisionNo,
 };
@@ -23,10 +23,10 @@ pub(super) fn required_query_param(
 
 pub(super) fn parse_include_attributes(
     value: &str,
-) -> Result<loonfs_api::AttributeInclusion, ApiResponseError> {
+) -> Result<loonfs_types::AttributeInclusion, ApiResponseError> {
     parse_boolean_query_param(value, "include_attributes").map(|include| match include {
-        true => loonfs_api::AttributeInclusion::Include,
-        false => loonfs_api::AttributeInclusion::Omit,
+        true => loonfs_types::AttributeInclusion::Include,
+        false => loonfs_types::AttributeInclusion::Omit,
     })
 }
 
@@ -86,14 +86,14 @@ where
     })
 }
 
-pub(super) fn parse_snapshot_id(value: &str) -> Result<loonfs_api::PinId, ApiResponseError> {
-    loonfs_api::PinId::parse(value)
+pub(super) fn parse_snapshot_id(value: &str) -> Result<loonfs_types::PinId, ApiResponseError> {
+    loonfs_types::PinId::parse(value)
         .map_err(|error| invalid_path_id_error("snapshot_id", value, error.reason()))
 }
 
 pub(super) fn resolve_page_limit(
     limit: Option<String>,
-) -> Result<loonfs_api::EffectiveLimit, ApiResponseError> {
+) -> Result<loonfs_types::EffectiveLimit, ApiResponseError> {
     let requested = limit.as_deref().map(parse_page_limit).transpose()?;
     PaginationPolicy::default()
         .resolve_limit(requested)
@@ -112,7 +112,7 @@ fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
 
 /// Checks that a cursor was minted by this endpoint before any read, and
 /// returns it unchanged for the pager, which decodes it again.
-pub(super) fn checked_cursor<C: loonfs_api::PageCursor>(
+pub(super) fn checked_cursor<C: loonfs_types::PageCursor>(
     cursor: Option<String>,
 ) -> Result<Option<String>, ApiResponseError> {
     if let Some(cursor) = cursor.as_deref() {
@@ -142,8 +142,8 @@ impl utoipa::PartialSchema for OpenApiPageLimit {
                 utoipa::openapi::KnownFormat::Int32,
             )))
             .minimum(Some(1u32))
-            .maximum(Some(loonfs_api::DEFAULT_MAX_PAGE_LIMIT))
-            .default(Some(serde_json::json!(loonfs_api::DEFAULT_PAGE_LIMIT)))
+            .maximum(Some(loonfs_types::DEFAULT_MAX_PAGE_LIMIT))
+            .default(Some(serde_json::json!(loonfs_types::DEFAULT_PAGE_LIMIT)))
             .into()
     }
 }

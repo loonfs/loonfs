@@ -9,14 +9,14 @@ use crate::path::read::load_current_metadata_view;
 use crate::storage::content::store_bytes_as_content;
 use crate::test_support::ops::create;
 use bytes::Bytes;
-use loonfs_api::v0::PathEntryKind;
-use loonfs_api::wire::wal::{decode_wal_object_envelope_zstd, WalDelta};
-use loonfs_api::{
-    AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FoldWalOutcome, WriterId,
-};
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
+use loonfs_types::api::v0::PathEntryKind;
+use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalDelta};
+use loonfs_types::{
+    AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FoldWalOutcome, WriterId,
+};
 
 async fn setup() -> (
     tempfile::TempDir,
@@ -291,7 +291,7 @@ async fn invalid_inline_candidates_write_nothing() {
         ..
     } = &mut wrong_checksum.request.operations[0]
     {
-        content_ref.checksum = loonfs_api::Checksum::crc32c(b"inline bytes");
+        content_ref.checksum = loonfs_types::Checksum::crc32c(b"inline bytes");
     }
     for candidate in [
         unreferenced,

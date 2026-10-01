@@ -9,11 +9,6 @@ use loonfs::{
     CoreError, CreateNamespaceOptions, ErrorCode, LoonFs, Maintenance, MetadataMaintenanceOptions,
     NamespaceId, PutFileOptions, SharedObjectStore,
 };
-use loonfs_api::wire::control::PinOwner;
-use loonfs_api::{
-    sha256_digest, AbsolutePath, ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse,
-    IndexSegmentId, RunNo, MAX_PUBLIC_INTEGER,
-};
 use loonfs_grep::keyspace::{
     grep_prefix, hint_key, manifest_key, manifests_prefix, segment_key, segments_prefix,
 };
@@ -33,6 +28,11 @@ use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
     OperationContext, OperationKind, RecordedOperation, RecordingStore,
+};
+use loonfs_types::format::control::PinOwner;
+use loonfs_types::{
+    sha256_digest, AbsolutePath, ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse,
+    IndexSegmentId, RunNo, MAX_PUBLIC_INTEGER,
 };
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -607,7 +607,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .await
         .expect("create namespace");
     let host = GrepHost::new(&store, "ambiguous-enable-maintenance").await;
-    let grep_manifest_key = manifest_key(&namespace_id, &loonfs_api::ManifestNo(1));
+    let grep_manifest_key = manifest_key(&namespace_id, &loonfs_types::ManifestNo(1));
     let failing_store = Arc::new(
         FailStore::matching(
             store.clone(),
@@ -673,7 +673,7 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .await
         .expect("make the current backfill restart");
 
-    let grep_manifest_key = manifest_key(&namespace_id, &loonfs_api::ManifestNo(2));
+    let grep_manifest_key = manifest_key(&namespace_id, &loonfs_types::ManifestNo(2));
     let failing_store = Arc::new(
         FailStore::matching(
             store.clone(),
@@ -971,8 +971,8 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
         .put_overwrite(
             &key,
             Bytes::from(
-                loonfs_api::wire::control::encode_control_state(
-                    loonfs_api::wire::control::ControlObjectKind::Pin,
+                loonfs_types::format::control::encode_control_state(
+                    loonfs_types::format::control::ControlObjectKind::Pin,
                     &expired,
                 )
                 .expect("encode record"),
@@ -998,7 +998,7 @@ async fn an_expired_backfill_pin_keeps_enumerating_until_deleted() {
 async fn assert_fresh_backfill_attempt(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> loonfs_api::PinId {
+) -> loonfs_types::PinId {
     let manifest = load_current_grep_manifest(&**store, namespace_id, crate::common::observation())
         .await
         .expect("load grep manifest")
@@ -1518,14 +1518,14 @@ async fn grep_manifest_lifecycle_pins_not_materialized_error_surface() {
         new_query(&store, &namespace_id, &request("needle")).await,
     );
 
-    let missing_manifest_no = loonfs_api::ManifestNo(20);
+    let missing_manifest_no = loonfs_types::ManifestNo(20);
     write_hint(&*store, &namespace_id, missing_manifest_no).await;
     assert_corrupt_index_error(
         "missing manifest",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
 
-    let corrupt_manifest_no = loonfs_api::ManifestNo(21);
+    let corrupt_manifest_no = loonfs_types::ManifestNo(21);
     store
         .put_overwrite(
             &manifest_key(&namespace_id, &corrupt_manifest_no),
@@ -1653,7 +1653,7 @@ async fn write_manifest_without_checkpoint_id(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
     manifest_bytes: &[u8],
-) -> loonfs_api::ManifestNo {
+) -> loonfs_types::ManifestNo {
     let mut document: serde_json::Value =
         serde_json::from_slice(manifest_bytes).expect("decode valid manifest document");
     document["payload"]["status"]
@@ -1665,7 +1665,7 @@ async fn write_manifest_without_checkpoint_id(
         serde_json::to_vec(&document["payload"]).expect("encode corrupt manifest payload");
     let payload_checksum = sha256_digest(&payload_bytes);
     document["payload_checksum"] = serde_json::Value::String(payload_checksum.clone());
-    let manifest_no = loonfs_api::ManifestNo(22);
+    let manifest_no = loonfs_types::ManifestNo(22);
     document["payload"]["manifest_no"] = serde_json::json!(manifest_no);
     let payload = serde_json::to_vec(&document["payload"]).expect("payload");
     document["payload_checksum"] = serde_json::json!(sha256_digest(&payload));
@@ -1682,7 +1682,7 @@ async fn write_manifest_without_checkpoint_id(
 async fn write_hint(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
-    manifest_no: loonfs_api::ManifestNo,
+    manifest_no: loonfs_types::ManifestNo,
 ) {
     let envelope = encode_grep_hint(GrepHint {
         namespace_id: namespace_id.clone(),
@@ -2156,10 +2156,10 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     else {
         panic!("a fresh enable publishes a backfill");
     };
-    let backfilling = loonfs_api::v0::GrepIndexLifecycle::from(&state);
+    let backfilling = loonfs_types::api::v0::GrepIndexLifecycle::from(&state);
     assert_eq!(
         backfilling,
-        loonfs_api::v0::GrepIndexLifecycle::Backfilling {
+        loonfs_types::api::v0::GrepIndexLifecycle::Backfilling {
             captured_seq: ChangeSeq(1),
             cursor_inode_id: None,
             checkpoint_id: match &state {
@@ -2196,7 +2196,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     // Once the walk finishes, the API reports the manifest as active with the
     // target it reached as its own watermark, and no target field survives.
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    let active = loonfs_api::v0::GrepIndexLifecycle::from(
+    let active = loonfs_types::api::v0::GrepIndexLifecycle::from(
         &worker
             .lifecycle(&namespace_id)
             .await
@@ -2204,7 +2204,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     );
     assert_eq!(
         active,
-        loonfs_api::v0::GrepIndexLifecycle::Active {
+        loonfs_types::api::v0::GrepIndexLifecycle::Active {
             built_through_seq: ChangeSeq(1),
             next_event_index: 0,
         }
@@ -2217,7 +2217,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
 
 #[tokio::test]
 async fn enable_disable_and_cached_queries_use_numbered_publication() {
-    use loonfs_api::ManifestNo;
+    use loonfs_types::ManifestNo;
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("numbered-query").expect("namespace");
     let recording = Arc::new(RecordingStore::new(
@@ -2309,8 +2309,8 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
 #[tokio::test]
 async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
-    use loonfs_api::ManifestNo;
     use loonfs_grep::manifest::encode_grep_manifest;
+    use loonfs_types::ManifestNo;
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("numbered-gc").expect("namespace");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
@@ -2502,8 +2502,8 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
 #[tokio::test]
 async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_young() {
     use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
-    use loonfs_api::ManifestNo;
     use loonfs_grep::manifest::encode_grep_manifest;
+    use loonfs_types::ManifestNo;
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("superseded-gc").expect("namespace");
     let now_ms = UNREFERENCED_SEGMENT_MIN_AGE_MS + 1;
@@ -2598,7 +2598,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
 #[tokio::test]
 async fn grep_filters_candidates_the_subject_cannot_read() {
     use loonfs::publish::{CommitRequest, FilesystemOperation};
-    use loonfs_api::{
+    use loonfs_types::{
         AccessGrants, AccessRight, AccessRights, CommitId, NamespaceAccess, PrincipalId,
         PrincipalScope, PrincipalSet, Subject, SubjectId,
     };

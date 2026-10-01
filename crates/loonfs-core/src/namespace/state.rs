@@ -1,8 +1,8 @@
 //! Current namespace state derived from a manifest and its numbered WAL.
 
-use loonfs_api::wire::control::{ForkBasis, NamespaceStatus, WriterBlock};
-use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{ActorId, ChangeSeq, InodeId, NamespaceAccess, NamespaceId, WalNo, WriterEpoch};
+use loonfs_types::format::control::{ForkBasis, NamespaceStatus, WriterBlock};
+use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::{ActorId, ChangeSeq, InodeId, NamespaceAccess, NamespaceId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,7 +24,7 @@ pub struct NamespaceReadState {
 impl NamespaceReadState {
     pub(crate) fn after_wal_object(
         &self,
-        payload: &loonfs_api::wire::wal::WalObjectPayload,
+        payload: &loonfs_types::format::wal::WalObjectPayload,
     ) -> Self {
         Self {
             seq: payload.head_seq,
@@ -66,7 +66,7 @@ impl NamespaceReadState {
             namespace_id,
             created_at_ms,
             created_by,
-            loonfs_api::NamespaceAccess::Unrestricted {},
+            loonfs_types::NamespaceAccess::Unrestricted {},
         ))
     }
 }

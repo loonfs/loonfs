@@ -4,18 +4,18 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::v0::{
-    AdvanceRetentionRequest, CreateCheckpointRequest, RunMaintenanceRequest, RunMaintenanceResponse,
-};
-use loonfs_api::{
-    AbsolutePath, ActorId, ChangeSeq, CommitId, CommitRequest, DestinationBehavior,
-    FilesystemOperation, RevisionNo,
-};
 use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath,
     PutFileOptions,
 };
 use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_types::api::v0::{
+    AdvanceRetentionRequest, CreateCheckpointRequest, RunMaintenanceRequest, RunMaintenanceResponse,
+};
+use loonfs_types::{
+    AbsolutePath, ActorId, ChangeSeq, CommitId, CommitRequest, DestinationBehavior,
+    FilesystemOperation, RevisionNo,
+};
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -34,7 +34,7 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -47,7 +47,7 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
             b"first payload\n",
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(commit_id.clone()),
                     message: Some("first commit".to_owned()),
@@ -65,7 +65,7 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
             b"second payload\n",
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(commit_id.clone()),
                     message: Some("second commit".to_owned()),
@@ -115,7 +115,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -177,7 +177,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(commit_id.clone()),
                     message: None,
@@ -190,7 +190,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .expect_err("fresh uploads must preserve the conflict");
     assert_eq!(
         reuploaded.code(),
-        Some(loonfs_api::ErrorCode::CommitIdReuseConflict)
+        Some(loonfs_types::ErrorCode::CommitIdReuseConflict)
     );
 
     let entry = harness.client.stat(&target).await.expect("stat path");
@@ -208,7 +208,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             &different_actor,
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(commit_id.clone()),
                     message: None,
@@ -235,7 +235,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(commit_id),
                     message: None,
@@ -271,7 +271,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -279,7 +279,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
     let commit_id = CommitId::parse("req-message-put").expect("valid commit id");
     let options = |message: &str| PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        commit: loonfs_api::options::CommitOptions {
+        commit: loonfs_types::options::CommitOptions {
             preconditions: Vec::new(),
             commit_id: Some(commit_id.clone()),
             message: Some(message.to_owned()),
@@ -391,14 +391,14 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
     let commit_id = CommitId::parse("req-path-put").expect("valid commit id");
     let options = PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        commit: loonfs_api::options::CommitOptions {
+        commit: loonfs_types::options::CommitOptions {
             preconditions: Vec::new(),
             commit_id: Some(commit_id.clone()),
             message: Some("import batch".to_owned()),
@@ -473,7 +473,7 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -481,7 +481,7 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
     let commit_id = CommitId::parse("req-precondition-put").expect("valid commit id");
     let replacing = PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        commit: loonfs_api::options::CommitOptions {
+        commit: loonfs_types::options::CommitOptions {
             preconditions: Vec::new(),
             commit_id: Some(commit_id.clone()),
             message: None,
@@ -562,7 +562,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -607,7 +607,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(commit_id),
                     message: None,
@@ -647,7 +647,7 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -700,7 +700,7 @@ async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
     // And the same through the convenience call.
     let pinned = NamespacePath::parse("demo", "/pinned").expect("pinned target");
     let mkdir_options = |message: &str| CreateDirectoryOptions {
-        commit: loonfs_api::options::CommitOptions {
+        commit: loonfs_types::options::CommitOptions {
             preconditions: Vec::new(),
             commit_id: Some(CommitId::parse("req-message-mkdir").expect("valid commit id")),
             message: Some(message.to_owned()),
@@ -759,7 +759,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -767,7 +767,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     let commit_id = CommitId::parse("req-trimmed-put").expect("valid commit id");
     let options = || PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        commit: loonfs_api::options::CommitOptions {
+        commit: loonfs_types::options::CommitOptions {
             preconditions: Vec::new(),
             commit_id: Some(commit_id.clone()),
             message: None,
@@ -862,7 +862,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -887,7 +887,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &loonfs_test_support::test_actor(),
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
@@ -906,7 +906,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &loonfs_test_support::test_actor(),
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                     message: None,
@@ -932,7 +932,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
@@ -951,7 +951,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                     message: None,
@@ -976,7 +976,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &moved,
             &loonfs_test_support::test_actor(),
             &DeleteOptions {
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
                     message: None,
@@ -992,7 +992,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &moved,
             &loonfs_test_support::test_actor(),
             &DeleteOptions {
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
                     message: None,
@@ -1034,7 +1034,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -1059,7 +1059,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
             &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,
@@ -1154,7 +1154,7 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("namespace");
@@ -1210,7 +1210,7 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
         candidate.behavior = DestinationBehavior::Replace;
         changed.push((actor.clone(), candidate));
         let mut candidate = options.clone();
-        candidate.expected_inode_id = Some(loonfs_api::InodeId(123));
+        candidate.expected_inode_id = Some(loonfs_types::InodeId(123));
         changed.push((actor.clone(), candidate));
         let mut candidate = options.clone();
         candidate.expected_revision_no = Some(RevisionNo(123));
@@ -1228,7 +1228,7 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
                 .expect_err("changed options must not replay");
             assert_eq!(
                 error.code(),
-                Some(loonfs_api::ErrorCode::CommitIdReuseConflict)
+                Some(loonfs_types::ErrorCode::CommitIdReuseConflict)
             );
         }
         assert_eq!(

@@ -7,9 +7,9 @@
 
 use super::*;
 use crate::pin::list::list_checkpoints_page;
-use loonfs_api::wire::control::PinOwner;
-use loonfs_api::{CheckpointOwnerSummary, ErrorCode, ListCheckpointsResponse, PageRequest};
 use loonfs_test_support::ids::page_limit;
+use loonfs_types::format::control::PinOwner;
+use loonfs_types::{CheckpointOwnerSummary, ErrorCode, ListCheckpointsResponse, PageRequest};
 
 async fn list_all_checkpoints<S: ObjectStore + ?Sized>(
     store: &S,

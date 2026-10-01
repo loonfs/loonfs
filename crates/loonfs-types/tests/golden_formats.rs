@@ -18,23 +18,23 @@
 //!   Compaction and WAL folding write successor records, so permissive
 //!   decoding could erase a field introduced by an unsupported writer.
 
-use loonfs_api::wire::control::{
+use loonfs_types::format::control::{
     decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
     ManifestRef, NamespaceStatus, PinOwner, PinPayload, ProxiedStaging, UploadSessionMode,
     UploadSessionPayload, UploadSessionRecordStatus, WriterBlock,
 };
-use loonfs_api::wire::envelope::EnvelopeCodecError;
-use loonfs_api::wire::manifest::{
+use loonfs_types::format::envelope::EnvelopeCodecError;
+use loonfs_types::format::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
     DeletedBinding, DeltaPosition, MetadataRow, MetadataRowFamily, MetadataRunRef,
     MetadataSegmentRef, NamespaceAccess, NamespaceManifestPayload, RunTier, TombstoneRowAction,
     METADATA_SEGMENT_ENCODING,
 };
-use loonfs_api::wire::wal::{
+use loonfs_types::format::wal::{
     decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, WalCommitDelta,
     WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
 };
-use loonfs_api::{
+use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
     CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
@@ -61,7 +61,7 @@ fn actor() -> ActorId {
     ActorId::parse("loonfs-golden").expect("valid actor id")
 }
 
-// Regenerate with `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1`:
+// Regenerate with `UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1`:
 // without the single thread, tests that read a fixture race the tests rewriting
 // it and fail on a half-written file.
 fn assert_matches_golden(name: &str, actual: &[u8]) {
@@ -72,7 +72,7 @@ fn assert_matches_golden(name: &str, actual: &[u8]) {
         std::fs::write(&path, actual).expect("write golden fixture");
     }
     let expected = std::fs::read(&path).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1` to generate it")
     });
     if expected != actual {
         let offset = expected
@@ -93,7 +93,7 @@ fn assert_matches_golden(name: &str, actual: &[u8]) {
 
 fn read_golden(name: &str) -> Vec<u8> {
     std::fs::read(golden_path(name)).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-api -- --test-threads=1` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1` to generate it")
     })
 }
 
@@ -127,7 +127,7 @@ fn content_id(value: &str) -> ContentId {
 
 fn sample_content_ref() -> ContentRef {
     ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         content_id("con_0123456789abcdef0123456789abcdef"),
         b"golden bytes",
     )
@@ -140,7 +140,7 @@ fn sample_content_ref() -> ContentRef {
 fn sample_crc_content_ref() -> ContentRef {
     ContentRef {
         kind: ContentRefKind::BlobV1,
-        owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         content_id: content_id("con_fedcba9876543210fedcba9876543210"),
         size_bytes: 11_534_336,
         checksum: Checksum {
@@ -157,7 +157,7 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
         sample_crc_content_ref(),
         ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: content_id("con_00112233445566778899aabbccddeeff"),
             size_bytes: 4_096,
             checksum: Checksum {
@@ -249,9 +249,9 @@ fn sample_wal_payload() -> WalObjectPayload {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Docs").expect("valid display name"),
+                display_name: loonfs_types::DisplayName::parse("Docs").expect("valid display name"),
                 child_inode_id: InodeId(7),
-                child_kind: loonfs_api::InodeKind::Directory,
+                child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_000,
             },
@@ -262,13 +262,13 @@ fn sample_wal_payload() -> WalObjectPayload {
                 delta_index: 2,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("old.txt").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Old.txt")
+                display_name: loonfs_types::DisplayName::parse("Old.txt")
                     .expect("valid display name"),
                 child_inode_id: InodeId(5),
-                child_kind: loonfs_api::InodeKind::File,
+                child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_000,
-                target: loonfs_api::wire::manifest::DeltaPosition {
+                target: loonfs_types::format::manifest::DeltaPosition {
                     seq: ChangeSeq(1),
                     delta_index: 0,
                 },
@@ -291,7 +291,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                 deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(1),
                     name_key: NameKey::parse("old.txt").expect("valid name key"),
-                    display_name: loonfs_api::DisplayName::parse("Old.txt")
+                    display_name: loonfs_types::DisplayName::parse("Old.txt")
                         .expect("valid display name"),
                 },
             },
@@ -375,25 +375,25 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
 
 fn sample_manifest_payload() -> NamespaceManifestPayload {
     let mut manifest = NamespaceManifestPayload {
-        activity: loonfs_api::wire::manifest::ManifestActivity {
-            content_bytes: loonfs_api::wire::manifest::ActivityCounter::parse(100_000_000_000)
+        activity: loonfs_types::format::manifest::ManifestActivity {
+            content_bytes: loonfs_types::format::manifest::ActivityCounter::parse(100_000_000_000)
                 .expect("activity"),
-            file_revisions: loonfs_api::wire::manifest::ActivityCounter::parse(10_000)
+            file_revisions: loonfs_types::format::manifest::ActivityCounter::parse(10_000)
                 .expect("activity"),
-            mutations: loonfs_api::wire::manifest::ActivityCounter::parse(14_000)
+            mutations: loonfs_types::format::manifest::ActivityCounter::parse(14_000)
                 .expect("activity"),
         },
         created_at_ms: 1_000,
-        created_by: loonfs_api::ActorId::parse("test").expect("actor"),
+        created_by: loonfs_types::ActorId::parse("test").expect("actor"),
         access: NamespaceAccess::Unrestricted {},
         fork_basis: None,
         status: NamespaceStatus::Active {},
         writer: Some(WriterBlock {
-            writer_id: loonfs_api::WriterId::parse("writer-a").expect("writer"),
+            writer_id: loonfs_types::WriterId::parse("writer-a").expect("writer"),
             acquired_at_ms: 2_000,
         }),
         folded_wal_no: WalNo(2),
-        compactor_epoch: loonfs_api::CompactorEpoch(0),
+        compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
 
@@ -414,13 +414,13 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
                 row_count: 6,
                 min_row_key: "commit-receipt".to_owned(),
                 max_row_key: "tombstone".to_owned(),
-                index_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                index_block: loonfs_types::format::sst_blocks::BlockHandle {
                     offset: 4_000,
                     stored_bytes: 200,
                     decoded_bytes: 400,
                     crc32c: 0x1234_5678,
                 },
-                filter_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                filter_block: loonfs_types::format::sst_blocks::BlockHandle {
                     offset: 3_900,
                     stored_bytes: 100,
                     decoded_bytes: 100,
@@ -556,7 +556,7 @@ fn check_control_golden<T>(fixture: &str, kind: ControlObjectKind, state: T)
 where
     T: Serialize + DeserializeOwned + PartialEq + Debug,
 {
-    let encoded = loonfs_api::wire::control::encode_control_state(kind, &state)
+    let encoded = loonfs_types::format::control::encode_control_state(kind, &state)
         .expect("encode control object");
     assert_matches_golden(fixture, &encoded);
 
@@ -803,7 +803,7 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_33333333333333333333333333333333")
                 .expect("valid upload id"),
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
-            subject_id: Some(loonfs_api::SubjectId::parse("usr_ada").expect("subject id")),
+            subject_id: Some(loonfs_types::SubjectId::parse("usr_ada").expect("subject id")),
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged(sample_content_ref()),
             },
@@ -1200,8 +1200,8 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
         ),
     ];
     for (kind, state) in cases {
-        let encoded =
-            loonfs_api::wire::control::encode_control_state(kind, &state).expect("encode control");
+        let encoded = loonfs_types::format::control::encode_control_state(kind, &state)
+            .expect("encode control");
         let mut document: serde_json::Value =
             serde_json::from_slice(&encoded).expect("decode document");
         document["format_version"] = serde_json::Value::from(7);
@@ -1358,9 +1358,9 @@ fn wal_delta_decode_rejects_invalid_name_key() {
         delta_index: 0,
         parent_inode_id: InodeId(1),
         name_key: name_key("docs"),
-        display_name: loonfs_api::DisplayName::parse("Docs").expect("valid display name"),
+        display_name: loonfs_types::DisplayName::parse("Docs").expect("valid display name"),
         child_inode_id: InodeId(2),
-        child_kind: loonfs_api::InodeKind::Directory,
+        child_kind: loonfs_types::InodeKind::Directory,
         child_created_by: actor(),
         child_created_at_ms: 4_000,
     };
@@ -1470,7 +1470,7 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
                 deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(1),
                     name_key: name_key("old.txt"),
-                    display_name: loonfs_api::DisplayName::parse("Old.txt")
+                    display_name: loonfs_types::DisplayName::parse("Old.txt")
                         .expect("valid display name"),
                 },
             },
@@ -1520,7 +1520,7 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
         manifest_no: ManifestNo(2),
     };
     let encoded =
-        loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &envelope)
+        loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &envelope)
             .expect("encode control object");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
@@ -1678,9 +1678,9 @@ fn wal_delta_wire_tags_match_spec_names() {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("a").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
+                display_name: loonfs_types::DisplayName::parse("a").expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
+                child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_000,
             }),
@@ -1691,12 +1691,12 @@ fn wal_delta_wire_tags_match_spec_names() {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("a").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
+                display_name: loonfs_types::DisplayName::parse("a").expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
+                child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_000,
-                target: loonfs_api::wire::manifest::DeltaPosition {
+                target: loonfs_types::format::manifest::DeltaPosition {
                     seq: ChangeSeq(1),
                     delta_index: 0,
                 },
@@ -1719,7 +1719,8 @@ fn wal_delta_wire_tags_match_spec_names() {
                 deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(1),
                     name_key: name_key("a"),
-                    display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
+                    display_name: loonfs_types::DisplayName::parse("a")
+                        .expect("valid display name"),
                 },
             }),
             "tombstone_subtree",
@@ -1767,7 +1768,7 @@ fn wal_delta_wire_tags_match_spec_names() {
 
 /// A delete by path: the tombstone records the binding it removed.
 fn sample_tombstone_set_row() -> MetadataRow {
-    MetadataRow::Tombstone(loonfs_api::wire::manifest::SubtreeTombstoneRecord {
+    MetadataRow::Tombstone(loonfs_types::format::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
         committed_seq: ChangeSeq(8),
         delta_index: 0,
@@ -1776,7 +1777,7 @@ fn sample_tombstone_set_row() -> MetadataRow {
             deleted_binding: DeletedBinding {
                 parent_inode_id: InodeId(1),
                 name_key: name_key("docs-archive"),
-                display_name: loonfs_api::DisplayName::parse("Docs-Archive")
+                display_name: loonfs_types::DisplayName::parse("Docs-Archive")
                     .expect("valid display name"),
             },
         },
@@ -1787,7 +1788,7 @@ fn sample_tombstone_set_row() -> MetadataRow {
 
 /// The undelete that cancels it, naming the exact position it revokes.
 fn sample_tombstone_revoke_row() -> MetadataRow {
-    MetadataRow::Tombstone(loonfs_api::wire::manifest::SubtreeTombstoneRecord {
+    MetadataRow::Tombstone(loonfs_types::format::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
         committed_seq: ChangeSeq(9),
         delta_index: 0,
@@ -1807,17 +1808,17 @@ fn sample_tombstone_revoke_row() -> MetadataRow {
 /// carries the deletion's stamp and the binding the trash entry renders, both
 /// copied from the tombstone event.
 fn sample_active_deletion_listed_row() -> MetadataRow {
-    MetadataRow::ActiveDeletion(loonfs_api::wire::manifest::ActiveDeletionRecord {
+    MetadataRow::ActiveDeletion(loonfs_types::format::manifest::ActiveDeletionRecord {
         root_inode_id: InodeId(5),
         deletion_seq: ChangeSeq(8),
         action: ActiveDeletionRowAction::Listed {
-            inode_kind: loonfs_api::InodeKind::Directory,
+            inode_kind: loonfs_types::InodeKind::Directory,
             deleted_at_ms: 4_000,
             deleted_by: actor(),
             deleted_binding: DeletedBinding {
                 parent_inode_id: InodeId(1),
                 name_key: name_key("docs-archive"),
-                display_name: loonfs_api::DisplayName::parse("Docs-Archive")
+                display_name: loonfs_types::DisplayName::parse("Docs-Archive")
                     .expect("valid display name"),
             },
         },
@@ -1828,7 +1829,7 @@ fn sample_active_deletion_listed_row() -> MetadataRow {
 /// repeats the deletion's sequence rather than the undelete's, so the two rows
 /// share a key prefix, and its rank sorts it ahead of the row it removes.
 fn sample_active_deletion_removed_row() -> MetadataRow {
-    MetadataRow::ActiveDeletion(loonfs_api::wire::manifest::ActiveDeletionRecord {
+    MetadataRow::ActiveDeletion(loonfs_types::format::manifest::ActiveDeletionRecord {
         root_inode_id: InodeId(5),
         deletion_seq: ChangeSeq(8),
         action: ActiveDeletionRowAction::Removed {
@@ -1840,7 +1841,7 @@ fn sample_active_deletion_removed_row() -> MetadataRow {
 /// An attribute revision that cleared the map. The empty map has an encoding
 /// of its own, so the sample carries a row that states it.
 fn sample_cleared_attributes_row() -> MetadataRow {
-    MetadataRow::AttributesRevision(loonfs_api::wire::manifest::AttributesRevisionRecord {
+    MetadataRow::AttributesRevision(loonfs_types::format::manifest::AttributesRevisionRecord {
         inode_id: InodeId(2),
         attributes_revision_no: AttributesRevisionNo(3),
         committed_seq: ChangeSeq(7),
@@ -1854,7 +1855,7 @@ fn sample_cleared_attributes_row() -> MetadataRow {
 
 /// An attribute revision that states a populated map.
 fn sample_populated_attributes_row() -> MetadataRow {
-    MetadataRow::AttributesRevision(loonfs_api::wire::manifest::AttributesRevisionRecord {
+    MetadataRow::AttributesRevision(loonfs_types::format::manifest::AttributesRevisionRecord {
         inode_id: InodeId(5),
         attributes_revision_no: AttributesRevisionNo(2),
         committed_seq: ChangeSeq(5),
@@ -1867,7 +1868,7 @@ fn sample_populated_attributes_row() -> MetadataRow {
 }
 
 fn sample_cleared_access_row() -> MetadataRow {
-    MetadataRow::AccessRevision(loonfs_api::wire::manifest::AccessRevisionRecord {
+    MetadataRow::AccessRevision(loonfs_types::format::manifest::AccessRevisionRecord {
         inode_id: InodeId(2),
         access_revision_no: AccessRevisionNo(3),
         committed_seq: ChangeSeq(7),
@@ -1881,7 +1882,7 @@ fn sample_cleared_access_row() -> MetadataRow {
 }
 
 fn sample_populated_access_row() -> MetadataRow {
-    MetadataRow::AccessRevision(loonfs_api::wire::manifest::AccessRevisionRecord {
+    MetadataRow::AccessRevision(loonfs_types::format::manifest::AccessRevisionRecord {
         inode_id: InodeId(5),
         access_revision_no: AccessRevisionNo(2),
         committed_seq: ChangeSeq(5),
@@ -1895,7 +1896,7 @@ fn sample_populated_access_row() -> MetadataRow {
 }
 
 fn sample_commit_receipt_row() -> MetadataRow {
-    MetadataRow::CommitReceipt(loonfs_api::wire::manifest::CommitReceiptRecord {
+    MetadataRow::CommitReceipt(loonfs_types::format::manifest::CommitReceiptRecord {
         commit_id: commit_id(),
         committed_seq: ChangeSeq(9),
     })
@@ -1924,10 +1925,10 @@ fn sample_commit_row() -> MetadataRow {
                     delta_index: 1,
                     parent_inode_id: InodeId(1),
                     name_key: name_key("reports"),
-                    display_name: loonfs_api::DisplayName::parse("Reports")
+                    display_name: loonfs_types::DisplayName::parse("Reports")
                         .expect("valid display name"),
                     child_inode_id: InodeId(2),
-                    child_kind: loonfs_api::InodeKind::Directory,
+                    child_kind: loonfs_types::InodeKind::Directory,
                     child_created_by: actor(),
                     child_created_at_ms: 9_000,
                 },
@@ -1939,7 +1940,7 @@ fn sample_commit_row() -> MetadataRow {
 
 fn sample_inode_rows() -> [MetadataRow; 2] {
     [
-        MetadataRow::Inode(loonfs_api::wire::manifest::InodeRecord {
+        MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
             inode_id: InodeId(1),
             inode_kind: InodeKind::Directory,
             committed_seq: ChangeSeq(1),
@@ -1947,7 +1948,7 @@ fn sample_inode_rows() -> [MetadataRow; 2] {
             committed_by: actor(),
             committed_at_ms: 1_000,
         }),
-        MetadataRow::Inode(loonfs_api::wire::manifest::InodeRecord {
+        MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
             inode_id: InodeId(2),
             inode_kind: InodeKind::File,
             committed_seq: ChangeSeq(3),
@@ -1960,7 +1961,7 @@ fn sample_inode_rows() -> [MetadataRow; 2] {
 
 fn sample_revision_rows() -> [MetadataRow; 2] {
     [
-        MetadataRow::FileRevision(loonfs_api::wire::manifest::RevisionRecord {
+        MetadataRow::FileRevision(loonfs_types::format::manifest::RevisionRecord {
             inode_id: InodeId(2),
             revision_no: RevisionNo(2),
             committed_seq: ChangeSeq(4),
@@ -1970,7 +1971,7 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             delta_index: 0,
             content_ref: sample_crc_content_ref(),
         }),
-        MetadataRow::FileRevision(loonfs_api::wire::manifest::RevisionRecord {
+        MetadataRow::FileRevision(loonfs_types::format::manifest::RevisionRecord {
             inode_id: InodeId(2),
             revision_no: RevisionNo(1),
             committed_seq: ChangeSeq(3),
@@ -1983,8 +1984,8 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
     ]
 }
 
-fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
-    use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+fn sample_segment_blocks() -> loonfs_types::format::sst_blocks::BuiltSegmentBlocks {
+    use loonfs_types::format::sst_blocks::SegmentBlocksBuilder;
     // A tiny target block size forces several data blocks, so the fixture
     // pins block splitting, restart points, and the index shape at once.
     let mut builder = SegmentBlocksBuilder::new(
@@ -2006,11 +2007,11 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
         sample_cleared_attributes_row(),
         sample_populated_attributes_row(),
         sample_commit_receipt_row(),
-        MetadataRow::DirentryBinding(loonfs_api::wire::manifest::DirentryBindingRecord {
+        MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             },
             child_inode_id: InodeId(2),
             child_kind: InodeKind::File,
@@ -2019,32 +2020,32 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             committed_seq: ChangeSeq(3),
             delta_index: 0,
         }),
-        MetadataRow::DirentryBinding(loonfs_api::wire::manifest::DirentryBindingRecord {
+        MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_api::DisplayName::parse("docs-archive")
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_types::DisplayName::parse("docs-archive")
                     .expect("valid display name"),
             },
             child_inode_id: InodeId(5),
-            child_kind: loonfs_api::InodeKind::Directory,
+            child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: actor(),
             child_created_at_ms: 6_000,
             committed_seq: ChangeSeq(6),
             delta_index: 0,
         }),
-        MetadataRow::DirentryBinding(loonfs_api::wire::manifest::DirentryBindingRecord {
+        MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
             child_inode_id: InodeId(5),
-            child_kind: loonfs_api::InodeKind::Directory,
+            child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: actor(),
             child_created_at_ms: 6_000,
 
             committed_seq: ChangeSeq(8),
             delta_index: 0,
 
-            state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         }),
     ];
     rows.extend(sample_inode_rows());
@@ -2059,15 +2060,15 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
 
 fn segment_section<'a>(
     bytes: &'a [u8],
-    handle: &loonfs_api::wire::sst_blocks::BlockHandle,
+    handle: &loonfs_types::format::sst_blocks::BlockHandle,
 ) -> &'a [u8] {
     &bytes[handle.offset as usize..handle.offset as usize + handle.stored_bytes as usize]
 }
 
 fn sample_segment_index(
-    built: &loonfs_api::wire::sst_blocks::BuiltSegmentBlocks,
-) -> Vec<loonfs_api::wire::sst_blocks::SegmentIndexEntry> {
-    loonfs_api::wire::sst_blocks::decode_index_block(
+    built: &loonfs_types::format::sst_blocks::BuiltSegmentBlocks,
+) -> Vec<loonfs_types::format::sst_blocks::SegmentIndexEntry> {
+    loonfs_types::format::sst_blocks::decode_index_block(
         segment_section(&built.bytes, &built.index),
         &built.index,
     )
@@ -2080,11 +2081,11 @@ fn sample_segment_index(
 /// families after it into other blocks. A guard that named a position would
 /// then read a block its family never reaches and assert nothing.
 fn family_block_position(
-    built: &loonfs_api::wire::sst_blocks::BuiltSegmentBlocks,
-    index: &[loonfs_api::wire::sst_blocks::SegmentIndexEntry],
+    built: &loonfs_types::format::sst_blocks::BuiltSegmentBlocks,
+    index: &[loonfs_types::format::sst_blocks::SegmentIndexEntry],
     prefix: &str,
 ) -> usize {
-    use loonfs_api::wire::sst_blocks::decode_data_block;
+    use loonfs_types::format::sst_blocks::decode_data_block;
     for (position, entry) in index.iter().enumerate() {
         let block = decode_data_block(segment_section(&built.bytes, &entry.block), &entry.block)
             .expect("decode data block");
@@ -2098,7 +2099,7 @@ fn family_block_position(
 /// Counts the rows one block holds for the family `prefix` names, so a guard
 /// can state that every row of the family landed in the block a fixture pins.
 fn rows_under_prefix(
-    block: &loonfs_api::wire::sst_blocks::DecodedDataBlock,
+    block: &loonfs_types::format::sst_blocks::DecodedDataBlock,
     prefix: &str,
 ) -> usize {
     block
@@ -2110,8 +2111,8 @@ fn rows_under_prefix(
 
 /// Reads back the block a fixture pins, so a decode test can state the rows it
 /// expects to find there.
-fn decode_golden_data_block(name: &str) -> loonfs_api::wire::sst_blocks::DecodedDataBlock {
-    use loonfs_api::wire::sst_blocks::{decode_data_block, BlockHandle};
+fn decode_golden_data_block(name: &str) -> loonfs_types::format::sst_blocks::DecodedDataBlock {
+    use loonfs_types::format::sst_blocks::{decode_data_block, BlockHandle};
     let payload = read_golden(name);
     let stored = rezstd(&payload);
     let handle = BlockHandle {
@@ -2124,7 +2125,7 @@ fn decode_golden_data_block(name: &str) -> loonfs_api::wire::sst_blocks::Decoded
 }
 
 fn assert_rows_match_single_block_golden(name: &str, rows: &[MetadataRow]) {
-    use loonfs_api::wire::sst_blocks::{decode_data_block, SegmentBlocksBuilder};
+    use loonfs_types::format::sst_blocks::{decode_data_block, SegmentBlocksBuilder};
 
     let mut builder = SegmentBlocksBuilder::new(
         std::num::NonZeroUsize::new(4096).expect("target block size should be non-zero"),
@@ -2162,7 +2163,7 @@ fn sst_block_data_first_block_covers_the_active_deletion_prefix() {
     let index = sample_segment_index(&built);
     let position = family_block_position(&built, &index, "active-deletion-");
     assert_eq!(position, 0, "the active-deletion family opens the segment");
-    let block = loonfs_api::wire::sst_blocks::decode_data_block(
+    let block = loonfs_types::format::sst_blocks::decode_data_block(
         segment_section(&built.bytes, &index[0].block),
         &index[0].block,
     )
@@ -2433,7 +2434,7 @@ fn active_deletion_rows_reject_missing_kind_or_binding() {
 fn provenance_rows_reject_every_missing_required_field() {
     let cases = [
         (
-            MetadataRow::Inode(loonfs_api::wire::manifest::InodeRecord {
+            MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
                 committed_seq: ChangeSeq(3),
@@ -2444,7 +2445,7 @@ fn provenance_rows_reject_every_missing_required_field() {
             &["commit_id", "committed_by", "committed_at_ms"][..],
         ),
         (
-            MetadataRow::FileRevision(loonfs_api::wire::manifest::RevisionRecord {
+            MetadataRow::FileRevision(loonfs_types::format::manifest::RevisionRecord {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(3),
@@ -2472,7 +2473,9 @@ fn provenance_rows_reject_every_missing_required_field() {
         // every other row states it at the top level.
         let nested_in_action = matches!(
             row,
-            MetadataRow::ActiveDeletion(loonfs_api::wire::manifest::ActiveDeletionRecord { .. })
+            MetadataRow::ActiveDeletion(
+                loonfs_types::format::manifest::ActiveDeletionRecord { .. }
+            )
         );
         for required_field in required_fields {
             let mut encoded = row_cbor(&row);
@@ -2495,7 +2498,7 @@ fn provenance_rows_reject_every_missing_required_field() {
 #[test]
 fn attribute_rows_reject_a_map_over_its_limits() {
     let mut row = row_cbor(&MetadataRow::AttributesRevision(
-        loonfs_api::wire::manifest::AttributesRevisionRecord {
+        loonfs_types::format::manifest::AttributesRevisionRecord {
             inode_id: InodeId(2),
             attributes_revision_no: AttributesRevisionNo(1),
             committed_seq: ChangeSeq(5),
@@ -2507,7 +2510,7 @@ fn attribute_rows_reject_a_map_over_its_limits() {
         },
     ));
     let owner = cbor_entry(cbor_entry(&mut row, "attributes"), "owner");
-    *owner = ciborium::Value::from("v".repeat(loonfs_api::MAX_ATTRIBUTE_VALUE_BYTES + 1));
+    *owner = ciborium::Value::from("v".repeat(loonfs_types::MAX_ATTRIBUTE_VALUE_BYTES + 1));
 
     assert_row_is_corrupt(&row, "an oversized value is not a value this format stores");
 }
@@ -2530,14 +2533,14 @@ fn with_flat_binding(mut row: ciborium::Value) -> ciborium::Value {
 
 #[test]
 fn sst_block_filter_matches_golden_bytes_and_answers() {
-    use loonfs_api::wire::sst_blocks::decode_filter_block;
+    use loonfs_types::format::sst_blocks::decode_filter_block;
     let built = sample_segment_blocks();
     // The filter section is stored raw, so its bytes are pinned directly.
     let stored = segment_section(&built.bytes, &built.filter);
     assert_matches_golden("sst_block_filter.v1.bin", stored);
     let filter = decode_filter_block(stored, &built.filter).expect("decode filter");
     assert!(filter.may_contain(
-        &MetadataRow::Inode(loonfs_api::wire::manifest::InodeRecord {
+        &MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
             inode_id: InodeId(1),
             inode_kind: InodeKind::Directory,
             committed_seq: ChangeSeq(1),
@@ -2552,7 +2555,7 @@ fn sst_block_filter_matches_golden_bytes_and_answers() {
 
 #[test]
 fn sst_block_index_entry_schema_matches_golden_bytes() {
-    use loonfs_api::wire::sst_blocks::{BlockHandle, SegmentIndexEntry};
+    use loonfs_types::format::sst_blocks::{BlockHandle, SegmentIndexEntry};
     // Fixed handle values: this fixture pins the index entry schema (field
     // names, order, integer widths) without coupling to zstd output.
     let entries = vec![SegmentIndexEntry {
@@ -2574,7 +2577,7 @@ fn sst_block_index_entry_schema_matches_golden_bytes() {
 
 #[test]
 fn every_metadata_row_rejects_unknown_fields() {
-    use loonfs_api::wire::sst_blocks::decode_data_block;
+    use loonfs_types::format::sst_blocks::decode_data_block;
     let built = sample_segment_blocks();
     for entry in sample_segment_index(&built) {
         let block = decode_data_block(segment_section(&built.bytes, &entry.block), &entry.block)
@@ -2592,7 +2595,7 @@ fn every_metadata_row_rejects_unknown_fields() {
 }
 
 fn sample_content_publication_row() -> MetadataRow {
-    MetadataRow::ContentPublication(loonfs_api::wire::manifest::ContentPublicationRecord {
+    MetadataRow::ContentPublication(loonfs_types::format::manifest::ContentPublicationRecord {
         content_id: sample_content_ref().content_id,
         committed_seq: ChangeSeq(2),
         delta_index: 3,
@@ -2623,7 +2626,7 @@ fn content_publication_rows_match_golden_bytes_and_lookup_grammar() {
 
 #[test]
 fn inline_commit_wire_bytes_match_golden() {
-    use loonfs_api::{AbsolutePath, CommitRequest, FilesystemOperation};
+    use loonfs_types::{AbsolutePath, CommitRequest, FilesystemOperation};
     let request = CommitRequest {
         commit_id: CommitId::parse("inline-wire").expect("commit id"),
         message: None,
@@ -2634,13 +2637,13 @@ fn inline_commit_wire_bytes_match_golden() {
                 path: AbsolutePath::parse("/binary").expect("path"),
                 content_ref: None,
                 inline_content: Some(vec![0, 255, 128, 1]),
-                behavior: loonfs_api::DestinationBehavior::NoReplace,
+                behavior: loonfs_types::DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
             },
             FilesystemOperation::CreateFileByInode {
                 parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse("empty").expect("name"),
+                display_name: loonfs_types::DisplayName::parse("empty").expect("name"),
                 content_ref: None,
                 inline_content: Some(Vec::new()),
             },
@@ -2661,9 +2664,9 @@ fn inline_commit_wire_bytes_match_golden() {
     let namespace = NamespaceId::parse("demo").expect("namespace");
     let fingerprint = |operations: &[FilesystemOperation],
                        ids: &std::collections::BTreeSet<ContentId>| {
-        loonfs_api::semantic_commit_fingerprint(
+        loonfs_types::semantic_commit_fingerprint(
             &namespace,
-            &loonfs_api::ActorId::loonfs(),
+            &loonfs_types::ActorId::loonfs(),
             None,
             None,
             operations,
@@ -2707,7 +2710,7 @@ fn inline_commit_wire_bytes_match_golden() {
 
 #[test]
 fn commit_precondition_wire_shapes_match_golden() {
-    use loonfs_api::{
+    use loonfs_types::{
         AbsolutePath, CommitPrecondition, CommitRequest, ErrorDetails, FilesystemOperation,
     };
 
@@ -2731,7 +2734,7 @@ fn commit_precondition_wire_shapes_match_golden() {
             path: AbsolutePath::parse("/docs/input").expect("path"),
             expected_inode_id: InodeId(42),
             expected_binding_version: Some(
-                loonfs_api::BindingVersion::parse("aaaa").expect("version"),
+                loonfs_types::BindingVersion::parse("aaaa").expect("version"),
             ),
         },
         CommitPrecondition::PathAbsence {
@@ -2739,15 +2742,17 @@ fn commit_precondition_wire_shapes_match_golden() {
         },
         CommitPrecondition::AttributesRevision {
             inode_id: InodeId(42),
-            expected_attributes_revision_no: loonfs_api::AttributesRevisionNo(2),
+            expected_attributes_revision_no: loonfs_types::AttributesRevisionNo(2),
         },
     ]);
     let details = ErrorDetails {
         precondition_index: Some(0),
         expected_head_seq: Some(ChangeSeq(42)),
         actual_head_seq: Some(ChangeSeq(43)),
-        expected_binding_version: Some(loonfs_api::BindingVersion::parse("aaaa").expect("version")),
-        actual_binding_version: Some(loonfs_api::BindingVersion::parse("bbbb").expect("version")),
+        expected_binding_version: Some(
+            loonfs_types::BindingVersion::parse("aaaa").expect("version"),
+        ),
+        actual_binding_version: Some(loonfs_types::BindingVersion::parse("bbbb").expect("version")),
         ..ErrorDetails::default()
     };
     let bytes =
@@ -2760,13 +2765,13 @@ fn commit_precondition_wire_shapes_match_golden() {
 
 #[test]
 fn deleted_namespace_error_details_match_golden() {
-    let details = loonfs_api::ErrorDetails {
+    let details = loonfs_types::ErrorDetails {
         namespace_id: Some(NamespaceId::parse("deleted").expect("namespace id")),
         ..Default::default()
     };
     let bytes = serde_json::to_vec_pretty(&details).expect("error details");
     assert_matches_golden("namespace_deleted_details.v1.json", &bytes);
-    let decoded: loonfs_api::ErrorDetails = serde_json::from_slice(&bytes).expect("details");
+    let decoded: loonfs_types::ErrorDetails = serde_json::from_slice(&bytes).expect("details");
     assert_eq!(decoded, details);
 }
 
@@ -2820,7 +2825,7 @@ fn name_folding_matches_the_fixed_unicode_corpus() {
         .map(|display_name| {
             serde_json::json!({
                 "display_name": display_name,
-                "name_key": loonfs_api::name_key_for_display_name(display_name),
+                "name_key": loonfs_types::name_key_for_display_name(display_name),
             })
         })
         .collect();
@@ -2850,10 +2855,10 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
 }
 
 fn sample_binding_rows() -> Vec<MetadataRow> {
-    use loonfs_api::wire::manifest::{DirentryBindingRecord, DirentryBindingState};
+    use loonfs_types::format::manifest::{DirentryBindingRecord, DirentryBindingState};
     [
         DirentryBindingState::Bound {
-            display_name: loonfs_api::DisplayName::parse("Report.txt").expect("display name"),
+            display_name: loonfs_types::DisplayName::parse("Report.txt").expect("display name"),
         },
         DirentryBindingState::Unbound,
     ]
@@ -2864,7 +2869,7 @@ fn sample_binding_rows() -> Vec<MetadataRow> {
             parent_inode_id: InodeId(1),
             name_key: name_key("report.txt"),
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::File,
+            child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_000,
             committed_seq: ChangeSeq(3),
@@ -2877,7 +2882,7 @@ fn sample_binding_rows() -> Vec<MetadataRow> {
 
 #[test]
 fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
-    use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+    use loonfs_types::format::sst_blocks::SegmentBlocksBuilder;
     for (family, fixture) in [
         (
             MetadataRowFamily::DirentryBinds,

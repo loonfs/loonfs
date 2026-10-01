@@ -2,7 +2,7 @@
 //!
 //! These tests pin the exact bytes the grep hint, the grep manifest,
 //! and a gram-index data block write. They run the mechanism the core
-//! families use in `crates/loonfs-api/tests/golden_formats.rs`:
+//! families use in `crates/loonfs-types/tests/golden_formats.rs`:
 //!
 //! - If an encoder's output diverges from its fixture, a Rust-side change
 //!   (field rename, reorder, serde attribute, removed field) silently changed
@@ -20,17 +20,17 @@
 
 #![allow(clippy::panic)]
 
-use loonfs_api::wire::sst_blocks::{
-    decode_data_block_rows, decode_index_block, BlockHandle, BuiltSegmentBlocks, DecodedDataBlock,
-    SegmentBlocksBuilder,
-};
-use loonfs_api::{ChangeSeq, IndexSegmentId, InodeId, PinId, RevisionNo, RunNo};
 use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
 use loonfs_grep::manifest::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest, GrepHint,
     GrepIndexState, GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef,
 };
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::format::sst_blocks::{
+    decode_data_block_rows, decode_index_block, BlockHandle, BuiltSegmentBlocks, DecodedDataBlock,
+    SegmentBlocksBuilder,
+};
+use loonfs_types::{ChangeSeq, IndexSegmentId, InodeId, PinId, RevisionNo, RunNo};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ const GRAM_POSTINGS_BLOCK_FIXTURE: &str = "grep_segment_gram_postings.v1.bin";
 // ---------------------------------------------------------------------------
 //
 // Copied from the core fixture helpers in
-// `crates/loonfs-api/tests/golden_formats.rs`, which name their own package
+// `crates/loonfs-types/tests/golden_formats.rs`, which name their own package
 // in the same message. Both crates store their fixtures under `tests/golden`
 // and rewrite them the same way.
 
@@ -123,7 +123,7 @@ pub(crate) fn sample_active_manifest(
     };
     GrepManifestState::new(
         namespace_id("docs"),
-        loonfs_api::ManifestNo(1),
+        loonfs_types::ManifestNo(1),
         GrepIndexStatus::Active {
             built_through_seq,
             next_event_index,
@@ -147,7 +147,7 @@ pub(crate) fn sample_active_manifest(
 pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
-        loonfs_api::ManifestNo(1),
+        loonfs_types::ManifestNo(1),
         GrepIndexStatus::Backfilling {
             captured_seq: ChangeSeq(7),
             cursor_inode_id: Some(InodeId(7)),
@@ -168,7 +168,7 @@ pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
 pub(crate) fn sample_disabled_manifest() -> GrepManifestState {
     GrepManifestState::new(
         namespace_id("docs"),
-        loonfs_api::ManifestNo(1),
+        loonfs_types::ManifestNo(1),
         GrepIndexStatus::Disabled {},
         GrepIndexState {
             reorganize: None,
@@ -182,7 +182,7 @@ pub(crate) fn sample_disabled_manifest() -> GrepManifestState {
 fn sample_hint() -> GrepHint {
     GrepHint {
         namespace_id: namespace_id("docs"),
-        manifest_no: loonfs_api::ManifestNo(1),
+        manifest_no: loonfs_types::ManifestNo(1),
     }
 }
 

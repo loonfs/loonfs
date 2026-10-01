@@ -1,8 +1,9 @@
-//! Wire types and durable-format codecs for LoonFS.
+//! Shared LoonFS types: validated identifiers and paths, HTTP API shapes, and
+//! durable-format codecs.
 //!
-//! The crate defines validated identifiers and paths, HTTP protocol shapes in
-//! [`v0`], durable storage formats in [`wire`], and shared operation options in
-//! [`options`].
+//! The crate defines validated identifiers and paths at its root, HTTP API
+//! shapes in [`api`], durable storage formats in [`format`](mod@format), and
+//! shared operation options in [`options`].
 
 #![warn(missing_docs)]
 
@@ -29,11 +30,16 @@ pub mod public_inode_id;
 mod retry;
 mod secret;
 mod sst_blocks;
-pub mod v0;
 mod wal;
 
-pub mod wire {
-    //! Durable wire formats grouped by their owning format family.
+pub mod api {
+    //! HTTP API request and response shapes, one module per protocol version.
+
+    pub mod v0;
+}
+
+pub mod format {
+    //! Durable formats grouped by their owning format family.
 
     pub mod hex {
         //! Lowercase hexadecimal primitives shared by durable codecs.
@@ -142,8 +148,8 @@ pub use retry::{
 pub use secret::SecretString;
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
-// in `v0`; add here only what most consumers touch.
-pub use v0::{
+// in `api::v0`; add here only what most consumers touch.
+pub use api::v0::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, AttributesProjection, Checkpoint,
     CheckpointOwnerSummary, Commit, CommitPrecondition, CommitRequest, CompactionStepOutcome,
     CreateCheckpointRequest, CreateNamespaceRequest, CreateSnapshotRequest,

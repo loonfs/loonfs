@@ -95,7 +95,7 @@ impl Default for InlineContentPolicy {
 
 impl InlineContentPolicy {
     pub(crate) fn validate(&self) -> crate::Result<()> {
-        use loonfs_api::wire::wal::{
+        use loonfs_types::format::wal::{
             MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
         };
         if self

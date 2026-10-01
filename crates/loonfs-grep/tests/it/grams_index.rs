@@ -8,8 +8,6 @@ use loonfs::publish::{CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, SharedObjectStore,
 };
-use loonfs_api::v0::GrepIndexLifecycle;
-use loonfs_api::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
@@ -19,6 +17,8 @@ use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{
     ConcurrencyWatchStore, KeyPredicate, OperationClass, RecordingStore,
 };
+use loonfs_types::api::v0::GrepIndexLifecycle;
+use loonfs_types::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;

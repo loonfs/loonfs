@@ -2,8 +2,8 @@
 
 use crate::manifest::GrepManifestError;
 use loonfs::{CoreError, StoreFailureClass};
-use loonfs_api::{ErrorCode, ErrorKind};
 use loonfs_objectstore::ObjectStoreError;
+use loonfs_types::{ErrorCode, ErrorKind};
 use thiserror::Error;
 
 /// Failure returned by grep queries or maintenance.
@@ -72,16 +72,16 @@ impl GrepError {
     }
 
     /// Preserves public error fields for embedded and HTTP callers.
-    pub fn to_api_error(&self) -> loonfs_api::ApiError {
+    pub fn to_api_error(&self) -> loonfs_types::ApiError {
         if let Self::Runtime(error) = self {
             return error.to_api_error();
         }
-        loonfs_api::ApiError {
+        loonfs_types::ApiError {
             code: self.code().as_str().to_owned(),
             message: self.public_message().into_owned(),
             param: None,
             feature: matches!(self, Self::NotEnabled | Self::Backfilling)
-                .then(|| loonfs_api::FEATURE_QUERY_GREP.to_owned()),
+                .then(|| loonfs_types::FEATURE_QUERY_GREP.to_owned()),
             request_id: None,
             details: None,
         }

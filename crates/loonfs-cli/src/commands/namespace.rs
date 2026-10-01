@@ -14,7 +14,7 @@ use crate::error::CliError;
 use crate::profiles::set_default_namespace;
 use crate::prompt::prompt_line;
 use crate::resolve::{load_cli_config, parse_namespace_id, resolve_actor, resolve_namespace};
-use loonfs_api::{AccessGrants, AccessRights, NamespaceAccess, PrincipalId, PrincipalScope};
+use loonfs_types::{AccessGrants, AccessRights, NamespaceAccess, PrincipalId, PrincipalScope};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -158,7 +158,7 @@ async fn run_namespace_delete(
     let expected_head_seq = args
         .expected_head_seq
         .map(|value| {
-            parse_public_ordinal_arg("--expected-head-seq", value, loonfs_api::ChangeSeq::parse)
+            parse_public_ordinal_arg("--expected-head-seq", value, loonfs_types::ChangeSeq::parse)
         })
         .transpose()
         .map_err(|error| context.fail(kind, error))?;

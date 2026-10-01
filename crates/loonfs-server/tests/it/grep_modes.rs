@@ -6,13 +6,6 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use loonfs::{LoonFs, Writable};
-use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
-use loonfs_api::{
-    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, RunMaintenanceResponse,
-    API_GROUP_QUERY_V0, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-};
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -20,6 +13,13 @@ use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
     app, AppOptions, GrepConfig, GrepMode, MaintenanceMode, MetadataCacheOverrides, ServerConfig,
     StoreConfig,
+};
+use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
+use loonfs_types::{
+    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, RunMaintenanceResponse,
+    API_GROUP_QUERY_V0, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
+    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
 };
 use serde::de::DeserializeOwned;
 use std::num::NonZeroUsize;
@@ -766,7 +766,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_concurrent_uploads: 2,
         max_concurrent_downloads: 2,
         max_concurrent_maintenance: 2,
-        max_merge_input_bytes: loonfs_api::wire::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+        max_merge_input_bytes: loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
         manifest_revalidation_interval_ms: None,
         max_block_memo_bytes: None,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,

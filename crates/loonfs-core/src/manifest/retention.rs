@@ -6,10 +6,10 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::{control::ensure_namespace_live, state::NamespaceReadState};
 use crate::store_waves::STORE_READ_WAVE;
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::{AdvanceRetentionResponse, NamespaceId};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

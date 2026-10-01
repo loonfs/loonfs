@@ -2,9 +2,9 @@
 
 use super::*;
 use crate::pin::snapshot::{classify_live_snapshot, extend_snapshot_expiry};
-use loonfs_api::wire::control::PinOwner;
 use loonfs_objectstore::keys;
 use loonfs_test_support::clock::ManualClock;
+use loonfs_types::format::control::PinOwner;
 
 #[tokio::test]
 async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {

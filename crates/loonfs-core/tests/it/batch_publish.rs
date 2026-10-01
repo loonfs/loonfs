@@ -6,12 +6,6 @@
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
-use loonfs_api::{
-    v0::FilesystemChange,
-    wire::wal::{decode_wal_object_envelope_zstd, WalDelta},
-    AbsolutePath, ActorId, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    InodeId, NamespaceId,
-};
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::control::load_namespace_read_state;
@@ -25,6 +19,12 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, OperationContext, OperationKind};
+use loonfs_types::{
+    api::v0::FilesystemChange,
+    format::wal::{decode_wal_object_envelope_zstd, WalDelta},
+    AbsolutePath, ActorId, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    InodeId, NamespaceId,
+};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -36,7 +36,7 @@ async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
     expected_inode_id: Option<InodeId>,
     context: &MutationContext,
     commit_id: &str,
-) -> Result<loonfs_api::Commit, CoreError> {
+) -> Result<loonfs_types::Commit, CoreError> {
     submit_operation(
         store,
         namespace_id,
@@ -906,7 +906,7 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
         .await
         .expect("writer a commit");
     let writer_b = MutationContext {
-        writer_id: loonfs_api::WriterId::parse("writer-b").expect("writer id"),
+        writer_id: loonfs_types::WriterId::parse("writer-b").expect("writer id"),
         now_ms: writer_a.now_ms.saturating_add(1),
     };
 
@@ -967,7 +967,7 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
         .expect("poison compacted WAL");
 
     let later_context = MutationContext {
-        writer_id: loonfs_api::WriterId::parse("writer-b").expect("writer id"),
+        writer_id: loonfs_types::WriterId::parse("writer-b").expect("writer id"),
         now_ms: first_context.now_ms + 10_000,
     };
     let replay = submit_commit(
@@ -1435,7 +1435,7 @@ fn directory_with_preconditions(
             parents: false,
         },
     )
-    .preconditions(vec![loonfs_api::CommitPrecondition::NamespaceHead {
+    .preconditions(vec![loonfs_types::CommitPrecondition::NamespaceHead {
         expected_head_seq,
     }])
 }
@@ -1502,7 +1502,7 @@ async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() 
             .await
             .expect("receipt resolves despite stale precondition");
         assert_eq!(&replay, landed);
-        let changed = first.preconditions(vec![loonfs_api::CommitPrecondition::NamespaceHead {
+        let changed = first.preconditions(vec![loonfs_types::CommitPrecondition::NamespaceHead {
             expected_head_seq: ChangeSeq(next_seq),
         }]);
         let conflict = submit_commit(&store, &namespace_id, changed, &context)
@@ -1514,7 +1514,7 @@ async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() 
 
 fn scoped_directory(
     commit_id: &str,
-    preconditions: Vec<loonfs_api::CommitPrecondition>,
+    preconditions: Vec<loonfs_types::CommitPrecondition>,
 ) -> CommitRequest {
     commit_request(
         commit_id,
@@ -1527,10 +1527,10 @@ fn scoped_directory(
 }
 
 fn precondition_details(
-    result: &Result<loonfs_api::Commit, CoreError>,
+    result: &Result<loonfs_types::Commit, CoreError>,
     code: ErrorCode,
     index: u32,
-) -> loonfs_api::ErrorDetails {
+) -> loonfs_types::ErrorDetails {
     let error = result.as_ref().expect_err("precondition fails");
     assert_eq!(error.code(), code);
     let details = error.details().expect("precondition details");
@@ -1541,7 +1541,7 @@ fn precondition_details(
 
 #[tokio::test]
 async fn file_revision_preconditions_ignore_unrelated_commits_and_reject_rewrites_and_deletion() {
-    use loonfs_api::{CommitPrecondition, RevisionNo};
+    use loonfs_types::{CommitPrecondition, RevisionNo};
 
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1630,7 +1630,7 @@ async fn file_revision_preconditions_ignore_unrelated_commits_and_reject_rewrite
 
 #[tokio::test]
 async fn binding_preconditions_track_identity_absence_and_moves() {
-    use loonfs_api::CommitPrecondition;
+    use loonfs_types::CommitPrecondition;
 
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1675,7 +1675,7 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
     let move_file = |from: &str, to: &str| FilesystemOperation::MovePath {
         source_path: AbsolutePath::parse(from).expect("source"),
         destination_path: AbsolutePath::parse(to).expect("destination"),
-        precondition: loonfs_api::DestinationPrecondition {
+        precondition: loonfs_types::DestinationPrecondition {
             behavior: DestinationBehavior::Replace,
             ..Default::default()
         },
@@ -1740,7 +1740,7 @@ async fn binding_preconditions_track_identity_absence_and_moves() {
 
 #[tokio::test]
 async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_updates() {
-    use loonfs_api::{AttributeKey, AttributeValue, AttributesRevisionNo, CommitPrecondition};
+    use loonfs_types::{AttributeKey, AttributeValue, AttributesRevisionNo, CommitPrecondition};
     use std::collections::BTreeMap;
 
     let temp_dir = tempdir().expect("tempdir");
@@ -1782,7 +1782,7 @@ async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_u
                     inode_id,
                     content_ref: Some(content.content_ref().clone()),
                     inline_content: None,
-                    expected_revision_no: loonfs_api::RevisionNo(1),
+                    expected_revision_no: loonfs_types::RevisionNo(1),
                 },
             ),
             scoped_directory("holds", vec![precondition.clone()]),
@@ -1821,8 +1821,8 @@ async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_u
 
 #[tokio::test]
 async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
-    use loonfs_api::{CommitPrecondition, RevisionNo};
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+    use loonfs_types::{CommitPrecondition, RevisionNo};
 
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
@@ -1919,7 +1919,7 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
     store.take();
     let request = directory_with_preconditions("over-limit", "/missing/child", ChangeSeq(0))
         .preconditions(vec![
-            loonfs_api::CommitPrecondition::NamespaceHead {
+            loonfs_types::CommitPrecondition::NamespaceHead {
                 expected_head_seq: ChangeSeq(0),
             };
             loonfs_core::limits::MAX_COMMIT_PRECONDITIONS + 1

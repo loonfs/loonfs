@@ -8,12 +8,12 @@ use crate::metadata::access::{access_chain, effective_rights, is_administrator};
 use crate::metadata::MetadataVisibilityReads;
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::read;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     AbsolutePath, BindingVersion as BindingVersionToken, DestinationBehavior, DisplayName, InodeId,
     InodeKind, NameKey, NamespaceAccess, NamespaceId, ROOT_INODE_ID,
 };
-use loonfs_api::{AccessGrants, AccessRight, AccessRights, PrincipalId};
-use loonfs_objectstore::ObjectStore;
+use loonfs_types::{AccessGrants, AccessRight, AccessRights, PrincipalId};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 

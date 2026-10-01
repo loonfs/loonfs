@@ -2,7 +2,7 @@
 
 use crate::error::{CoreError, Result};
 use crate::limits::{METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS};
-use loonfs_api::NamespaceId;
+use loonfs_types::NamespaceId;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 

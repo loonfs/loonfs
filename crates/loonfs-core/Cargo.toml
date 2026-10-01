@@ -11,7 +11,7 @@ keywords = ["filesystem", "object-storage", "wal", "metadata"]
 categories = ["filesystem"]
 
 [dependencies]
-loonfs-api.workspace = true
+loonfs-types.workspace = true
 loonfs-objectstore.workspace = true
 async-trait.workspace = true
 base64.workspace = true

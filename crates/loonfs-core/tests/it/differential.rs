@@ -1,17 +1,17 @@
 //! Differential checks between core metadata and the `loonfs-model` oracle.
 
-use loonfs_api::wire::manifest::{DeletedBinding, DeltaPosition};
-use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{
-    AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue, Attributes,
-    AttributesRevisionNo, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName, InodeId,
-    InodeKind, NameKey, RevisionNo,
-};
 use loonfs_core::metadata::{
     MetadataState as CoreMetadataState, TombstoneRowAction as CoreTombstoneAction,
 };
 use loonfs_model::metadata::{
     MetadataState as ModelMetadataState, SubtreeTombstoneAction as ModelTombstoneAction,
+};
+use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition};
+use loonfs_types::format::wal::WalDelta;
+use loonfs_types::{
+    AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue, Attributes,
+    AttributesRevisionNo, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName, InodeId,
+    InodeKind, NameKey, RevisionNo,
 };
 
 type NormalizedInodes = Vec<(u64, &'static str, u64, CommitId, ActorId, u64)>;
@@ -119,12 +119,12 @@ fn create_directory(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
+            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(display_name))
                 .expect("derived name key"),
             display_name: DisplayName::parse(display_name).expect("valid display name"),
             child_inode_id: inode_id,
-            child_kind: loonfs_api::InodeKind::Directory,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::Directory,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
         },
     ]
@@ -146,12 +146,12 @@ fn create_file(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
+            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(display_name))
                 .expect("derived name key"),
             display_name: DisplayName::parse(display_name).expect("valid display name"),
             child_inode_id: inode_id,
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
         },
         WalDelta::AppendFileRevision {
@@ -186,12 +186,12 @@ fn bind(
     vec![WalDelta::BindDirentry {
         delta_index,
         parent_inode_id,
-        name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
+        name_key: NameKey::parse(loonfs_types::name_key_for_display_name(display_name))
             .expect("derived name key"),
         display_name: DisplayName::parse(display_name).expect("valid display name"),
         child_inode_id: inode_id,
-        child_kind: loonfs_api::InodeKind::File,
-        child_created_by: loonfs_api::ActorId::loonfs(),
+        child_kind: loonfs_types::InodeKind::File,
+        child_created_by: loonfs_types::ActorId::loonfs(),
         child_created_at_ms: 4_200,
     }]
 }
@@ -208,7 +208,7 @@ fn tombstone(
         root_inode_id,
         deleted_binding: DeletedBinding {
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
+            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(display_name))
                 .expect("derived name key"),
             display_name: DisplayName::parse(display_name).expect("valid display name"),
         },
@@ -520,7 +520,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
 fn core_bootstrap_state() -> CoreMetadataState {
     CoreMetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(0),
-        &loonfs_api::wire::control::genesis_commit_id(),
+        &loonfs_types::format::control::genesis_commit_id(),
         &ActorId::loonfs(),
         4_000,
         &[WalDelta::CreateInode {

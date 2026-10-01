@@ -2,10 +2,10 @@
 
 use super::*;
 use crate::{InlineContentPolicy, MetadataCache, MetadataMaintenanceOptions, PutFileOptions};
-use loonfs_api::wire::wal::decode_wal_object_envelope_zstd;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
+use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 
 fn policy() -> InlineContentPolicy {
     InlineContentPolicy {
@@ -356,7 +356,7 @@ fn family_requests(store: &RecordingStore<LocalFsStore>, family: DurableObjectFa
 
 async fn written_records(
     store: &RecordingStore<LocalFsStore>,
-) -> Vec<loonfs_api::wire::wal::WalCommitPayload> {
+) -> Vec<loonfs_types::format::wal::WalCommitPayload> {
     let keys: Vec<_> = store
         .snapshot()
         .into_iter()
@@ -439,7 +439,7 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
             .await
             .expect_err("conflict")
             .code(),
-        loonfs_api::ErrorCode::CommitIdReuseConflict
+        loonfs_types::ErrorCode::CommitIdReuseConflict
     );
     assert_eq!(store.count(OperationClass::Put), 0);
     writer.shutdown().await.expect("shutdown");
@@ -488,7 +488,7 @@ async fn disabled_and_above_threshold_writes_keep_uploaded_object_identity() {
                 .await
                 .expect_err("fresh object conflicts")
                 .code(),
-            loonfs_api::ErrorCode::CommitIdReuseConflict
+            loonfs_types::ErrorCode::CommitIdReuseConflict
         );
         writer.shutdown().await.expect("shutdown");
     }
@@ -901,7 +901,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
         .deltas
         .iter()
         .filter_map(|delta| match &delta.delta {
-            loonfs_api::wire::wal::WalDelta::AppendFileRevision { content_ref, .. } => {
+            loonfs_types::format::wal::WalDelta::AppendFileRevision { content_ref, .. } => {
                 Some(content_ref.content_id.as_str())
             }
             _ => None,
@@ -1315,7 +1315,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
 
 #[tokio::test]
 async fn invalid_inline_policy_is_rejected_before_store_access() {
-    use loonfs_api::wire::wal::{
+    use loonfs_types::format::wal::{
         MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
     };
     let directory = tempdir().expect("directory");

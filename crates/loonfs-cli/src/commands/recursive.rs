@@ -17,9 +17,9 @@ use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
-use loonfs_api::DestinationBehavior;
-use loonfs_api::PinId;
 use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
+use loonfs_types::DestinationBehavior;
+use loonfs_types::PinId;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -456,10 +456,10 @@ pub(crate) async fn run_copy_tree(
         .map_err(|error| context.fail(kind, error))?;
     let destination = parse_remote(context, destination_root, "destination_path")
         .map_err(|error| context.fail(kind, error))?;
-    let source_key = loonfs_api::name_key_for_display_name(source.absolute_path().as_str());
+    let source_key = loonfs_types::name_key_for_display_name(source.absolute_path().as_str());
     let source_path = source_key.trim_end_matches('/');
     let destination_key =
-        loonfs_api::name_key_for_display_name(destination.absolute_path().as_str());
+        loonfs_types::name_key_for_display_name(destination.absolute_path().as_str());
     let destination_path = destination_key.trim_end_matches('/');
     if destination_path == source_path || destination_path.starts_with(&format!("{source_path}/")) {
         return Err(context.fail(
@@ -569,10 +569,10 @@ mod tests {
     use crate::progress::ProgressMode;
     use crate::resolve::ResolvedTarget;
     use loonfs::SharedObjectStore;
-    use loonfs_api::NamespaceId;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
     use loonfs_test_support::stores::BufferWatchStore;
+    use loonfs_types::NamespaceId;
 
     /// A file of two transfer parts and a bit: enough that holding it whole
     /// would show up plainly against holding one part of it, and enough that
@@ -630,7 +630,7 @@ mod tests {
             .create_namespace(
                 &namespace,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");

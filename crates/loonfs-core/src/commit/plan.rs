@@ -3,9 +3,9 @@
 use super::CommitFingerprint;
 use crate::storage::inline_content::InlineContent;
 
-use loonfs_api::wire::manifest::DeltaPosition;
-use loonfs_api::wire::wal::WalCommitDelta;
-use loonfs_api::{
+use loonfs_types::format::manifest::DeltaPosition;
+use loonfs_types::format::wal::WalCommitDelta;
+use loonfs_types::{
     ActorId, ChangeSeq, CommitId, DisplayName, InodeId, NameKey, NamespaceId, WriterEpoch,
 };
 

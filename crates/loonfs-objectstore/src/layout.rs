@@ -1,6 +1,6 @@
 //! The durable key grammar: object families and key classification.
 
-use loonfs_api::{ManifestNo, UploadId};
+use loonfs_types::{ManifestNo, UploadId};
 
 /// One family in the [durable object key grammar].
 ///
@@ -102,7 +102,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
 }
 
 /// Parses the fixed-width WAL number in a WAL object key.
-pub fn wal_no_of(key: &str) -> Option<loonfs_api::WalNo> {
+pub fn wal_no_of(key: &str) -> Option<loonfs_types::WalNo> {
     let parsed = parse_object_key(key)?;
     if parsed.family() != DurableObjectFamily::WalObject {
         return None;
@@ -110,11 +110,11 @@ pub fn wal_no_of(key: &str) -> Option<loonfs_api::WalNo> {
     parse_wal_no(parsed.identifier()?)
 }
 
-fn parse_wal_no(number: &str) -> Option<loonfs_api::WalNo> {
+fn parse_wal_no(number: &str) -> Option<loonfs_types::WalNo> {
     if number.len() != 20 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let number = loonfs_api::WalNo::parse(number.parse().ok()?).ok()?;
+    let number = loonfs_types::WalNo::parse(number.parse().ok()?).ok()?;
     (number.0 > 0).then_some(number)
 }
 
@@ -161,7 +161,7 @@ mod tests {
         content_blob, hint, metadata_manifest_object, metadata_segment, metadata_segment_prefix,
         pin, upload_session, wal_object, wal_prefix,
     };
-    use loonfs_api::{
+    use loonfs_types::{
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
     };
 

@@ -57,7 +57,7 @@ async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: 
         namespace_id,
         &gc_options(),
         &MutationContext {
-            writer_id: loonfs_api::WriterId::parse("reclamation-test").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("reclamation-test").expect("writer id"),
             now_ms,
         },
     )

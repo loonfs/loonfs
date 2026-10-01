@@ -14,8 +14,8 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::{ListOptions, StatOptions};
 #[cfg(feature = "openapi")]
-use loonfs_api::ApiError;
-use loonfs_api::{
+use loonfs_types::ApiError;
+use loonfs_types::{
     public_inode_id, DirectoryPageCursor, FileRevisionsPageCursor, InodeId,
     ListFileRevisionsResponse, PageRequest,
 };
@@ -58,10 +58,10 @@ pub(super) struct StatInodeQuery {
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "Inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
-            ("snapshot_id" = Option<loonfs_api::PinId>, Query, description = "Use the path state captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the path state captured by this snapshot")
         ),
         responses(
-            (status = 200, description = "Authoritative current inode entry", body = loonfs_api::PathEntry),
+            (status = 200, description = "Authoritative current inode entry", body = loonfs_types::PathEntry),
             (status = 400, description = "Invalid inode ID, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
@@ -76,7 +76,7 @@ pub(super) async fn get_inode(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<StatInodeQuery>,
-) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
+) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
@@ -125,10 +125,10 @@ pub(super) struct ListInodeChildrenQuery {
             ("limit" = inline(Option<super::query_params::OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory page cursor"),
             ("include_attributes" = inline(Option<super::query_params::OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
-            ("snapshot_id" = Option<loonfs_api::PinId>, Query, description = "Use the directory state captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the directory state captured by this snapshot")
         ),
         responses(
-            (status = 200, description = "One page of directory children", body = loonfs_api::ListInodeChildrenResponse),
+            (status = 200, description = "One page of directory children", body = loonfs_types::ListInodeChildrenResponse),
             (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
@@ -234,7 +234,7 @@ pub(super) async fn list_file_revisions_by_inode(
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("revision_no" = loonfs_api::RevisionNo, Path, description = "Revision number")
+            ("revision_no" = loonfs_types::RevisionNo, Path, description = "Revision number")
         ),
         responses(
             (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),

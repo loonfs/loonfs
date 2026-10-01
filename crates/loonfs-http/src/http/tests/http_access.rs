@@ -3,8 +3,8 @@
 use super::fixtures::{test_app, test_options, TestAppOptions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use loonfs_api::{ApiError, ErrorCode};
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::{ApiError, ErrorCode};
 use tempfile::tempdir;
 use tower::ServiceExt as _;
 
@@ -525,7 +525,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
 
     let namespace = namespace_reader.metadata().await.expect("namespace");
-    assert_eq!(namespace.head_seq, loonfs_api::ChangeSeq(0));
+    assert_eq!(namespace.head_seq, loonfs_types::ChangeSeq(0));
 }
 
 #[tokio::test]
@@ -553,7 +553,7 @@ async fn a_former_server_observes_revocation_on_its_first_read_after_publication
         ("Loonfs-Principals", "prn_root"),
     ];
     let publication = serde_json::json!({
-        "commit_id": loonfs_api::CommitId::generate(),
+        "commit_id": loonfs_types::CommitId::generate(),
         "operations": [
             {"kind": "create_directory", "path": "/team"},
             {"kind": "update_access", "path": "/team", "boundary": true,
@@ -573,12 +573,12 @@ async fn a_former_server_observes_revocation_on_its_first_read_after_publication
         .await
         .expect("publish response");
     assert_eq!(response.status(), StatusCode::OK);
-    config.writer_id = loonfs_api::WriterId::parse("peer").expect("writer id");
+    config.writer_id = loonfs_types::WriterId::parse("peer").expect("writer id");
     let (peer_router, peer_state) = test_app(config, TestAppOptions::default())
         .await
         .expect("peer server");
     let revocation = serde_json::json!({
-        "commit_id": loonfs_api::CommitId::generate(),
+        "commit_id": loonfs_types::CommitId::generate(),
         "operations": [
             {"kind": "update_access", "path": "/team", "boundary": true, "grants": {}}
         ]

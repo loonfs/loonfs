@@ -2,7 +2,7 @@
 
 use super::{CoreError, NamespaceId, PreparedCandidate};
 use crate::PublicationLimits;
-use loonfs_api::wire::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
+use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -225,7 +225,7 @@ mod tests {
             .acquire_candidate(&namespace_id, &candidate)
             .err()
             .expect("oversized commit");
-        assert_eq!(error.code(), loonfs_api::ErrorCode::ContentTooLarge);
+        assert_eq!(error.code(), loonfs_types::ErrorCode::ContentTooLarge);
         assert!(error.to_string().contains("too large for one WAL object"));
         assert!(error.to_string().contains("MAX_WAL_OBJECT_BYTES"));
         drop(permit);

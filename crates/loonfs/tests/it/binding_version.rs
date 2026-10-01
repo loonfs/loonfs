@@ -3,8 +3,8 @@
 
 use crate::common::*;
 use loonfs::{ChangeSeq, DestinationBehavior, PutFileOptions};
-use loonfs_api::v0::FilesystemChange;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::api::v0::FilesystemChange;
 use tempfile::tempdir;
 
 #[test]

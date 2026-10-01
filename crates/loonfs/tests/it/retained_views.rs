@@ -9,13 +9,6 @@ use loonfs::{
     DestinationBehavior, GcOptions, InlineContentPolicy, LoonFs, MetadataCompactionPolicy,
     MetadataMaintenanceOptions, PutFileOptions, WalFoldStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS,
 };
-use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily, RunTier};
-use loonfs_api::wire::sst_blocks::{decode_data_block, decode_index_block};
-use loonfs_api::{
-    AccessGrants, AccessRevisionNo, AccessRight, AccessRights, Attributes, AttributesRevisionNo,
-    ChangeSeq, ErrorCode, NamespaceAccess, PageRequest, PathEntry, PrincipalId, PrincipalScope,
-    PrincipalSet, RevisionNo, Subject, SubjectId,
-};
 use loonfs_core::control::load_namespace_current_manifest;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -24,6 +17,13 @@ use loonfs_test_support::ids::{
     attribute_key, attribute_text, first_page, namespace_id, page_limit,
 };
 use loonfs_test_support::test_actor;
+use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, RunTier};
+use loonfs_types::format::sst_blocks::{decode_data_block, decode_index_block};
+use loonfs_types::{
+    AccessGrants, AccessRevisionNo, AccessRight, AccessRights, Attributes, AttributesRevisionNo,
+    ChangeSeq, ErrorCode, NamespaceAccess, PageRequest, PathEntry, PrincipalId, PrincipalScope,
+    PrincipalSet, RevisionNo, Subject, SubjectId,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::tempdir;
 
@@ -297,7 +297,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                         grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
                     },
                     &MutationContext {
-                        writer_id: loonfs_api::WriterId::parse("retained-views-gc")
+                        writer_id: loonfs_types::WriterId::parse("retained-views-gc")
                             .expect("writer id"),
                         now_ms,
                     },

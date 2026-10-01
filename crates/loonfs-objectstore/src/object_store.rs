@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
-use loonfs_api::Checksum;
+use loonfs_types::Checksum;
 use std::borrow::Cow;
 use std::fmt::Debug;
 use std::sync::Arc;

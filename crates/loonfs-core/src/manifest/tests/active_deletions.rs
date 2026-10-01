@@ -11,12 +11,12 @@ use crate::metadata::{
 };
 use crate::path::read::load_current_metadata_view;
 use crate::{NamespaceEngine, RuntimeReadContext};
-use loonfs_api::v0::DirectoryBinding;
-use loonfs_api::wire::manifest::{
+use loonfs_types::api::v0::DirectoryBinding;
+use loonfs_types::format::manifest::{
     ActiveDeletionRowAction, DeletedBinding, DeltaPosition, InodeRecord,
 };
-use loonfs_api::{AttributeInclusion, InodeKind};
-use loonfs_api::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
+use loonfs_types::{AttributeInclusion, InodeKind};
+use loonfs_types::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 use std::sync::Arc;
 
 fn position(seq: u64) -> DeltaPosition {
@@ -33,7 +33,7 @@ fn tombstone_set(root_inode_id: InodeId, seq: u64, name: &str) -> SubtreeTombsto
         delta_index: 0,
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         committed_at_ms: 1_000 + seq,
-        committed_by: loonfs_api::ActorId::loonfs(),
+        committed_by: loonfs_types::ActorId::loonfs(),
         action: TombstoneRowAction::Set {
             deleted_binding: DeletedBinding {
                 parent_inode_id: InodeId(1),
@@ -51,7 +51,7 @@ fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> Subtre
         delta_index: 0,
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         committed_at_ms: 1_000 + seq,
-        committed_by: loonfs_api::ActorId::loonfs(),
+        committed_by: loonfs_types::ActorId::loonfs(),
         action: TombstoneRowAction::Revoke {
             target: position(target_seq),
         },
@@ -70,7 +70,7 @@ fn state_from_tombstones(tombstones: Vec<SubtreeTombstoneRecord>) -> MetadataSta
             inode_kind: InodeKind::File,
             committed_seq: ChangeSeq(0),
             commit_id: CommitId::parse("c_initial").expect("commit id"),
-            committed_by: loonfs_api::ActorId::loonfs(),
+            committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 1_000,
         });
     }
@@ -228,7 +228,7 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
     commit_id: &str,
     operation: FilesystemOperation,
     context: &MutationContext,
-) -> loonfs_api::Commit {
+) -> loonfs_types::Commit {
     NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,
@@ -259,7 +259,7 @@ async fn undelete<S: ObjectStore + ?Sized>(
     deletion_seq: ChangeSeq,
     absolute_path: &str,
     context: &MutationContext,
-) -> loonfs_api::Commit {
+) -> loonfs_types::Commit {
     submit_operation_for_test(
         store,
         namespace_id,
@@ -534,7 +534,7 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
         &namespace_id,
         "c_create_docs",
         FilesystemOperation::CreateDirectory {
-            path: loonfs_api::AbsolutePath::parse("/docs").expect("directory path"),
+            path: loonfs_types::AbsolutePath::parse("/docs").expect("directory path"),
             parents: false,
         },
         &context,
@@ -636,8 +636,8 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
         "the cursor names the position the page ended on"
     );
 
-    let encoded = loonfs_api::encode_cursor(&cursor).expect("encode cursor");
-    let decoded: TrashPageCursor = loonfs_api::decode_cursor(&encoded).expect("decode cursor");
+    let encoded = loonfs_types::encode_cursor(&cursor).expect("encode cursor");
+    let decoded: TrashPageCursor = loonfs_types::decode_cursor(&encoded).expect("decode cursor");
     assert_eq!(decoded, cursor, "the trash cursor round-trips on the wire");
 
     let second = trash_page(&store, &namespace_id, 2, Some(decoded)).await;
@@ -663,7 +663,7 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
         "the paged walk and a single large page agree"
     );
 
-    let wrong_kind = loonfs_api::encode_cursor(&loonfs_api::DirectoryPageCursor {
+    let wrong_kind = loonfs_types::encode_cursor(&loonfs_types::DirectoryPageCursor {
         head_seq: ChangeSeq(1),
         pin_id: None,
         directory_inode_id: InodeId(1),
@@ -671,7 +671,7 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
     })
     .expect("encode cursor");
     assert!(
-        loonfs_api::decode_cursor::<TrashPageCursor>(&wrong_kind).is_err(),
+        loonfs_types::decode_cursor::<TrashPageCursor>(&wrong_kind).is_err(),
         "another endpoint's cursor must not resume a trash listing"
     );
 }

@@ -7,17 +7,17 @@
 //! bookkeeping stay outside every budget.
 
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::{ForkBasis, ManifestRef, WriterBlock};
-use loonfs_api::wire::envelope::VerifiedEnvelope;
-use loonfs_api::wire::manifest::{
+use loonfs_types::format::control::{ForkBasis, ManifestRef, WriterBlock};
+use loonfs_types::format::envelope::VerifiedEnvelope;
+use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
     CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindingRecord,
     InodeRecord, MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess,
     NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
-use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
-use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_api::{
+use loonfs_types::format::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
+use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, ChangeSeq, CommitFingerprint,
     CommitId, ContentId, ContentRef, DisplayName, InodeId, MetadataSegmentId, NameKey, NamespaceId,
     PinId, PrincipalId, PrincipalScope, WriterId,
@@ -392,7 +392,7 @@ impl HeapBytes for SegmentIndexEntry {
 #[cfg(test)]
 mod tests {
     use super::HeapBytes;
-    use loonfs_api::AccessGrants;
+    use loonfs_types::AccessGrants;
 
     #[test]
     fn a_decoded_grant_map_is_charged_for_every_level_of_nodes() {

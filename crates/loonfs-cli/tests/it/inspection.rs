@@ -1,9 +1,9 @@
 //! Integration tests for `capabilities` and `doctor`.
 
 use super::common::*;
-use loonfs_api::{CapabilityDocument, PROTOCOL_VERSION};
 #[cfg(unix)]
 use loonfs_objectstore::{probe::PROBE_RUN_PREFIX, ObjectStoreErrorClass};
+use loonfs_types::{CapabilityDocument, PROTOCOL_VERSION};
 use std::collections::BTreeMap;
 
 const CHECK_NAMES: [&str; 9] = [

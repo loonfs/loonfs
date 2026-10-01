@@ -8,11 +8,11 @@ use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingVersion, CommitPrecondition,
     InodeId, InodeKind,
 };
-use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
     preconditions: &[CommitPrecondition],

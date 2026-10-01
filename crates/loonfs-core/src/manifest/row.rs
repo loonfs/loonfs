@@ -2,8 +2,8 @@
 //! row-key order.
 
 use crate::metadata::{active_deletion_from_tombstone, MetadataState};
-use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_api::ChangeSeq;
+use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
+use loonfs_types::ChangeSeq;
 
 #[cfg(test)]
 use super::runs::MANIFEST_ROW_FAMILIES;

@@ -4,7 +4,7 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::{AbsolutePath, CommitId, ContentId, DestinationBehavior};
+use loonfs_types::{AbsolutePath, CommitId, ContentId, DestinationBehavior};
 use std::sync::Arc;
 
 async fn publish_inline(

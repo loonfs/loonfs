@@ -17,22 +17,22 @@ use loonfs::content_tokens::{
 use loonfs::publish::PreparedContent;
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{Namespace, Writable};
+use loonfs_objectstore::{
+    presign::{DirectMultipartIssuer, PresignedPartRequest, PresignedPutRequest},
+    ObjectStoreError,
+};
 #[cfg(feature = "openapi")]
-use loonfs_api::ApiError;
-use loonfs_api::ErrorCode;
-use loonfs_api::{
-    options::DirectMultipartUploadOptions,
-    v0::{
+use loonfs_types::ApiError;
+use loonfs_types::ErrorCode;
+use loonfs_types::{
+    api::v0::{
         CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, ObjectTransferAccess,
         SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadMode,
         UploadSession, UploadSessionStatus,
     },
+    options::DirectMultipartUploadOptions,
     ContentId, ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-};
-use loonfs_objectstore::{
-    presign::{DirectMultipartIssuer, PresignedPartRequest, PresignedPutRequest},
-    ObjectStoreError,
 };
 use std::time::{Duration, SystemTime};
 
@@ -762,8 +762,8 @@ pub(super) async fn abort_upload(
 mod completion_body_tests {
     use super::*;
     use loonfs::LoonFs;
-    use loonfs_api::{
-        v0::{CompletedUploadPart, UploadContentClaim, UploadPartChecksumClaim},
+    use loonfs_types::{
+        api::v0::{CompletedUploadPart, UploadContentClaim, UploadPartChecksumClaim},
         Checksum, ChecksumAlgorithm,
     };
 

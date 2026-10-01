@@ -4,8 +4,8 @@ use super::{
     Intercept, InterceptStore, Interceptor, KeyPredicate, OperationClass, OperationContext,
 };
 use async_trait::async_trait;
-use loonfs_api::MonotonicTimer;
 use loonfs_objectstore::timing::StdMonotonicTimer;
+use loonfs_types::MonotonicTimer;
 use std::sync::Mutex;
 use std::time::Duration;
 

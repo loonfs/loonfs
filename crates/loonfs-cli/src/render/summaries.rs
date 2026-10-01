@@ -2,8 +2,8 @@
 
 use super::*;
 
-pub(super) fn public_inode_id(inode_id: loonfs_api::InodeId) -> String {
-    loonfs_api::public_inode_id::encode(inode_id)
+pub(super) fn public_inode_id(inode_id: loonfs_types::InodeId) -> String {
+    loonfs_types::public_inode_id::encode(inode_id)
 }
 
 /// Formats one object-store contract check.
@@ -27,7 +27,7 @@ pub(crate) enum StoreProbeVerdict {
 }
 
 pub(crate) fn store_probe_verdict(
-    response: &loonfs_api::v0::StoreProbeResponse,
+    response: &loonfs_types::api::v0::StoreProbeResponse,
 ) -> StoreProbeVerdict {
     let counted = |outcome: StoreProbeCheckOutcome| {
         response
@@ -46,7 +46,9 @@ pub(crate) fn store_probe_verdict(
     }
 }
 
-pub(crate) fn store_probe_summary_line(response: &loonfs_api::v0::StoreProbeResponse) -> String {
+pub(crate) fn store_probe_summary_line(
+    response: &loonfs_types::api::v0::StoreProbeResponse,
+) -> String {
     let run_id = &response.run_id;
     let total = response.checks.len();
     match store_probe_verdict(response) {
@@ -61,7 +63,7 @@ pub(crate) fn store_probe_summary_line(response: &loonfs_api::v0::StoreProbeResp
 }
 
 pub(super) fn store_probe_report_lines(
-    response: &loonfs_api::v0::StoreProbeResponse,
+    response: &loonfs_types::api::v0::StoreProbeResponse,
 ) -> Vec<String> {
     let mut lines: Vec<String> = response.checks.iter().map(store_probe_check_line).collect();
     lines.push(store_probe_summary_line(response));
@@ -70,7 +72,7 @@ pub(super) fn store_probe_report_lines(
 
 /// Groups failed probe checks by the one-line message shown by `doctor`.
 pub(super) fn store_probe_failure_group_lines(
-    response: &loonfs_api::v0::StoreProbeResponse,
+    response: &loonfs_types::api::v0::StoreProbeResponse,
 ) -> Vec<String> {
     let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
     for check in &response.checks {
@@ -288,8 +290,8 @@ pub(super) fn format_utc_ms(unix_ms: u64) -> String {
 }
 
 /// Formats one change-feed event for human-readable output.
-pub(super) fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
-    use loonfs_api::v0::FilesystemChange;
+pub(super) fn event_descriptor(event: &loonfs_types::api::v0::FilesystemChange) -> String {
+    use loonfs_types::api::v0::FilesystemChange;
     match event {
         FilesystemChange::DirectoryCreated { display_name, .. }
         | FilesystemChange::FileCreated { display_name, .. } => {
@@ -336,7 +338,7 @@ pub(super) fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> Stri
     }
 }
 
-pub(super) fn event_summary(events: &[loonfs_api::v0::FilesystemChange]) -> String {
+pub(super) fn event_summary(events: &[loonfs_types::api::v0::FilesystemChange]) -> String {
     const SHOWN: usize = 3;
     if events.is_empty() {
         return "-".to_owned();

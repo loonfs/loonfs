@@ -226,7 +226,7 @@ mod tests {
     use crate::ObjectStoreError;
     use crate::{AwsS3Credentials, ObjectStore};
     use bytes::Bytes;
-    use loonfs_api::ChecksumAlgorithm;
+    use loonfs_types::ChecksumAlgorithm;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -239,7 +239,7 @@ mod tests {
         let store = ConfiguredObjectStore::local_fs(temp_dir.path(), Some("tenant-a"))
             .expect("construct configured local fs store")
             .into_shared();
-        let hint_key = hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let hint_key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
 
         store
             .put_overwrite(&hint_key, Bytes::from_static(br#"{"ok":true}"#))

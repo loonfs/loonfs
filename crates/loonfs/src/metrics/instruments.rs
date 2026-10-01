@@ -1650,7 +1650,7 @@ mod tests {
 
         instruments.compaction_finished(
             &Ok(MetadataCompactionJobOutcome::Published {
-                manifest_no: loonfs_api::ManifestNo(1),
+                manifest_no: loonfs_types::ManifestNo(1),
                 rows_read: 20,
                 rows_written: 10,
                 input_bytes: 2_000,
@@ -1736,19 +1736,19 @@ mod tests {
         let instruments = RuntimeInstruments::new(Some(recorder.clone()));
         let mut gc = GcResponse {
             namespace_id: loonfs_test_support::ids::namespace_id("demo"),
-            deleted: loonfs_api::DeletedObjectCounts {
+            deleted: loonfs_types::DeletedObjectCounts {
                 wal_objects: 3,
                 content_objects: 5,
-                ..loonfs_api::DeletedObjectCounts::default()
+                ..loonfs_types::DeletedObjectCounts::default()
             },
-            deleted_checkpoints_by_owner: loonfs_api::DeletedCheckpointsByOwner {
+            deleted_checkpoints_by_owner: loonfs_types::DeletedCheckpointsByOwner {
                 fork: 2,
                 user: 3,
                 snapshot: 7,
             },
-            retained: loonfs_api::RetainedCandidates {
+            retained: loonfs_types::RetainedCandidates {
                 referenced: 2,
-                ..loonfs_api::RetainedCandidates::default()
+                ..loonfs_types::RetainedCandidates::default()
             },
             next_reclamation_at_ms: None,
             reclaimable_at_ms: None,

@@ -19,7 +19,7 @@
 //! - Every section's CRC32C is stored in its handle.
 //! - Bloom hashing uses two xxh64 hashes with fixed seeds.
 
-use crate::wire::manifest::MetadataRow;
+use crate::format::manifest::MetadataRow;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::num::NonZeroUsize;
@@ -102,7 +102,7 @@ impl BuiltSegmentBlocks {
     pub fn inline_filter_hex(&self) -> Option<String> {
         (self.filter.stored_bytes <= DEFAULT_INLINE_FILTER_MAX_BYTES).then(|| {
             let start = self.filter.offset as usize;
-            crate::wire::hex::hex_encode_bytes(
+            crate::format::hex::hex_encode_bytes(
                 &self.bytes[start..start + self.filter.stored_bytes as usize],
             )
         })

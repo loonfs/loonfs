@@ -1,6 +1,6 @@
 //! Transport failures before a complete HTTP response is received.
 
-use loonfs_api::ErrorCode;
+use loonfs_types::ErrorCode;
 
 type Cause = Box<dyn std::error::Error + Send + Sync>;
 

@@ -6,12 +6,12 @@ use super::materialized_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
 use crate::metadata::{DirentryBindingRecord, MetadataViewSession, ResolvedVisiblePath};
-use loonfs_api::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use std::collections::{HashMap, HashSet};
 
 /// Maximum number of inode IDs accepted by a batch resolution.
-pub const MAX_RESOLVE_CURRENT_FILES: usize = loonfs_api::DEFAULT_MAX_PAGE_LIMIT as usize;
+pub const MAX_RESOLVE_CURRENT_FILES: usize = loonfs_types::DEFAULT_MAX_PAGE_LIMIT as usize;
 
 /// Current namespace state for one inode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,7 +193,7 @@ async fn current_path<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{ensure_resolve_batch_within_cap, MAX_RESOLVE_CURRENT_FILES};
-    use loonfs_api::{ErrorCode, PaginationPolicy};
+    use loonfs_types::{ErrorCode, PaginationPolicy};
 
     #[test]
     fn the_batch_cap_is_the_pagination_maximum() {

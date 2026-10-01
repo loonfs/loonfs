@@ -9,13 +9,6 @@
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
-use loonfs_api::{
-    wire::control::{decode_control_object, ControlObjectKind, PinOwner, PinPayload},
-    wire::manifest::{
-        decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
-    },
-    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId, PinId,
-};
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::FilesystemOperation;
@@ -28,6 +21,13 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
     RecordedOperation, RecordingStore,
 };
+use loonfs_types::{
+    format::control::{decode_control_object, ControlObjectKind, PinOwner, PinPayload},
+    format::manifest::{
+        decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
+    },
+    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId, PinId,
+};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -36,7 +36,7 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::NamespaceMetadata, CoreError> {
+) -> Result<loonfs_types::NamespaceMetadata, CoreError> {
     namespace_engine(store, source_namespace_id, context)
         .fork_namespace(new_namespace_id, &loonfs_test_support::test_actor(), None)
         .await
@@ -65,7 +65,7 @@ async fn listed_names<S: ObjectStore + ?Sized>(
     namespace_engine(store, namespace_id, &mutation_context())
         .list_path_page(
             "/docs",
-            loonfs_api::PageRequest {
+            loonfs_types::PageRequest {
                 limit: loonfs_test_support::ids::page_limit(10),
                 cursor: None,
             },
@@ -118,7 +118,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         let report = engine
             .metadata_compaction_step(
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_api::CompactorEpoch(0),
+                loonfs_types::CompactorEpoch(0),
             )
             .await
             .expect("compact source");
@@ -347,7 +347,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     let root_entry = resolve_path(&store, &namespace_id, "/")
         .await
         .expect("a fresh namespace serves reads");
-    assert_eq!(root_entry.inode_kind(), loonfs_api::InodeKind::Directory);
+    assert_eq!(root_entry.inode_kind(), loonfs_types::InodeKind::Directory);
     let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status");
@@ -414,7 +414,7 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     seed_source_namespace_for_fork(store.as_ref(), &source, &context).await;
 
     let mut second = context.clone();
-    second.writer_id = loonfs_api::WriterId::parse("writer-second").expect("writer id");
+    second.writer_id = loonfs_types::WriterId::parse("writer-second").expect("writer id");
     let (left, right) = tokio::join!(
         fork_namespace(store.as_ref(), &source, &target, &context),
         fork_namespace(store.as_ref(), &source, &target, &second),
@@ -449,7 +449,7 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     let head = head_state(store.as_ref(), &contested).await;
     assert_eq!(
         head.status,
-        loonfs_api::wire::control::NamespaceStatus::Active {}
+        loonfs_types::format::control::NamespaceStatus::Active {}
     );
     if created.is_ok() {
         assert!(head.fork_basis.is_none(), "the create won");
@@ -465,7 +465,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         namespace_id: &NamespaceId,
         bytes: &[u8],
         context: &MutationContext,
-    ) -> loonfs_api::ContentRef {
+    ) -> loonfs_types::ContentRef {
         let engine = namespace_engine(store, namespace_id, context);
         let upload = engine.begin_upload(None).await.expect("begin upload");
         let staged = engine
@@ -733,14 +733,14 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         let report = engine
             .metadata_compaction_step(
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_api::CompactorEpoch(0),
+                loonfs_types::CompactorEpoch(0),
             )
             .await
             .expect("compact clone");
         match report {
             loonfs_core::CompactionStepOutcome::NotNeeded { .. } => break,
             loonfs_core::CompactionStepOutcome::UnitPublished { group, .. } => {
-                revisions_compacted |= group == loonfs_api::MetadataFamilyGroup::Revisions;
+                revisions_compacted |= group == loonfs_types::MetadataFamilyGroup::Revisions;
             }
             other => panic!("expected bounded compaction, got {other:?}"),
         }
@@ -750,7 +750,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let revisions = engine
         .list_file_revisions_for_inode_page(
             clone_entry.inode_id,
-            loonfs_api::PageRequest {
+            loonfs_types::PageRequest {
                 limit: loonfs_test_support::ids::page_limit(10),
                 cursor: None,
             },
@@ -823,7 +823,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         match engine
             .metadata_compaction_step(
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_api::CompactorEpoch(0),
+                loonfs_types::CompactorEpoch(0),
             )
             .await
             .expect("compact descendant")
@@ -927,7 +927,7 @@ async fn a_fork_survives_a_concurrent_collection_pass() {
     collected.expect("the pass finishes");
     assert_eq!(
         head_state(store.as_ref(), &clone).await.status,
-        loonfs_api::wire::control::NamespaceStatus::Active {}
+        loonfs_types::format::control::NamespaceStatus::Active {}
     );
     assert_eq!(
         read_file_bytes(store.as_ref(), &clone, "/docs/shared.txt")
@@ -967,7 +967,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         run.segments
             .retain(|descriptor| descriptor.family != MetadataRowFamily::DirentryChildBinds);
     });
-    let manifest = loonfs_api::wire::manifest::encode_namespace_manifest_json(manifest)
+    let manifest = loonfs_types::format::manifest::encode_namespace_manifest_json(manifest)
         .expect("rebuild manifest checksum")
         .into_envelope();
     let corrupted = encode_namespace_manifest_json(manifest.payload().clone())
@@ -1028,25 +1028,26 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     let context = mutation_context();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     // Another writer's complete head for the same id, already durable.
-    let foreign = loonfs_api::wire::manifest::NamespaceManifestPayload::initial(
+    let foreign = loonfs_types::format::manifest::NamespaceManifestPayload::initial(
         namespace_id.clone(),
         1_000,
         loonfs_test_support::test_actor(),
-        loonfs_api::NamespaceAccess::Unrestricted {},
+        loonfs_types::NamespaceAccess::Unrestricted {},
     );
-    let foreign_bytes = loonfs_api::wire::manifest::encode_namespace_manifest_json(foreign.clone())
-        .map(|encoded| encoded.into_bytes())
-        .expect("encode foreign head");
+    let foreign_bytes =
+        loonfs_types::format::manifest::encode_namespace_manifest_json(foreign.clone())
+            .map(|encoded| encoded.into_bytes())
+            .expect("encode foreign head");
     let store = InjectCreateFailureStore::new(
         inner,
         KeyMatcher::Exact(metadata_manifest_object(
             &namespace_id,
-            &loonfs_api::ManifestNo(1),
+            &loonfs_types::ManifestNo(1),
         )),
         InjectedCreateFailure::PreconditionFailed {
             write_attempted_object: false,
             additional_writes: vec![(
-                metadata_manifest_object(&namespace_id, &loonfs_api::ManifestNo(1)),
+                metadata_manifest_object(&namespace_id, &loonfs_types::ManifestNo(1)),
                 foreign_bytes.clone(),
             )],
         },
@@ -1059,7 +1060,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     assert_eq!(
         store
             .get(
-                &metadata_manifest_object(&namespace_id, &loonfs_api::ManifestNo(1)),
+                &metadata_manifest_object(&namespace_id, &loonfs_types::ManifestNo(1)),
                 None
             )
             .await

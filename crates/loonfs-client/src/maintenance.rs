@@ -2,10 +2,10 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
-use loonfs_api::{ActorId, PageRequest};
+use loonfs_types::{ActorId, PageRequest};
 
 /// A pager over existing checkpoints.
-pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, ClientError>;
+pub type CheckpointsPager = loonfs_types::Pager<ListCheckpointsResponse, ClientError>;
 
 impl Client {
     /// Returns namespace state and storage details used by maintenance.
@@ -47,7 +47,7 @@ impl Client {
     pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
             async move { client.checkpoints_page(&namespace_id, request).await }

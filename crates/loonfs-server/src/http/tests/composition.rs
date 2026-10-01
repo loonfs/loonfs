@@ -91,7 +91,7 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
             capabilities
                 .api_groups
                 .iter()
-                .any(|group| group == loonfs_api::API_GROUP_MAINTENANCE_V0),
+                .any(|group| group == loonfs_types::API_GROUP_MAINTENANCE_V0),
             serves_maintenance
         );
 

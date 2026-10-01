@@ -12,10 +12,10 @@ use crate::metadata::MetadataState;
 use crate::namespace::state::NamespaceReadState;
 use crate::store_waves::STORE_READ_WAVE;
 use futures::{stream, StreamExt};
-use loonfs_api::wire::wal::{decode_wal_object_envelope_zstd, WalObjectEnvelope};
-use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 use loonfs_objectstore::keys::wal_object;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalObjectEnvelope};
+use loonfs_types::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 
 // Missing and malformed objects still need their numbered key in caller diagnostics.
 pub(super) struct LoadedWalObject {

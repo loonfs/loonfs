@@ -21,9 +21,9 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
-use loonfs_api::wire::manifest::MetadataRow;
-use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
-use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
+use loonfs_types::format::manifest::MetadataRow;
+use loonfs_types::format::manifest::NamespaceManifestEnvelope;
+use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -502,8 +502,8 @@ mod tests {
     use crate::block_cache::DecodedBlock;
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::wal::ProjectedWalTail;
-    use loonfs_api::wire::sst_blocks::DecodedDataBlock;
-    use loonfs_api::{ActorId, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
+    use loonfs_types::format::sst_blocks::DecodedDataBlock;
+    use loonfs_types::{ActorId, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
     use std::sync::Arc;
 
     fn block(decoded_bytes: usize) -> DecodedMetadataSegmentBlock {
@@ -544,7 +544,7 @@ mod tests {
                     inode_id: InodeId(42),
                     inode_kind: InodeKind::File,
                     committed_seq: ChangeSeq(3),
-                    commit_id: loonfs_api::CommitId::parse("c_cache_row").expect("commit id"),
+                    commit_id: loonfs_types::CommitId::parse("c_cache_row").expect("commit id"),
                     committed_by: actor.clone(),
                     committed_at_ms: 3_000 + offset as u64,
                 }],

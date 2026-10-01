@@ -18,7 +18,7 @@ fn a_refused_put_allows_force_with_the_same_or_changed_source() {
             "/greeting.txt",
         ];
         assert_success(&harness.run(&args));
-        let commit_id = loonfs_api::CommitId::generate();
+        let commit_id = loonfs_types::CommitId::generate();
         if explicit {
             args.extend(["--commit-id", commit_id.as_str()]);
         }
@@ -2094,7 +2094,7 @@ fn mkdir_parents_is_idempotent_over_an_existing_directory_in_both_modes() {
         assert_eq!(again_data["target"], "demo:/a/b");
         assert!(again_data["inode_id"]
             .as_str()
-            .is_some_and(|inode_id| { loonfs_api::public_inode_id::decode(inode_id).is_ok() }));
+            .is_some_and(|inode_id| { loonfs_types::public_inode_id::decode(inode_id).is_ok() }));
 
         // Without -p the conflict still surfaces.
         let strict = harness.run(&["--json", "mkdir", "/a/b", "--profile", profile]);

@@ -4,10 +4,10 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::{ApiError, Commit};
 use loonfs_client::NamespacePath;
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::{ApiError, Commit};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -70,7 +70,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -186,7 +186,7 @@ async fn a_misspelled_delete_guard_is_rejected_and_the_namespace_survives() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -232,7 +232,7 @@ async fn unknown_query_parameters_are_rejected_on_every_operation() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -336,7 +336,7 @@ async fn an_unknown_query_parameter_without_credentials_answers_unauthorized() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

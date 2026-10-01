@@ -47,7 +47,7 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
         .create_namespace(
             target.namespace(),
             &actor,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

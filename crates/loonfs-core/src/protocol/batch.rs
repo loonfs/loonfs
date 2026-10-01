@@ -17,10 +17,10 @@ use crate::path::write::PublishPlanningSession;
 use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, Observation};
 use crate::wal::{prepare_wal_object, publish_wal_object};
-use loonfs_api::v0::Commit;
-use loonfs_api::wire::wal::WalCommitPayload;
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::api::v0::Commit;
+use loonfs_types::format::wal::WalCommitPayload;
+use loonfs_types::NamespaceId;
 use tracing::Instrument;
 
 #[derive(Debug, Clone)]
@@ -347,10 +347,10 @@ mod tests {
     use crate::protocol::load_publish_metadata_view;
     use crate::test_support::ops::create;
     use crate::time::StdMonotonicTimer;
-    use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, MAX_PUBLIC_INTEGER};
     use loonfs_objectstore::keys::{hint, wal_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
+    use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, MAX_PUBLIC_INTEGER};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -366,7 +366,7 @@ mod tests {
         );
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let context = MutationContext {
-            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
         create(&store, &namespace_id, &context)
@@ -395,7 +395,7 @@ mod tests {
                         path: AbsolutePath::parse(format!("/{name}")).expect("path"),
                         content_ref: Some(content_ref.clone()),
                         inline_content: None,
-                        behavior: loonfs_api::DestinationBehavior::NoReplace,
+                        behavior: loonfs_types::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
                     },
@@ -431,7 +431,7 @@ mod tests {
                 .as_ref()
                 .expect_err("expired content")
                 .code(),
-            loonfs_api::ErrorCode::ContentNotPrepared
+            loonfs_types::ErrorCode::ContentNotPrepared
         );
         assert!(matches!(
             result.results[1],
@@ -448,7 +448,7 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let context = MutationContext {
-            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1_000,
         };
         create(&store, &namespace_id, &context)
@@ -503,7 +503,7 @@ mod tests {
         let error = result.results[0]
             .as_ref()
             .expect_err("exhausted sequence must reject the commit");
-        assert_eq!(error.code(), loonfs_api::ErrorCode::ServerError);
+        assert_eq!(error.code(), loonfs_types::ErrorCode::ServerError);
         assert!(error.to_string().contains("cannot exceed"));
         assert!(matches!(result.effect, PublishViewEffect::Unchanged));
         assert_eq!(

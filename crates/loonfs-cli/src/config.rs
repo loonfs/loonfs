@@ -1,10 +1,10 @@
 //! The CLI config file: profiles, defaults, and strict TOML loading.
 
 use crate::error::CliError;
-use loonfs_api::env::AUTH_TOKEN_ENV;
-use loonfs_api::{ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId};
 use loonfs_client::{ClientConfig, ClientError};
 use loonfs_objectstore::StoreConfigError;
+use loonfs_types::env::AUTH_TOKEN_ENV;
+use loonfs_types::{ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -769,9 +769,9 @@ mod tests {
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{remote_client_config_from, CliConfig, ProfileConfig};
-    use loonfs_api::env::AUTH_TOKEN_ENV;
-    use loonfs_api::SecretString;
     use loonfs_test_support::EnvGuard;
+    use loonfs_types::env::AUTH_TOKEN_ENV;
+    use loonfs_types::SecretString;
 
     #[test]
     fn a_remote_profile_takes_its_token_from_the_config_then_the_environment() {

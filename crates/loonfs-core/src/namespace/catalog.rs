@@ -3,8 +3,8 @@
 use crate::control_object::ControlObjectLoadError;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::{NamespaceAccess, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{NamespaceAccess, NamespaceId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedNamespaceCatalogEntry {

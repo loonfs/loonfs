@@ -4,10 +4,10 @@
 use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
 use loonfs::metrics::MetricsRecorder;
 use loonfs::MetadataCache;
-use loonfs_api::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
-use loonfs_api::SecretString;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, StoreConfigError};
+use loonfs_types::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
+use loonfs_types::SecretString;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -345,7 +345,7 @@ fn default_max_concurrent_maintenance() -> usize {
 }
 
 fn default_max_merge_input_bytes() -> usize {
-    loonfs_api::wire::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
+    loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
 }
 
 fn default_idle_fold_after_ms() -> u64 {
@@ -1596,7 +1596,7 @@ root = "/tmp/loonfs-server"
 
         // The environment fills fields the file left unset.
         config.auth_token = None;
-        config.content_token_secret = loonfs_api::SecretString::default();
+        config.content_token_secret = loonfs_types::SecretString::default();
         config.apply_env_fallbacks(
             Some("env-auth-token".to_owned()),
             Some("env-content-token-secret".to_owned()),
@@ -1610,8 +1610,8 @@ root = "/tmp/loonfs-server"
             "env-content-token-secret"
         );
 
-        config.auth_token = Some(loonfs_api::SecretString::new("   ".to_owned()));
-        config.content_token_secret = loonfs_api::SecretString::new("   ".to_owned());
+        config.auth_token = Some(loonfs_types::SecretString::new("   ".to_owned()));
+        config.content_token_secret = loonfs_types::SecretString::new("   ".to_owned());
         config.apply_env_fallbacks(
             Some("env-auth-token".to_owned()),
             Some("env-content-token-secret".to_owned()),
@@ -1627,7 +1627,7 @@ root = "/tmp/loonfs-server"
 
         // Blank environment values are ignored.
         config.auth_token = None;
-        config.content_token_secret = loonfs_api::SecretString::default();
+        config.content_token_secret = loonfs_types::SecretString::default();
         config.apply_env_fallbacks(Some("   ".to_owned()), Some(String::new()));
         assert!(config.auth_token.is_none());
         assert!(config.content_token_secret.expose().is_empty());

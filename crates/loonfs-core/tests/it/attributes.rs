@@ -7,11 +7,6 @@
 
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
-use loonfs_api::{
-    v0::FilesystemChange, AbsolutePath, AttributeKey, AttributeValue, Attributes,
-    AttributesRevisionNo, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    InodeId, NamespaceId, RevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
-};
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
@@ -23,6 +18,11 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+use loonfs_types::{
+    api::v0::FilesystemChange, AbsolutePath, AttributeKey, AttributeValue, Attributes,
+    AttributesRevisionNo, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    InodeId, NamespaceId, RevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -112,7 +112,7 @@ async fn update<S: ObjectStore + ?Sized>(
     id: &str,
     operation: FilesystemOperation,
     context: &MutationContext,
-) -> Result<loonfs_api::Commit, CoreError> {
+) -> Result<loonfs_types::Commit, CoreError> {
     submit_operation(store, namespace_id, commit_id(id), operation, context).await
 }
 
@@ -121,7 +121,7 @@ async fn publish_request<S: ObjectStore + ?Sized>(
     store: &S,
     request: CommitRequest,
     context: &MutationContext,
-) -> Result<loonfs_api::Commit, CoreError> {
+) -> Result<loonfs_types::Commit, CoreError> {
     engine
         .publish_batch(
             store,
@@ -1109,7 +1109,7 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
         FilesystemOperation::MovePath {
             source_path: path("/docs/a.txt"),
             destination_path: path("/moved.txt"),
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1269,7 +1269,7 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
         FilesystemOperation::CopyPath {
             source_path: path("/docs/a.txt"),
             destination_path: path("/docs/b.txt"),
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1331,7 +1331,7 @@ async fn a_copy_of_a_file_without_attributes_publishes_no_attribute_event() {
         FilesystemOperation::CopyPath {
             source_path: path("/docs/a.txt"),
             destination_path: path("/docs/b.txt"),
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1394,7 +1394,7 @@ async fn a_copy_over_an_existing_file_leaves_its_attributes_alone() {
         FilesystemOperation::CopyPath {
             source_path: path("/docs/a.txt"),
             destination_path: path("/docs/b.txt"),
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,

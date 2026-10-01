@@ -17,7 +17,7 @@ mod session;
 
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
-use loonfs_api::{DisplayName, InodeId, NameKey, ROOT_INODE_ID};
+use loonfs_types::{DisplayName, InodeId, NameKey, ROOT_INODE_ID};
 
 pub use intent::{CommitRequest, FilesystemOperation};
 pub(crate) use planner::commit_fingerprint;
@@ -48,13 +48,13 @@ pub(super) fn ensure_expected_inode(
     Ok(())
 }
 
-impl From<loonfs_api::DestinationPreconditionError> for CoreError {
-    fn from(error: loonfs_api::DestinationPreconditionError) -> Self {
+impl From<loonfs_types::DestinationPreconditionError> for CoreError {
+    fn from(error: loonfs_types::DestinationPreconditionError) -> Self {
         let field = match error {
-            loonfs_api::DestinationPreconditionError::PreconditionsRequireReplace { field } => {
+            loonfs_types::DestinationPreconditionError::PreconditionsRequireReplace { field } => {
                 field
             }
-            loonfs_api::DestinationPreconditionError::RevisionRequiresInode {
+            loonfs_types::DestinationPreconditionError::RevisionRequiresInode {
                 revision_field,
                 ..
             } => revision_field,

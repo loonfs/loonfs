@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-loonfs-api.workspace = true
+loonfs-types.workspace = true
 
 [lints]
 workspace = true

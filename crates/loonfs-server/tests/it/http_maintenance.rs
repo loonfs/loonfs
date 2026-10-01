@@ -5,15 +5,15 @@
 use crate::common::http_split_support::*;
 use crate::common::{collect_checkpoints, start_server};
 use bytes::Bytes;
-use loonfs_api::{
-    ApiError, ChangeSeq, Checkpoint, CheckpointOwnerSummary, DeleteCheckpointResponse, ManifestNo,
-    PinId,
-};
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_types::{
+    ApiError, ChangeSeq, Checkpoint, CheckpointOwnerSummary, DeleteCheckpointResponse, ManifestNo,
+    PinId,
+};
 use tempfile::tempdir;
 
 type ApiResult<T> = Result<T, Box<ApiError>>;
@@ -30,7 +30,7 @@ fn delete_checkpoint(
     server_url: &str,
     namespace: &str,
     checkpoint_id: &str,
-) -> ApiResult<loonfs_api::DeleteCheckpointResponse> {
+) -> ApiResult<loonfs_types::DeleteCheckpointResponse> {
     retry_result_on_macos_teardown_einval(|| {
         decode_maintenance_response(
             raw_agent()
@@ -43,21 +43,21 @@ fn delete_checkpoint(
     })
 }
 
-fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_api::GcResponse> {
+fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_types::GcResponse> {
     post_gc_with(server_url, namespace, serde_json::json!({}))
 }
 
 fn upkeep(
-    response: &loonfs_api::RunMaintenanceResponse,
-) -> &loonfs_api::MetadataMaintenanceResponse {
-    let loonfs_api::RunMaintenanceResponse::Metadata(metadata) = response else {
+    response: &loonfs_types::RunMaintenanceResponse,
+) -> &loonfs_types::MetadataMaintenanceResponse {
+    let loonfs_types::RunMaintenanceResponse::Metadata(metadata) = response else {
         panic!("metadata request returned a different response")
     };
     metadata
 }
 
-fn retention_floor(response: loonfs_api::RunMaintenanceResponse) -> ChangeSeq {
-    let loonfs_api::RunMaintenanceResponse::Retention(retention) = response else {
+fn retention_floor(response: loonfs_types::RunMaintenanceResponse) -> ChangeSeq {
+    let loonfs_types::RunMaintenanceResponse::Retention(retention) = response else {
         panic!("retention request returned a different response")
     };
     retention.retention_floor_seq
@@ -67,19 +67,19 @@ fn post_gc_with(
     server_url: &str,
     namespace: &str,
     gc: serde_json::Value,
-) -> ApiResult<loonfs_api::GcResponse> {
+) -> ApiResult<loonfs_types::GcResponse> {
     let mut request = gc;
     request
         .as_object_mut()
         .expect("GC options are an object")
         .insert("kind".to_owned(), serde_json::json!("gc"));
-    let response: ApiResult<loonfs_api::RunMaintenanceResponse> = post_maintenance_json_body(
+    let response: ApiResult<loonfs_types::RunMaintenanceResponse> = post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
         request,
     );
     response.map(|response| {
-        let loonfs_api::RunMaintenanceResponse::Gc(gc) = response else {
+        let loonfs_types::RunMaintenanceResponse::Gc(gc) = response else {
             panic!("GC request returned a different response")
         };
         gc
@@ -89,7 +89,7 @@ fn post_gc_with(
 fn post_metadata_run(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_api::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
     post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
@@ -100,7 +100,7 @@ fn post_metadata_run(
 fn post_missing_maintenance_body(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_api::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
     post_maintenance_json(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
@@ -110,7 +110,7 @@ fn post_missing_maintenance_body(
 fn post_retention_advance(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_api::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
     post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
@@ -198,7 +198,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -339,7 +339,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -370,7 +370,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(
         report.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner::default()
+        loonfs_types::DeletedCheckpointsByOwner::default()
     );
 
     let bytes = client.read_file(&target).await.expect("read file");
@@ -396,7 +396,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -418,33 +418,37 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     let idle = post_metadata_run(&server_url, namespace.as_str()).expect("idle step");
     assert_eq!(
         upkeep(&idle).wal_fold,
-        loonfs_api::WalFoldStepOutcome::NotNeeded
+        loonfs_types::WalFoldStepOutcome::NotNeeded
     );
 
     let forced = client
         .run_maintenance(
             &namespace,
-            &loonfs_api::RunMaintenanceRequest::Metadata(loonfs_api::MetadataMaintenanceRequest {
-                max_wal_tail_objects: Some(1),
-            }),
+            &loonfs_types::RunMaintenanceRequest::Metadata(
+                loonfs_types::MetadataMaintenanceRequest {
+                    max_wal_tail_objects: Some(1),
+                },
+            ),
             None,
         )
         .await
         .expect("forced step");
     assert_eq!(
         upkeep(&forced).wal_fold,
-        loonfs_api::WalFoldStepOutcome::Folded {
+        loonfs_types::WalFoldStepOutcome::Folded {
             manifest_head_seq: ChangeSeq(1),
         }
     );
     assert_eq!(
         upkeep(&forced).compaction,
-        loonfs_api::CompactionStepOutcome::NotNeeded {}
+        loonfs_types::CompactionStepOutcome::NotNeeded {}
     );
     let retention = client
         .run_maintenance(
             &namespace,
-            &loonfs_api::RunMaintenanceRequest::Retention(loonfs_api::AdvanceRetentionRequest {}),
+            &loonfs_types::RunMaintenanceRequest::Retention(
+                loonfs_types::AdvanceRetentionRequest {},
+            ),
             None,
         )
         .await
@@ -472,10 +476,10 @@ impl loonfs::WallClock for FixedWallClock {
 async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
     let default_idle_ms = loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms;
     for (idle_fold_after_ms, expected) in [
-        (0, loonfs_api::WalFoldStepOutcome::NotNeeded),
+        (0, loonfs_types::WalFoldStepOutcome::NotNeeded),
         (
             default_idle_ms,
-            loonfs_api::WalFoldStepOutcome::Folded {
+            loonfs_types::WalFoldStepOutcome::Folded {
                 manifest_head_seq: ChangeSeq(1),
             },
         ),
@@ -516,8 +520,8 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
             .client
             .run_maintenance(
                 &namespace,
-                &loonfs_api::RunMaintenanceRequest::Metadata(
-                    loonfs_api::MetadataMaintenanceRequest::default(),
+                &loonfs_types::RunMaintenanceRequest::Metadata(
+                    loonfs_types::MetadataMaintenanceRequest::default(),
                 ),
                 None,
             )
@@ -549,7 +553,7 @@ async fn http_maintenance_retention_advance_uses_initial_manifest_after_create()
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -596,7 +600,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -652,7 +656,7 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
     ))
     .await;
 
-    let probe: loonfs_api::v0::StoreProbeResponse = post_maintenance_json_body(
+    let probe: loonfs_types::api::v0::StoreProbeResponse = post_maintenance_json_body(
         &format!("{}/v0/maintenance/store/probe", harness.server_url),
         "test-token",
         serde_json::json!({}),
@@ -674,7 +678,7 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
     for check in &probe.checks {
         assert_ne!(
             check.outcome,
-            loonfs_api::v0::StoreProbeCheckOutcome::Failed,
+            loonfs_types::api::v0::StoreProbeCheckOutcome::Failed,
             "the local filesystem store should honour every contract check: {check:?}"
         );
         assert_eq!(check.message, None);
@@ -707,7 +711,7 @@ async fn http_maintenance_store_probe_requires_a_token_and_accepts_a_bodyless_re
     .await;
     let url = format!("{}/v0/maintenance/store/probe", harness.server_url);
 
-    let unauthorized: ApiResult<loonfs_api::v0::StoreProbeResponse> =
+    let unauthorized: ApiResult<loonfs_types::api::v0::StoreProbeResponse> =
         post_maintenance_json_body(&url, "wrong-token", serde_json::json!({}));
     assert_eq!(
         unauthorized.expect_err("a wrong token is refused").code,
@@ -715,7 +719,7 @@ async fn http_maintenance_store_probe_requires_a_token_and_accepts_a_bodyless_re
     );
 
     // An absent body is treated as an empty object.
-    let bodyless: loonfs_api::v0::StoreProbeResponse =
+    let bodyless: loonfs_types::api::v0::StoreProbeResponse =
         post_maintenance_json(&url, "test-token").expect("probe with no body");
     assert!(
         !bodyless.checks.is_empty(),

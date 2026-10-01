@@ -11,8 +11,8 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::read_anchor::load_read_anchor;
 use futures::StreamExt;
-use loonfs_api::{GcResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{GcResponse, NamespaceId};
 
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     store: &S,

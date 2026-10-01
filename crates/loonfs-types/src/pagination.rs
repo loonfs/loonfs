@@ -171,13 +171,13 @@ string_cursor_response!(
     checkpoints
 );
 string_cursor_response!(
-    crate::v0::ListSnapshotsResponse,
-    crate::v0::SnapshotSummary,
+    crate::api::v0::ListSnapshotsResponse,
+    crate::api::v0::SnapshotSummary,
     snapshots
 );
 
-impl PagedResponse for crate::v0::ListChangesResponse {
-    type Item = crate::v0::Commit;
+impl PagedResponse for crate::api::v0::ListChangesResponse {
+    type Item = crate::api::v0::Commit;
     type Cursor = ChangeSeq;
 
     fn items_mut(&mut self) -> &mut Vec<Self::Item> {

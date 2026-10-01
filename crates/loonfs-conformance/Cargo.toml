@@ -13,7 +13,7 @@ readme = "README.md"
 async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
-loonfs-api.workspace = true
+loonfs-types.workspace = true
 loonfs-objectstore.workspace = true
 loonfs-server = { path = "../loonfs-server" }
 loonfs-test-support.workspace = true

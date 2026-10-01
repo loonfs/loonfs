@@ -530,11 +530,11 @@ fn openapi_documents_current_server_paths() {
         );
         assert_eq!(
             parameter.pointer("/schema/pattern").and_then(Value::as_str),
-            Some(loonfs_api::public_inode_id::PATTERN)
+            Some(loonfs_types::public_inode_id::PATTERN)
         );
         assert_eq!(
             parameter.get("example").and_then(Value::as_str),
-            Some(loonfs_api::public_inode_id::EXAMPLE)
+            Some(loonfs_types::public_inode_id::EXAMPLE)
         );
     }
 
@@ -1552,7 +1552,7 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
         assert_eq!(schema.get("minimum").and_then(Value::as_u64), Some(0));
         assert_eq!(
             schema.get("maximum").and_then(Value::as_u64),
-            Some(loonfs_api::MAX_PUBLIC_INTEGER),
+            Some(loonfs_types::MAX_PUBLIC_INTEGER),
             "wrong public maximum for {name}"
         );
     }
@@ -1561,11 +1561,11 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
     assert_eq!(inode_id.get("type").and_then(Value::as_str), Some("string"));
     assert_eq!(
         inode_id.get("pattern").and_then(Value::as_str),
-        Some(loonfs_api::public_inode_id::PATTERN)
+        Some(loonfs_types::public_inode_id::PATTERN)
     );
     assert_eq!(
         inode_id.get("example").and_then(Value::as_str),
-        Some(loonfs_api::public_inode_id::EXAMPLE)
+        Some(loonfs_types::public_inode_id::EXAMPLE)
     );
 
     // Each flattened status variant must use the capped run number schema.
@@ -1625,7 +1625,7 @@ fn openapi_describes_inode_ids_as_non_null_strings() {
             schema_matches(schema, schemas, |schema| {
                 schema.get("type").and_then(Value::as_str) == Some("string")
                     && schema.get("pattern").and_then(Value::as_str)
-                        == Some(loonfs_api::public_inode_id::PATTERN)
+                        == Some(loonfs_types::public_inode_id::PATTERN)
             }),
             "inode ID at {location} must use the public string format: {schema}"
         );
@@ -1856,7 +1856,7 @@ fn access_id_schemas_exclude_commas() {
         .and_then(Value::as_object)
         .expect("openapi schemas object");
     let subject_schema =
-        serde_json::to_value(loonfs_api::SubjectId::schema()).expect("subject id schema");
+        serde_json::to_value(loonfs_types::SubjectId::schema()).expect("subject id schema");
     assert_eq!(
         subject_schema.get("pattern").and_then(Value::as_str),
         Some(r"^[\x21-\x2B\x2D-\x7E]{1,256}$"),

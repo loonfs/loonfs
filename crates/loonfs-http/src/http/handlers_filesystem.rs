@@ -26,12 +26,12 @@ use loonfs::{
     ReadView, StatOptions, TraceMode, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
-use loonfs_api::ApiError;
+use loonfs_types::ApiError;
 // The wire commit request and the runtime's differ only by the content
 // tokens, which this handler resolves and strips; the operations inside them
 // are one type. The alias keeps the two request names readable side by side.
-use loonfs_api::{
-    v0::{Commit, ListChangesResponse},
+use loonfs_types::{
+    api::v0::{Commit, ListChangesResponse},
     CommitRequest as ApiCommitRequest, DirectoryPageCursor, FileRevisionsPageCursor,
     FilesystemOperation, ListFileRevisionsResponse, ListTrashResponse, PageRequest, RevisionNo,
     TrashPageCursor,
@@ -197,10 +197,10 @@ impl ReadTarget {
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
             ("cursor" = Option<String>, Query, description = "Opaque directory-list page cursor"),
             ("include_attributes" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Project each entry's attribute map and revision (`true` or `false`). Defaults to `false`: a page holds many entries and each map may be 64 KiB, so a listing does not carry them unless asked."),
-            ("snapshot_id" = Option<loonfs_api::PinId>, Query, description = "Use the directory state captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the directory state captured by this snapshot")
         ),
         responses(
-            (status = 200, description = "Directory listing page", body = loonfs_api::ListPathEntriesResponse),
+            (status = 200, description = "Directory listing page", body = loonfs_types::ListPathEntriesResponse),
             (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ApiError),
@@ -255,10 +255,10 @@ pub(super) async fn list_path_entries(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute filesystem path"),
             ("include_attributes" = inline(Option<OpenApiDefaultTrueBoolean>), Query, description = "Project the inode's attribute map and revision (`true` or `false`). Defaults to `true`: a stat answers for one path and a map is capped at 64 KiB."),
-            ("snapshot_id" = Option<loonfs_api::PinId>, Query, description = "Use the path state captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the path state captured by this snapshot")
         ),
         responses(
-            (status = 200, description = "Authoritative path entry", body = loonfs_api::PathEntry),
+            (status = 200, description = "Authoritative path entry", body = loonfs_types::PathEntry),
             (status = 400, description = "Invalid path, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, path, or snapshot not found", body = ApiError),
@@ -272,7 +272,7 @@ pub(super) async fn get_path_entry(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathQuery>,
-) -> Result<Json<loonfs_api::PathEntry>, ApiResponseError> {
+) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let path = required_query_param(query.path, "path")?;
@@ -306,7 +306,7 @@ pub(super) async fn get_path_entry(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("path" = String, Query, description = "Absolute file path"),
             ("revision_no" = Option<RevisionNo>, Query, description = "Optional prior revision number; cannot be combined with snapshot_id"),
-            ("snapshot_id" = Option<loonfs_api::PinId>, Query, description = "Use the file revision captured by this snapshot")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the file revision captured by this snapshot")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
@@ -608,9 +608,9 @@ pub(super) async fn create_commit(
         description = "Returns committed changes after a sequence. A snapshot limits the feed to its captured sequence.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("after_seq" = loonfs_api::ChangeSeq, Query, description = "Return committed changes after this sequence"),
+            ("after_seq" = loonfs_types::ChangeSeq, Query, description = "Return committed changes after this sequence"),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum page size"),
-            ("snapshot_id" = Option<loonfs_api::PinId>, Query, description = "End the feed at this snapshot's captured sequence")
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "End the feed at this snapshot's captured sequence")
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
@@ -686,8 +686,8 @@ pub(super) fn parse_optional_snapshot_id(
         .transpose()
 }
 
-fn parse_after_seq(value: &str) -> Result<loonfs_api::ChangeSeq, ApiResponseError> {
-    parse_public_ordinal("after_seq", value, loonfs_api::ChangeSeq::parse)
+fn parse_after_seq(value: &str) -> Result<loonfs_types::ChangeSeq, ApiResponseError> {
+    parse_public_ordinal("after_seq", value, loonfs_types::ChangeSeq::parse)
 }
 
 #[cfg(test)]
@@ -698,7 +698,7 @@ mod tests {
     fn after_seq_parser_accepts_the_public_maximum_and_rejects_the_next_value() {
         assert!(matches!(
             parse_after_seq("9007199254740991"),
-            Ok(loonfs_api::ChangeSeq(loonfs_api::MAX_PUBLIC_INTEGER))
+            Ok(loonfs_types::ChangeSeq(loonfs_types::MAX_PUBLIC_INTEGER))
         ));
         assert!(parse_after_seq("9007199254740992").is_err());
     }

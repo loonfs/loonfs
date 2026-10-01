@@ -14,12 +14,12 @@ use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
     DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
-use loonfs_api::wire::manifest::lookup_keys;
-use loonfs_api::wire::manifest::{MetadataRow, MetadataRowFamily};
-use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::wire::wal::WalCommitPayload;
-use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::lookup_keys;
+use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily};
+use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
+use loonfs_types::format::wal::WalCommitPayload;
+use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey, RevisionNo};
 
 pub(super) fn manifest_error_to_core(error: ManifestLoadError) -> CoreError {
     CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
@@ -288,7 +288,7 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
 
 pub(super) async fn content_publication<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
-    content_id: &loonfs_api::ContentId,
+    content_id: &loonfs_types::ContentId,
     visible_seq: ChangeSeq,
 ) -> Result<Option<ChangeSeq>> {
     let rows = segments

@@ -1,7 +1,7 @@
 //! [`MutationContext`]: the writer identity and request timestamp every
 //! mutation carries.
 
-use loonfs_api::WriterId;
+use loonfs_types::WriterId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -11,10 +11,10 @@ use crate::protocol::{
     ResolvedUploadCompletion,
 };
 use crate::test_support::ops::create;
-use loonfs_api::{AbsolutePath, DestinationBehavior, WriterId};
 use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+use loonfs_types::{AbsolutePath, DestinationBehavior, WriterId};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
 
@@ -219,7 +219,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
             .as_ref()
             .expect_err("reclaimed content must not publish")
             .code(),
-        loonfs_api::ErrorCode::ContentNotPrepared
+        loonfs_types::ErrorCode::ContentNotPrepared
     );
     let head_after = load_namespace_read_state(&store, &namespace_id)
         .await
@@ -316,7 +316,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     for outcome in &result.results[..2] {
         assert_eq!(
             outcome.as_ref().expect_err("expired evidence").code(),
-            loonfs_api::ErrorCode::ContentNotPrepared
+            loonfs_types::ErrorCode::ContentNotPrepared
         );
     }
     assert_eq!(
@@ -357,14 +357,14 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
     assert_eq!(
         reopened
-            .resolve_path("/content", loonfs_api::AttributeInclusion::Omit, &access)
+            .resolve_path("/content", loonfs_types::AttributeInclusion::Omit, &access)
             .await
             .expect_err("expired content was not published")
             .code(),
-        loonfs_api::ErrorCode::PathNotFound
+        loonfs_types::ErrorCode::PathNotFound
     );
     reopened
-        .resolve_path("/later", loonfs_api::AttributeInclusion::Omit, &access)
+        .resolve_path("/later", loonfs_types::AttributeInclusion::Omit, &access)
         .await
         .expect("valid peer published");
 }
@@ -461,7 +461,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         reopened
             .resolve_path(
                 path,
-                loonfs_api::AttributeInclusion::Omit,
+                loonfs_types::AttributeInclusion::Omit,
                 &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
             )
             .await
@@ -470,7 +470,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     reopened
         .resolve_path(
             "/original",
-            loonfs_api::AttributeInclusion::Omit,
+            loonfs_types::AttributeInclusion::Omit,
             &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
         )
         .await
@@ -559,7 +559,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         let outcome = crate::manifest::compaction_step(
             &store,
             &namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             MetadataLsmPolicy {
                 max_delta_runs: NonZeroUsize::MIN,
                 ..MetadataLsmPolicy::default()

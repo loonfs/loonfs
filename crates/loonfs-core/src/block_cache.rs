@@ -2,7 +2,7 @@
 
 use crate::manifest::ManifestLoadError;
 use crate::recency::Recency;
-use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
+use loonfs_types::format::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};

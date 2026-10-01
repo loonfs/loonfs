@@ -2,7 +2,7 @@
 
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
-use loonfs_api::{ChangeSeq, DirectoryPageCursor, InodeKind};
+use loonfs_types::{ChangeSeq, DirectoryPageCursor, InodeKind};
 
 /// A cursor is an ordering resume: any head at or past the one that minted
 /// it serves the next page, resuming strictly after the last returned key,

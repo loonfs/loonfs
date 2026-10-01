@@ -3,8 +3,8 @@
 use super::{AdmissionPermit, NamespacePublisher, PreparedCandidate};
 use crate::publish::CommitCandidate;
 use crate::{CoreError, Result};
-use loonfs_api::wire::wal::MAX_WAL_INLINE_CONTENT_BYTES;
 use loonfs_core::publish::InlineContent;
+use loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES;
 
 pub(super) struct InlineCandidatePlan {
     pub(super) candidate: PreparedCandidate,

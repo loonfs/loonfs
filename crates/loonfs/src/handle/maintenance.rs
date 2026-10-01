@@ -3,7 +3,7 @@
 use crate::fs::{RuntimeCore, WriterIdentity};
 use crate::publisher::PublisherRegistry;
 use crate::{NamespaceId, Result};
-use loonfs_api::CompactorEpoch;
+use loonfs_types::CompactorEpoch;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

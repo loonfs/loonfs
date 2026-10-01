@@ -9,8 +9,8 @@ use super::visibility::{self, resolve_in_memory_read, MetadataVisibilityReads};
 use super::{
     AccessRevisionRecord, DirentryBindingRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
-use loonfs_api::wire::manifest::DeltaPosition;
-use loonfs_api::{AbsolutePath, ActorId, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey};
+use loonfs_types::format::manifest::DeltaPosition;
+use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;

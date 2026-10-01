@@ -52,7 +52,7 @@ async fn create_direct_put_upload(
     let uri = format!("/v0/namespaces/{namespace_id}/uploads");
     let body = serde_json::json!({"mode": "direct_put", "size_bytes": 5});
     let (status, body) = send(router, Method::POST, &uri, body.to_string()).await;
-    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error body");
+    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error body");
     (status, error.code)
 }
 

@@ -5,10 +5,10 @@ use loonfs::{
     CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, MaintenanceHandle,
     MaintenanceJob, MaintenanceProbe, Namespace, SharedObjectStore, SnapshotPolicy, Writable,
 };
-use loonfs_api::{ErrorCode, NamespaceId, SecretString};
 use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
+use loonfs_types::{ErrorCode, NamespaceId, SecretString};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Semaphore;

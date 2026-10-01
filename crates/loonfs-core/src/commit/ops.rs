@@ -6,7 +6,7 @@
 //! path-oriented operations the planner compiles into the ops below; nothing
 //! outside this crate constructs them.
 
-use loonfs_api::{
+use loonfs_types::{
     AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, ContentRef,
     DisplayName, InodeId, RevisionNo,
 };

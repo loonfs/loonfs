@@ -6,8 +6,8 @@ use super::{joined_remote, parse_remote, relative_remote, CommandContext, FileJo
 use crate::commands::pagination::page_request;
 use crate::error::CliError;
 use futures::Stream;
-use loonfs_api::PinId;
-use loonfs_api::{ChangeSeq, ListPathEntriesResponse, PathEntry, PathEntryKind};
+use loonfs_types::PinId;
+use loonfs_types::{ChangeSeq, ListPathEntriesResponse, PathEntry, PathEntryKind};
 use std::fs::ReadDir;
 use std::path::{Path, PathBuf};
 
@@ -34,7 +34,7 @@ pub(super) struct LocalTree {
 }
 
 pub(super) fn local_tree(root: &Path, remote_root: &str) -> Result<LocalTree, CliError> {
-    loonfs_api::AbsolutePath::parse(remote_root)
+    loonfs_types::AbsolutePath::parse(remote_root)
         .map_err(|error| CliError::invalid_request(error.to_string()).with_param("remote_path"))?;
     let entries = std::fs::read_dir(root).map_err(|error| CliError::io_for_path(root, error))?;
     Ok(LocalTree {
@@ -80,7 +80,7 @@ impl Iterator for LocalTree {
                 .strip_prefix(&self.root)
                 .expect("a descendant of the root");
             let relative_remote = match relative_remote(relative).and_then(|relative| {
-                loonfs_api::AbsolutePath::parse(joined_remote(&self.remote_root, &relative))
+                loonfs_types::AbsolutePath::parse(joined_remote(&self.remote_root, &relative))
                     .map_err(|error| {
                         CliError::invalid_request(error.to_string()).with_param("local_path")
                     })?;
@@ -261,7 +261,7 @@ mod tests {
                 relative_remote(path).map(|_| ()),
             ] {
                 let error = result.expect_err("invalid name");
-                assert_eq!(error.code, loonfs_api::ErrorCode::InvalidRequest.as_str());
+                assert_eq!(error.code, loonfs_types::ErrorCode::InvalidRequest.as_str());
             }
         }
     }
@@ -271,7 +271,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(root.path().join("allowed/too-deep/never-visited"))
             .expect("nested tree");
-        let remote_root = format!("/{}", vec!["d"; loonfs_api::MAX_PATH_DEPTH - 1].join("/"));
+        let remote_root = format!("/{}", vec!["d"; loonfs_types::MAX_PATH_DEPTH - 1].join("/"));
         let mut tree = local_tree(root.path(), &remote_root).expect("walk");
         assert!(matches!(tree.next(), Some(TreeEntry::Failure(_, _))));
         assert_eq!(

@@ -17,8 +17,8 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt};
-use loonfs_api::Checksum;
-use loonfs_api::{OperationDeadline, TransportRetryPolicy};
+use loonfs_types::Checksum;
+use loonfs_types::{OperationDeadline, TransportRetryPolicy};
 use object_store as provider_store;
 use provider_store::multipart::{MultipartStore, PartId};
 use provider_store::path::Path;
@@ -1288,7 +1288,7 @@ mod tests {
     };
     use crate::test_support::{aws_environment_lock, isolated_aws_environment, SteppingTimer};
     use futures::StreamExt;
-    use loonfs_api::transport_retry_backoff;
+    use loonfs_types::transport_retry_backoff;
     use object_store::client::CredentialProvider;
     use object_store::memory::InMemory;
 

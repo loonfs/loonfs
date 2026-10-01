@@ -3,19 +3,6 @@
 #![allow(clippy::panic, clippy::unwrap_used)]
 
 use bytes::Bytes;
-use loonfs_api::options::DirectMultipartUploadOptions;
-use loonfs_api::v0::{
-    CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
-    DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
-    ListSnapshotsResponse, SnapshotSummary, UploadContentClaim, UploadMode,
-    UploadPartChecksumClaim, UploadSessionStatus,
-};
-use loonfs_api::PageRequest;
-use loonfs_api::{
-    ActorId, ApiError, BindingVersion, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation, NamespaceId,
-    PathEntry,
-};
 use loonfs_client::{
     Client, ClientConfig, ClientError, CommitOptions, CreateDirectoryOptions, DeleteOptions,
     MoveOptions, NamespacePath, PutFileOptions,
@@ -23,6 +10,19 @@ use loonfs_client::{
 use loonfs_conformance::server::{start_server, ConformanceServer, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
 use loonfs_test_support::ids::{first_page, page_limit};
+use loonfs_types::api::v0::{
+    CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
+    DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
+    ListSnapshotsResponse, SnapshotSummary, UploadContentClaim, UploadMode,
+    UploadPartChecksumClaim, UploadSessionStatus,
+};
+use loonfs_types::options::DirectMultipartUploadOptions;
+use loonfs_types::PageRequest;
+use loonfs_types::{
+    ActorId, ApiError, BindingVersion, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation, NamespaceId,
+    PathEntry,
+};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -247,7 +247,7 @@ async fn assert_raw_error(response: reqwest::Response, expected: &ErrorOutcome) 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommitReplayRequest {
-    preconditions: Vec<loonfs_api::CommitPrecondition>,
+    preconditions: Vec<loonfs_types::CommitPrecondition>,
     namespace_id: String,
     commit_id: String,
     actor_id: ActorId,
@@ -269,7 +269,7 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create replay namespace");
@@ -277,7 +277,7 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
         commit_id(&request.commit_id),
         Some(request.message),
         FilesystemOperation::CreateDirectory {
-            path: loonfs_api::AbsolutePath::parse(&request.path).expect("fixture path"),
+            path: loonfs_types::AbsolutePath::parse(&request.path).expect("fixture path"),
             parents: false,
         },
     )
@@ -327,7 +327,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create direct-put namespace");
@@ -449,7 +449,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create multipart namespace");
@@ -603,7 +603,7 @@ async fn run_abort(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create abort namespace");
@@ -682,7 +682,7 @@ async fn run_download(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create download namespace");
@@ -721,7 +721,10 @@ async fn run_download(harness: &Harness, case: &Case) {
     assert_eq!(bytes, request.content_utf8.as_bytes());
 }
 
-async fn stream_grant(client: &Client, grant: &loonfs_api::v0::CreateDownloadResponse) -> Vec<u8> {
+async fn stream_grant(
+    client: &Client,
+    grant: &loonfs_types::api::v0::CreateDownloadResponse,
+) -> Vec<u8> {
     let mut stream = client
         .open_direct_download(grant)
         .await
@@ -783,7 +786,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create children-by-inode namespace");
@@ -934,7 +937,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create inode-mutations namespace");
@@ -1117,7 +1120,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
                 expected_binding_version,
                 destination_parent_inode_id: inode_directory_id,
                 destination_display_name: display_name(&request.moved_file_name),
-                precondition: loonfs_api::DestinationPrecondition {
+                precondition: loonfs_types::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -1280,7 +1283,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create snapshots namespace");
@@ -1418,7 +1421,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         "{}/v0/namespaces/{}/filesystem/entries",
         harness.server_url, request.namespace_id
     );
-    let captured_listing: loonfs_api::v0::ListPathEntriesResponse = raw_success_json(
+    let captured_listing: loonfs_types::api::v0::ListPathEntriesResponse = raw_success_json(
         harness
             .raw_client
             .get(&entries_url)
@@ -1435,7 +1438,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         listed_entry_names(&captured_listing.entries),
         expected.captured_entry_names
     );
-    let current_listing: loonfs_api::v0::ListPathEntriesResponse = raw_success_json(
+    let current_listing: loonfs_types::api::v0::ListPathEntriesResponse = raw_success_json(
         harness
             .raw_client
             .get(&entries_url)
@@ -1721,7 +1724,7 @@ async fn run_pagination(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create pagination namespace");
@@ -1823,7 +1826,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create changes namespace");
@@ -1831,7 +1834,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
         commit_id(&request.commit_id),
         None,
         FilesystemOperation::CreateDirectory {
-            path: loonfs_api::AbsolutePath::parse(&request.path).expect("fixture path"),
+            path: loonfs_types::AbsolutePath::parse(&request.path).expect("fixture path"),
             parents: false,
         },
     );
@@ -1898,7 +1901,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .create_namespace(
             &namespace,
             &request.actor_id,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create end-to-end namespace");

@@ -7,8 +7,8 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
-use loonfs_api::{transport_retry_backoff, ApiError, ErrorCode, OperationDeadline};
-pub(crate) use loonfs_api::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
+use loonfs_types::{transport_retry_backoff, ApiError, ErrorCode, OperationDeadline};
+pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -2,10 +2,10 @@
 
 use super::ControlObjectLoadError;
 use crate::error::StoreFailureClass;
-use loonfs_api::wire::control::{decode_control_object, ControlObjectKind};
-use loonfs_api::wire::envelope::EnvelopeCodecError;
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_types::format::control::{decode_control_object, ControlObjectKind};
+use loonfs_types::format::envelope::EnvelopeCodecError;
+use loonfs_types::NamespaceId;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -145,14 +145,14 @@ mod tests {
     use super::*;
     use crate::error::StoreFailureClass;
     use bytes::Bytes;
-    use loonfs_api::wire::control::HintPayload;
-    use loonfs_api::NamespaceId;
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{
         FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
     };
+    use loonfs_types::format::control::HintPayload;
+    use loonfs_types::NamespaceId;
     use serde_json::Value;
     use tempfile::{tempdir, TempDir};
 
@@ -169,10 +169,10 @@ mod tests {
     fn encoded_hint(namespace_id: &NamespaceId) -> (HintPayload, Vec<u8>) {
         let state = HintPayload {
             namespace_id: namespace_id.clone(),
-            manifest_no: loonfs_api::ManifestNo(1),
+            manifest_no: loonfs_types::ManifestNo(1),
         };
         let bytes =
-            loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &state)
+            loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &state)
                 .expect("hint bytes");
         (state, bytes)
     }

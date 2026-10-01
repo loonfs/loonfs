@@ -1,4 +1,5 @@
-//! The representative LoonFS HTTP binding over a LoonFS runtime.
+//! The LoonFS HTTP API as a library: the routes and handlers that serve a
+//! LoonFS runtime, and the OpenAPI document that describes them.
 //! Hosts own configuration, listeners, shutdown, and operational routes.
 
 mod http;

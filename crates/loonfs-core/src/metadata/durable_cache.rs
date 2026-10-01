@@ -3,7 +3,7 @@
 //! types and the shared-row handle its hits return.
 
 use super::{DirentryBindingRecord, InodeRecord, SubtreeTombstoneRecord};
-use loonfs_api::{InodeId, NameKey};
+use loonfs_types::{InodeId, NameKey};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

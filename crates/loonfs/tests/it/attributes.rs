@@ -10,8 +10,8 @@ use loonfs::AttributeChanges;
 use loonfs::{
     AttributesRevisionNo, CommitId, ListOptions, PageRequest, StatOptions, UpdateAttributesOptions,
 };
-use loonfs_api::semantic_commit_fingerprint;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
+use loonfs_types::semantic_commit_fingerprint;
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::tempdir;
 
@@ -40,8 +40,8 @@ fn annotate_owner(namespace: &loonfs::Namespace<loonfs::Writable>) {
 
 #[test]
 fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
-    use loonfs_api::{Attributes, MAX_ATTRIBUTES_TOTAL_BYTES};
     use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use loonfs_types::{Attributes, MAX_ATTRIBUTES_TOTAL_BYTES};
     use std::sync::Arc;
 
     let temp_dir = tempdir().expect("tempdir");
@@ -67,7 +67,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
     let mut set = BTreeMap::from([(attribute_key("x"), attribute_text("a"))]);
     let mut remaining = MAX_ATTRIBUTES_TOTAL_BYTES - 2 - 16 * 3;
     for index in 0..16 {
-        let length = remaining.min(loonfs_api::MAX_ATTRIBUTE_VALUE_BYTES);
+        let length = remaining.min(loonfs_types::MAX_ATTRIBUTE_VALUE_BYTES);
         remaining -= length;
         set.insert(
             attribute_key(&format!("k{index:02}")),
@@ -360,7 +360,7 @@ fn read_options_project_grouped_attributes_or_none() {
     let opted_out = block_on(namespace.stat_with_options(
         "/docs/report.txt",
         &StatOptions {
-            include_attributes: loonfs_api::AttributeInclusion::Omit,
+            include_attributes: loonfs_types::AttributeInclusion::Omit,
             snapshot_id: None,
         },
     ))
@@ -379,7 +379,7 @@ fn read_options_project_grouped_attributes_or_none() {
             .list_with_options(
                 "/docs",
                 &ListOptions {
-                    include_attributes: loonfs_api::AttributeInclusion::Include,
+                    include_attributes: loonfs_types::AttributeInclusion::Include,
                     snapshot_id: None,
                 },
             )

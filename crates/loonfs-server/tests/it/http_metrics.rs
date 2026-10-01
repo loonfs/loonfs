@@ -52,7 +52,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

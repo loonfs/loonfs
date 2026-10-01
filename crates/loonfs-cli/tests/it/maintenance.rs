@@ -42,7 +42,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
     .build()
     .await
     .expect("build writer");
-    let namespace_id = loonfs_api::NamespaceId::parse("demo").expect("namespace id");
+    let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -52,11 +52,11 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
         .expect("prepare content");
     let operations = (0..=loonfs_grep::MAX_GREP_TAIL_FILES)
         .map(|index| loonfs::publish::FilesystemOperation::PutFile {
-            path: loonfs_api::AbsolutePath::parse(format!("/unindexed/{index:04}.txt"))
+            path: loonfs_types::AbsolutePath::parse(format!("/unindexed/{index:04}.txt"))
                 .expect("path"),
             content_ref: Some(prepared.content_ref().clone()),
             inline_content: None,
-            behavior: loonfs_api::DestinationBehavior::NoReplace,
+            behavior: loonfs_types::DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
         })
@@ -64,7 +64,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
     namespace
         .commit_prepared(
             loonfs::publish::CommitRequest {
-                commit_id: loonfs_api::CommitId::generate(),
+                commit_id: loonfs_types::CommitId::generate(),
                 actor_id: loonfs_test_support::test_actor(),
                 subject: None,
                 message: None,

@@ -10,12 +10,12 @@ use crate::authorize::Absence;
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
-use loonfs_api::wire::manifest::TombstoneRowAction;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::TombstoneRowAction;
+use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, ChangeSeq, ContentRef, DestinationBehavior,
     ExpectedFileState, InodeId, InodeKind, ROOT_INODE_ID,
 };
-use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,

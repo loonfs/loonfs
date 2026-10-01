@@ -2,7 +2,7 @@
 
 use crate::object_store::Result;
 use async_trait::async_trait;
-use loonfs_api::{Checksum, ChecksumAlgorithm};
+use loonfs_types::{Checksum, ChecksumAlgorithm};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

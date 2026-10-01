@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::scripted_transport::{self, Outcome};
-use loonfs_api::v0::ObjectTransferAccess;
-use loonfs_api::{
+use loonfs_types::api::v0::ObjectTransferAccess;
+use loonfs_types::{
     CapabilityDocument, ContentId, ContentRef, API_GROUP_FILESYSTEM_V0,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
 };
@@ -105,7 +105,7 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
     let payload = b"the bytes the grant described".to_vec();
     let served = b"something else entirely, and a different length".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
     );
@@ -130,11 +130,11 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
 /// transfer to Google Cloud Storage leaves behind.
 fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
     ContentRef {
-        kind: loonfs_api::ContentRefKind::BlobV1,
-        owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        kind: loonfs_types::ContentRefKind::BlobV1,
+        owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         content_id: ContentId::generate(),
         size_bytes: bytes.len() as u64,
-        checksum: loonfs_api::Checksum::crc32c(bytes),
+        checksum: loonfs_types::Checksum::crc32c(bytes),
     }
 }
 
@@ -223,7 +223,7 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
 async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     let payload = b"exactly the bytes the grant described".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
     );
@@ -248,7 +248,7 @@ async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
     let payload = b"the first half and then the second half".to_vec();
     let held = 10;
     let content_ref = ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
     );
@@ -287,14 +287,14 @@ async fn a_resumed_inode_download_asks_for_the_rest_and_verifies_the_whole_file(
     let payload = b"the first half and then the second half".to_vec();
     let held = 10;
     let content_ref = ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
     );
     let path_grant = grant(content_ref, "http://example.invalid/object");
     let inode_grant = CreateDownloadByInodeResponse {
         namespace_id: path_grant.namespace_id,
-        inode_id: loonfs_api::InodeId(1),
+        inode_id: loonfs_types::InodeId(1),
         revision_no: path_grant.revision_no,
         content_ref: path_grant.content_ref,
         access: path_grant.access,
@@ -330,7 +330,7 @@ async fn a_resumed_inode_download_asks_for_the_rest_and_verifies_the_whole_file(
 async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     let payload = b"a whole object".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
     );
@@ -368,7 +368,7 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
 async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() {
     let payload = b"unused".to_vec();
     let content_ref = ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
     );

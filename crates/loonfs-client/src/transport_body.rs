@@ -5,7 +5,7 @@ use crate::{Body, TransportError};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use http_body::{Body as HttpBody, Frame, SizeHint};
-use loonfs_api::MonotonicTimer;
+use loonfs_types::MonotonicTimer;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};

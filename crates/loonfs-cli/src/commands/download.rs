@@ -3,8 +3,8 @@
 use crate::error::CliError;
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_api::{ContentRef, RevisionNo};
 use loonfs_client::{DirectDownloadStream, PayloadStream};
+use loonfs_types::{ContentRef, RevisionNo};
 
 pub(crate) enum FileDownload {
     Direct {

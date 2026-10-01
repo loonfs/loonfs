@@ -107,7 +107,7 @@ async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
             - (current.wal_no.0 - current.folded_wal_no.0)
             - 1,
         &MutationContext {
-            writer_id: loonfs_api::WriterId::parse("wal-tail-test-writer").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("wal-tail-test-writer").expect("writer id"),
             now_ms: 1_000,
         },
     )
@@ -371,7 +371,7 @@ fn put_file_and_prepare_then_put_commit_equivalent_state() {
             .expect("open namespace");
         let commit_id = CommitId::parse("equivalent-put").expect("valid commit id");
         let options = PutFileOptions {
-            commit: loonfs_api::options::CommitOptions {
+            commit: loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: Some(commit_id.clone()),
                 message: None,
@@ -619,7 +619,7 @@ fn a_runner_retries_a_failed_writer_fold_without_another_write() {
             &namespace_id,
             wal_tail_object_threshold() - 1,
             &MutationContext {
-                writer_id: loonfs_api::WriterId::parse("fold-retry-seed").expect("writer id"),
+                writer_id: loonfs_types::WriterId::parse("fold-retry-seed").expect("writer id"),
                 now_ms: 1_000,
             },
         )
@@ -803,7 +803,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             &namespace_id,
             seed_wal_objects,
             &MutationContext {
-                writer_id: loonfs_api::WriterId::parse("fold-failure-seed").expect("writer id"),
+                writer_id: loonfs_types::WriterId::parse("fold-failure-seed").expect("writer id"),
                 now_ms: 1_000,
             },
         )
@@ -889,7 +889,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             &namespace_id,
             wal_tail_object_threshold() - 1,
             &MutationContext {
-                writer_id: loonfs_api::WriterId::parse("parked-fold-seed").expect("writer id"),
+                writer_id: loonfs_types::WriterId::parse("parked-fold-seed").expect("writer id"),
                 now_ms: 1_000,
             },
         )

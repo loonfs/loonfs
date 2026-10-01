@@ -1,16 +1,16 @@
 //! Checkpoint secondary-index parity and manifest descriptor validation.
 
 use super::*;
-use loonfs_api::Checksum;
+use loonfs_types::Checksum;
 
 #[derive(serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PreCommitIdMetadataRow {
     Inode {
         inode_id: InodeId,
-        inode_kind: loonfs_api::InodeKind,
+        inode_kind: loonfs_types::InodeKind,
         committed_seq: ChangeSeq,
-        committed_by: loonfs_api::ActorId,
+        committed_by: loonfs_types::ActorId,
         committed_at_ms: u64,
     },
 }
@@ -52,7 +52,7 @@ pub(super) async fn rewrite_manifest_segment(
         <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
         .then(|| {
             let start = built.filter.offset as usize;
-            loonfs_api::wire::hex::hex_encode_bytes(
+            loonfs_types::format::hex::hex_encode_bytes(
                 &built.bytes[start..start + built.filter.stored_bytes as usize],
             )
         });
@@ -170,7 +170,7 @@ async fn load_perturbed_manifest(
 /// The copied row metadata models a stray or duplicate descriptor.
 fn segment_modelled_on(modelled_on: &MetadataSegmentRef) -> MetadataSegmentRef {
     MetadataSegmentRef {
-        segment_id: loonfs_api::MetadataSegmentId::generate(),
+        segment_id: loonfs_types::MetadataSegmentId::generate(),
 
         ..modelled_on.clone()
     }
@@ -373,7 +373,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     );
     assert!(!binds.iter().any(|row| matches!(
         row,
-        MetadataRow::DirentryBinding (crate::metadata::DirentryBindingRecord { state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name }, .. }) if display_name.as_str() == "tmp.txt"
+        MetadataRow::DirentryBinding (crate::metadata::DirentryBindingRecord { state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name }, .. }) if display_name.as_str() == "tmp.txt"
     )));
     assert!(materialized
         .metadata_state
@@ -400,12 +400,12 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             },
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::Directory,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::Directory,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(seq),
             delta_index: delta,
@@ -416,12 +416,12 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::Directory,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::Directory,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(unbind_seq),
             delta_index: 0,
-            state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         })
     };
     let mut rows = BTreeMap::new();
@@ -450,12 +450,12 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             },
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::Directory,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::Directory,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(1),
             delta_index: delta,
@@ -465,12 +465,12 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         parent_inode_id: InodeId(1),
         name_key: NameKey::parse("docs").expect("valid name key"),
         child_inode_id: InodeId(2),
-        child_kind: loonfs_api::InodeKind::Directory,
-        child_created_by: loonfs_api::ActorId::loonfs(),
+        child_kind: loonfs_types::InodeKind::Directory,
+        child_created_by: loonfs_types::ActorId::loonfs(),
         child_created_at_ms: 4_200,
         committed_seq: ChangeSeq(1),
         delta_index: 1,
-        state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+        state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
     });
     let mut rows = BTreeMap::new();
     rows.insert(
@@ -510,12 +510,12 @@ fn drop_pass_refuses_superseded_bind_without_unbind() {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             },
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::Directory,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::Directory,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(1),
             delta_index: delta,
@@ -733,17 +733,18 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
             .await
             .expect("load manifest before replacing a row");
 
-    let row_key = loonfs_api::wire::manifest::lookup_keys::inode_key(loonfs_api::ROOT_INODE_ID);
+    let row_key =
+        loonfs_types::format::manifest::lookup_keys::inode_key(loonfs_types::ROOT_INODE_ID);
     let mut builder = SegmentBlocksBuilder::default();
     builder
         .push(
             &row_key,
             &row_key,
             &PreCommitIdMetadataRow::Inode {
-                inode_id: loonfs_api::ROOT_INODE_ID,
-                inode_kind: loonfs_api::InodeKind::Directory,
+                inode_id: loonfs_types::ROOT_INODE_ID,
+                inode_kind: loonfs_types::InodeKind::Directory,
                 committed_seq: ChangeSeq(0),
-                committed_by: loonfs_api::ActorId::loonfs(),
+                committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: context.now_ms,
             },
         )
@@ -771,7 +772,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
         <= super::super::build::INLINE_SEGMENT_FILTER_MAX_BYTES)
         .then(|| {
             let start = built.filter.offset as usize;
-            loonfs_api::wire::hex::hex_encode_bytes(
+            loonfs_types::format::hex::hex_encode_bytes(
                 &built.bytes[start..start + built.filter.stored_bytes as usize],
             )
         });
@@ -838,7 +839,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         .iter()
         .find(|family_segments| {
             family_segments.family
-                == loonfs_api::wire::manifest::MetadataRowFamily::DirentryChildBinds
+                == loonfs_types::format::manifest::MetadataRowFamily::DirentryChildBinds
         })
         .expect("child bind segments");
     let child_segment = child_binds.segments.first().expect("child bind segment");
@@ -1081,7 +1082,7 @@ async fn manifest_validation_rejects_unsupported_segment_encoding() {
         .expect("valid manifest");
     let mut payload = manifest.state.envelope.payload().clone();
     let descriptor = &mut payload.runs[0].segments[0];
-    descriptor.encoding = loonfs_api::wire::manifest::METADATA_SEGMENT_ENCODING + 1;
+    descriptor.encoding = loonfs_types::format::manifest::METADATA_SEGMENT_ENCODING + 1;
     let segment_id = descriptor.segment_id.clone();
     let encoding = descriptor.encoding;
     let manifest_no = payload.manifest_no;

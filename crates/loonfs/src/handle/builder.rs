@@ -50,7 +50,7 @@ struct CoreSettings {
     manifest_revalidation_interval_ms: u64,
     /// Carries the merge input budget and the block memo budget.
     metadata_lsm_policy: MetadataLsmPolicy,
-    timer: Arc<dyn loonfs_api::MonotonicTimer>,
+    timer: Arc<dyn loonfs_types::MonotonicTimer>,
     wall_clock: Arc<dyn crate::WallClock>,
     stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
     trace_mode: TraceMode,
@@ -88,7 +88,7 @@ impl<M> LoonFsBuilder<M> {
                 manifest_revalidation_interval_ms:
                     crate::config::DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS,
                 metadata_lsm_policy: MetadataLsmPolicy::default(),
-                timer: Arc::new(loonfs_api::StdMonotonicTimer::default()),
+                timer: Arc::new(loonfs_types::StdMonotonicTimer::default()),
                 wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
                 stored_metadata_block_cache: None,
                 trace_mode: TraceMode::Embedded,
@@ -113,7 +113,7 @@ impl<M> LoonFsBuilder<M> {
     }
 
     /// Supplies monotonic time for runtime scheduling and deterministic tests.
-    pub fn monotonic_timer(mut self, timer: Arc<dyn loonfs_api::MonotonicTimer>) -> Self {
+    pub fn monotonic_timer(mut self, timer: Arc<dyn loonfs_types::MonotonicTimer>) -> Self {
         self.core.timer = timer;
         self
     }

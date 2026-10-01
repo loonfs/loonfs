@@ -10,8 +10,8 @@ use crate::metadata::{
     ContentPublicationRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
-use loonfs_api::wire::manifest::MetadataRow;
-use loonfs_api::wire::wal::WalCommitPayload;
+use loonfs_types::format::manifest::MetadataRow;
+use loonfs_types::format::wal::WalCommitPayload;
 
 /// The scanned segment can only hold `expected_kind` rows; the foreign row's
 /// self-keyed row key names its actual kind and identity.
@@ -113,16 +113,16 @@ pub(crate) fn access_revision_from_manifest_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::manifest::TombstoneRowAction;
-    use loonfs_api::{ChangeSeq, CommitId, InodeId};
+    use loonfs_types::format::manifest::TombstoneRowAction;
+    use loonfs_types::{ChangeSeq, CommitId, InodeId};
 
     fn foreign() -> MetadataRow {
         MetadataRow::Inode(InodeRecord {
             inode_id: InodeId(7),
-            inode_kind: loonfs_api::InodeKind::File,
+            inode_kind: loonfs_types::InodeKind::File,
             committed_seq: ChangeSeq(3),
             commit_id: CommitId::parse("c_foreign_inode").expect("commit id"),
-            committed_by: loonfs_api::ActorId::loonfs(),
+            committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 4_000,
         })
     }
@@ -149,15 +149,15 @@ mod tests {
             delta_index: 0,
             commit_id: CommitId::parse("c_foreign_tombstone").expect("commit id"),
             action: TombstoneRowAction::Set {
-                deleted_binding: loonfs_api::wire::manifest::DeletedBinding {
+                deleted_binding: loonfs_types::format::manifest::DeletedBinding {
                     parent_inode_id: InodeId(1),
-                    name_key: loonfs_api::NameKey::parse("foreign").expect("valid name key"),
-                    display_name: loonfs_api::DisplayName::parse("foreign")
+                    name_key: loonfs_types::NameKey::parse("foreign").expect("valid name key"),
+                    display_name: loonfs_types::DisplayName::parse("foreign")
                         .expect("valid display name"),
                 },
             },
             committed_at_ms: 4_000,
-            committed_by: loonfs_api::ActorId::loonfs(),
+            committed_by: loonfs_types::ActorId::loonfs(),
         });
         assert!(inode_from_manifest_row(tombstone).is_err());
     }

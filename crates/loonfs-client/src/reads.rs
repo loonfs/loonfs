@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
-use loonfs_api::PageRequest;
+use loonfs_types::PageRequest;
 
 /// Selects a retained revision or snapshot for a file read. Set at most one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -21,17 +21,17 @@ pub struct ListChangesOptions {
 }
 
 /// A pager over directory entries.
-pub type PathEntriesPager = loonfs_api::Pager<ListPathEntriesResponse, ClientError>;
+pub type PathEntriesPager = loonfs_types::Pager<ListPathEntriesResponse, ClientError>;
 /// A pager over directory children addressed by inode.
-pub type InodeChildrenPager = loonfs_api::Pager<ListInodeChildrenResponse, ClientError>;
+pub type InodeChildrenPager = loonfs_types::Pager<ListInodeChildrenResponse, ClientError>;
 /// A pager over retained file revisions.
-pub type FileRevisionsPager = loonfs_api::Pager<ListFileRevisionsResponse, ClientError>;
+pub type FileRevisionsPager = loonfs_types::Pager<ListFileRevisionsResponse, ClientError>;
 /// A pager over recoverable deletions.
-pub type TrashPager = loonfs_api::Pager<ListTrashResponse, ClientError>;
+pub type TrashPager = loonfs_types::Pager<ListTrashResponse, ClientError>;
 /// A pager over committed changes.
-pub type ChangesPager = loonfs_api::Pager<ListChangesResponse, ClientError>;
+pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, ClientError>;
 /// A pager over live snapshots.
-pub type SnapshotsPager = loonfs_api::Pager<ListSnapshotsResponse, ClientError>;
+pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, ClientError>;
 
 impl Client {
     /// Saves the namespace's current state for a limited time.
@@ -58,7 +58,7 @@ impl Client {
     pub fn list_snapshots(&self, namespace_id: &NamespaceId) -> SnapshotsPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
             async move { client.snapshots_page(&namespace_id, request).await }
@@ -117,8 +117,8 @@ impl Client {
     pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
-        actor_id: &loonfs_api::ActorId,
-        access: loonfs_api::NamespaceAccess,
+        actor_id: &loonfs_types::ActorId,
+        access: loonfs_types::NamespaceAccess,
     ) -> Result<NamespaceMetadata> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
@@ -168,7 +168,7 @@ impl Client {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-        actor: &loonfs_api::ActorId,
+        actor: &loonfs_types::ActorId,
     ) -> Result<NamespaceMetadata> {
         self.fork_namespace_with_options(
             source_namespace_id,
@@ -185,7 +185,7 @@ impl Client {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-        actor: &loonfs_api::ActorId,
+        actor: &loonfs_types::ActorId,
         options: &ForkNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let url = format!(
@@ -218,7 +218,7 @@ impl Client {
         let client = self.clone();
         let spec = spec.clone();
         let options = options.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let spec = spec.clone();
             let options = options.clone();
@@ -292,7 +292,7 @@ impl Client {
         inode_id: InodeId,
         options: &StatOptions,
     ) -> Result<PathEntry> {
-        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
+        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}",
             self.base_url
@@ -325,7 +325,7 @@ impl Client {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
         let options = options.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
             let options = options.clone();
@@ -344,7 +344,7 @@ impl Client {
         request: PageRequest<String>,
         options: &ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
-        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
+        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
             self.base_url
@@ -363,7 +363,7 @@ impl Client {
     pub fn list_file_revisions(&self, spec: &NamespacePath) -> FileRevisionsPager {
         let client = self.clone();
         let spec = spec.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let spec = spec.clone();
             async move { client.file_revisions_page(&spec, request).await }
@@ -395,7 +395,7 @@ impl Client {
     ) -> FileRevisionsPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
             async move {
@@ -412,7 +412,7 @@ impl Client {
         inode_id: InodeId,
         request: PageRequest<String>,
     ) -> Result<ListFileRevisionsResponse> {
-        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
+        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
             self.base_url
@@ -427,7 +427,7 @@ impl Client {
     pub fn list_trash(&self, namespace_id: &NamespaceId) -> TrashPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
             async move { client.trash_page(&namespace_id, request).await }
@@ -466,7 +466,7 @@ impl Client {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
         let options = options.clone();
-        loonfs_api::Pager::new(move |request: PageRequest<ChangeSeq>| {
+        loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
             let options = options.clone();
@@ -487,7 +487,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
-        limit: loonfs_api::EffectiveLimit,
+        limit: loonfs_types::EffectiveLimit,
         options: &ListChangesOptions,
     ) -> Result<ListChangesResponse> {
         let mut query = QueryBuilder::new(format!(
@@ -563,7 +563,7 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
+        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
             self.base_url

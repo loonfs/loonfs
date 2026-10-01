@@ -9,12 +9,12 @@ use loonfs::{
     CommitId, CoreError, DestinationBehavior, LoonFs, Maintenance, MetadataMaintenanceOptions,
     NamespaceId, PutFileOptions, ReadOnly, SharedObjectStore, Writable,
 };
-use loonfs_api::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
 use loonfs_grep::manifest::load_current_grep_manifest;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepReorganizeOutcome, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::nonzero_usize;
+use loonfs_types::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};

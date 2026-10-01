@@ -10,14 +10,6 @@ use crate::store_waves::STORE_WRITE_WAVE;
 use crate::test_support::ops::{create, write_file_bytes};
 use crate::time::StdMonotonicTimer;
 use crate::MutationContext;
-use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, MetadataRow, MetadataRowFamily, MetadataSegmentRef,
-    NamespaceManifestEnvelope,
-};
-use loonfs_api::wire::sst_blocks::{
-    decode_data_block, decode_filter_block, decode_index_block, BlockHandle,
-};
-use loonfs_api::WriterId;
 use loonfs_objectstore::keys::{
     metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
     metadata_segment_prefix,
@@ -27,6 +19,14 @@ use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, OperationKind,
     RecordedOperation, RecordingStore,
 };
+use loonfs_types::format::manifest::{
+    decode_namespace_manifest_json, MetadataRow, MetadataRowFamily, MetadataSegmentRef,
+    NamespaceManifestEnvelope,
+};
+use loonfs_types::format::sst_blocks::{
+    decode_data_block, decode_filter_block, decode_index_block, BlockHandle,
+};
+use loonfs_types::WriterId;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;

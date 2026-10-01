@@ -3,11 +3,11 @@
 
 use crate::error::{CoreError, Result};
 use crate::path::read::LoadedMetadataView;
-use loonfs_api::v0::{Commit, FilesystemChange, ListChangesResponse};
-use loonfs_api::wire::manifest::DeltaPosition;
-use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
-use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::api::v0::{Commit, FilesystemChange, ListChangesResponse};
+use loonfs_types::format::manifest::DeltaPosition;
+use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
+use loonfs_types::{ChangeSeq, EffectiveLimit, NamespaceId};
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
@@ -108,7 +108,7 @@ pub(crate) fn events_from_wal_deltas(
 ) -> Result<Vec<FilesystemChange>> {
     let mut events = Vec::new();
     let mut group = Vec::new();
-    for deltas in loonfs_api::wire::wal::semantic_operation_groups(deltas) {
+    for deltas in loonfs_types::format::wal::semantic_operation_groups(deltas) {
         group.clear();
         group.extend(deltas.iter().map(|delta| &delta.delta));
         events.push(event_from_op_deltas(namespace_id, committed_seq, &group)?);
@@ -125,7 +125,7 @@ fn event_from_op_deltas(
         // CreateDirectory: allocate + bind.
         [WalDelta::CreateInode {
             inode_id,
-            inode_kind: loonfs_api::InodeKind::Directory,
+            inode_kind: loonfs_types::InodeKind::Directory,
             ..
         }, WalDelta::BindDirentry {
             delta_index,
@@ -142,7 +142,7 @@ fn event_from_op_deltas(
         // CreateFile (and copy-file): allocate + bind + first revision.
         [WalDelta::CreateInode {
             inode_id,
-            inode_kind: loonfs_api::InodeKind::File,
+            inode_kind: loonfs_types::InodeKind::File,
             ..
         }, WalDelta::BindDirentry {
             delta_index,
@@ -203,7 +203,7 @@ fn event_from_op_deltas(
             ..
         }] if child_inode_id == root_inode_id => FilesystemChange::Deleted {
             inode_id: *root_inode_id,
-            deleted_binding: loonfs_api::v0::DirectoryBinding {
+            deleted_binding: loonfs_types::api::v0::DirectoryBinding {
                 parent_inode_id: deleted_binding.parent_inode_id,
                 name_key: deleted_binding.name_key.clone(),
                 display_name: deleted_binding.display_name.clone(),
@@ -262,7 +262,7 @@ fn binding_version(
     namespace_id: &NamespaceId,
     committed_seq: ChangeSeq,
     delta_index: u32,
-) -> loonfs_api::BindingVersion {
+) -> loonfs_types::BindingVersion {
     crate::binding_version::encode(
         DeltaPosition {
             seq: committed_seq,
@@ -281,13 +281,13 @@ mod tests {
     use crate::namespace::read_anchor::load_read_anchor;
     use crate::test_support::ops::create;
     use crate::{NamespaceEngine, RuntimeReadContext};
-    use loonfs_api::v0::FilesystemChange;
-    use loonfs_api::wire::wal::WalDelta;
-    use loonfs_api::{
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_types::api::v0::FilesystemChange;
+    use loonfs_types::format::wal::WalDelta;
+    use loonfs_types::{
         AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, EffectiveLimit,
         InodeId, NamespaceId,
     };
-    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -322,7 +322,7 @@ mod tests {
             &store,
             &namespace_id,
             &MutationContext {
-                writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
+                writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
                 now_ms: 1,
             },
         )

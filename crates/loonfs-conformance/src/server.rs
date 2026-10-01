@@ -8,7 +8,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::Router;
 use bytes::Bytes;
-use loonfs_api::ChecksumAlgorithm;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::{
     DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, DirectTransferIssuers,
@@ -16,6 +15,7 @@ use loonfs_objectstore::presign::{
 };
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore};
 use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
+use loonfs_types::ChecksumAlgorithm;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;

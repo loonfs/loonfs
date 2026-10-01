@@ -6,10 +6,12 @@ use crate::payload::LocalPayload;
 use crate::progress::ProgressReporter;
 use crate::resolve::ResolvedTarget;
 use crate::uploads::UploadJournal;
-use loonfs_api::{ActorId, ChangeSeq, Commit, InodeId, NamespaceId, PathEntry, PinId, RevisionNo};
 use loonfs_client::{
     ChangesPager, DownloadOptions, ListChangesOptions, ListOptions, NamespacePath,
     PathEntriesPager, PutFileOptions, ReadFileOptions, StatOptions,
+};
+use loonfs_types::{
+    ActorId, ChangeSeq, Commit, InodeId, NamespaceId, PathEntry, PinId, RevisionNo,
 };
 use std::sync::Arc;
 
@@ -77,7 +79,7 @@ impl ResolvedTarget {
         self.stat_with_options(
             spec,
             &StatOptions {
-                include_attributes: loonfs_api::AttributeInclusion::Omit,
+                include_attributes: loonfs_types::AttributeInclusion::Omit,
                 snapshot_id: snapshot_id.cloned(),
             },
         )

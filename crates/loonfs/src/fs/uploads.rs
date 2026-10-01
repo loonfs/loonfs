@@ -17,9 +17,9 @@ use crate::ByteStream;
 use crate::Result;
 use crate::{ChecksumAlgorithm, MaintenanceHint, MaintenanceJobId, UploadMode, UploadSession};
 use crate::{Namespace, Writable};
-use loonfs_api::options::DirectMultipartUploadOptions;
-use loonfs_api::v0::UploadPartChecksumClaim;
-use loonfs_api::UploadId;
+use loonfs_types::api::v0::UploadPartChecksumClaim;
+use loonfs_types::options::DirectMultipartUploadOptions;
+use loonfs_types::UploadId;
 
 impl Namespace<Writable> {
     /// Plants the deadline a durable upload session just created.

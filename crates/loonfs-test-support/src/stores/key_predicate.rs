@@ -1,8 +1,8 @@
 //! Reusable key predicates for object-store wrappers.
 
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::{hint, metadata_manifest_prefix};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+use loonfs_types::NamespaceId;
 use std::fmt;
 use std::sync::Arc;
 

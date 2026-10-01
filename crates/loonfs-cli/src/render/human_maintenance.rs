@@ -1,10 +1,10 @@
 use super::summaries::*;
 use crate::commands::{MaintenanceKeyReport, MaintenanceRan};
-use loonfs_api::v0::{
+use loonfs_types::api::v0::{
     DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, SnapshotSummary,
     StoreProbeResponse,
 };
-use loonfs_api::{
+use loonfs_types::{
     ChangeSeq, Checkpoint, CompactionStepOutcome, DeleteCheckpointResponse,
     DeleteNamespaceResponse, ListCheckpointsResponse, MetadataCompactionOutcome, NamespaceId,
     NamespaceMetadata, RunMaintenanceResponse,
@@ -23,8 +23,8 @@ pub(super) fn human_current(profile: &str, namespace: Option<&str>) -> String {
 
 pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
     let access = match &namespace.access {
-        loonfs_api::v0::NamespaceAccessMode::Unrestricted {} => "unrestricted".to_owned(),
-        loonfs_api::v0::NamespaceAccessMode::Acl { principal_scope } => {
+        loonfs_types::api::v0::NamespaceAccessMode::Unrestricted {} => "unrestricted".to_owned(),
+        loonfs_types::api::v0::NamespaceAccessMode::Acl { principal_scope } => {
             format!("acl (scope {principal_scope})")
         }
     };

@@ -7,10 +7,10 @@ use crate::commit::{CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::VisiblePathError;
 use crate::path::mutation_path::final_component;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, InodeId, InodeKind, ROOT_INODE_ID,
 };
-use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
@@ -20,7 +20,10 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
     expected_access_revision_no: Option<AccessRevisionNo>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
-    loonfs_api::v0::validate_access_precondition(expected_inode_id, expected_access_revision_no)?;
+    loonfs_types::api::v0::validate_access_precondition(
+        expected_inode_id,
+        expected_access_revision_no,
+    )?;
     if view.access.is_unrestricted() {
         return Err(CoreError::NamespaceUnrestricted {
             namespace_id: view.namespace_id.clone(),

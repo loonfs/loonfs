@@ -13,14 +13,14 @@ use loonfs::{
     maintenance_hint_relay, GarbageCollectionJob, LoonFs, MaintenanceRegistry, MaintenanceRunner,
     MetadataCompactionJob, MetadataMaintenanceJob, SharedObjectStore, TraceStoreKind, WriterId,
 };
-use loonfs_api::{
-    ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, Subject,
-    SubjectId,
-};
 use loonfs_client::Client;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+};
+use loonfs_types::{
+    ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, Subject,
+    SubjectId,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -297,7 +297,7 @@ impl ResolvedTarget {
             no_retry,
         )
         .await?;
-        target.journal_identity = loonfs_api::Checksum::sha256(
+        target.journal_identity = loonfs_types::Checksum::sha256(
             &serde_json::to_vec(store_config)
                 .map_err(|error| CliError::invalid_config(error.to_string()))?,
         )
@@ -411,7 +411,7 @@ impl ResolvedTarget {
 #[cfg(test)]
 mod tests {
     use super::ResolvedTarget;
-    use loonfs_api::SecretString;
+    use loonfs_types::SecretString;
 
     #[test]
     fn a_stored_token_is_rejected_for_non_loopback_http() {

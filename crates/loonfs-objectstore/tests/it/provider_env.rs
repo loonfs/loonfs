@@ -1,4 +1,4 @@
-use loonfs_api::SecretString;
+use loonfs_types::SecretString;
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;

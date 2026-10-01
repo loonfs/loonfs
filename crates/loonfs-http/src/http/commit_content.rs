@@ -2,7 +2,7 @@
 
 use super::error::ApiResponseError;
 use loonfs::publish::InlineContent;
-use loonfs_api::{
+use loonfs_types::{
     ContentId, ErrorCode, FilesystemOperation, NamespaceId, FEATURE_COMMIT_INLINE_CONTENT,
 };
 

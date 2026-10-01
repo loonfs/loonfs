@@ -31,9 +31,9 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use futures::TryStreamExt;
-    use loonfs_api::Checksum;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
+    use loonfs_types::Checksum;
 
     #[tokio::test]
     async fn wrappers_preserve_the_start_after_contract() {

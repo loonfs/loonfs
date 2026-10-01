@@ -6,12 +6,12 @@
 
 use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, start_server};
-use loonfs_api::AttributesRevisionNo;
 use loonfs_client::AccessState;
 use loonfs_client::AttributeChanges;
 use loonfs_client::{ListOptions, NamespacePath, StatOptions};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
+use loonfs_types::AttributesRevisionNo;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -27,7 +27,7 @@ async fn served_namespace(harness: &crate::common::TestServer) {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -244,7 +244,7 @@ async fn the_client_round_trips_the_read_options() {
         .stat_with_options(
             &path("/docs/report.txt"),
             &StatOptions {
-                include_attributes: loonfs_api::AttributeInclusion::Omit,
+                include_attributes: loonfs_types::AttributeInclusion::Omit,
                 snapshot_id: None,
             },
         )
@@ -264,7 +264,7 @@ async fn the_client_round_trips_the_read_options() {
         &harness.client,
         &path("/docs"),
         &ListOptions {
-            include_attributes: loonfs_api::AttributeInclusion::Include,
+            include_attributes: loonfs_types::AttributeInclusion::Include,
             snapshot_id: None,
         },
     )
@@ -290,7 +290,7 @@ async fn an_unrestricted_namespace_answers_namespace_unrestricted_over_http() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -301,14 +301,14 @@ async fn an_unrestricted_namespace_answers_namespace_unrestricted_over_http() {
             &loonfs_test_support::test_actor(),
             AccessState {
                 boundary: false,
-                grants: loonfs_api::AccessGrants::default(),
+                grants: loonfs_types::AccessGrants::default(),
             },
         )
         .await
         .expect_err("unrestricted namespace");
     assert_eq!(
         error.code(),
-        Some(loonfs_api::ErrorCode::NamespaceUnrestricted)
+        Some(loonfs_types::ErrorCode::NamespaceUnrestricted)
     );
     assert!(matches!(
         error,

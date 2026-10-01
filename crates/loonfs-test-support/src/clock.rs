@@ -1,6 +1,6 @@
 //! Time advanced explicitly by tests.
 
-use loonfs_api::MonotonicTimer;
+use loonfs_types::MonotonicTimer;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug)]

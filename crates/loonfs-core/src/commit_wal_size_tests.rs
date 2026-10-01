@@ -9,14 +9,14 @@ use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::storage::inline_content::InlineContent;
 use crate::wal::prepare_wal_object;
-use loonfs_api::wire::wal::{WalDelta, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
-use loonfs_api::{
+use loonfs_test_support::ids::{attribute_key, attribute_text};
+use loonfs_types::format::wal::{WalDelta, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
+use loonfs_types::{
     ActorId, AttributeKey, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId,
     ContentId, ContentRef, ContentRefKind, DestinationBehavior, DestinationPrecondition,
     DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalNo, WriterEpoch,
     MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
 };
-use loonfs_test_support::ids::{attribute_key, attribute_text};
 use std::collections::BTreeMap;
 
 fn full_attributes() -> Attributes {
@@ -77,7 +77,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 name_key: NameKey::parse("source").expect("key"),
                 display_name: DisplayName::parse("source").expect("name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
+                child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor.clone(),
                 child_created_at_ms: 0,
             },
@@ -101,7 +101,10 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         let inline = InlineContent::new(
             namespace_id.clone(),
             ContentId::generate(),
-            bytes::Bytes::from(vec![0; loonfs_api::wire::wal::MAX_WAL_INLINE_CONTENT_BYTES]),
+            bytes::Bytes::from(vec![
+                0;
+                loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES
+            ]),
         );
         let operation_count = if kind == "put" || kind == "inline" {
             1
@@ -135,7 +138,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                     _ => FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!(
                             "/{}{index:0255}",
-                            "d/".repeat(loonfs_api::MAX_PATH_DEPTH - 1)
+                            "d/".repeat(loonfs_types::MAX_PATH_DEPTH - 1)
                         ))
                         .expect("path"),
                         content_ref: Some(if kind == "inline" {

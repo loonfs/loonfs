@@ -15,12 +15,12 @@ use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, Metada
 use super::error::ManifestLoadError;
 use super::stored_block_cache::StoredMetadataBlockKind;
 use crate::heap_bytes::data_block_heap_bytes;
-use loonfs_api::wire::manifest::MetadataSegmentRef;
-use loonfs_api::wire::sst_blocks::{
-    decode_data_block, BlockHandle, DecodedDataBlock, SegmentIndexEntry,
-};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::MetadataSegmentRef;
+use loonfs_types::format::sst_blocks::{
+    decode_data_block, BlockHandle, DecodedDataBlock, SegmentIndexEntry,
+};
 use std::sync::Arc;
 
 /// Longest single ranged GET issued while bulk-reading a block span; longer

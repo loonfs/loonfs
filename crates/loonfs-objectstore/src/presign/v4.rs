@@ -202,7 +202,7 @@ pub(crate) fn normalize_header_value(value: &str) -> String {
 }
 
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {
-    loonfs_api::wire::hex::hex_encode_bytes(bytes)
+    loonfs_types::format::hex::hex_encode_bytes(bytes)
 }
 
 fn percent_encode_query(value: &str) -> String {

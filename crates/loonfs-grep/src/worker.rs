@@ -27,18 +27,18 @@ use loonfs::{
     CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance, ReadOnly,
     StoreFailureClass,
 };
-use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
-use loonfs_api::wire::sst_blocks::{
+use loonfs_objectstore::timing::StdMonotonicTimer;
+use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
+use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
+use loonfs_types::format::sst_blocks::{
     DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, SstBlockCodecError,
     DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS,
     DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
-use loonfs_api::{
+use loonfs_types::{
     ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId,
     RevisionNo, RunNo,
 };
-use loonfs_objectstore::timing::StdMonotonicTimer;
-use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -415,7 +415,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     async fn create_backfill_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<loonfs_api::Checkpoint> {
+    ) -> Result<loonfs_types::Checkpoint> {
         Ok(self
             .maintenance
             .create_checkpoint_with_options(

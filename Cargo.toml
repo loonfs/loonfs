@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/loonfs-api",
+  "crates/loonfs-types",
   "crates/loonfs-test-support",
   "crates/loonfs-grep",
   "crates/loonfs-objectstore",
@@ -83,12 +83,12 @@ loonfs-test-support = { path = "crates/loonfs-test-support" }
 # when they also have a local path. These versions must match
 # `workspace.package.version`.
 loonfs = { path = "crates/loonfs", version = "0.4.0" }
-loonfs-api = { path = "crates/loonfs-api", version = "0.4.0" }
 loonfs-client = { path = "crates/loonfs-client", version = "0.4.0" }
 loonfs-core = { path = "crates/loonfs-core", version = "0.4.0" }
 loonfs-grep = { path = "crates/loonfs-grep", version = "0.4.0" }
 loonfs-http = { path = "crates/loonfs-http", version = "0.4.0" }
 loonfs-objectstore = { path = "crates/loonfs-objectstore", version = "0.4.0" }
+loonfs-types = { path = "crates/loonfs-types", version = "0.4.0" }
 # foyer reports its internal counters through this registry trait and does not
 # re-export it, so a host that wants to read them names the crate itself. The
 # version must stay the one foyer resolves, or the trait this workspace
@@ -125,7 +125,7 @@ opt-level = 3
 opt-level = 3
 
 [workspace.lints.rust]
-# The clock_gettime boundary in loonfs-api needs one local unsafe allowance.
+# The clock_gettime boundary in loonfs-types needs one local unsafe allowance.
 unsafe_code = "deny"
 unreachable_pub = "warn"
 

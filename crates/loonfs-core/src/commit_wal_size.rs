@@ -2,7 +2,7 @@
 
 use crate::path::write::CommitRequest;
 use crate::storage::inline_content::InlineContent;
-use loonfs_api::{
+use loonfs_types::{
     AbsolutePath, AccessRight, FilesystemOperation, MAX_ACCESS_GRANTS_PRINCIPAL_BYTES,
     MAX_ACCESS_GRANT_ENTRIES, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES,
     MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
@@ -236,7 +236,7 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
 fn create_path_bytes(path: &AbsolutePath) -> usize {
     path.components().iter().fold(0_usize, |bytes, component| {
         let display_name = component.as_str();
-        let name_key = loonfs_api::name_key_for_display_name(display_name);
+        let name_key = loonfs_types::name_key_for_display_name(display_name);
         bytes.saturating_add(
             CREATE_INODE_BYTES
                 + BIND_BYTES

@@ -2,8 +2,8 @@
 
 use crate::args::CommandKind;
 use crate::config::NAMESPACE_ENV;
-use loonfs_api::ErrorCode;
 use loonfs_client::ClientError;
+use loonfs_types::ErrorCode;
 use serde::{Deserialize, Serialize};
 
 macro_rules! cli_error_codes {
@@ -79,7 +79,7 @@ pub(crate) struct CliError {
     pub request_id: Option<String>,
     /// Structured context for the code, when the backend carried any.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<Box<loonfs_api::ErrorDetails>>,
+    pub details: Option<Box<loonfs_types::ErrorDetails>>,
 }
 
 impl CliError {

@@ -46,7 +46,7 @@
 #![warn(missing_docs)]
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
-compile_error!("the loonfs runtime needs a monotonic clock that counts host sleep; see StdMonotonicTimer in loonfs-api");
+compile_error!("the loonfs runtime needs a monotonic clock that counts host sleep; see StdMonotonicTimer in loonfs-types");
 
 mod cache;
 mod config;
@@ -59,12 +59,28 @@ mod options;
 mod publisher;
 mod trace;
 
-pub use loonfs_api::v0::{
+pub use loonfs_core::cache::{
+    StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
+    StoredMetadataBlockKind,
+};
+pub use loonfs_core::limits::{
+    DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST,
+};
+pub use loonfs_core::time::{current_time_ms, WallClock};
+pub use loonfs_core::{
+    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
+    CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
+    ErrorCode, ErrorKind, FileContentStream, GcOptions, ListCheckpointFilesOptions,
+    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, StoreFailureClass,
+    WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+};
+pub use loonfs_types::api::v0::{
     Commit, CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, FilesystemChange,
     ListChangesResponse, ObjectTransferAccess, UploadContentClaim, UploadMode, UploadSession,
     UploadSessionStatus,
 };
-pub use loonfs_api::{
+pub use loonfs_types::{
     ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
     AttributesProjection, AttributesRevisionNo, CapabilityDocument, ChangeSeq, Checkpoint,
     CheckpointOwnerSummary, ChecksumAlgorithm, CommitId, CommitPrecondition, CompactionStepOutcome,
@@ -82,22 +98,6 @@ pub use loonfs_api::{
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
     FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
-};
-pub use loonfs_core::cache::{
-    StoredMetadataBlockCache, StoredMetadataBlockCacheCloseError, StoredMetadataBlockKey,
-    StoredMetadataBlockKind,
-};
-pub use loonfs_core::limits::{
-    DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
-    MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST,
-};
-pub use loonfs_core::time::{current_time_ms, WallClock};
-pub use loonfs_core::{
-    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
-    CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
-    ErrorCode, ErrorKind, FileContentStream, GcOptions, ListCheckpointFilesOptions,
-    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, StoreFailureClass,
-    WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
 
@@ -121,7 +121,7 @@ pub mod engine {
 
 /// Request shapes a serving host decodes before converting them to runtime options.
 pub mod requests {
-    pub use loonfs_api::{
+    pub use loonfs_types::{
         AdvanceRetentionRequest, CreateCheckpointRequest, CreateSnapshotRequest,
         ExtendSnapshotRequest, GcRequest, MetadataCompactionRequest, MetadataMaintenanceRequest,
         RunMaintenanceRequest,
@@ -154,10 +154,10 @@ pub mod publish {
 /// publication deadline.
 /// Most embedded applications do not need this module.
 pub mod content_tokens {
-    pub use loonfs_api::v0::ContentToken;
     pub use loonfs_core::content::{
         mint_content_token, CompletedUpload, CompletedUploadEvidence, ContentTokenError,
     };
+    pub use loonfs_types::api::v0::ContentToken;
 }
 
 /// Direct-upload target types used by servers to create presigned URLs.
@@ -260,8 +260,8 @@ pub enum Error {
 
 impl Error {
     /// Returns this error as the public API error body.
-    pub fn to_api_error(&self) -> loonfs_api::ApiError {
-        loonfs_api::ApiError {
+    pub fn to_api_error(&self) -> loonfs_types::ApiError {
+        loonfs_types::ApiError {
             code: self.code().as_str().to_owned(),
             message: self.public_message().into_owned(),
             param: self.invalid_request_param(),
@@ -287,7 +287,7 @@ impl Error {
     /// error envelope for the same condition, so both backends serve one
     /// contract. Only the engine attaches any; runtime-local failures have
     /// no structured half.
-    pub fn details(&self) -> Option<loonfs_api::ErrorDetails> {
+    pub fn details(&self) -> Option<loonfs_types::ErrorDetails> {
         match self {
             Self::Core(error) => error.details(),
             Self::Config(_)

@@ -2,7 +2,7 @@
 
 use crate::error::{CoreError, Result};
 use crate::limits::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
-use loonfs_api::GcRequest;
+use loonfs_types::GcRequest;
 use serde::{Deserialize, Serialize};
 
 /// The grace window used by namespace collection.

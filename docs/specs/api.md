@@ -266,7 +266,7 @@ One code exists specifically so capability handling is uniform from day one:
   op or feature. Any op may return it; a client maps the error to its
   `feature` key and disables or degrades that code path.
 
-The full registry (`ErrorCode` in `loonfs-api`):
+The full registry (`ErrorCode` in `loonfs-types`):
 
 | Code | HTTP status | Meaning |
 | --- | --- | --- |
@@ -391,7 +391,7 @@ opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
   constant.
 - The two surfaces stay aligned by sharing one definition of every option
   struct they both take (`PutFileOptions`, `CreateDirectoryOptions`,
-  `DeleteOptions` live in `loonfs-api` and are re-exported by both), not by a
+  `DeleteOptions` live in `loonfs-types` and are re-exported by both), not by a
   trait either one implements. There is no transport abstraction to program
   against: a host picks the embedded runtime or the HTTP client directly.
 - A mutation takes the actor as an argument. The remote client sends it in

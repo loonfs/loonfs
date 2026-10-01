@@ -7,11 +7,11 @@ use crate::error::CliError;
 use crate::resolve::{
     load_cli_config, resolve_actor, resolve_namespace, resolve_subject, ResolvedTarget,
 };
-use loonfs_api::{
+use loonfs_client::{CreateDirectoryOptions, NamespacePath};
+use loonfs_types::{
     AbsolutePath, ActorId, ChangeSeq, Commit, ErrorCode, InodeId, InodeKind, NamespaceId, PinId,
     PublicOrdinalRangeError,
 };
-use loonfs_client::{CreateDirectoryOptions, NamespacePath};
 use std::path::{Path, PathBuf};
 
 pub(crate) struct CommandContext {
@@ -325,7 +325,7 @@ pub(crate) fn destination_user_path(
                     .with_param(path_param),
             );
         }
-        let leaf = loonfs_api::DisplayName::parse(source_leaf).map_err(|error| {
+        let leaf = loonfs_types::DisplayName::parse(source_leaf).map_err(|error| {
             CliError::invalid_request(error.to_string()).with_param(source_leaf_param)
         })?;
         return Ok(directory.join(&leaf));
@@ -435,7 +435,7 @@ impl UndeleteHint {
 
     /// The complete `loonfs undelete` invocation that recovers one deletion.
     pub(crate) fn command(&self, inode_id: InodeId, deletion_seq: ChangeSeq) -> String {
-        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
+        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         format!(
             "loonfs undelete --inode {inode_id} --deletion-seq {}{}",
             deletion_seq.0, self.context_flags

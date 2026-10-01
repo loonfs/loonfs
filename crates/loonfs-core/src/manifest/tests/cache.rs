@@ -322,7 +322,7 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
         .into_iter()
         .filter_map(|row| match row {
             MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-                state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name },
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
                 ..
             }) => Some(display_name.as_str().to_owned()),
             _ => None,
@@ -433,7 +433,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
             _ => None,
         })
         .expect("docs directory bind");
-    let encoded_name = loonfs_api::wire::manifest::hex_encode_row_key_component("beta.txt");
+    let encoded_name = loonfs_types::format::manifest::hex_encode_row_key_component("beta.txt");
     let filter_probe = format!("direntry-bind-{:020}-{encoded_name}", docs_inode.0);
     let prefix = format!("{filter_probe}-");
     let rows = segments
@@ -991,7 +991,7 @@ async fn warm_block_caches_reuse_only_the_same_owner_and_segment() {
     let mut other_owner = descriptor.clone();
     other_owner.owner_namespace_id = NamespaceId::parse("other").expect("valid namespace id");
     let mut other_segment = descriptor.clone();
-    other_segment.segment_id = loonfs_api::MetadataSegmentId::generate();
+    other_segment.segment_id = loonfs_types::MetadataSegmentId::generate();
     for missing in [other_owner, other_segment] {
         let error = block_fetch::load_segment_index(&store, Some(&cache), &memo, &missing)
             .await

@@ -23,14 +23,14 @@ use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for
 use crate::storage::content::ContentLocation;
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
-use loonfs_api::v0::DirectoryBinding;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::api::v0::DirectoryBinding;
+use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
     ContentRef, DirectoryPageCursor, DisplayName, FileBytes, FileRevision, FileRevisionsPageCursor,
     InodeId, InodeKind, ManifestNo, NamespaceId, Page, PageRequest, PathEntry, PathEntryKind,
     RevisionNo, TrashEntry, TrashPageCursor,
 };
-use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::Instrument;
@@ -1076,15 +1076,15 @@ mod tests {
     use crate::path::write::{CommitRequest, FilesystemOperation};
     use crate::test_support::ops::create;
     use bytes::Bytes;
-    use loonfs_api::{AttributeValue, AttributesRevisionNo, CommitId, ErrorCode};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::attribute_key;
+    use loonfs_types::{AttributeValue, AttributesRevisionNo, CommitId, ErrorCode};
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     fn context() -> MutationContext {
         MutationContext {
-            writer_id: loonfs_api::WriterId::parse("reader-tests").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("reader-tests").expect("writer id"),
             now_ms: 1,
         }
     }
@@ -1167,11 +1167,11 @@ mod tests {
             .expect("state");
         let key = loonfs_objectstore::keys::wal_object(&namespace_id, &head.wal_no);
         let bytes = store.get(&key, None).await.expect("WAL").expect("exists");
-        let mut payload = loonfs_api::wire::wal::decode_wal_object_envelope_zstd(&bytes)
+        let mut payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
             .expect("decode")
             .into_payload();
         payload.next_inode_id = InodeId(payload.next_inode_id.0 + 1);
-        let bytes = loonfs_api::wire::wal::encode_wal_object_envelope_zstd(payload)
+        let bytes = loonfs_types::format::wal::encode_wal_object_envelope_zstd(payload)
             .expect("encode")
             .into_bytes();
         store

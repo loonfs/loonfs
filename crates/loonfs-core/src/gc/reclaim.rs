@@ -5,10 +5,10 @@ use super::live_set::{LiveSet, RetirementState};
 use crate::error::{CoreError, Result};
 use crate::store_waves::STORE_WRITE_WAVE;
 use futures::{StreamExt, TryStreamExt};
-use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::GcResponse;
 use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::GcResponse;
 
 pub(super) async fn reclaim_namespace<S: ObjectStore + ?Sized>(
     store: &S,

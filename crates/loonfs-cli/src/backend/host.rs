@@ -5,7 +5,6 @@ use crate::error::CliError;
 use crate::render::write_stderr_warning;
 use http_body_util::BodyExt as _;
 use loonfs::InlineContentPolicy;
-use loonfs_api::SecretString;
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::GrepService;
 use loonfs_http::{
@@ -13,6 +12,7 @@ use loonfs_http::{
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
 use loonfs_objectstore::ConfiguredObjectStoreKind;
+use loonfs_types::SecretString;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use tower::ServiceExt as _;
@@ -37,7 +37,7 @@ pub(crate) fn client(
         max_concurrent_downloads: DEFAULT_MAX_CONCURRENT_DOWNLOADS,
         inline_content,
         content_token_secret: CONTENT_TOKEN_SECRET
-            .get_or_init(|| loonfs_api::generated_id("content-token").into())
+            .get_or_init(|| loonfs_types::generated_id("content-token").into())
             .clone(),
         request_deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,

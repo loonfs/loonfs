@@ -2,11 +2,11 @@
 
 use super::*;
 use crate::test_support::ops::create;
-use loonfs_api::{AbsolutePath, WriterId};
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_types::{AbsolutePath, WriterId};
 use tempfile::tempdir;
 
 fn context() -> MutationContext {
@@ -53,7 +53,7 @@ async fn deletion_budget_includes_writer_acquisition() {
     assert!(!manifest.state.envelope.payload().status.is_deleted());
     assert_eq!(
         manifest.state.envelope.payload().manifest_no,
-        loonfs_api::ManifestNo(2)
+        loonfs_types::ManifestNo(2)
     );
 }
 
@@ -118,9 +118,9 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         assert_eq!(
             error.code(),
             if attempt == 0 {
-                loonfs_api::ErrorCode::StaleHead
+                loonfs_types::ErrorCode::StaleHead
             } else {
-                loonfs_api::ErrorCode::WriterFenced
+                loonfs_types::ErrorCode::WriterFenced
             }
         );
         assert_eq!(store.counts().puts, usize::from(attempt == 0));
@@ -157,7 +157,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
                 path: AbsolutePath::parse("/content").expect("path"),
                 content_ref: Some(value.content_ref().clone()),
                 inline_content: None,
-                behavior: loonfs_api::DestinationBehavior::NoReplace,
+                behavior: loonfs_types::DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
             },

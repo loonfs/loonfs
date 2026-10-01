@@ -8,9 +8,9 @@ use crate::manifest::{
 };
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::{ManifestRef, PinPayload};
-use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{ManifestRef, PinPayload};
+use loonfs_types::{NamespaceId, PinId};
 
 /// The manifest a pin holds, loaded and verified.
 pub(crate) struct PinBasis<'a, S: ObjectStore + ?Sized> {

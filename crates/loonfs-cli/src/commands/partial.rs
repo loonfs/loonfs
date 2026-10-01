@@ -2,7 +2,7 @@
 
 use super::download::FileDownload;
 use crate::error::CliError;
-use loonfs_api::{Checksum, ContentRef, RevisionNo};
+use loonfs_types::{Checksum, ContentRef, RevisionNo};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -190,12 +190,12 @@ pub(super) fn parent_of(destination: &Path) -> &Path {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::{ContentId, ContentRef, ContentRefKind};
+    use loonfs_types::{ContentId, ContentRef, ContentRefKind};
 
     fn meta_for(bytes: &[u8]) -> PartialMeta {
         PartialMeta::describe(
             &ContentRef::blob_v1(
-                loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                 ContentId::generate(),
                 bytes,
             ),
@@ -206,7 +206,7 @@ mod tests {
     fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
         ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(bytes),

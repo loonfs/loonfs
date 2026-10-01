@@ -6,8 +6,8 @@ use super::content::{
 };
 use crate::error::CoreError;
 use bytes::Bytes;
-use loonfs_api::ContentRef;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::ContentRef;
 
 /// Identifies where a published reference's bytes are read from.
 /// `Tail` carries the object key that will hold the content after folding.

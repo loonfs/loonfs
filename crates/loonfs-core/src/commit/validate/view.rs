@@ -1,9 +1,9 @@
 //! The metadata view used while validating a commit for publication.
 
 use crate::metadata::{MetadataState, MetadataView};
-use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{ActorId, ChangeSeq, CommitId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::wal::WalDelta;
+use loonfs_types::{ActorId, ChangeSeq, CommitId};
 
 /// The publish view: it holds the loaded [`MetadataView`] plus the
 /// accumulating commit overlay, rebuilding an overlaid view for each lookup.

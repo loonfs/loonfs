@@ -4,9 +4,9 @@ use crate::{
     Checkpoint, DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result,
     SnapshotSummary, Writable,
 };
-use loonfs_api::PageRequest;
-use loonfs_api::PinId;
 use loonfs_core::CheckpointPageCursor;
+use loonfs_types::PageRequest;
+use loonfs_types::PinId;
 use std::num::NonZeroU32;
 
 /// Limits applied to snapshot lifetimes and namespace quota.
@@ -55,13 +55,13 @@ impl SnapshotPolicy {
 }
 
 /// A pager over live snapshots.
-pub type SnapshotsPager = loonfs_api::Pager<ListSnapshotsResponse, Error>;
+pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, Error>;
 
 impl<M> Namespace<M> {
     /// Lists live snapshots.
     pub fn list_snapshots(&self) -> SnapshotsPager {
         let reader = self.read_only();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
             async move {
                 reader
@@ -110,7 +110,7 @@ impl<M> Namespace<M> {
             .expect("a snapshot page with room remaining has a nonzero limit");
             let page = engine
                 .list_checkpoints_page(PageRequest {
-                    limit: loonfs_api::EffectiveLimit::new(limit),
+                    limit: loonfs_types::EffectiveLimit::new(limit),
                     cursor,
                 })
                 .await
@@ -198,7 +198,7 @@ impl Namespace<Writable> {
         additional_live: usize,
     ) -> Result<()> {
         let now_ms = self.core.now_ms()?;
-        let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
+        let page_limit = loonfs_types::PaginationPolicy::default().max_limit();
         let engine = self
             .core
             .writer_engine(&self.mode.bits.identity, &self.namespace_id);
@@ -207,7 +207,7 @@ impl Namespace<Writable> {
         loop {
             let page = engine
                 .list_checkpoints_page(PageRequest {
-                    limit: loonfs_api::EffectiveLimit::new(page_limit),
+                    limit: loonfs_types::EffectiveLimit::new(page_limit),
                     cursor,
                 })
                 .await

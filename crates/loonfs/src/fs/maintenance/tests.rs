@@ -12,14 +12,14 @@ use crate::{
     CompactionStepOutcome, LoonFs, Maintenance, MetadataCompactionOutcome,
     MetadataCompactionPolicy, MetadataMaintenanceOptions, NamespaceId, SharedObjectStore, Writable,
 };
-use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
-};
 use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::format::manifest::{
+    decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
+};
 use std::collections::BTreeSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -509,10 +509,10 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
         parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation,
     };
     use crate::{AttributeChanges, CommitId};
-    use loonfs_api::Checksum;
     use loonfs_objectstore::keys::metadata_segment;
     use loonfs_test_support::ids::{attribute_key, attribute_text};
     use loonfs_test_support::stores::RecordingStore;
+    use loonfs_types::Checksum;
 
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::metadata_segments(
@@ -737,7 +737,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     assert_eq!(store.counts().create_if_absent_puts, 1);
     let mut expected = before.clone();
     expected.manifest_no = before.manifest_no.successor().expect("next manifest");
-    expected.compactor_epoch = loonfs_api::CompactorEpoch(before.compactor_epoch.0 + 1);
+    expected.compactor_epoch = loonfs_types::CompactorEpoch(before.compactor_epoch.0 + 1);
     assert_eq!(
         current_manifest_payload(store.as_ref(), &namespace).await,
         expected
@@ -750,7 +750,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .maintenance(loonfs_test_support::ids::writer_id("other"));
     assert_eq!(
         other.compactor_epoch(&namespace).await.expect("new claim"),
-        loonfs_api::CompactorEpoch(epoch.0 + 1)
+        loonfs_types::CompactorEpoch(epoch.0 + 1)
     );
     store.reset();
     assert_eq!(

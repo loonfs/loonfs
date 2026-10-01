@@ -4,8 +4,8 @@
 
 use super::visibility::MetadataVisibilityReads;
 use crate::error::CoreError;
-use loonfs_api::wire::manifest::{AccessRevisionRecord, TombstoneRowAction};
-use loonfs_api::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID};
+use loonfs_types::format::manifest::{AccessRevisionRecord, TombstoneRowAction};
+use loonfs_types::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID};
 use std::collections::BTreeSet;
 
 /// The access rows the inheritance walk visits, nearest first.
@@ -121,8 +121,8 @@ mod tests {
         DirentryBindingRecord, InodeRecord, MetadataState, MetadataStateBuilder,
         SubtreeTombstoneRecord,
     };
-    use loonfs_api::wire::manifest::DeletedBinding;
-    use loonfs_api::{
+    use loonfs_types::format::manifest::DeletedBinding;
+    use loonfs_types::{
         AccessGrants, AccessRevisionNo, ActorId, ChangeSeq, CommitId, DisplayName, InodeKind,
         NameKey, PrincipalId,
     };
@@ -176,14 +176,14 @@ mod tests {
             builder.push_direntry_binding(DirentryBindingRecord {
                 parent_inode_id: InodeId(parent),
                 name_key: NameKey::for_display_name(&display_name),
-                state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name },
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id: InodeId(child),
                 child_kind: if matches!(child, 4 | 7 | 8) {
                     InodeKind::File
                 } else {
                     InodeKind::Directory
                 },
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 1_000,
                 committed_seq: ChangeSeq(1),
                 delta_index: 0,
@@ -305,7 +305,7 @@ mod tests {
             builder.push_direntry_binding(DirentryBindingRecord {
                 parent_inode_id,
                 name_key: NameKey::for_display_name(&display_name),
-                state: loonfs_api::wire::manifest::DirentryBindingState::Bound { display_name },
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id,
                 child_kind: InodeKind::Directory,
                 child_created_by: ActorId::loonfs(),
@@ -322,7 +322,7 @@ mod tests {
         )
         .await
         .expect_err("inheritance cycle");
-        assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
+        assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
         assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
     }
 }

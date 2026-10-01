@@ -2,7 +2,7 @@
 
 use crate::args::PageLimitArgs;
 use crate::error::CliError;
-use loonfs_api::{PageRequest, PagedResponse, PaginationPolicy};
+use loonfs_types::{PageRequest, PagedResponse, PaginationPolicy};
 use std::future::Future;
 use std::io::{self, Write};
 
@@ -143,7 +143,7 @@ impl PagePlan {
             let remaining = limit.saturating_sub(self.emitted);
             Some(
                 self.page_size
-                    .unwrap_or(loonfs_api::DEFAULT_PAGE_LIMIT)
+                    .unwrap_or(loonfs_types::DEFAULT_PAGE_LIMIT)
                     .min(remaining),
             )
         })
@@ -166,7 +166,7 @@ impl PagePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::{AbsolutePath, ChangeSeq, ListPathEntriesResponse, NamespaceId};
+    use loonfs_types::{AbsolutePath, ChangeSeq, ListPathEntriesResponse, NamespaceId};
     use std::cell::Cell;
 
     #[tokio::test]

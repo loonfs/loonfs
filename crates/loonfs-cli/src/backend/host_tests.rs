@@ -4,8 +4,8 @@ use crate::config::StoreConfig;
 use crate::resolve::ResolvedTarget;
 use bytes::Bytes;
 use futures::StreamExt as _;
-use loonfs_api::NamespaceAccess;
 use loonfs_client::{NamespacePath, PayloadSource};
+use loonfs_types::NamespaceAccess;
 
 #[test]
 fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_limit() {

@@ -5,18 +5,18 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::wire::manifest::{NamespaceAccess, NamespaceManifestPayload};
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
+use loonfs_types::{
     AccessRevisionNo, ActorId, ChangeSeq, InodeKind, NamespaceId, NamespaceMetadata, ROOT_INODE_ID,
 };
-use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
 pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    actor_id: &loonfs_api::ActorId,
+    actor_id: &loonfs_types::ActorId,
     access: &NamespaceAccess,
     allow_existing: bool,
 ) -> Result<NamespaceMetadata> {
@@ -45,7 +45,7 @@ pub(crate) fn bootstrap_metadata_state(
                 inode_id: ROOT_INODE_ID,
                 access_revision_no: AccessRevisionNo(0),
                 committed_seq: ChangeSeq(0),
-                commit_id: loonfs_api::wire::control::genesis_commit_id(),
+                commit_id: loonfs_types::format::control::genesis_commit_id(),
                 delta_index: 0,
                 committed_by: ActorId::loonfs(),
                 committed_at_ms: created_at_ms,
@@ -60,8 +60,8 @@ pub(crate) fn bootstrap_metadata_state(
             inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
             committed_seq: ChangeSeq(0),
-            commit_id: loonfs_api::wire::control::genesis_commit_id(),
-            committed_by: loonfs_api::ActorId::loonfs(),
+            commit_id: loonfs_types::format::control::genesis_commit_id(),
+            committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: created_at_ms,
         }],
         Vec::new(),

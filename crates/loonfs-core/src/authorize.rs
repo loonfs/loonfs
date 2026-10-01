@@ -5,10 +5,10 @@ use crate::metadata::access::effective_rights;
 use crate::metadata::MetadataViewSession;
 use crate::metadata::MetadataVisibilityReads;
 use crate::path::read::LoadedMetadataView;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     AccessRight, AccessRights, InodeId, NamespaceAccess, NamespaceId, PrincipalSet, Subject,
 };
-use loonfs_objectstore::ObjectStore;
 
 pub(crate) enum Authorizer<'a> {
     /// An unrestricted namespace: every check passes without a lookup.

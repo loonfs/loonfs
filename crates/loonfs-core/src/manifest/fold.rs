@@ -24,12 +24,12 @@ use crate::time::Deadline;
 use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
 use futures::{stream, TryStreamExt};
-use loonfs_api::wire::control::ManifestRef;
-use loonfs_api::wire::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::ManifestRef;
+use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
+use loonfs_types::{
     ChangeSeq, FoldWalOutcome, FoldWalResponse, ManifestNo, NamespaceId, RunNo, MAX_PUBLIC_INTEGER,
 };
-use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 use tracing::Instrument;
 

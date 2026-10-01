@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use loonfs_api::{MetadataSegmentId, NamespaceId};
+use loonfs_types::{MetadataSegmentId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use thiserror::Error;

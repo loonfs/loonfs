@@ -156,12 +156,12 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
 #[tokio::test]
 async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     use bytes::Bytes;
-    use loonfs_api::{AbsolutePath, CommitId, ContentId, WriterId};
     use loonfs_core::publish::{
         CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
     };
     use loonfs_core::{CreateNamespaceOptions, MutationContext, NamespaceEngine};
     use loonfs_test_support::stores::KeyPredicate;
+    use loonfs_types::{AbsolutePath, CommitId, ContentId, WriterId};
 
     let directory = tempdir().expect("directory");
     let log = Arc::new(RecordingStore::new(

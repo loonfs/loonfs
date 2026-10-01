@@ -1,6 +1,6 @@
 //! Defines [`ClientError`], returned by asynchronous client operations.
 
-use loonfs_api::{ApiError, ErrorCode, ErrorDetails};
+use loonfs_types::{ApiError, ErrorCode, ErrorDetails};
 use thiserror::Error;
 
 /// Error returned by the asynchronous HTTP client.

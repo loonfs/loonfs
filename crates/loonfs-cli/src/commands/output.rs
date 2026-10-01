@@ -6,11 +6,11 @@ use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_verdict, StoreProbeVerdict};
-use loonfs_api::v0::{
+use loonfs_types::api::v0::{
     DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, SnapshotSummary,
     StoreProbeResponse,
 };
-use loonfs_api::{
+use loonfs_types::{
     AbsolutePath, CapabilityDocument, ChangeSeq, Checkpoint, CommitId, DeleteCheckpointResponse,
     DeleteNamespaceResponse, FileRevision, GrepMatch, InodeId, ListCheckpointsResponse,
     NamespaceId, NamespaceMetadata, PathEntry, RunMaintenanceResponse,
@@ -63,7 +63,7 @@ pub(crate) struct TreeTransferFailure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct TrashListing {
     #[serde(flatten)]
-    pub response: loonfs_api::ListTrashResponse,
+    pub response: loonfs_types::ListTrashResponse,
     /// One complete `loonfs undelete` per entry, in `response.entries` order.
     #[serde(skip)]
     pub recovery_commands: Vec<String>,
@@ -312,7 +312,7 @@ pub(crate) enum CommandData {
         /// `loonfs undelete`.
         #[serde(
             skip_serializing_if = "Option::is_none",
-            with = "loonfs_api::public_inode_id::option"
+            with = "loonfs_types::public_inode_id::option"
         )]
         inode_id: Option<InodeId>,
         /// The `loonfs undelete` that puts this deletion back, set by `rm`
@@ -325,7 +325,7 @@ pub(crate) enum CommandData {
     /// caller asked for is simply there.
     DirectoryAlreadyExists {
         target: String,
-        #[serde(with = "loonfs_api::public_inode_id")]
+        #[serde(with = "loonfs_types::public_inode_id")]
         inode_id: InodeId,
         /// Namespace head the existing directory was observed at.
         head_seq: ChangeSeq,
@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn inspection_data_uses_the_expected_kind_names() {
         let capabilities = CommandData::Capabilities(CapabilityDocument {
-            protocol_version: loonfs_api::PROTOCOL_VERSION.to_owned(),
+            protocol_version: loonfs_types::PROTOCOL_VERSION.to_owned(),
             api_groups: Vec::new(),
             features: BTreeMap::new(),
             limits: BTreeMap::new(),

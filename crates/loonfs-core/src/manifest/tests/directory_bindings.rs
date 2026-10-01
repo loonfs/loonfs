@@ -6,8 +6,8 @@ use crate::metadata::LeafRevisionPrefetch;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::store_waves::STORE_READ_WAVE;
-use loonfs_api::{AttributeInclusion, DirectoryPageCursor, PageRequest};
 use loonfs_test_support::stores::ConcurrencyWatchStore;
+use loonfs_types::{AttributeInclusion, DirectoryPageCursor, PageRequest};
 
 #[tokio::test]
 async fn a_cold_path_walk_reads_only_the_leaf_inode() {
@@ -74,7 +74,7 @@ async fn a_cold_path_walk_reads_only_the_leaf_inode() {
             .await
             .expect("resolve path");
         assert_eq!(resolved.absolute_path, "/docs/reports/summary.txt");
-        assert_eq!(resolved.inode_kind, loonfs_api::InodeKind::File);
+        assert_eq!(resolved.inode_kind, loonfs_types::InodeKind::File);
         let inode_reads = store
             .take_gets()
             .into_iter()
@@ -235,7 +235,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         .map(|(source, destination)| FilesystemOperation::MovePath {
             source_path: AbsolutePath::parse(source).expect("source"),
             destination_path: AbsolutePath::parse(destination).expect("destination"),
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

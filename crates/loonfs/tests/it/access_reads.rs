@@ -2,12 +2,12 @@
 
 use loonfs::publish::{CommitRequest, FilesystemOperation};
 use loonfs::{CreateNamespaceOptions, DestinationBehavior, LoonFs};
-use loonfs_api::{
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::ids::namespace_id;
+use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ErrorCode, NamespaceAccess,
     PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
 };
-use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::ids::namespace_id;
 use std::sync::Arc;
 
 fn subject(principal: &str) -> Subject {

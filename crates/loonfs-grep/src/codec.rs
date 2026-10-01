@@ -3,8 +3,8 @@
 //! The frozen tokenizer, posting-batch, and row-key grammar is specified in
 //! [`docs/specs/format.md` Appendix D](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#appendix-d-grep-extension-format).
 
-use loonfs_api::wire::sst_blocks::{read_varint, write_varint, SstBlockCodecError};
-use loonfs_api::{InodeId, RevisionNo};
+use loonfs_types::format::sst_blocks::{read_varint, write_varint, SstBlockCodecError};
+use loonfs_types::{InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -21,12 +21,12 @@ pub struct Gram(pub [u8; GRAM_LEN]);
 impl Gram {
     /// The gram as the six lowercase hex characters row keys embed.
     pub(crate) fn as_hex(&self) -> String {
-        loonfs_api::wire::hex::hex_encode_bytes(&self.0)
+        loonfs_types::format::hex::hex_encode_bytes(&self.0)
     }
 
     /// Parses the row-key hex form back into a gram.
     pub(crate) fn from_hex(hex: &str) -> Result<Self, IndexGramsCodecError> {
-        let bytes = loonfs_api::wire::hex::hex_decode_bytes(hex).map_err(|reason| {
+        let bytes = loonfs_types::format::hex::hex_decode_bytes(hex).map_err(|reason| {
             IndexGramsCodecError::InvalidGram {
                 reason: reason.to_string(),
             }
@@ -393,10 +393,10 @@ mod tests {
         let mut full_inode_range = Vec::new();
         write_varint(&mut full_inode_range, 1);
         write_varint(&mut full_inode_range, u64::MAX);
-        write_varint(&mut full_inode_range, loonfs_api::MAX_PUBLIC_INTEGER);
+        write_varint(&mut full_inode_range, loonfs_types::MAX_PUBLIC_INTEGER);
         assert_eq!(
             decode_gram_postings(&full_inode_range).expect("full-range inode id"),
-            vec![posting(u64::MAX, loonfs_api::MAX_PUBLIC_INTEGER)]
+            vec![posting(u64::MAX, loonfs_types::MAX_PUBLIC_INTEGER)]
         );
 
         let mut first_revision_overflow = Vec::new();
@@ -404,7 +404,7 @@ mod tests {
         write_varint(&mut first_revision_overflow, 1);
         write_varint(
             &mut first_revision_overflow,
-            loonfs_api::MAX_PUBLIC_INTEGER + 1,
+            loonfs_types::MAX_PUBLIC_INTEGER + 1,
         );
         let error = decode_gram_postings(&first_revision_overflow)
             .expect_err("first revision above the public range");
@@ -418,7 +418,7 @@ mod tests {
         write_varint(&mut later_revision_overflow, 1);
         write_varint(
             &mut later_revision_overflow,
-            loonfs_api::MAX_PUBLIC_INTEGER + 1,
+            loonfs_types::MAX_PUBLIC_INTEGER + 1,
         );
         let error = decode_gram_postings(&later_revision_overflow)
             .expect_err("later revision above the public range");
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn segment_max_row_key_survives_a_full_final_block() {
-        use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+        use loonfs_types::format::sst_blocks::SegmentBlocksBuilder;
 
         let mut builder = SegmentBlocksBuilder::new(std::num::NonZeroUsize::MIN);
         let mut last_row_key = String::new();

@@ -69,19 +69,6 @@ use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::wire::manifest::{
-    encode_namespace_manifest_json, lookup_keys, MetadataRow,
-    MetadataRowFamily as ApiMetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
-    NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
-};
-use loonfs_api::wire::sst_blocks::{
-    decode_data_block, string_prefix_upper_bound, BlockHandle, DecodedDataBlock,
-    SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
-};
-use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, EffectiveLimit, InodeId, ManifestNo,
-    NameKey, NamespaceId, PinId, RevisionNo, RunNo,
-};
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
 };
@@ -91,6 +78,19 @@ use loonfs_objectstore::{
 };
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+};
+use loonfs_types::format::manifest::{
+    encode_namespace_manifest_json, lookup_keys, MetadataRow,
+    MetadataRowFamily as ApiMetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
+    NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
+};
+use loonfs_types::format::sst_blocks::{
+    decode_data_block, string_prefix_upper_bound, BlockHandle, DecodedDataBlock,
+    SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
+};
+use loonfs_types::{
+    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, EffectiveLimit, InodeId, ManifestNo,
+    NameKey, NamespaceId, PinId, RevisionNo, RunNo,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -137,11 +137,11 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> crate::error::Result<loonfs_api::Checkpoint> {
+) -> crate::error::Result<loonfs_types::Checkpoint> {
     crate::pin::create_pin(
         store,
         namespace_id,
-        loonfs_api::wire::control::PinOwner::User {
+        loonfs_types::format::control::PinOwner::User {
             name: "test-pin".to_owned(),
             expires_at_ms: None,
         },
@@ -153,7 +153,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
 
 pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {
     MutationContext {
-        writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
+        writer_id: loonfs_types::WriterId::parse(writer_id).expect("writer id"),
         now_ms,
     }
 }
@@ -213,7 +213,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::NamespaceMetadata, crate::error::CoreError> {
+) -> Result<loonfs_types::NamespaceMetadata, crate::error::CoreError> {
     let summary = create(store, namespace_id, context).await?;
     acquire_writer_epoch(store, namespace_id, context)
         .await
@@ -331,7 +331,7 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
         let outcome = super::compaction_step(
             store,
             namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -369,7 +369,7 @@ async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     run_metadata_compaction_job(
         store,
         namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         spec,
         policy,
         &MetadataCompactionCancellation::default(),
@@ -454,7 +454,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     let report = compaction_step(
         store,
         namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
     )
@@ -848,12 +848,12 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         activity: Default::default(),
         created_at_ms: head.created_at_ms,
         created_by: head.created_by.clone(),
-        access: loonfs_api::NamespaceAccess::Unrestricted {},
+        access: loonfs_types::NamespaceAccess::Unrestricted {},
         fork_basis: head.fork_basis.clone(),
         status: head.status,
         writer: head.writer.clone(),
         folded_wal_no: head.wal_no,
-        compactor_epoch: loonfs_api::CompactorEpoch(0),
+        compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no,
 
@@ -894,7 +894,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
 
 async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
-    manifest: loonfs_api::wire::envelope::EncodedEnvelope<NamespaceManifestPayload>,
+    manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
 ) -> Result<ManifestPublicationOutcome, CoreError> {
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     super::publish::publish_manifest(store, manifest, &deadline).await
@@ -912,18 +912,18 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         activity: Default::default(),
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
-        access: loonfs_api::NamespaceAccess::Unrestricted {},
+        access: loonfs_types::NamespaceAccess::Unrestricted {},
         fork_basis: None,
-        status: loonfs_api::wire::control::NamespaceStatus::Active {},
+        status: loonfs_types::format::control::NamespaceStatus::Active {},
         writer: None,
-        folded_wal_no: loonfs_api::WalNo(0),
-        compactor_epoch: loonfs_api::CompactorEpoch(0),
+        folded_wal_no: loonfs_types::WalNo(0),
+        compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no,
 
         head_seq,
 
-        writer_epoch: loonfs_api::WriterEpoch(1),
+        writer_epoch: loonfs_types::WriterEpoch(1),
         next_inode_id: InodeId(64),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),

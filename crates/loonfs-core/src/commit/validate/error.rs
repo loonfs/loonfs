@@ -1,7 +1,7 @@
 //! [`CommitValidationError`]: every way a commit request can fail
 //! validation.
 
-use loonfs_api::{
+use loonfs_types::{
     AccessRevisionNo, AttributesRevisionNo, ChangeSeq, ErrorCode, ErrorDetails, InodeId, InodeKind,
     NameKey, RevisionNo,
 };

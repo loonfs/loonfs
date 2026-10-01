@@ -1,7 +1,7 @@
 //! Encodes opaque API tokens for binding positions.
 
-use loonfs_api::wire::manifest::DeltaPosition;
-use loonfs_api::{decode_token, encode_token, BindingVersion, NamespaceId, OpaqueToken};
+use loonfs_types::format::manifest::DeltaPosition;
+use loonfs_types::{decode_token, encode_token, BindingVersion, NamespaceId, OpaqueToken};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

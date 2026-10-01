@@ -3,10 +3,10 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::{gc_namespace, GcOptions};
-use loonfs_api::wire::control::{PinOwner, PinPayload};
-use loonfs_api::AttributeInclusion;
 use loonfs_objectstore::keys::{pin, pin_prefix};
 use loonfs_test_support::stores::{MetadataMapStore, OperationKind};
+use loonfs_types::format::control::{PinOwner, PinPayload};
+use loonfs_types::AttributeInclusion;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Fixture {

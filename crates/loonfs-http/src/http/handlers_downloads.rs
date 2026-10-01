@@ -9,16 +9,16 @@ use super::query_params::parse_revision_no;
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
+use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 #[cfg(feature = "openapi")]
-use loonfs_api::ApiError;
-use loonfs_api::{
-    v0::{
+use loonfs_types::ApiError;
+use loonfs_types::{
+    api::v0::{
         CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse,
         ObjectTransferAccess,
     },
     FEATURE_DOWNLOADS_DIRECT_GET,
 };
-use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use std::time::Duration;
 
 /// Issues a short-lived download URL for a file.
@@ -93,7 +93,7 @@ pub(super) async fn create_download(
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("revision_no" = loonfs_api::RevisionNo, Path, description = "Revision number")
+            ("revision_no" = loonfs_types::RevisionNo, Path, description = "Revision number")
         ),
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),

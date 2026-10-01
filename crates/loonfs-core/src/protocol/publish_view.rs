@@ -15,10 +15,10 @@ use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::storage::inline_content::InlineContent;
 use crate::wal::ProjectedWalTail;
 use crate::wal::{replay_discovered_tail, ValidatedWalTail, WalObjectError};
-use loonfs_api::wire::control::AcquiredWriter;
-use loonfs_api::wire::wal::WalCommitPayload;
-use loonfs_api::{CommitId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::AcquiredWriter;
+use loonfs_types::format::wal::WalCommitPayload;
+use loonfs_types::{CommitId, NamespaceId};
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {

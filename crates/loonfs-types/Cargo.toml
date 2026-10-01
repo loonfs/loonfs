@@ -1,10 +1,10 @@
 [package]
-name = "loonfs-api"
+name = "loonfs-types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Wire types and durable-format codecs for LoonFS."
+description = "Shared LoonFS types: validated ids and paths, HTTP API shapes, and durable-format codecs."
 repository.workspace = true
 homepage.workspace = true
 keywords = ["filesystem", "object-storage", "wire-format", "openapi"]

@@ -13,9 +13,9 @@ use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationError, InodeA
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::{NamespaceStatus, WriterBlock};
-use loonfs_api::wire::{manifest::DeletedBinding, wal::WalDelta};
-use loonfs_api::{
+use loonfs_types::format::control::{NamespaceStatus, WriterBlock};
+use loonfs_types::format::{manifest::DeletedBinding, wal::WalDelta};
+use loonfs_types::{
     next_public_ordinal, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq,
     CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
     WriterEpoch, MAX_PUBLIC_INTEGER,
@@ -85,12 +85,12 @@ fn wal_create_directory(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(&display_name))
+            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(&display_name))
                 .expect("derived name key"),
             display_name: test_display_name(display_name),
             child_inode_id: inode_id,
-            child_kind: loonfs_api::InodeKind::Directory,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::Directory,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
         },
     ]
@@ -112,12 +112,12 @@ fn wal_create_file(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(&display_name))
+            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(&display_name))
                 .expect("derived name key"),
             display_name: test_display_name(display_name),
             child_inode_id: inode_id,
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
         },
         WalDelta::AppendFileRevision {
@@ -196,18 +196,18 @@ fn validation_context(
     let head = NamespaceReadState {
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
-        access: loonfs_api::NamespaceAccess::Unrestricted {},
+        access: loonfs_types::NamespaceAccess::Unrestricted {},
         fork_basis: None,
         namespace_id: namespace_id.clone(),
         seq,
         writer_epoch: WriterEpoch(1),
         writer: Some(WriterBlock {
-            writer_id: loonfs_api::WriterId::parse("writer-a").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("writer-a").expect("writer id"),
             acquired_at_ms: 1_000,
         }),
         next_inode_id,
-        wal_no: loonfs_api::WalNo(0),
-        folded_wal_no: loonfs_api::WalNo(0),
+        wal_no: loonfs_types::WalNo(0),
+        folded_wal_no: loonfs_types::WalNo(0),
         status: NamespaceStatus::Active {},
     };
     TestValidationContext {
@@ -454,7 +454,7 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
             name_key: NameKey::parse("missing.txt").expect("valid name key"),
             display_name: test_display_name("missing.txt"),
             child_inode_id: InodeId(9),
-            position: loonfs_api::wire::manifest::DeltaPosition {
+            position: loonfs_types::format::manifest::DeltaPosition {
                 seq: ChangeSeq(1),
                 delta_index: 0,
             },

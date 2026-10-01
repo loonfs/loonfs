@@ -4,15 +4,15 @@
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::{start_server, TestServer};
-use loonfs_api::v0::ListChangesResponse;
-use loonfs_api::PageRequest;
-use loonfs_api::{
-    ApiError, ChangeSeq, CreateCheckpointRequest, ListPathEntriesResponse, PathEntry,
-    SnapshotSummary,
-};
 use loonfs_client::NamespacePath;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
+use loonfs_types::api::v0::ListChangesResponse;
+use loonfs_types::PageRequest;
+use loonfs_types::{
+    ApiError, ChangeSeq, CreateCheckpointRequest, ListPathEntriesResponse, PathEntry,
+    SnapshotSummary,
+};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 use std::io::Read as _;
@@ -114,7 +114,7 @@ fn create_snapshot(server_url: &str, namespace: &str, name: &str, ttl_ms: u64) -
 
 fn delete_snapshot(server_url: &str, namespace: &str, snapshot_id: &str) {
     retry_result_on_macos_teardown_einval(|| {
-        decode_json_response::<loonfs_api::DeleteSnapshotResponse>(
+        decode_json_response::<loonfs_types::DeleteSnapshotResponse>(
             raw_agent()
                 .delete(&format!(
                     "{server_url}/v0/namespaces/{namespace}/snapshots/{snapshot_id}"
@@ -211,7 +211,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -309,7 +309,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     };
     let first = harness
         .client
-        .list_by_inode_with_options(&namespace, loonfs_api::InodeId(1), &options)
+        .list_by_inode_with_options(&namespace, loonfs_types::InodeId(1), &options)
         .page(PageRequest {
             limit: page_limit(1),
             cursor: None,
@@ -321,17 +321,17 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     let cursor = first.next_cursor.as_deref().expect("children cursor");
     let error = harness
         .client
-        .list_by_inode(&namespace, loonfs_api::InodeId(1))
+        .list_by_inode(&namespace, loonfs_types::InodeId(1))
         .page(PageRequest {
             limit: page_limit(1),
             cursor: Some(cursor.to_owned()),
         })
         .await
         .expect_err("snapshot children cursor cannot resume live");
-    assert_eq!(error.code(), Some(loonfs_api::ErrorCode::InvalidRequest));
+    assert_eq!(error.code(), Some(loonfs_types::ErrorCode::InvalidRequest));
     let second = harness
         .client
-        .list_by_inode_with_options(&namespace, loonfs_api::InodeId(1), &options)
+        .list_by_inode_with_options(&namespace, loonfs_types::InodeId(1), &options)
         .page(PageRequest {
             limit: page_limit(1),
             cursor: Some(cursor.to_owned()),
@@ -377,7 +377,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -479,7 +479,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -635,7 +635,7 @@ async fn snapshot_page_cursors_resume_one_pinned_directory() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

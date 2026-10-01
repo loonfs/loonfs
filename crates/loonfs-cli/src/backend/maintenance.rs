@@ -7,9 +7,9 @@ use loonfs::{
     LoonFs, Maintenance, MaintenanceAssignment, MaintenanceHandle, MaintenanceJob,
     MaintenanceJobId, MaintenanceRegistry, MaintenanceRunner, SharedObjectStore, Writable,
 };
-use loonfs_api::NamespaceId;
 use loonfs_grep::GrepWorker;
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+use loonfs_types::NamespaceId;
 use std::sync::Arc;
 
 pub(crate) struct MaintenanceHost {
@@ -25,7 +25,7 @@ type HostedJob = (MaintenanceJobId, Arc<dyn MaintenanceJob>);
 impl ResolvedTarget {
     fn maintenance_host(&self) -> Result<&MaintenanceHost, CliError> {
         self.maintenance.as_ref().ok_or_else(|| CliError::new(
-            loonfs_api::ErrorCode::NotSupported.as_str(),
+            loonfs_types::ErrorCode::NotSupported.as_str(),
             "`maintenance loop` requires an embedded profile because remote servers run their \
              own maintenance; use `loonfs maintenance metadata` for one pass or `loonfs maintenance \
              index status` to inspect the index",

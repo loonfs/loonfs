@@ -75,7 +75,7 @@ async fn run_snapshot_list(
                 .page(page_request(cursor, limit)?)
                 .await?)
         },
-        |_: &loonfs_api::v0::ListSnapshotsResponse| {},
+        |_: &loonfs_types::api::v0::ListSnapshotsResponse| {},
     )
     .await
     .map_err(|error| context.fail(kind, error))?;

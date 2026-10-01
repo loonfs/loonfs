@@ -10,10 +10,10 @@ use crate::commit::CommitOp;
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, DeleteDirectoryBehavior, InodeId, InodeKind,
 };
-use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_delete_path<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,

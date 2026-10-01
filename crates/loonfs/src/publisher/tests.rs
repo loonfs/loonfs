@@ -18,8 +18,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use loonfs_api::wire::wal::decode_wal_object_envelope_zstd;
-use loonfs_api::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
@@ -30,6 +28,8 @@ use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
     OperationContext, OperationKind, RecordingStore,
 };
+use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
+use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -39,7 +39,7 @@ use tokio::time::timeout;
 
 fn is_publication(bytes: &[u8]) -> bool {
     decode_wal_object_envelope_zstd(bytes).is_ok_and(|wal| !wal.payload().records.is_empty())
-        || loonfs_api::wire::manifest::decode_namespace_manifest_json(bytes)
+        || loonfs_types::format::manifest::decode_namespace_manifest_json(bytes)
             .is_ok_and(|manifest| manifest.payload().status.is_deleted())
 }
 
@@ -48,7 +48,7 @@ fn is_fold(operation: &OperationContext<'_>) -> bool {
         OperationKind::Put {
             bytes,
             mode: PutMode::CreateIfAbsent,
-        } => loonfs_api::wire::manifest::decode_namespace_manifest_json(bytes).is_ok_and(
+        } => loonfs_types::format::manifest::decode_namespace_manifest_json(bytes).is_ok_and(
             |manifest| {
                 manifest.payload().folded_wal_no.0 > 0 && !manifest.payload().status.is_deleted()
             },
@@ -212,7 +212,7 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
         MetadataCache::default(),
         None,
         RuntimeInstruments::new(None),
-        Arc::new(loonfs_api::StdMonotonicTimer::default()),
+        Arc::new(loonfs_types::StdMonotonicTimer::default()),
         Arc::new(loonfs_core::time::SystemWallClock),
     )
 }
@@ -330,7 +330,7 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
         .bootstrap_namespace(
             &loonfs_test_support::test_actor(),
             &loonfs_core::CreateNamespaceOptions {
-                access: loonfs_api::NamespaceAccess::Unrestricted {},
+                access: loonfs_types::NamespaceAccess::Unrestricted {},
                 allow_existing: false,
             },
         )
@@ -624,10 +624,10 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
 
 #[tokio::test]
 async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() {
-    use loonfs_api::wire::wal::{
+    use loonfs_core::publish::InlineContent;
+    use loonfs_types::format::wal::{
         MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
     };
-    use loonfs_core::publish::InlineContent;
 
     for extra_values in [0, 1] {
         let directory = tempdir().expect("directory");
@@ -660,7 +660,7 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
                 .map(|_| {
                     InlineContent::new(
                         namespace_id.clone(),
-                        loonfs_api::ContentId::generate(),
+                        loonfs_types::ContentId::generate(),
                         Bytes::from(vec![1; MAX_WAL_INLINE_CONTENT_BYTES]),
                     )
                 })
@@ -798,7 +798,7 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
         CommitCandidate::rejected(
             request,
             ContentPreparationError::ContentToken(vec![(
-                loonfs_api::ContentId::generate(),
+                loonfs_types::ContentId::generate(),
                 ContentTokenError::Expired,
             )]),
         ),
@@ -835,7 +835,7 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
         CommitCandidate::rejected(
             request.clone(),
             ContentPreparationError::ContentToken(vec![(
-                loonfs_api::ContentId::generate(),
+                loonfs_types::ContentId::generate(),
                 ContentTokenError::Expired,
             )]),
         ),
@@ -890,7 +890,7 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
 
     let wal_keys = shared
         .list_prefix(&wal_prefix(
-            &loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"),
+            &loonfs_types::NamespaceId::parse("demo").expect("valid namespace id"),
         ))
         .await
         .expect("list wal");
@@ -1819,7 +1819,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_object() {
     // one WAL object.
     let wal_keys = shared
         .list_prefix(&wal_prefix(
-            &loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"),
+            &loonfs_types::NamespaceId::parse("demo").expect("valid namespace id"),
         ))
         .await
         .expect("list wal");
@@ -1960,7 +1960,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
 
     let wal_keys = shared
         .list_prefix(&wal_prefix(
-            &loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"),
+            &loonfs_types::NamespaceId::parse("demo").expect("valid namespace id"),
         ))
         .await
         .expect("list wal");
@@ -2150,7 +2150,7 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
         &namespace_id,
         FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
-            writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+            writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )
@@ -2219,7 +2219,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         &namespace_id,
         FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
-            writer_id: loonfs_api::WriterId::parse("seed").expect("writer"),
+            writer_id: loonfs_types::WriterId::parse("seed").expect("writer"),
             now_ms: 1_000,
         },
     )
@@ -2227,7 +2227,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     .expect("seed tail");
     let value = InlineContent::new(
         namespace_id.clone(),
-        loonfs_api::ContentId::generate(),
+        loonfs_types::ContentId::generate(),
         Bytes::from_static(b"folded inline bytes"),
     );
     let candidate = CommitCandidate::with_inline_content(
@@ -2339,7 +2339,7 @@ async fn a_failed_fold_notifies_maintenance_and_reloads_the_tail() {
         &namespace_id,
         FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
-            writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+            writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )
@@ -2429,7 +2429,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
             namespace_id,
             FOLD_AT_WAL_OBJECTS - 1,
             &MutationContext {
-                writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+                writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
             },
         )
@@ -2514,7 +2514,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
             namespace_id,
             FOLD_AT_WAL_OBJECTS - 1,
             &MutationContext {
-                writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+                writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
                 now_ms: 1_000,
             },
         )
@@ -2597,7 +2597,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         &namespace_id,
         FOLD_AT_WAL_OBJECTS - 1,
         &MutationContext {
-            writer_id: loonfs_api::WriterId::parse("fold-seed").expect("valid writer id"),
+            writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
             now_ms: 1_000,
         },
     )

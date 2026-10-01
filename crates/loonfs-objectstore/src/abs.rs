@@ -6,7 +6,7 @@ use crate::object_store::Result;
 use crate::provider_object_store::CompareToken;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig};
-use loonfs_api::SecretString;
+use loonfs_types::SecretString;
 use object_store::azure::MicrosoftAzureBuilder;
 use std::sync::Arc;
 
