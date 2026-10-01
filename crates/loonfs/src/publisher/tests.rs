@@ -223,6 +223,10 @@ fn test_writer_bits() -> Arc<WriterBits> {
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
         wal_fold_permits: tokio::sync::Semaphore::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS),
         wal_folds_waiting: AtomicUsize::new(0),
+        compaction_permits: tokio::sync::Semaphore::new(
+            crate::config::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+        ),
+        compactor_epochs: tokio::sync::Mutex::default(),
         maintenance_hint_observer: None,
         namespace_advance_observer: None,
     })
@@ -2524,40 +2528,39 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
     let namespace_writer_a = writer.open_namespace(&namespace_a).expect("open namespace");
     let namespace_writer_b = writer.open_namespace(&namespace_b).expect("open namespace");
     recording.inner().block_next();
-
-    for (namespace, commit_id) in [
-        (&namespace_writer_a, "cross-a"),
-        (&namespace_writer_b, "cross-b"),
-    ] {
-        namespace
-            .commit_candidate(CommitCandidate::new(create_directory_request(
-                commit_id, "docs",
-            )))
-            .await
-            .expect("publish across the fold threshold");
-        if namespace.id() == &namespace_a {
-            recording.inner().wait_until_blocked().await;
-        } else {
-            wait_for_fold_waiters(&writer, 1).await;
-        }
-    }
-
-    recording.reset();
-    writer
-        .maintenance(loonfs_test_support::ids::writer_id("late-fold-maintenance"))
-        .fold_wal(&namespace_b)
-        .await
-        .expect("fold the waiting namespace tail");
-    assert_eq!(recording.count(OperationClass::Put), 1);
-    namespace_writer_b
+    namespace_writer_a
         .commit_candidate(CommitCandidate::new(create_directory_request(
-            "after-fold",
-            "after-fold",
+            "cross-a", "docs",
         )))
         .await
-        .expect("refresh the retained projection below the fold threshold");
+        .expect("publish across the fold threshold");
+    recording.inner().wait_until_blocked().await;
 
+    // An explicit fold takes a fold permit too, so it queues ahead of the
+    // fold that the next publication starts, and folds that tail first.
+    let explicit_fold = tokio::spawn({
+        let maintenance =
+            writer.maintenance(loonfs_test_support::ids::writer_id("late-fold-maintenance"));
+        let namespace_b = namespace_b.clone();
+        async move { maintenance.fold_wal(&namespace_b).await }
+    });
+    wait_for_fold_waiters(&writer, 1).await;
+    namespace_writer_b
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "cross-b", "docs",
+        )))
+        .await
+        .expect("publish across the fold threshold");
+    wait_for_fold_waiters(&writer, 2).await;
+
+    recording.reset();
     recording.inner().release();
+    let folded = explicit_fold
+        .await
+        .expect("join the explicit fold")
+        .expect("fold the namespace tail");
+    assert_eq!(folded.outcome, crate::FoldWalOutcome::Published);
+    assert_eq!(folded.manifest_head_seq, folded.target_head_seq);
     namespace_writer_a
         .wait_for_fold()
         .await
@@ -3172,6 +3175,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
 }
 
 mod inline_writer;
+mod session_compaction;
 
 impl loonfs_core::time::WallClock for ManualMonotonicTimer {
     fn now_ms(&self) -> Result<u64, crate::CoreError> {

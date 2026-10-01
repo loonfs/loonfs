@@ -12,18 +12,19 @@ use crate::{Error, Result, SharedObjectStore};
 use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache, StoredMetadataBlockCache};
 use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use loonfs_types::{
-    decode_cursor, encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page,
-    PageCursor, PageRequest, PaginationPolicy, Subject, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST,
-    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
-    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
-    LIMIT_GC_MIN_GRACE_WINDOW_MS, MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
+    decode_cursor, encode_cursor, CapabilityDocument, CompactorEpoch, FileRevision,
+    FileRevisionsPageCursor, Page, PageCursor, PageRequest, PaginationPolicy, Subject, WriterId,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
+    LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
+    LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
+    MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 /// The object-store client, configuration, caches, and metrics that
 /// read-only and writable runtimes share.
@@ -53,19 +54,71 @@ pub(crate) struct WriterIdentity {
     pub(crate) writer_id: WriterId,
 }
 
-/// Writer state shared weakly with the publisher worker.
+/// Writer state shared weakly with the publisher worker, and strongly with
+/// every [`Maintenance`](crate::Maintenance) value of the runtime.
 pub(crate) struct WriterBits {
     pub(crate) inline_content: crate::InlineContentPolicy,
     pub(crate) identity: WriterIdentity,
     pub(crate) wal_fold_permits: Semaphore,
     pub(crate) wal_folds_waiting: AtomicUsize,
+    /// Held by every metadata merge the runtime runs: one bounded
+    /// compaction step, or one streaming compaction.
+    pub(crate) compaction_permits: Semaphore,
+    /// The compactor epoch this runtime holds for each namespace. Its
+    /// sessions and every `Maintenance` value share it, so they never fence
+    /// each other.
+    pub(crate) compactor_epochs: tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
     pub(crate) maintenance_hint_observer: Option<MaintenanceHintObserver>,
     /// Optional synchronous notification after a mutation batch durably
     /// advances a namespace. Callers promise that it does not block.
     pub(crate) namespace_advance_observer: Option<NamespaceAdvanceObserver>,
 }
 
+/// A fold counted as waiting for a writer permit.
+struct WaitingFold<'a> {
+    counter: &'a AtomicUsize,
+    instruments: &'a RuntimeInstruments,
+}
+
+impl<'a> WaitingFold<'a> {
+    fn new(counter: &'a AtomicUsize, instruments: &'a RuntimeInstruments) -> Self {
+        let waiting_fold = Self {
+            counter,
+            instruments,
+        };
+        let waiting = counter.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+        instruments.publisher_wal_folds_waiting(waiting);
+        waiting_fold
+    }
+}
+
+impl Drop for WaitingFold<'_> {
+    fn drop(&mut self) {
+        let waiting = self
+            .counter
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        self.instruments.publisher_wal_folds_waiting(waiting);
+    }
+}
+
 impl WriterBits {
+    /// Waits for one of the writer's fold permits. Every fold the runtime
+    /// starts holds one, and so does a namespace deletion.
+    pub(crate) async fn fold_permit(
+        &self,
+        instruments: &RuntimeInstruments,
+    ) -> SemaphorePermit<'_> {
+        let waiting = WaitingFold::new(&self.wal_folds_waiting, instruments);
+        let permit = self
+            .wal_fold_permits
+            .acquire()
+            .await
+            .expect("fold permit semaphore should remain open");
+        drop(waiting);
+        permit
+    }
+
     /// Notifies maintenance after every publish attempt and the change observer
     /// after a successful commit.
     pub(crate) fn notify_after_publish(

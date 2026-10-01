@@ -76,6 +76,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
             .expect("reach fold threshold");
     }
     namespace.wait_for_fold().await.expect("fold");
+    writer.drain().await.expect("the fold's compaction settles");
     store.reset();
     namespace
         .create_directory("/after-fold", &test_actor())
@@ -176,6 +177,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         .expect("drop projection during fold");
     store.inner().release();
     namespace_writer.wait_for_fold().await.expect("fold");
+    writer.drain().await.expect("the fold's compaction settles");
     store.reset();
 
     namespace_writer

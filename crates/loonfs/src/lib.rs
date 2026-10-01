@@ -39,9 +39,12 @@
 //! # Ok(()) }
 //! ```
 //!
-//! A runtime starts no maintenance by itself. A host that wants scheduled
+//! A writable session keeps its own namespace's metadata compact: after each
+//! fold it publishes, it runs
+//! [`Maintenance::maintain_metadata_while_due`] over its namespace. A runtime
+//! starts no other maintenance by itself. A host that wants scheduled
 //! maintenance registers jobs built over [`LoonFs::maintenance`] with a
-//! [`MaintenanceRunner`], which is the only scheduler and is optional.
+//! [`MaintenanceRunner`], which is optional.
 
 #![warn(missing_docs)]
 

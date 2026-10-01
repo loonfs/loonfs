@@ -12,6 +12,11 @@ writer_id = "loonfs-server-local"
 # Defaults to 2.
 #max_concurrent_folds = 2
 
+# Maximum metadata merges this server runs at once, bounded compaction steps
+# and streaming compactions alike. Each holds up to max_merge_input_bytes of
+# decoded input. Defaults to 2.
+#max_concurrent_compactions = 2
+
 # Minimum interval between publication starts per namespace; cold namespaces
 # publish immediately. Defaults to 1000 ms.
 #min_publish_interval_ms = 1000

@@ -1183,20 +1183,34 @@ async fn commit_two_values(
 #[tokio::test]
 async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count() {
     for mode in ["automatic", "explicit", "scheduled"] {
+        // Every fold takes a fold permit, so holding them would stop an
+        // explicit fold too. Only the automatic case folds at four bytes on
+        // the session's own path and holds the permits until it is checked.
+        let automatic = mode == "automatic";
         let (_directory, store, writer, namespace, namespace_writer) =
             writer_with_policy(InlineContentPolicy {
-                inline_content_fold_at_bytes: 4,
+                inline_content_fold_at_bytes: if automatic {
+                    4
+                } else {
+                    InlineContentPolicy::default().inline_content_fold_at_bytes
+                },
                 ..policy()
             })
             .await;
         let namespace_reader = writer.namespace(&namespace);
-        let permits = writer
-            .mode
-            .bits
-            .wal_fold_permits
-            .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-            .await
-            .expect("hold folds");
+        let permits = if automatic {
+            Some(
+                writer
+                    .mode
+                    .bits
+                    .wal_fold_permits
+                    .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
+                    .await
+                    .expect("hold folds"),
+            )
+        } else {
+            None
+        };
         namespace_writer
             .put_file_with_options(
                 "/file",
@@ -1396,12 +1410,14 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
         KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace)),
         OperationClass::CompareAndSwap,
     ));
+    // The session folds only a full tail, so nothing but the explicit fold
+    // runs until the last commit fills it.
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
         .metadata_cache(cache)
         .inline_content(InlineContentPolicy {
             inline_content_threshold_bytes: Some(4),
-            inline_content_fold_at_bytes: 4,
+            inline_content_fold_at_bytes: 8,
             inline_content_tail_limit_bytes: 8,
             ..Default::default()
         })
@@ -1416,13 +1432,6 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
         .await
         .expect("namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
-    let permits = writer
-        .mode
-        .bits
-        .wal_fold_permits
-        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-        .await
-        .expect("hold automatic folds");
     namespace_writer
         .put_file_with_options(
             "/first",
@@ -1495,6 +1504,13 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
             put_operation("/last", &prepared[1]),
         ],
     };
+    let permits = writer
+        .mode
+        .bits
+        .wal_fold_permits
+        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
+        .await
+        .expect("hold the fold the full tail starts");
     namespace_writer
         .commit_candidate(CommitCandidate::prepared(request, prepared))
         .await

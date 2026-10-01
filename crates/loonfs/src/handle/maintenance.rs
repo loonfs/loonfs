@@ -1,10 +1,8 @@
 //! The maintenance capability of a writable runtime.
 
-use crate::fs::{RuntimeCore, WriterIdentity};
+use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::publisher::PublisherRegistry;
-use crate::{NamespaceId, Result};
-use loonfs_types::CompactorEpoch;
-use std::collections::BTreeMap;
+use crate::Result;
 use std::sync::Arc;
 
 /// Explicit maintenance: namespace diagnostics, operator checkpoints, WAL
@@ -13,13 +11,15 @@ use std::sync::Arc;
 /// Get one from [`LoonFs::maintenance`](crate::LoonFs::maintenance). Each
 /// call runs in the caller's task; this value starts no background work.
 /// Operations that mutate durable control state record the writer id it was
-/// created with.
+/// created with. Every value from one runtime shares that runtime's
+/// compactor claim, fold permits, and compaction permits with its writer
+/// sessions.
 #[derive(Clone)]
 pub struct Maintenance {
     pub(crate) core: RuntimeCore,
     pub(crate) publisher: PublisherRegistry,
+    pub(crate) writer: Arc<WriterBits>,
     pub(crate) actor: WriterIdentity,
-    pub(crate) compactor_epochs: Arc<tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>>,
     /// A narrowed per-step row budget for the tests that need a family group
     /// whose base run no bounded step can compact. See
     /// [`Self::starve_compaction_row_budget`].
@@ -32,16 +32,17 @@ pub struct Maintenance {
 }
 
 impl Maintenance {
-    pub(super) fn new(
+    pub(crate) fn new(
         core: RuntimeCore,
         publisher: PublisherRegistry,
+        writer: Arc<WriterBits>,
         actor: WriterIdentity,
     ) -> Self {
         Self {
             core,
             publisher,
+            writer,
             actor,
-            compactor_epochs: Arc::default(),
             #[cfg(test)]
             compaction_row_budget: None,
             #[cfg(test)]

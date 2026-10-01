@@ -14,7 +14,8 @@ pub(crate) const DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS: u64 = 1000;
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// Default maximum WAL-tail folds one writer runs concurrently.
 pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
-/// Default maximum streaming metadata compactions one job runs concurrently.
+/// Default maximum metadata merges, bounded or streaming, one writer runs
+/// concurrently.
 pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 2;
 /// Default cap on concurrently running maintenance invocations.
 /// Each job already runs at most once per namespace at a time; this bounds how many may run at

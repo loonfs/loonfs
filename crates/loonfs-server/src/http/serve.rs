@@ -382,6 +382,10 @@ pub(super) async fn build_handles(
             std::num::NonZeroUsize::new(config.max_concurrent_folds)
                 .expect("validated maximum concurrent folds should be nonzero"),
         )
+        .max_concurrent_compactions(
+            std::num::NonZeroUsize::new(config.max_concurrent_compactions)
+                .expect("validated maximum concurrent compactions should be nonzero"),
+        )
         .max_merge_input_bytes(
             std::num::NonZeroUsize::new(config.max_merge_input_bytes)
                 .expect("validated merge input budget should be nonzero"),
