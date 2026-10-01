@@ -277,9 +277,7 @@ mod tests {
     use super::event_from_op_deltas;
     use crate::context::MutationContext;
     use crate::error::CoreError;
-    use crate::manifest::{
-        MetadataSegmentCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
-    };
+    use crate::manifest::{HeadStateCache, MetadataSegmentCache};
     use crate::namespace::read_anchor::load_read_anchor;
     use crate::test_support::ops::create;
     use crate::{NamespaceEngine, RuntimeReadContext};
@@ -338,14 +336,7 @@ mod tests {
             basis: loaded.basis(),
             head: loaded.read_state,
             segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
-            tail_cache: Arc::new(WalTailProjectionCache::new(
-                WalTailProjectionCacheConfig {
-                    max_entries: 1,
-                    max_rows: usize::MAX,
-                    max_decoded_bytes: usize::MAX,
-                },
-                None,
-            )),
+            head_state: Arc::new(HeadStateCache::new(usize::MAX)),
         };
         let engine = NamespaceEngine::reader(&store, namespace_id);
 

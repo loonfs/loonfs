@@ -8,8 +8,8 @@ use crate::authorize::{Absence, ReadAccess};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::manifest::{
-    load_basis_metadata_segments, MetadataSegmentCache, VerifiedMetadataSegments,
-    WalTailProjectionCache, WalTailProjectionCacheKey,
+    load_basis_metadata_segments, HeadStateCache, MetadataSegmentCache, VerifiedMetadataSegments,
+    WalTailProjectionCacheKey,
 };
 use crate::metadata::{
     LeafRevisionPrefetch, MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord,
@@ -44,7 +44,7 @@ pub(crate) struct ReadLoadContext<'anchor, 'cache> {
     /// WAL replay covering the rest).
     basis: &'anchor MetadataBasis,
     segment_cache: Option<&'cache MetadataSegmentCache>,
-    tail_cache: Option<&'cache WalTailProjectionCache>,
+    head_state: Option<&'cache HeadStateCache>,
 }
 
 impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
@@ -52,13 +52,13 @@ impl<'anchor, 'cache> ReadLoadContext<'anchor, 'cache> {
         head: &'anchor NamespaceReadState,
         basis: &'anchor MetadataBasis,
         segment_cache: Option<&'cache MetadataSegmentCache>,
-        tail_cache: Option<&'cache WalTailProjectionCache>,
+        head_state: Option<&'cache HeadStateCache>,
     ) -> Self {
         Self {
             head,
             basis,
             segment_cache,
-            tail_cache,
+            head_state,
         }
     }
 }
@@ -203,8 +203,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             manifest_no,
             head_seq: head.seq,
         };
-        if let Some(cache) = load_context.tail_cache {
-            if let Some(wal_tail) = cache.get(&cache_key) {
+        if let Some(cache) = load_context.head_state {
+            if let Some(wal_tail) = cache.get_tail(&cache_key) {
                 return Ok(Self {
                     namespace_id: namespace_id.clone(),
                     head,
@@ -219,8 +219,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .await
                 .map_err(CoreError::MetadataProjection)?;
         let wal_tail = Arc::new(replayed.projected_tail);
-        if let Some(cache) = load_context.tail_cache {
-            cache.insert(cache_key, Arc::clone(&wal_tail));
+        if let Some(cache) = load_context.head_state {
+            cache.insert_tail(cache_key, Arc::clone(&wal_tail));
         }
         Ok(Self {
             namespace_id: namespace_id.clone(),

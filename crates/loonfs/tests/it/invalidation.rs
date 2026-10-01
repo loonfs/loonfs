@@ -741,11 +741,60 @@ async fn writer_with_timer(
         .expect("build writer")
 }
 
+/// Creates `other_id` from a writer of its own and gives it one 16 KiB
+/// inline file, so its head state outweighs a namespace of a few small files.
+async fn fill_other(store: &SharedObjectStore, other_id: &NamespaceId) {
+    let setup = writer(store, "other-setup").await;
+    setup
+        .create_namespace(
+            other_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create other namespace");
+    setup
+        .open_namespace(other_id)
+        .expect("open other namespace")
+        .put_file_bytes(
+            "/large.bin",
+            &[b'x'; 16 * 1024],
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("put large file");
+    setup.drain().await.expect("finish hints");
+}
+
+/// What a cold read of the root of `other_id` caches as head state once
+/// [`fill_other`] has written it, measured on a store of its own.
+async fn other_head_state_bytes(other_id: &NamespaceId) -> usize {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
+    fill_other(&store, other_id).await;
+    let reader = LoonFs::reader_with_store(store)
+        .build()
+        .await
+        .expect("build reader");
+    reader
+        .namespace(other_id)
+        .get_path_entry("/", Default::default())
+        .await
+        .expect("cold read");
+    reader
+        .runtime_cache_stats()
+        .head_state_cache_cached_decoded_bytes
+}
+
 #[tokio::test]
 async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("seeded-check").expect("namespace");
     let other_id = NamespaceId::parse("other").expect("namespace");
+    // The budget holds exactly the other namespace's head state, which
+    // outweighs this namespace's, so reading the other namespace evicts
+    // everything this one has cached.
+    let budget = other_head_state_bytes(&other_id).await;
     let blocking = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
@@ -763,7 +812,7 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
         &timer,
         RuntimeCacheConfig {
             manifest_revalidation_interval_ms: interval_ms,
-            max_cached_namespaces: 1,
+            max_cached_wal_tail_projection_decoded_bytes: budget,
             ..Default::default()
         },
     )
@@ -774,15 +823,14 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     let reader = writer.read_only();
     let other_namespace = reader.namespace(&other_id);
     let namespace = reader.namespace(&namespace_id);
-    for id in [&namespace_id, &other_id] {
-        writer
-            .create_namespace(
-                id,
-                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-            )
-            .await
-            .expect("create namespace");
-    }
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    fill_other(&store, &other_id).await;
     let put = |path: &'static str| {
         namespace_writer.put_file_bytes(
             path,
@@ -1047,6 +1095,83 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         .get_path_entry("/docs/fresh.txt", Default::default())
         .await
         .expect("read after write");
+    crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
+    let after_read = reader.runtime_cache_stats();
+    assert_eq!(
+        after_read.wal_tail_projection_cache_misses,
+        before_read.wal_tail_projection_cache_misses
+    );
+    assert_eq!(
+        after_read.wal_tail_projection_cache_hits,
+        before_read.wal_tail_projection_cache_hits + 1
+    );
+}
+
+#[tokio::test]
+async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = recording.clone();
+    let namespace_id = NamespaceId::parse("maintained").expect("valid namespace id");
+    let writer = writer_with_cache(
+        &store,
+        "maintained-writer",
+        RuntimeCacheConfig {
+            manifest_revalidation_interval_ms: u64::MAX,
+            ..Default::default()
+        },
+    )
+    .await;
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .put_file_bytes(
+            "/file.txt",
+            b"file",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("put file");
+    let reader = writer.read_only();
+    let namespace = reader.namespace(&namespace_id);
+    namespace
+        .get_path_entry("/file.txt", Default::default())
+        .await
+        .expect("read the seeded view");
+
+    writer
+        .maintenance(loonfs_test_support::ids::writer_id("maintained-writer"))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the tail into a new manifest");
+    let file = namespace
+        .get_file_bytes("/file.txt")
+        .await
+        .expect("read after maintenance");
+    assert_eq!(file.bytes, b"file");
+
+    writer.drain().await.expect("finish hints");
+    let next_wal_no = head_state(&store, &namespace_id)
+        .await
+        .wal_no
+        .successor()
+        .expect("next WAL number");
+    recording.reset();
+    let before_read = reader.runtime_cache_stats();
+    namespace
+        .get_path_entry("/file.txt", Default::default())
+        .await
+        .expect("next read");
     crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
     let after_read = reader.runtime_cache_stats();
     assert_eq!(

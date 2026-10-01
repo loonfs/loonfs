@@ -956,14 +956,7 @@ async fn fresh_read_context<S: ObjectStore + ?Sized>(
         basis: loaded.basis(),
         head: loaded.read_state,
         segment_cache: Arc::new(MetadataSegmentCache::new(Default::default())),
-        tail_cache: Arc::new(crate::manifest::WalTailProjectionCache::new(
-            crate::manifest::WalTailProjectionCacheConfig {
-                max_entries: 4,
-                max_rows: usize::MAX,
-                max_decoded_bytes: usize::MAX,
-            },
-            None,
-        )),
+        head_state: Arc::new(crate::manifest::HeadStateCache::new(usize::MAX)),
     }
 }
 

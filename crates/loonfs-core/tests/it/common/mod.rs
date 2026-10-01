@@ -4,9 +4,8 @@
 
 use loonfs_api::NamespaceId;
 use loonfs_core::cache::{
-    MetadataSegmentCache, MetadataSegmentCacheConfig, WalTailProjectionCache,
-    WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+    HeadStateCache, MetadataSegmentCache, MetadataSegmentCacheConfig,
+    DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
 };
 use loonfs_core::control::load_read_anchor;
 use loonfs_core::{MutationContext, NamespaceWriterEngine, RuntimeReadContext};
@@ -41,13 +40,8 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
         segment_cache: Arc::new(MetadataSegmentCache::new(
             MetadataSegmentCacheConfig::default(),
         )),
-        tail_cache: Arc::new(WalTailProjectionCache::new(
-            WalTailProjectionCacheConfig {
-                max_entries: 4,
-                max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-                max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-            },
-            None,
+        head_state: Arc::new(HeadStateCache::new(
+            DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
         )),
     }
 }

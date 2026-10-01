@@ -48,11 +48,11 @@ async fn writer_with_file(
 /// resolution shows up as segment GETs.
 async fn uncached_segment_reader(
     store: &loonfs::SharedObjectStore,
-    max_cached_namespaces: usize,
+    head_state_bytes: usize,
 ) -> LoonFs<ReadOnly> {
     LoonFs::reader_with_store(store.clone())
         .runtime_cache(RuntimeCacheConfig {
-            max_cached_namespaces,
+            max_cached_wal_tail_projection_decoded_bytes: head_state_bytes,
             metadata_segment_cache: MetadataSegmentCacheConfig {
                 max_decoded_bytes: 0,
                 ..MetadataSegmentCacheConfig::default()
@@ -99,7 +99,11 @@ async fn an_unchanged_view_resolves_the_path_once() {
         "resolution should read metadata segments"
     );
 
-    let speculative = uncached_segment_reader(&store, 8).await;
+    let speculative = uncached_segment_reader(
+        &store,
+        RuntimeCacheConfig::default().max_cached_wal_tail_projection_decoded_bytes,
+    )
+    .await;
     let speculative_namespace = speculative.namespace(&namespace_id);
     speculative_namespace
         .get_file_bytes(PATH)
@@ -227,8 +231,10 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
         )
         .await;
     assert!(result.results[0].is_ok());
-    for max_cached_namespaces in [0, 8] {
-        let reader = uncached_segment_reader(&store, max_cached_namespaces).await;
+    let default_head_state_bytes =
+        RuntimeCacheConfig::default().max_cached_wal_tail_projection_decoded_bytes;
+    for head_state_bytes in [0, default_head_state_bytes] {
+        let reader = uncached_segment_reader(&store, head_state_bytes).await;
         let namespace = reader.namespace(&namespace_id);
         for (index, value) in values.iter().enumerate() {
             for _ in 0..2 {
@@ -240,7 +246,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
                 assert_eq!(read.bytes, value.bytes().as_ref());
                 assert!(
                     log.snapshot().is_empty(),
-                    "{max_cached_namespaces} cached namespaces requested content"
+                    "a head-state budget of {head_state_bytes} bytes requested content"
                 );
             }
         }

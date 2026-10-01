@@ -376,8 +376,6 @@ pub struct LocalCacheConfig {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCacheConfigOverrides {
     pub manifest_revalidation_interval_ms: Option<u64>,
-    pub max_cached_namespaces: Option<usize>,
-    pub max_cached_wal_tail_projection_rows: Option<usize>,
     pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
     pub metadata_segment_cache_max_decoded_bytes: Option<usize>,
     pub max_block_memo_bytes: Option<usize>,
@@ -514,12 +512,6 @@ impl ServerConfig {
         let mut config = RuntimeCacheConfig::default();
         if let Some(value) = self.runtime_cache.manifest_revalidation_interval_ms {
             config.manifest_revalidation_interval_ms = value;
-        }
-        if let Some(value) = self.runtime_cache.max_cached_namespaces {
-            config.max_cached_namespaces = value;
-        }
-        if let Some(value) = self.runtime_cache.max_cached_wal_tail_projection_rows {
-            config.max_cached_wal_tail_projection_rows = value;
         }
         if let Some(value) = self
             .runtime_cache
@@ -1707,7 +1699,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [runtime_cache]
-max_cached_namespacs = 2
+max_cached_wal_tail_projection_decoded_byte = 2
 
 [store]
 kind = "local-fs"
@@ -1733,7 +1725,10 @@ root = "/tmp/loonfs-server"
         for (path, typo) in [
             (top_level, "lease_duration"),
             (store_level, "key_prefiks"),
-            (runtime_cache_level, "max_cached_namespacs"),
+            (
+                runtime_cache_level,
+                "max_cached_wal_tail_projection_decoded_byte",
+            ),
             (grep_level, "max_files_per_stepp"),
         ] {
             let error = load_server_config(&path).expect_err("typo'd key must be rejected");
@@ -1813,8 +1808,6 @@ writer_id = "loonfs-server"
 
 [runtime_cache]
 manifest_revalidation_interval_ms = 250
-max_cached_namespaces = 2
-max_cached_wal_tail_projection_rows = 10
 max_cached_wal_tail_projection_decoded_bytes = 4096
 max_block_memo_bytes = 8192
 
@@ -1828,8 +1821,6 @@ root = "/tmp/loonfs-server"
             .expect("load config")
             .runtime_cache_config();
         assert_eq!(config.manifest_revalidation_interval_ms, 250);
-        assert_eq!(config.max_cached_namespaces, 2);
-        assert_eq!(config.max_cached_wal_tail_projection_rows, 10);
         assert_eq!(config.max_cached_wal_tail_projection_decoded_bytes, 4096);
         assert_eq!(config.metadata_segment_cache.max_block_memo_bytes, 8192);
     }
@@ -1843,8 +1834,6 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [runtime_cache]
-max_cached_namespaces = 0
-max_cached_wal_tail_projection_rows = 0
 max_cached_wal_tail_projection_decoded_bytes = 0
 metadata_segment_cache_max_decoded_bytes = 0
 
@@ -2255,7 +2244,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [runtime_cache]
-max_cached_wal_tail_projection_rows = -1
+max_cached_wal_tail_projection_decoded_bytes = -1
 
 [store]
 kind = "local-fs"
@@ -2263,7 +2252,7 @@ root = "/tmp/loonfs-server"
 "#,
         );
 
-        let error = load_server_config(&path).expect_err("negative row limit");
+        let error = load_server_config(&path).expect_err("negative byte limit");
         match error {
             ServerConfigError::Decode(_) => {}
             other => panic!("expected decode error, got {other:?}"),

@@ -1,7 +1,7 @@
 //! The runtime core that read-only and writable runtimes share, and the extra
 //! state a writer holds.
 
-use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
+use crate::cache::RuntimeCacheStatsInner;
 use crate::config::ReadConfig;
 use crate::metrics::RuntimeInstruments;
 use crate::publisher::{NamespaceAdvanceHint, NamespaceAdvanceObserver};
@@ -19,14 +19,11 @@ use loonfs_api::{
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
     MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
-use loonfs_core::cache::{
-    MetadataSegmentCache, StoredMetadataBlockCache, WalTailProjectionCache,
-    WalTailProjectionCacheConfig,
-};
+use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache, StoredMetadataBlockCache};
 use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 /// The object-store client, configuration, caches, and metrics that
@@ -42,9 +39,8 @@ pub(crate) struct RuntimeCoreInner {
     pub(crate) config: ReadConfig,
     pub(crate) timer: Arc<dyn loonfs_api::MonotonicTimer>,
     pub(crate) wall_clock: Arc<dyn crate::WallClock>,
-    pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_segment_cache: Arc<MetadataSegmentCache>,
-    pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
+    pub(crate) head_state: Arc<HeadStateCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
     /// Publication, collection, and completed-compaction metrics.
     pub(crate) instruments: Arc<RuntimeInstruments>,
@@ -133,19 +129,6 @@ impl WriterIdentity {
     }
 }
 
-/// Lock accessors for the runtime caches.
-///
-/// Poisoning is propagated as a panic: a poisoned cache means another thread
-/// panicked mid-update, and serving from it could violate the consistency the
-/// caches promise.
-impl RuntimeCoreInner {
-    pub(crate) fn control_cache(&self) -> MutexGuard<'_, RuntimeControlCache> {
-        self.control_cache
-            .lock()
-            .expect("control cache lock poisoned")
-    }
-}
-
 impl RuntimeCore {
     pub(crate) fn as_subject(&self, subject: Subject) -> Self {
         Self {
@@ -178,14 +161,11 @@ impl RuntimeCore {
                 instruments.metadata_segment_cache_observer(),
             ))
         });
-        let wal_tail_projection_cache = Arc::new(WalTailProjectionCache::new(
-            WalTailProjectionCacheConfig {
-                max_entries: config.runtime_cache.max_cached_namespaces,
-                max_rows: config.runtime_cache.max_cached_wal_tail_projection_rows,
-                max_decoded_bytes: config
-                    .runtime_cache
-                    .max_cached_wal_tail_projection_decoded_bytes,
-            },
+        let head_state = Arc::new(HeadStateCache::with_observers(
+            config
+                .runtime_cache
+                .max_cached_wal_tail_projection_decoded_bytes,
+            instruments.head_state_cache_observer(),
             instruments.wal_tail_projection_cache_observer(),
         ));
         Self {
@@ -195,9 +175,8 @@ impl RuntimeCore {
                 config,
                 timer,
                 wall_clock,
-                control_cache: Mutex::new(RuntimeControlCache::new(Arc::clone(&instruments))),
                 metadata_segment_cache,
-                wal_tail_projection_cache,
+                head_state,
                 cache_stats: RuntimeCacheStatsInner::new(Arc::clone(&instruments)),
                 instruments,
             }),
@@ -306,7 +285,7 @@ impl RuntimeCore {
     pub(crate) fn runtime_cache_stats(&self) -> RuntimeCacheStats {
         self.inner.cache_stats.snapshot(
             self.inner.metadata_segment_cache.stats(),
-            self.inner.wal_tail_projection_cache.stats(),
+            self.inner.head_state.stats(),
         )
     }
 

@@ -9,10 +9,12 @@ use loonfs::{
 };
 use tempfile::tempdir;
 
+/// Reads `/a` while a compaction and a collection remove the segments the
+/// read started from, and hands back the cold reader that read it.
 async fn read_during_compaction_and_collection(
     durable: bool,
     head_view: bool,
-) -> loonfs::Result<loonfs::PathEntry> {
+) -> (loonfs::Result<loonfs::PathEntry>, LoonFs<loonfs::ReadOnly>) {
     use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
     use loonfs_test_support::stores::{
         BlockingStore, KeyPredicate, MetadataMapStore, OperationClass,
@@ -48,7 +50,10 @@ async fn read_during_compaction_and_collection(
         )
         .await
         .expect("namespace");
-    let namespace_writer = runtime.writer.open_namespace(&namespace)?;
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace)
+        .expect("open namespace");
     for name in ["a", "b"] {
         runtime
             .put_file_bytes(
@@ -215,13 +220,14 @@ async fn read_during_compaction_and_collection(
         assert_eq!(entry, if durable { &captured } else { &current_entry });
     }
     runtime.writer.shutdown().await.expect("shutdown");
-    result
+    (result, reader)
 }
 
 #[tokio::test]
 async fn head_read_view_returns_stale_head_after_compaction_and_collection() {
     let error = read_during_compaction_and_collection(false, true)
         .await
+        .0
         .expect_err("captured segments were collected");
     assert_eq!(error.code(), ErrorCode::StaleHead);
 }
@@ -230,14 +236,32 @@ async fn head_read_view_returns_stale_head_after_compaction_and_collection() {
 async fn snapshot_read_view_survives_compaction_and_collection() {
     read_during_compaction_and_collection(true, true)
         .await
+        .0
         .expect("durable snapshot remains readable");
 }
 
 #[tokio::test]
 async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
-    read_during_compaction_and_collection(false, false)
+    let (result, reader) = read_during_compaction_and_collection(false, false).await;
+    let entry = result.expect("one current read remains readable");
+
+    let before_read = reader.runtime_cache_stats();
+    let again = reader
+        .namespace(&entry.namespace_id)
+        .get_path_entry("/a", Default::default())
         .await
-        .expect("one current read remains readable");
+        .expect("the read after the stale-head retry");
+    assert_eq!(again, entry);
+    let after_read = reader.runtime_cache_stats();
+    assert_eq!(
+        after_read.wal_tail_projection_cache_misses,
+        before_read.wal_tail_projection_cache_misses
+    );
+    assert_eq!(
+        after_read.wal_tail_projection_cache_hits,
+        before_read.wal_tail_projection_cache_hits + 1,
+        "the next read reuses the tail the retry loaded"
+    );
 }
 
 #[tokio::test]

@@ -768,14 +768,7 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         segment_cache: std::sync::Arc::new(crate::cache::MetadataSegmentCache::new(
             Default::default(),
         )),
-        tail_cache: std::sync::Arc::new(crate::cache::WalTailProjectionCache::new(
-            crate::cache::WalTailProjectionCacheConfig {
-                max_entries: 1,
-                max_rows: usize::MAX,
-                max_decoded_bytes: usize::MAX,
-            },
-            None,
-        )),
+        head_state: std::sync::Arc::new(crate::cache::HeadStateCache::new(usize::MAX)),
     };
     let error = super::probe_namespace_wal(&store, &mut warm)
         .await

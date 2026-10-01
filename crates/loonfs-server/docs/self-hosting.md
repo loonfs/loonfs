@@ -292,8 +292,8 @@ namespace.
 | Metric | Type | What moves it |
 | --- | --- | --- |
 | `loonfs.namespace_head_cache.gets` | Counter, `result` label | A read looks up its namespace head: `hit` or `miss`. |
-| `loonfs.namespace_head_cache.evictions` | Counter | A head is evicted at the `runtime_cache.max_cached_namespaces` limit. |
-| `loonfs.namespace_head_cache.entries` | Gauge | Heads in the cache now. |
+| `loonfs.head_state_cache.evictions` | Counter | A head anchor or read-side WAL-tail projection is evicted at the `runtime_cache.max_cached_wal_tail_projection_decoded_bytes` budget. |
+| `loonfs.head_state_cache.retained_decoded_bytes` | Gauge | Decoded bytes of head anchors and read-side WAL-tail projections held now. |
 | `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `runtime_cache.metadata_segment_cache_max_decoded_bytes`. |
 | `loonfs.publisher.projection_evictions` | Counter | A publish-side WAL-tail projection is evicted at the projection budget. |
 | `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of using a retained projection. This happens on a session's first publish, after an eviction or a failed publish, when the namespace's last write was more than a minute ago, and when a fold the publisher did not run has published a new manifest. |
@@ -342,9 +342,8 @@ counted in any budget and sit on top.
 | Budget | Setting | Default | What it bounds | Kind |
 | --- | --- | --- | --- | --- |
 | Metadata segment cache | `runtime_cache.metadata_segment_cache_max_decoded_bytes` | 256 MiB | Decoded metadata blocks and manifests | Steady |
-| Read-side WAL-tail projections | `runtime_cache.max_cached_wal_tail_projection_decoded_bytes` and `runtime_cache.max_cached_wal_tail_projection_rows` | 64 MiB and 1,000,000 rows | WAL tails replayed for reads | Steady |
-| Publish-side WAL-tail projections | The same two settings | 64 MiB and 1,000,000 rows | WAL tails the namespace publishers keep | Steady |
-| Head anchors | `runtime_cache.max_cached_namespaces` | 64 namespaces | Cached namespace heads, and the number of read-side projections | Steady, by count |
+| Head state | `runtime_cache.max_cached_wal_tail_projection_decoded_bytes` | 64 MiB | Cached namespace heads and the WAL tails replayed for reads, for any number of namespaces | Steady |
+| Publish-side WAL-tail projections | The same setting | 64 MiB | WAL tails the namespace publishers keep | Steady |
 | Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
@@ -371,7 +370,7 @@ is written alone. A checkpoint, snapshot, or fork that has to fold the WAL
 tail first runs that fold with the default 64 MiB block memo.
 
 Maintenance requests sent to the API run outside
-`max_concurrent_maintenance`. Head anchors are limited by count, not by bytes.
+`max_concurrent_maintenance`.
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied
 transfer. Both default to 256 MiB. They do not reserve memory.
@@ -382,7 +381,7 @@ process-wide limit add up to 1,024 MiB by default:
 | Budget | Ceiling |
 | --- | --- |
 | Metadata segment cache | 256 MiB |
-| WAL-tail projections, both sides | 128 MiB |
+| Head state and publish-side projections | 128 MiB |
 | Publication queue | 64 MiB |
 | 8 uploads at 8 MiB | 64 MiB |
 | 16 downloads at 8 MiB | 128 MiB |
@@ -390,7 +389,7 @@ process-wide limit add up to 1,024 MiB by default:
 | 2 maintenance runs at 96 MiB | 192 MiB |
 | Total | 1,024 MiB |
 
-The total leaves out writer sessions, head anchors, the block memos of reads
+The total leaves out writer sessions, the block memos of reads
 and publications, WAL tails that an operation replays because no projection
 holds them, and maintenance requests sent to the API. Eight running
 publications can hold up to 512 MiB of block memos at the default budget.
@@ -406,8 +405,8 @@ The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk
 tier, and up to 256 MiB of inserts waiting for the disk tier. The last two
 have no setting.
 
-This config for a 256 MiB container uses a 64 MiB segment cache, 16 MiB of
-WAL-tail projections per side, 8 MiB block memos, an 8 MiB merge input, two
+This config for a 256 MiB container uses a 64 MiB segment cache, a 16 MiB
+head-state budget that also bounds the publish-side projections, 8 MiB block memos, an 8 MiB merge input, two
 running publications, one fold, and one maintenance run:
 
 ```toml
@@ -430,7 +429,7 @@ max_block_memo_bytes = 8388608
 | Budget | Ceiling |
 | --- | --- |
 | Metadata segment cache | 64 MiB |
-| WAL-tail projections, both sides | 32 MiB |
+| Head state and publish-side projections | 32 MiB |
 | Publication queue | 8 MiB |
 | 2 uploads at 8 MiB | 16 MiB |
 | 2 downloads at 8 MiB | 16 MiB |

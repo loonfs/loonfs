@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 /// Holds the WAL tail after a manifest as rows and the inline content they name.
 /// Replay already downloaded the resident bytes, so reads need no content request.
-/// The existing projection budgets bound those bytes.
+/// The head-state budgets bound those bytes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectedWalTail {
     pub(crate) rows: MetadataState,
@@ -62,7 +62,7 @@ impl ProjectedWalTail {
     }
 
     /// The heap the projection holds behind the `Arc` every holder shares.
-    pub(crate) fn decoded_bytes(&self) -> usize {
+    pub fn decoded_bytes(&self) -> usize {
         arc_bytes::<Self>()
             + self.rows.decoded_bytes()
             + hash_map_table_bytes(&self.inline_content)

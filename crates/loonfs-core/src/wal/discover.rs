@@ -139,7 +139,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             .validate(loaded.object_key, envelope)
             .map_err(wal_error)?;
         if state.wal_no == context.head.wal_no {
-            projected_tail = context.tail_cache.get(&cache_key);
+            projected_tail = context.head_state.get_tail(&cache_key);
         }
         let before = state.clone();
         state = state.after_wal_object(object.envelope().payload());
@@ -153,7 +153,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     }
     if let Some(projected_tail) = projected_tail {
         cache_key.head_seq = state.seq;
-        context.tail_cache.insert(cache_key, projected_tail);
+        context.head_state.insert_tail(cache_key, projected_tail);
     }
     context.head = state;
     Ok(true)

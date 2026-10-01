@@ -1,6 +1,7 @@
 #![allow(clippy::panic, clippy::print_stdout)]
-//! Checks that the metadata segment cache and the WAL-tail projection cache
-//! charge their budgets with the heap their contents hold.
+//! Checks that the metadata segment cache and the head-state cache, which
+//! holds head anchors and WAL-tail projections, charge their budgets with the
+//! heap their contents hold.
 //!
 //! This binary counts every allocation, so it keeps a process of its own.
 //! Heap here means the bytes the program asks the allocator for; allocator
@@ -433,7 +434,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         },
     ];
     let mut failures = Vec::new();
-    println!("shape | segment budget | segment heap | ratio | projections accounted | projections heap | ratio");
+    println!("shape | segment budget | segment heap | ratio | head state accounted | head state heap | ratio");
     for shape in &shapes {
         let root = tempfile::tempdir().expect("tempdir");
         let store: SharedObjectStore =
@@ -447,7 +448,7 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         let (segment_heap, reader) = retained_heap(
             root.path(),
             RuntimeCacheConfig {
-                max_cached_namespaces: 0,
+                max_cached_wal_tail_projection_decoded_bytes: 0,
                 metadata_segment_cache: MetadataSegmentCacheConfig {
                     max_decoded_bytes: SEGMENT_BUDGET_BYTES,
                     ..MetadataSegmentCacheConfig::default()
@@ -467,42 +468,40 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         );
         drop(reader);
 
-        let projections = RuntimeCacheConfig {
-            max_cached_namespaces: shape.namespaces,
+        let head_state = RuntimeCacheConfig {
             metadata_segment_cache: MetadataSegmentCacheConfig {
                 max_decoded_bytes: 0,
                 ..MetadataSegmentCacheConfig::default()
             },
             ..RuntimeCacheConfig::default()
         };
-        let (with_projections, reader) =
-            retained_heap(root.path(), projections.clone(), |reader| {
-                stat_one_path_per_namespace(shape, reader)
-            })
-            .await;
+        let (with_head_state, reader) = retained_heap(root.path(), head_state.clone(), |reader| {
+            stat_one_path_per_namespace(shape, reader)
+        })
+        .await;
         let accounted = reader
             .runtime_cache_stats()
-            .wal_tail_projection_cache_cached_decoded_bytes;
+            .head_state_cache_cached_decoded_bytes;
         drop(reader);
-        let (without_projections, reader) = retained_heap(
+        let (without_head_state, reader) = retained_heap(
             root.path(),
             RuntimeCacheConfig {
-                max_cached_wal_tail_projection_rows: 0,
-                ..projections
+                max_cached_wal_tail_projection_decoded_bytes: 0,
+                ..head_state
             },
             |reader| stat_one_path_per_namespace(shape, reader),
         )
         .await;
         drop(reader);
-        let projection_heap = with_projections.saturating_sub(without_projections);
+        let head_state_heap = with_head_state.saturating_sub(without_head_state);
 
         let segment_ratio = ratio(segment_heap, SEGMENT_BUDGET_BYTES);
-        let projection_ratio = ratio(projection_heap, accounted);
+        let head_state_ratio = ratio(head_state_heap, accounted);
         println!(
-            "{} | {SEGMENT_BUDGET_BYTES} | {segment_heap} | {segment_ratio:.2} | {accounted} | {projection_heap} | {projection_ratio:.2}",
+            "{} | {SEGMENT_BUDGET_BYTES} | {segment_heap} | {segment_ratio:.2} | {accounted} | {head_state_heap} | {head_state_ratio:.2}",
             shape.label
         );
-        for (what, value) in [("segment", segment_ratio), ("projection", projection_ratio)] {
+        for (what, value) in [("segment", segment_ratio), ("head state", head_state_ratio)] {
             if (value - 1.0).abs() > TOLERANCE {
                 failures.push(format!(
                     "{} {what} heap is {value:.2}x its accounted bytes",

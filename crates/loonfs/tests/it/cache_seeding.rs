@@ -13,6 +13,7 @@ use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::test_support::{
     RecordedStoredMetadataBlockCall, RecordingStoredMetadataBlockCache,
 };
+use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
@@ -85,87 +86,6 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     assert_eq!(after_mutation.wal_tail_projection_cache_misses, 0);
     assert!(
         after_mutation.wal_tail_projection_cache_hits > after_second.wal_tail_projection_cache_hits
-    );
-}
-
-#[tokio::test]
-async fn cold_discovery_seeds_projection_after_control_cache_eviction() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let other_namespace_id = NamespaceId::parse("other").expect("namespace id");
-    let recording = Arc::new(RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::any(),
-    ));
-    let object_store: SharedObjectStore = recording.clone();
-    let fs = open_runtime_with_async(object_store.clone(), "shared-projection", |builder| {
-        builder
-            .inline_content(loonfs::InlineContentOptions {
-                inline_content_threshold_bytes: None,
-                ..Default::default()
-            })
-            .runtime_cache(RuntimeCacheConfig {
-                max_cached_namespaces: 1,
-                ..Default::default()
-            })
-    })
-    .await;
-    for namespace_id in [&namespace_id, &other_namespace_id] {
-        fs.create_namespace(
-            namespace_id,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("create namespace");
-    }
-    let namespace = fs.reader.namespace(&namespace_id);
-    let namespace_writer = fs
-        .writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    namespace_writer
-        .create_directory(
-            "/docs",
-            CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-        )
-        .await
-        .expect("publish directory");
-    let other_namespace_writer = fs
-        .writer
-        .open_namespace(&other_namespace_id)
-        .expect("open namespace");
-    other_namespace_writer
-        .prepare_file_bytes(b"pending")
-        .await
-        .expect("evict published control entry");
-    let before_read = fs.runtime_cache_stats();
-    assert_eq!(before_read.wal_tail_projection_cache_inserts, 2);
-    assert_eq!(before_read.wal_tail_projection_cache_evictions, 1);
-    recording.reset();
-
-    let entry = namespace
-        .get_path_entry("/docs", Default::default())
-        .await
-        .expect("read published directory");
-    assert_eq!(entry.head_seq, ChangeSeq(1));
-    let gets = recording.take_get_keys();
-    let wal_gets = gets
-        .iter()
-        .filter(|key| key.contains("/wal/"))
-        .collect::<Vec<_>>();
-    assert_eq!(wal_gets.len(), 3, "{gets:?}");
-    let after_read = fs.runtime_cache_stats();
-    assert_eq!(
-        after_read.wal_tail_projection_cache_hits,
-        before_read.wal_tail_projection_cache_hits + 1
-    );
-    assert_eq!(
-        after_read.wal_tail_projection_cache_misses,
-        before_read.wal_tail_projection_cache_misses
-    );
-    assert_eq!(
-        after_read.wal_tail_projection_cache_inserts,
-        before_read.wal_tail_projection_cache_inserts + 1
     );
 }
 
@@ -461,72 +381,153 @@ fn runtime_cache_can_be_disabled() {
     assert_eq!(stats.wal_tail_projection_cache_misses, 0);
 }
 
-#[test]
-fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
-    let temp_dir = tempdir().expect("tempdir");
-    let first = NamespaceId::parse("first").expect("valid namespace id");
-    let second = NamespaceId::parse("second").expect("valid namespace id");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &first));
-    let shared_store = raw_store.store();
-    let setup = open_runtime(shared_store.clone(), "tail-count-setup");
-
-    setup
-        .create_namespace_blocking(
-            &first,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .expect("create first namespace");
-    setup
-        .put_file_bytes_blocking(
-            &first,
-            "/file.txt",
-            b"first",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
-        .expect("put first file");
-    setup
-        .create_namespace_blocking(
-            &second,
-            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-        )
-        .expect("create second namespace");
-    setup
-        .put_file_bytes_blocking(
-            &second,
-            "/file.txt",
-            b"second",
-            PutFileOptions::new(loonfs_test_support::test_actor()),
-        )
-        .expect("put second file");
-
+/// Creates `first` and `other`, each holding one file of five bytes, so the
+/// two namespaces' head state weighs the same.
+fn two_namespaces_with_one_file(store: SharedObjectStore) -> (NamespaceId, NamespaceId) {
+    let first = namespace_id("first");
+    let other = namespace_id("other");
+    let setup = open_runtime(store, "head-state-setup");
+    for (namespace_id, bytes) in [(&first, b"first"), (&other, b"other")] {
+        setup
+            .create_namespace_blocking(
+                namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .expect("create namespace");
+        setup
+            .put_file_bytes_blocking(
+                namespace_id,
+                "/file.txt",
+                bytes,
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .expect("put file");
+    }
     block_on(setup.writer.drain()).expect("finish hints");
-    let fs = open_runtime_with(shared_store, "tail-count-budget", |builder| {
+    (first, other)
+}
+
+/// What one namespace's head state weighs after a cold read of its file:
+/// the head anchor and the WAL-tail projection.
+fn one_namespace_head_state_bytes() -> usize {
+    let temp_dir = tempdir().expect("tempdir");
+    let shared_store = store(temp_dir.path());
+    let (first, _) = two_namespaces_with_one_file(shared_store.clone());
+    let fs = open_runtime(shared_store, "head-state-measure");
+    fs.get_file_bytes_blocking(&first, "/file.txt")
+        .expect("cold read");
+    fs.runtime_cache_stats()
+        .head_state_cache_cached_decoded_bytes
+}
+
+#[test]
+fn head_state_evicts_by_bytes_anchors_included() {
+    // Room for one namespace's head state, not for two.
+    let budget = one_namespace_head_state_bytes() * 5 / 4;
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
+        temp_dir.path(),
+        &namespace_id("first"),
+    ));
+    let (first, other) = two_namespaces_with_one_file(raw_store.store());
+    let fs = open_runtime_with(raw_store.store(), "head-state-budget", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
-            max_cached_namespaces: 1,
+            max_cached_wal_tail_projection_decoded_bytes: budget,
             ..RuntimeCacheConfig::default()
         })
     });
 
     fs.get_file_bytes_blocking(&first, "/file.txt")
-        .expect("cache first tail projection");
-    fs.get_file_bytes_blocking(&second, "/file.txt")
-        .expect("cache second tail projection and evict first");
-    let after_second = fs.runtime_cache_stats();
-    assert_eq!(after_second.wal_tail_projection_cache_evictions, 1);
-    assert!(after_second.wal_tail_projection_cache_cached_rows > 0);
+        .expect("cache the first namespace's head state");
+    fs.get_file_bytes_blocking(&other, "/file.txt")
+        .expect("cache the other namespace's head state");
+    let after_other = fs.runtime_cache_stats();
+    assert!(after_other.head_state_cache_evictions > 0);
+    assert!(after_other.head_state_cache_cached_decoded_bytes <= budget);
 
-    raw_store.reset_wal_get_count();
-    fs.get_file_bytes_blocking(&first, "/file.txt")
-        .expect("first tail projection reloads after eviction");
-    let after_reload = fs.runtime_cache_stats();
+    raw_store.reset_control_get_counts();
+    let file = fs
+        .get_file_bytes_blocking(&first, "/file.txt")
+        .expect("reload the evicted head state");
+    assert_eq!(file.bytes, b"first");
+    // Discovery reads the starting hint and rechecks it after the final gap.
+    assert_eq!(
+        raw_store.hint_get_count(),
+        2,
+        "the oldest entry, the first namespace's anchor, was evicted"
+    );
     assert_eq!(raw_store.wal_get_count(), 3);
-    assert_eq!(after_reload.wal_tail_projection_cache_evictions, 2);
+    let after_reload = fs.runtime_cache_stats();
+    assert_eq!(
+        after_reload.wal_tail_projection_cache_inserts,
+        after_other.wal_tail_projection_cache_inserts + 1
+    );
+    assert_eq!(
+        after_reload.wal_tail_projection_cache_hits,
+        after_other.wal_tail_projection_cache_hits + 1,
+        "the read uses the projection its cold discovery inserted"
+    );
+    assert_eq!(
+        after_reload.wal_tail_projection_cache_misses,
+        after_other.wal_tail_projection_cache_misses
+    );
+}
+
+#[tokio::test]
+async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_budget() {
+    const NAMESPACES: usize = 80;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let hints = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::family(DurableObjectFamily::Hint),
+    ));
+    let object_store: SharedObjectStore = hints.clone();
+    let setup = open_runtime_async(object_store.clone(), "many-namespaces").await;
+    let namespaces = (0..NAMESPACES)
+        .map(|index| namespace_id(&format!("ns-{index:03}")))
+        .collect::<Vec<_>>();
+    for namespace_id in &namespaces {
+        setup
+            .create_namespace(
+                namespace_id,
+                CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("create namespace");
+    }
+    let reader = loonfs::LoonFs::reader_with_store(object_store)
+        .build()
+        .await
+        .expect("reader");
+    let stat_every_root = || async {
+        for namespace_id in &namespaces {
+            reader
+                .namespace(namespace_id)
+                .get_path_entry("/", Default::default())
+                .await
+                .expect("stat the root");
+        }
+    };
+
+    stat_every_root().await;
+    hints.reset();
+    stat_every_root().await;
+    assert_eq!(
+        hints.count(OperationClass::Read),
+        0,
+        "no namespace's head was dropped and loaded again"
+    );
+    assert_eq!(reader.runtime_cache_stats().head_state_cache_evictions, 0);
 }
 
 #[test]
 fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
+    // Half of a namespace's anchor and tail together holds the anchor but not
+    // the tail, which outweighs it.
+    let budget = one_namespace_head_state_bytes() / 2;
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
+    let namespace_id = namespace_id("first");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::any(),
@@ -535,7 +536,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
             manifest_revalidation_interval_ms: u64::MAX,
-            max_cached_wal_tail_projection_rows: 0,
+            max_cached_wal_tail_projection_decoded_bytes: budget,
             ..RuntimeCacheConfig::default()
         })
     });
@@ -549,7 +550,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/file.txt",
-        b"file",
+        b"first",
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put file");
@@ -593,8 +594,9 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.wal_tail_projection_cache_misses, 2);
     assert_eq!(stats.wal_tail_projection_cache_hits, 0);
-    assert_eq!(stats.wal_tail_projection_cache_uncacheable_count, 3);
-    assert_eq!(stats.wal_tail_projection_cache_cached_rows, 0);
+    assert_eq!(stats.head_state_cache_rejections, 3);
+    assert_eq!(stats.head_state_cache_evictions, 0);
+    assert!(stats.head_state_cache_cached_decoded_bytes <= budget);
 }
 
 #[test]
@@ -798,7 +800,7 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
 }
 
 #[test]
-fn runtime_control_cache_reuses_head_for_materialization_validation() {
+fn a_cached_head_anchor_serves_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
@@ -830,59 +832,7 @@ fn runtime_control_cache_reuses_head_for_materialization_validation() {
 }
 
 #[test]
-fn control_cache_eviction_reloads_head_for_materialization_validation() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let other_namespace = NamespaceId::parse("other").expect("valid namespace id");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
-    let object_store = raw_store.store();
-    let fs = open_runtime_with(object_store, "control-cache-eviction-test", |builder| {
-        builder.runtime_cache(RuntimeCacheConfig {
-            max_cached_namespaces: 1,
-            ..RuntimeCacheConfig::default()
-        })
-    });
-
-    fs.create_namespace_blocking(
-        &namespace_id,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create namespace");
-    fs.create_directory_blocking(
-        &namespace_id,
-        "/docs",
-        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create docs");
-    fs.create_namespace_blocking(
-        &other_namespace,
-        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create other namespace");
-    fs.create_directory_blocking(
-        &other_namespace,
-        "/docs",
-        CreateDirectoryOptions::new(loonfs_test_support::test_actor()),
-    )
-    .expect("create other docs");
-
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("prime first namespace materialization");
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("prime first namespace head cache");
-
-    raw_store.reset_control_get_counts();
-    fs.stat_path_blocking(&other_namespace, "/docs")
-        .expect("load other namespace materialization and evict first head cache");
-    fs.stat_path_blocking(&namespace_id, "/docs")
-        .expect("reload first namespace materialization and head cache");
-
-    // Discovery reads the starting hint and rechecks it after the final gap.
-    assert_eq!(raw_store.hint_get_count(), 2);
-}
-
-#[test]
-fn runtime_control_cache_probes_wal_after_external_commit() {
+fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
@@ -914,10 +864,10 @@ fn runtime_control_cache_probes_wal_after_external_commit() {
     raw_store.reset_control_get_counts();
     reader
         .stat_path_blocking(&namespace_id, "/docs")
-        .expect("prime control cache");
+        .expect("prime the head anchor");
     reader
         .stat_path_blocking(&namespace_id, "/docs")
-        .expect("reuse unchanged control cache");
+        .expect("reuse the unchanged head anchor");
     assert_eq!(raw_store.hint_get_count(), 0);
 
     writer

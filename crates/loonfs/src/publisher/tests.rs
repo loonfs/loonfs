@@ -23,7 +23,6 @@ use loonfs_api::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
-use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
@@ -2247,7 +2246,6 @@ async fn a_fold_reloads_the_tail_when_no_projection_is_retained() {
 
 #[tokio::test]
 async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_tail() {
-    use loonfs_core::cache::DecodedBlock;
     use loonfs_core::publish::InlineContent;
 
     let directory = tempdir().expect("directory");
@@ -2344,10 +2342,9 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .wal_fold_input()
         .expect("reanchored projection");
     assert_eq!(input.wal_tail_objects, 0);
-    assert_eq!(input.tail_state.weight().rows, 0);
     assert_eq!(
-        input.tail_state.weight(),
-        Arc::new(loonfs_core::cache::ProjectedWalTail::default()).weight()
+        input.tail_state.decoded_bytes(),
+        loonfs_core::cache::ProjectedWalTail::default().decoded_bytes()
     );
     store.reset();
     namespace_writer
@@ -2931,61 +2928,6 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         .expect("delete succeeds after the queued batch");
     assert_eq!(delete_response.head_seq, ChangeSeq(2));
     writer.shutdown().await.expect("drain settles both units");
-}
-
-#[tokio::test]
-async fn retained_tail_projections_are_not_bounded_by_the_namespace_count() {
-    const NAMESPACES: usize = 12;
-
-    let temp_dir = tempdir().expect("tempdir");
-    let recording = Arc::new(RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::family(DurableObjectFamily::WalObject),
-    ));
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = test_writer_with_cache(
-        recording.clone(),
-        RuntimeCacheConfig {
-            max_cached_namespaces: 3,
-            ..RuntimeCacheConfig::default()
-        },
-        recorder.clone(),
-    )
-    .await;
-    let registry = writer.mode.publisher.clone();
-    let namespaces = test_namespaces(NAMESPACES);
-
-    let namespace_writers = publish_once_into_each(&writer, &namespaces).await;
-
-    assert_eq!(
-        retained_projections(&registry).projections,
-        NAMESPACES,
-        "every projection fits the byte budget, so none is evicted"
-    );
-    assert_eq!(
-        gauge(&recorder, "loonfs.publisher.retained_projections"),
-        i64::try_from(NAMESPACES).expect("small count"),
-    );
-
-    recording.reset();
-    for namespace in &namespace_writers {
-        namespace
-            .commit_candidate(CommitCandidate::new(create_directory_request(
-                "second", "more",
-            )))
-            .await
-            .expect("commit");
-    }
-    assert_eq!(
-        recording.count(OperationClass::Read),
-        0,
-        "a commit with a retained projection reads no WAL object"
-    );
-
-    writer
-        .shutdown()
-        .await
-        .expect("drain settles every publisher");
 }
 
 #[tokio::test]

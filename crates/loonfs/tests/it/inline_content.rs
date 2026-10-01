@@ -84,7 +84,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("runtime-writer")
         .runtime_cache(loonfs::RuntimeCacheConfig {
-            max_cached_namespaces: 0,
+            max_cached_wal_tail_projection_decoded_bytes: 0,
             ..Default::default()
         })
         .build()
@@ -154,7 +154,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id("runtime-writer")
         .runtime_cache(loonfs::RuntimeCacheConfig {
-            max_cached_namespaces: 0,
+            max_cached_wal_tail_projection_decoded_bytes: 0,
             ..Default::default()
         })
         .build()

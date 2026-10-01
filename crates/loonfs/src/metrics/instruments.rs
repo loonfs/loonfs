@@ -12,7 +12,7 @@ use crate::metrics::{
     LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_HIT, RESULT_MISS, RESULT_OK,
 };
 use crate::{GcResponse, MaintenanceConclusion, MaintenanceJobId, MetadataCompactionJobOutcome};
-use loonfs_core::cache::{DecodedBlockCacheObserver, DecodedBlockWeight};
+use loonfs_core::cache::DecodedBlockCacheObserver;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -396,22 +396,6 @@ impl RuntimeInstruments {
         }
     }
 
-    pub(crate) fn namespace_head_cache_eviction(&self) {
-        if let Some(installed) = &self.installed {
-            installed.cache.namespace_head.evictions.increment(1);
-        }
-    }
-
-    pub(crate) fn namespace_head_cache_entries(&self, entries: usize) {
-        if let Some(installed) = &self.installed {
-            installed
-                .cache
-                .namespace_head
-                .entries
-                .set(metric_level(entries));
-        }
-    }
-
     /// Returns the metadata-segment cache metrics observer, if metrics are enabled.
     pub(crate) fn metadata_segment_cache_observer(
         &self,
@@ -420,11 +404,19 @@ impl RuntimeInstruments {
         Some(observer)
     }
 
-    /// Returns the WAL-tail projection cache metrics observer, if metrics are enabled.
+    /// Returns the observer for WAL-tail lookups and inserts, if metrics are
+    /// enabled.
     pub(crate) fn wal_tail_projection_cache_observer(
         &self,
     ) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
         let observer = Arc::clone(&self.installed.as_ref()?.cache.wal_tail_projection);
+        Some(observer)
+    }
+
+    /// Returns the observer for evictions, rejections, and retained bytes
+    /// across head anchors and WAL-tail projections, if metrics are enabled.
+    pub(crate) fn head_state_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
+        let observer = Arc::clone(&self.installed.as_ref()?.cache.head_state);
         Some(observer)
     }
 
@@ -828,13 +820,12 @@ struct RuntimeCacheInstruments {
     namespace_head: NamespaceHeadCacheInstruments,
     metadata_segment: Arc<MetadataSegmentCacheInstruments>,
     wal_tail_projection: Arc<WalTailProjectionCacheInstruments>,
+    head_state: Arc<HeadStateCacheInstruments>,
 }
 
 struct NamespaceHeadCacheInstruments {
     hits: Arc<dyn CounterHandle>,
     misses: Arc<dyn CounterHandle>,
-    evictions: Arc<dyn CounterHandle>,
-    entries: Arc<dyn GaugeHandle>,
 }
 
 struct MetadataSegmentCacheInstruments {
@@ -851,13 +842,13 @@ struct WalTailProjectionCacheInstruments {
     hits: Arc<dyn CounterHandle>,
     misses: Arc<dyn CounterHandle>,
     inserts: Arc<dyn CounterHandle>,
+}
+
+struct HeadStateCacheInstruments {
     evictions: Arc<dyn CounterHandle>,
-    evicted_rows: Arc<dyn CounterHandle>,
     evicted_decoded_bytes: Arc<dyn CounterHandle>,
     rejections: Arc<dyn CounterHandle>,
-    rejected_rows: Arc<dyn CounterHandle>,
     rejected_decoded_bytes: Arc<dyn CounterHandle>,
-    retained_rows: Arc<dyn GaugeHandle>,
     retained_decoded_bytes: Arc<dyn GaugeHandle>,
 }
 
@@ -877,6 +868,7 @@ impl RuntimeCacheInstruments {
             namespace_head: NamespaceHeadCacheInstruments::register(recorder),
             metadata_segment: Arc::new(MetadataSegmentCacheInstruments::register(recorder)),
             wal_tail_projection: Arc::new(WalTailProjectionCacheInstruments::register(recorder)),
+            head_state: Arc::new(HeadStateCacheInstruments::register(recorder)),
         }
     }
 }
@@ -893,16 +885,6 @@ impl NamespaceHeadCacheInstruments {
         Self {
             hits: get(RESULT_HIT),
             misses: get(RESULT_MISS),
-            evictions: recorder.register_counter(
-                "loonfs.namespace_head_cache.evictions",
-                "Namespace heads evicted to stay within the cached namespace limit",
-                &[],
-            ),
-            entries: recorder.register_gauge(
-                "loonfs.namespace_head_cache.entries",
-                "Namespace heads currently cached",
-                &[],
-            ),
         }
     }
 }
@@ -961,7 +943,7 @@ impl DecodedBlockCacheObserver for MetadataSegmentCacheInstruments {
         self.inserts.increment(1);
     }
 
-    fn evict(&self, _weight: DecodedBlockWeight) {
+    fn evict(&self, _decoded_bytes: usize) {
         self.evictions.increment(1);
     }
 
@@ -973,8 +955,8 @@ impl DecodedBlockCacheObserver for MetadataSegmentCacheInstruments {
         self.filter_false_positives.increment(1);
     }
 
-    fn retained(&self, weight: DecodedBlockWeight) {
-        self.retained_decoded_bytes.set(metric_level(weight.bytes));
+    fn retained(&self, decoded_bytes: usize) {
+        self.retained_decoded_bytes.set(metric_level(decoded_bytes));
     }
 }
 
@@ -995,46 +977,6 @@ impl WalTailProjectionCacheInstruments {
                 "WAL-tail projections inserted into the cache",
                 &[],
             ),
-            evictions: recorder.register_counter(
-                "loonfs.wal_tail_projection_cache.evictions",
-                "WAL-tail projections evicted or invalidated",
-                &[],
-            ),
-            evicted_rows: recorder.register_counter(
-                "loonfs.wal_tail_projection_cache.evicted_rows",
-                "Metadata rows dropped with evicted WAL-tail projections",
-                &[],
-            ),
-            evicted_decoded_bytes: recorder.register_counter(
-                "loonfs.wal_tail_projection_cache.evicted_decoded_bytes",
-                "Decoded bytes dropped with evicted WAL-tail projections",
-                &[],
-            ),
-            rejections: recorder.register_counter(
-                "loonfs.wal_tail_projection_cache.rejections",
-                "WAL-tail projections rejected because they exceeded a cache limit",
-                &[],
-            ),
-            rejected_rows: recorder.register_counter(
-                "loonfs.wal_tail_projection_cache.rejected_rows",
-                "Metadata rows in rejected WAL-tail projections",
-                &[],
-            ),
-            rejected_decoded_bytes: recorder.register_counter(
-                "loonfs.wal_tail_projection_cache.rejected_decoded_bytes",
-                "Decoded bytes in rejected WAL-tail projections",
-                &[],
-            ),
-            retained_rows: recorder.register_gauge(
-                "loonfs.wal_tail_projection_cache.retained_rows",
-                "Metadata rows currently retained in WAL-tail projections",
-                &[],
-            ),
-            retained_decoded_bytes: recorder.register_gauge(
-                "loonfs.wal_tail_projection_cache.retained_decoded_bytes",
-                "Decoded bytes currently retained in WAL-tail projections",
-                &[],
-            ),
         }
     }
 }
@@ -1051,24 +993,55 @@ impl DecodedBlockCacheObserver for WalTailProjectionCacheInstruments {
     fn insert(&self) {
         self.inserts.increment(1);
     }
+}
 
-    fn evict(&self, weight: DecodedBlockWeight) {
+impl HeadStateCacheInstruments {
+    fn register(recorder: &dyn MetricsRecorder) -> Self {
+        Self {
+            evictions: recorder.register_counter(
+                "loonfs.head_state_cache.evictions",
+                "Head anchors and WAL-tail projections evicted to stay within the head-state budget",
+                &[],
+            ),
+            evicted_decoded_bytes: recorder.register_counter(
+                "loonfs.head_state_cache.evicted_decoded_bytes",
+                "Decoded bytes dropped with evicted head state",
+                &[],
+            ),
+            rejections: recorder.register_counter(
+                "loonfs.head_state_cache.rejections",
+                "Head anchors and WAL-tail projections heavier than the whole head-state budget",
+                &[],
+            ),
+            rejected_decoded_bytes: recorder.register_counter(
+                "loonfs.head_state_cache.rejected_decoded_bytes",
+                "Decoded bytes in rejected head state",
+                &[],
+            ),
+            retained_decoded_bytes: recorder.register_gauge(
+                "loonfs.head_state_cache.retained_decoded_bytes",
+                "Decoded bytes currently retained as head anchors and WAL-tail projections",
+                &[],
+            ),
+        }
+    }
+}
+
+impl DecodedBlockCacheObserver for HeadStateCacheInstruments {
+    fn evict(&self, decoded_bytes: usize) {
         self.evictions.increment(1);
-        self.evicted_rows.increment(metric_count(weight.rows));
         self.evicted_decoded_bytes
-            .increment(metric_count(weight.bytes));
+            .increment(metric_count(decoded_bytes));
     }
 
-    fn reject(&self, weight: DecodedBlockWeight) {
+    fn reject(&self, decoded_bytes: usize) {
         self.rejections.increment(1);
-        self.rejected_rows.increment(metric_count(weight.rows));
         self.rejected_decoded_bytes
-            .increment(metric_count(weight.bytes));
+            .increment(metric_count(decoded_bytes));
     }
 
-    fn retained(&self, weight: DecodedBlockWeight) {
-        self.retained_rows.set(metric_level(weight.rows));
-        self.retained_decoded_bytes.set(metric_level(weight.bytes));
+    fn retained(&self, decoded_bytes: usize) {
+        self.retained_decoded_bytes.set(metric_level(decoded_bytes));
     }
 }
 
@@ -1353,13 +1326,10 @@ mod tests {
         metadata.hit();
         metadata.miss();
         metadata.insert();
-        metadata.evict(DecodedBlockWeight::default());
+        metadata.evict(0);
         metadata.filter_skip();
         metadata.filter_false_positive();
-        metadata.retained(DecodedBlockWeight {
-            rows: 0,
-            bytes: 170,
-        });
+        metadata.retained(170);
 
         let wal = instruments
             .wal_tail_projection_cache_observer()
@@ -1367,15 +1337,13 @@ mod tests {
         wal.hit();
         wal.miss();
         wal.insert();
-        wal.evict(DecodedBlockWeight { rows: 7, bytes: 70 });
-        wal.reject(DecodedBlockWeight {
-            rows: 11,
-            bytes: 110,
-        });
-        wal.retained(DecodedBlockWeight {
-            rows: 13,
-            bytes: 130,
-        });
+
+        let head_state = instruments
+            .head_state_cache_observer()
+            .expect("head-state observer");
+        head_state.evict(70);
+        head_state.reject(110);
+        head_state.retained(130);
 
         let snapshot = recorder.snapshot();
         for (name, labels, value) in [
@@ -1414,21 +1382,11 @@ mod tests {
                 1,
             ),
             ("loonfs.wal_tail_projection_cache.inserts", &[][..], 1),
-            ("loonfs.wal_tail_projection_cache.evictions", &[][..], 1),
-            ("loonfs.wal_tail_projection_cache.evicted_rows", &[][..], 7),
+            ("loonfs.head_state_cache.evictions", &[][..], 1),
+            ("loonfs.head_state_cache.evicted_decoded_bytes", &[][..], 70),
+            ("loonfs.head_state_cache.rejections", &[][..], 1),
             (
-                "loonfs.wal_tail_projection_cache.evicted_decoded_bytes",
-                &[][..],
-                70,
-            ),
-            ("loonfs.wal_tail_projection_cache.rejections", &[][..], 1),
-            (
-                "loonfs.wal_tail_projection_cache.rejected_rows",
-                &[][..],
-                11,
-            ),
-            (
-                "loonfs.wal_tail_projection_cache.rejected_decoded_bytes",
+                "loonfs.head_state_cache.rejected_decoded_bytes",
                 &[][..],
                 110,
             ),
@@ -1443,14 +1401,7 @@ mod tests {
             170
         );
         assert_eq!(
-            gauge(&snapshot, "loonfs.wal_tail_projection_cache.retained_rows"),
-            13
-        );
-        assert_eq!(
-            gauge(
-                &snapshot,
-                "loonfs.wal_tail_projection_cache.retained_decoded_bytes"
-            ),
+            gauge(&snapshot, "loonfs.head_state_cache.retained_decoded_bytes"),
             130
         );
     }

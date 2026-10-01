@@ -39,8 +39,6 @@ max_concurrent_downloads = 2
 max_concurrent_maintenance = 1
 
 [runtime_cache]
-max_cached_namespaces = 8
-max_cached_wal_tail_projection_rows = 100000
 max_cached_wal_tail_projection_decoded_bytes = 67108864
 metadata_segment_cache_max_decoded_bytes = 67108864
 

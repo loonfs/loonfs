@@ -82,17 +82,14 @@ writer_id = "loonfs-server-local"
 # Clients gate on `filesystem.uploads.direct_put` in the capability document.
 
 # Optional runtime cache overrides; omitted fields keep the runtime defaults.
-# `max_cached_namespaces` bounds every cache counted in entries: head anchors
-# and read-side WAL-tail projections. The two budgets under it bound
-# WAL-tail projections by size, counted once for the read side and once for
-# the publish side. The WAL-tail projections the writer's namespace
-# publishers retain are bounded by those two budgets only. None of these
-# bound writer sessions: the server keeps one for each namespace it has
-# written since it started.
+# `max_cached_wal_tail_projection_decoded_bytes` is the head-state budget:
+# namespace head anchors and read-side WAL-tail projections share it, with no
+# limit on how many namespaces stay cached. The WAL-tail projections the
+# writer's namespace publishers retain hold a second total against the same
+# budget. Neither bounds writer sessions: the server keeps one for each
+# namespace it has written since it started.
 #[runtime_cache]
 #manifest_revalidation_interval_ms = 1000
-#max_cached_namespaces = 64
-#max_cached_wal_tail_projection_rows = 1000000
 #max_cached_wal_tail_projection_decoded_bytes = 67108864
 # Decoded-byte budget for the metadata segment cache. Defaults to 256 MiB.
 #metadata_segment_cache_max_decoded_bytes = 268435456
