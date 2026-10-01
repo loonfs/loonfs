@@ -75,10 +75,10 @@ impl BindingState {
 /// The writable handle this host holds for each namespace.
 ///
 /// The host decides which writer sessions stay open and for how long: a
-/// session lives while its handle is held. This reference host keeps every
-/// namespace it has written open, with no cap and no eviction. It stops
-/// holding a handle only when the namespace is deleted or turns out not to
-/// exist.
+/// session lives while its handle is held. This reference host holds a
+/// handle only for a namespace that existed when the handle was first
+/// opened. It keeps each such handle, with no cap and no eviction, and stops
+/// holding it when the namespace is deleted or a request finds it gone.
 pub struct Namespaces {
     runtime: LoonFs<Writable>,
     handles: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
@@ -92,8 +92,19 @@ impl Namespaces {
         }
     }
 
-    /// Returns the handle held for `namespace_id`, opening one first if none is held.
-    pub fn open(&self, namespace_id: &NamespaceId) -> loonfs::Result<Namespace<Writable>> {
+    /// Returns the handle held for `namespace_id`. When none is held, first
+    /// reads the namespace through a read-only handle, which holds no writer
+    /// session. A missing or deleted namespace fails that read with
+    /// `namespace_not_found` or `namespace_deleted`. Otherwise this opens
+    /// the writable handle and holds it in one step, with no await between,
+    /// so a `close` that runs during the read cannot leave a closed session
+    /// in the table.
+    pub async fn open(&self, namespace_id: &NamespaceId) -> loonfs::Result<Namespace<Writable>> {
+        let held = self.lock().get(namespace_id).cloned();
+        if let Some(handle) = held {
+            return Ok(handle);
+        }
+        self.runtime.namespace(namespace_id).metadata().await?;
         let mut handles = self.lock();
         if let Some(handle) = handles.get(namespace_id) {
             return Ok(handle.clone());
@@ -121,8 +132,8 @@ impl Namespaces {
     }
 
     /// Stops holding the handle after a request through it found the
-    /// namespace missing or deleted. Without this, the map would keep a
-    /// session for every namespace id a client ever named.
+    /// namespace missing or deleted. Another writer can delete a namespace
+    /// after this host holds its handle.
     pub(crate) fn forget_if_gone(&self, namespace_id: &NamespaceId, code: ErrorCode) {
         if matches!(
             code,

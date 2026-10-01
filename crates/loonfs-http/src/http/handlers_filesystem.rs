@@ -522,9 +522,13 @@ pub(super) async fn create_commit(
     // Failed and uncertain outcomes echo the idempotency key the caller can
     // resubmit under (API spec, "Commit responses and safe retry").
     let commit_id_for_errors = commit_id.clone();
-    let namespace = state.namespaces.open(&namespace_id).map_err(|error| {
-        ApiResponseError::runtime_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
-    })?;
+    let namespace = state
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
+        })?;
     // Every put in the request shares one preparation pass: a proof belongs
     // to the content, not to the operation that names it.
     let put_content_refs = operations
