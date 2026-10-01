@@ -49,7 +49,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     )
     .expect("put file");
 
-    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read is served from the projection the put seeded");
@@ -59,7 +59,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     assert!(after_first.wal_tail_projection_cache_inserts >= 1);
     assert!(after_first.wal_tail_projection_cache_hits >= 1);
 
-    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should reuse cached WAL-tail projection");
@@ -76,7 +76,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
         PutFileOptions::new(loonfs_test_support::test_actor()),
     )
     .expect("put other");
-    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("read after local mutation reuses the newly seeded projection");
@@ -293,7 +293,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
     }
     recording.inner().release();
     namespace.wait_for_fold().await.expect("fold");
-    writer.publisher().drain().await.expect("finish hints");
+    writer.drain().await.expect("finish hints");
     let manifest =
         loonfs_core::control::load_namespace_current_manifest(recording.as_ref(), &namespace_id)
             .await
@@ -449,7 +449,7 @@ fn runtime_cache_can_be_disabled() {
     )
     .expect("put file");
 
-    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("finish hints");
     raw_store.reset_wal_get_count();
     fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read should project WAL tail");
@@ -499,7 +499,7 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
         )
         .expect("put second file");
 
-    block_on(setup.writer.publisher().drain()).expect("finish hints");
+    block_on(setup.writer.drain()).expect("finish hints");
     let fs = open_runtime_with(shared_store, "tail-count-budget", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
             max_cached_namespaces: 1,
@@ -554,7 +554,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     )
     .expect("put file");
 
-    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     let _snapshot = block_on(namespace.pin_namespace()).expect("pin the seeded namespace");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
@@ -642,7 +642,7 @@ fn wal_publication_conflict_recovers_and_reseeds_caches() {
     )
     .expect("write succeeds after the WAL publication conflict");
 
-    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
     let before_read = fs.runtime_cache_stats();
     fs.stat_path_blocking(&namespace_id, "/after-stale")
@@ -783,7 +783,7 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
     .expect("put file");
     fs.create_checkpoint_blocking(&namespace_id)
         .expect("checkpoint");
-    block_on(fs.writer.publisher().drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("finish hints");
     let fs = runtime(temp_dir.path(), "materialized-reader");
     fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("first materialized stat");
@@ -1116,7 +1116,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         .expect("put file");
         fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
             .expect("validate the published read state");
-        block_on(fs.writer.publisher().drain()).expect("finish hints");
+        block_on(fs.writer.drain()).expect("finish hints");
         let calls_before = stored_blocks.call_count();
         let step = fs
             .maintenance_run_namespace_blocking(&namespace_id, metadata_request(1))

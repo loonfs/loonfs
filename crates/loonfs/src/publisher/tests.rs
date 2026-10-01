@@ -2042,7 +2042,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -2062,7 +2062,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     store.wait_until_blocked().await;
 
     // Admission then closes, and new work is refused.
-    registry.close_admission();
+    writer.close_admission_for_shutdown();
     let refused = namespace
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "refused", "refused",
@@ -2087,7 +2087,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         .expect("submit task")
         .expect("admitted commit publishes");
     assert_eq!(response.committed_seq, ChangeSeq(1));
-    registry.drain().await.expect("drain settles publish tasks");
+    writer.drain().await.expect("drain settles publish tasks");
     assert!(registry
         .shared
         .lock_state()
@@ -2110,7 +2110,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -2144,7 +2144,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     wait_for_queued_candidates(&publisher, 1).await;
 
     store.release_into_panic();
-    registry.close_admission();
+    writer.close_admission_for_shutdown();
 
     let doomed_error = doomed
         .await
@@ -2157,7 +2157,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         .expect("the surviving worker publishes queued work");
     assert_eq!(queued_response.committed_seq, ChangeSeq(1));
 
-    let drain_error = registry
+    let drain_error = writer
         .drain()
         .await
         .expect_err("drain surfaces the contained panic");
@@ -2657,7 +2657,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -2746,15 +2746,15 @@ async fn close_admission_refuses_without_creating_publishers() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer(store.clone()).await;
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
 
-    registry.close_admission();
+    writer.close_admission_for_shutdown();
     let refused = writer
         .open_namespace(&namespace_id)
         .expect_err("closed registry refuses to open a session");
     assert_eq!(refused.code(), ErrorCode::ShuttingDown);
     assert!(registry.shared.lock_state().sessions.is_empty());
-    registry.drain().await.expect("nothing to drain");
+    writer.drain().await.expect("nothing to drain");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2771,7 +2771,6 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -2796,7 +2795,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
 
     // Admission closes with the delete already admitted; releasing the gate
     // lets the batch and then the delete publish.
-    registry.close_admission();
+    writer.close_admission_for_shutdown();
     store.release();
 
     let response = active
@@ -2820,7 +2819,7 @@ async fn a_delete_admitted_before_close_admission_lands_terminal() {
     )
     .expect_err("submission after the delete lands");
     assert_eq!(late.code(), ErrorCode::NamespaceDeleted);
-    registry.drain().await.expect("drain settles the delete");
+    writer.drain().await.expect("drain settles the delete");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2837,7 +2836,6 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -2932,8 +2930,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         .expect("delete task")
         .expect("delete succeeds after the queued batch");
     assert_eq!(delete_response.head_seq, ChangeSeq(2));
-    registry.close_admission();
-    registry.drain().await.expect("drain settles both units");
+    writer.shutdown().await.expect("drain settles both units");
 }
 
 #[tokio::test]
@@ -2955,7 +2952,7 @@ async fn retained_tail_projections_are_not_bounded_by_the_namespace_count() {
         recorder.clone(),
     )
     .await;
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let namespaces = test_namespaces(NAMESPACES);
 
     let namespace_writers = publish_once_into_each(&writer, &namespaces).await;
@@ -2985,9 +2982,8 @@ async fn retained_tail_projections_are_not_bounded_by_the_namespace_count() {
         "a commit with a retained projection reads no WAL object"
     );
 
-    registry.close_admission();
-    registry
-        .drain()
+    writer
+        .shutdown()
         .await
         .expect("drain settles every publisher");
 }
@@ -3014,12 +3010,12 @@ async fn maintenance_invalidation_leaves_publisher_projection() {
         )))
         .await
         .expect("publish commit");
-    assert_eq!(retained_projections(&writer.publisher()).projections, 1);
+    assert_eq!(retained_projections(&writer.mode.publisher).projections, 1);
 
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     maintenance.invalidate_namespace(&namespace_id);
 
-    assert_eq!(retained_projections(&writer.publisher()).projections, 1);
+    assert_eq!(retained_projections(&writer.mode.publisher).projections, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3040,7 +3036,7 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
         recorder.clone(),
     )
     .await;
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let namespaces = test_namespaces(NAMESPACES);
 
     let namespace_writers = publish_once_into_each(&writer, &namespaces).await;
@@ -3091,9 +3087,8 @@ async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
         );
     }
 
-    registry.close_admission();
-    registry
-        .drain()
+    writer
+        .shutdown()
         .await
         .expect("drain settles every publisher");
 }
@@ -3115,7 +3110,6 @@ async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
         )
         .await
         .expect("bootstrap");
-    let registry = writer.publisher();
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -3138,9 +3132,8 @@ async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
         "the engine drops a projection older than the publish budget and rereads the tail"
     );
 
-    registry.close_admission();
-    registry
-        .drain()
+    writer
+        .shutdown()
         .await
         .expect("drain settles every publisher");
 }
@@ -3152,7 +3145,7 @@ async fn one_projection_decoded_bytes() -> usize {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let writer = test_writer(store).await;
     let _namespace_writers = publish_once_into_each(&writer, &test_namespaces(1)).await;
-    let totals = retained_projections(&writer.publisher());
+    let totals = retained_projections(&writer.mode.publisher);
     assert_eq!(totals.projections, 1, "one publish retains one projection");
     totals.decoded_bytes
 }
@@ -3164,7 +3157,7 @@ async fn disabled_runtime_caches_retain_no_tail_projections() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer =
         test_writer_with_cache(store, RuntimeCacheConfig::disabled(), recorder.clone()).await;
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let namespaces = test_namespaces(3);
 
     let _namespace_writers = publish_once_into_each(&writer, &namespaces).await;
@@ -3181,9 +3174,8 @@ async fn disabled_runtime_caches_retain_no_tail_projections() {
         "sessions and their publishers survive caches being off"
     );
 
-    registry.close_admission();
-    registry
-        .drain()
+    writer
+        .shutdown()
         .await
         .expect("drain settles every publisher");
 }
@@ -3195,7 +3187,7 @@ async fn a_landed_delete_forgets_the_namespace_projection() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer =
         test_writer_with_cache(store, RuntimeCacheConfig::default(), recorder.clone()).await;
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let namespaces = test_namespaces(2);
 
     let namespace_writers = publish_once_into_each(&writer, &namespaces).await;
@@ -3214,9 +3206,8 @@ async fn a_landed_delete_forgets_the_namespace_projection() {
     );
     assert_eq!(gauge(&recorder, "loonfs.publisher.retained_projections"), 1);
 
-    registry.close_admission();
-    registry
-        .drain()
+    writer
+        .shutdown()
         .await
         .expect("drain settles every publisher");
 }
@@ -3236,7 +3227,7 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
         recorder.clone(),
     )
     .await;
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let namespaces = test_namespaces(3);
     let (busy, other, last) = (
         namespaces[0].clone(),
@@ -3274,9 +3265,8 @@ async fn a_skipped_eviction_leaves_the_namespace_accounted() {
         "the next sweep evicts what the previous one skipped"
     );
 
-    registry.close_admission();
-    registry
-        .drain()
+    writer
+        .shutdown()
         .await
         .expect("drain settles every publisher");
 }
@@ -3307,7 +3297,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
             .await
             .expect("bootstrap");
     }
-    let registry = writer.publisher();
+    let registry = writer.mode.publisher.clone();
     let writer_a = writer.open_namespace(&a).expect("open namespace");
     let writer_b = writer.open_namespace(&b).expect("open namespace");
     store.block_next();

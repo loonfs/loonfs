@@ -821,11 +821,10 @@ impl Namespace<Writable> {
             .await
     }
 
-    /// Publishes one candidate through the core's publication service (see
-    /// [`crate::publisher`]): batching is adaptive, every submitter receives
-    /// its own durable result, and admitted work is owned by the service's
-    /// worker — a cancelled caller abandons only its result delivery, never
-    /// the publication.
+    /// Publishes one candidate through the runtime's publication service:
+    /// batching is adaptive, every submitter receives its own durable result,
+    /// and admitted work is owned by the service's worker — a cancelled
+    /// caller abandons only its result delivery, never the publication.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.apply_commit",
