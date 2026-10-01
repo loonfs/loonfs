@@ -327,6 +327,17 @@ impl<S: ObjectStore> ObjectStore for DeleteOnCheckpointLoadStore<S> {
     ) -> BoxStream<'static, std::result::Result<String, ObjectStoreError>> {
         self.inner.list_prefix_from_stream(prefix, start_after)
     }
+
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: loonfs_types::EffectiveLimit,
+    ) -> std::result::Result<loonfs_types::Page<String, String>, ObjectStoreError> {
+        self.inner
+            .list_child_prefixes(prefix, start_after, limit)
+            .await
+    }
 }
 
 #[tokio::test]

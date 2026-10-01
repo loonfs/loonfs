@@ -17,7 +17,8 @@ use loonfs_objectstore::s3_compatible::{
 };
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{AwsS3Credentials, ObjectStore};
-use loonfs_types::{Checksum, ContentId};
+use loonfs_test_support::ids::page_limit;
+use loonfs_types::{Checksum, ContentId, Page};
 use tempfile::TempDir;
 
 #[test]
@@ -46,6 +47,29 @@ async fn local_fs_passes_the_store_contract_probe() {
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
     assert_store_contract_probe_passes(&store, false).await;
     assert_start_after_contract(&store).await;
+    assert_child_prefix_contract(&store).await;
+}
+
+#[tokio::test]
+async fn local_fs_lists_child_prefixes_inside_its_key_prefix() {
+    let temp_dir = test_dir("child-prefixes");
+    let store = LocalFsStore::with_key_prefix(temp_dir.path(), Some("tenant-a"))
+        .expect("create scoped local object store");
+    let neighbour = LocalFsStore::with_key_prefix(temp_dir.path(), Some("tenant-b"))
+        .expect("create neighbouring local object store");
+    neighbour
+        .put_overwrite("outside/1", Bytes::from_static(b"outside"))
+        .await
+        .expect("write outside the key prefix");
+
+    assert_child_prefix_contract(&store).await;
+    store
+        .put_overwrite("inside/1", Bytes::from_static(b"inside"))
+        .await
+        .expect("write inside the key prefix");
+    let root = child_page(&store, "", None, 10).await;
+    assert_eq!(root.items, ["inside/"]);
+    assert_eq!(root.next_cursor, None);
 }
 
 #[tokio::test]
@@ -322,7 +346,76 @@ async fn azure_abs_streamed_write_round_trips() {
 async fn assert_provider_conformance(store: &dyn ObjectStore, direct_put_proven: bool) {
     assert_store_contract_probe_passes(store, direct_put_proven).await;
     assert_start_after_contract(store).await;
+    assert_child_prefix_contract(store).await;
     assert_rejects_invalid_keys_consistently(store).await;
+}
+
+/// Checks that a store lists the child prefixes under a prefix in order, one
+/// page at a time, resumes after a given child, and leaves out the objects
+/// directly under the prefix.
+async fn assert_child_prefix_contract(store: &dyn ObjectStore) {
+    let run_id = loonfs_types::generated_id("children");
+    let prefix = format!("child-prefixes/{run_id}/");
+    let keys = [
+        "a/1", "a/2/3", "b/1", "b-1/1", "b0/1", "c/1", "c/2", "c/3/4", "c/5/6", "d/1", "direct",
+    ]
+    .map(|key| format!("{prefix}{key}"));
+    for key in &keys {
+        store
+            .put_overwrite(key, Bytes::from_static(b"listed"))
+            .await
+            .expect("write child-prefix fixture");
+    }
+    let children = ["a/", "b-1/", "b/", "b0/", "c/", "d/"].map(|child| format!("{prefix}{child}"));
+
+    let first = child_page(store, &prefix, None, 2).await;
+    assert_eq!(first.items, children[..2]);
+    let second = child_page(store, &prefix, first.next_cursor.as_deref(), 2).await;
+    assert_eq!(second.items, children[2..4]);
+    let mut listed = [first.items, second.items].concat();
+    let mut cursor = second.next_cursor;
+    while let Some(start_after) = cursor {
+        let page = child_page(store, &prefix, Some(&start_after), 2).await;
+        assert!(page.items.len() <= 2, "{page:?}");
+        listed.extend(page.items);
+        cursor = page.next_cursor;
+    }
+    assert_eq!(listed, children);
+
+    let after_child = child_page(store, &prefix, Some(&children[2]), 2).await;
+    assert_eq!(after_child.items, children[3..5]);
+    let whole = child_page(store, &prefix, None, 10).await;
+    assert_eq!(whole.items, children);
+    assert_eq!(whole.next_cursor, None);
+    let empty = child_page(store, &format!("{prefix}none/"), None, 10).await;
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.next_cursor, None);
+    let unterminated = store
+        .list_child_prefixes(prefix.trim_end_matches('/'), None, page_limit(10))
+        .await;
+    assert!(
+        matches!(unterminated, Err(ObjectStoreError::InvalidKey { .. })),
+        "{unterminated:?}"
+    );
+
+    for key in &keys {
+        store
+            .delete(key)
+            .await
+            .expect("delete child-prefix fixture");
+    }
+}
+
+async fn child_page(
+    store: &dyn ObjectStore,
+    prefix: &str,
+    start_after: Option<&str>,
+    limit: u32,
+) -> Page<String, String> {
+    store
+        .list_child_prefixes(prefix, start_after, page_limit(limit))
+        .await
+        .expect("list child prefixes")
 }
 
 /// Checks that every provider resumes after the given key in sorted order.

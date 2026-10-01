@@ -78,6 +78,7 @@ pub(crate) fn gcp_gcs_with_issuers(
     let store = ProviderObjectStore::new(
         Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
         Arc::new(one_attempt),
+        Arc::clone(&provider) as Arc<dyn object_store::multipart::MultipartStore>,
         provider,
         ProviderObjectStoreConfig {
             key_prefix: config.key_prefix,

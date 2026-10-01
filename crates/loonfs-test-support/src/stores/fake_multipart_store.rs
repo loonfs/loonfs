@@ -21,7 +21,7 @@ use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
     ObjectStoreError, PutMode, Result, StoredObjectChecksum,
 };
-use loonfs_types::Checksum;
+use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -282,5 +282,15 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
         start_after: Option<&str>,
     ) -> BoxStream<'static, Result<String>> {
         self.inner.list_prefix_from_stream(prefix, start_after)
+    }
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>> {
+        self.inner
+            .list_child_prefixes(prefix, start_after, limit)
+            .await
     }
 }

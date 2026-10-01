@@ -73,6 +73,19 @@ pub(crate) fn scope_list_prefix(key_prefix: Option<&str>, prefix: &str) -> Resul
     }
 }
 
+/// Scopes the prefix of a child-prefix listing, which names a level of the
+/// key tree and so must be empty or end with `/`.
+pub(crate) fn scope_child_listing_prefix(key_prefix: Option<&str>, prefix: &str) -> Result<String> {
+    if !prefix.is_empty() && !prefix.ends_with('/') {
+        return Err(ObjectStoreError::InvalidKey {
+            object_key: prefix.to_owned(),
+            message: "a child-prefix listing needs an empty prefix or one ending with `/`"
+                .to_owned(),
+        });
+    }
+    scope_list_prefix(key_prefix, prefix)
+}
+
 pub(crate) fn unscope_listed_key(key_prefix: Option<&str>, scoped_key: &str) -> Option<String> {
     let key_prefix = key_prefix.filter(|value| !value.is_empty())?;
     let prefix = format!("{key_prefix}/");

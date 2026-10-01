@@ -23,6 +23,7 @@ macro_rules! delegate_object_store {
             list_prefix_stream,
             list_prefix_from_stream,
             list_prefix,
+            list_child_prefixes,
         );
     };
     ($receiver:ident => $inner:expr; except put) => {
@@ -38,6 +39,7 @@ macro_rules! delegate_object_store {
             list_prefix_stream,
             list_prefix_from_stream,
             list_prefix,
+            list_child_prefixes,
         );
     };
     ($receiver:ident => $inner:expr; except head_stored_checksum) => {
@@ -58,6 +60,7 @@ macro_rules! delegate_object_store {
             list_prefix_stream,
             list_prefix_from_stream,
             list_prefix,
+            list_child_prefixes,
         );
     };
     ($receiver:ident => $inner:expr; $($method:ident),+ $(,)?) => {
@@ -406,6 +409,32 @@ macro_rules! __delegate_object_store_method {
             Result<String, ::loonfs_objectstore::ObjectStoreError>,
         > {
             $inner.list_prefix_stream(prefix)
+        }
+    };
+    (list_child_prefixes, $receiver:ident, $inner:expr) => {
+        fn list_child_prefixes<'store, 'prefix, 'start, 'future>(
+            &'store $receiver,
+            prefix: &'prefix str,
+            start_after: Option<&'start str>,
+            limit: ::loonfs_types::EffectiveLimit,
+        ) -> ::core::pin::Pin<::std::boxed::Box<
+            dyn ::core::future::Future<
+                    Output = Result<
+                        ::loonfs_types::Page<String, String>,
+                        ::loonfs_objectstore::ObjectStoreError,
+                    >,
+                > + Send
+                + 'future,
+        >>
+        where
+            'store: 'future,
+            'prefix: 'future,
+            'start: 'future,
+            Self: 'future,
+        {
+            ::std::boxed::Box::pin(async move {
+                $inner.list_child_prefixes(prefix, start_after, limit).await
+            })
         }
     };
     (list_prefix, $receiver:ident, $inner:expr) => {

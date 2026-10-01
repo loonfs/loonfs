@@ -8,7 +8,7 @@ use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
     ObjectStoreError, PutMode, StoredObjectChecksum,
 };
-use loonfs_types::Checksum;
+use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -277,6 +277,25 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
             intercept => intercept,
         };
         let result = self.inner.delete(key).await;
+        let outcome = result_outcome(&result);
+        Self::finish(&self.interceptor, &context, intercept, result, outcome)
+    }
+
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>, ObjectStoreError> {
+        let context = OperationContext::new(prefix, OperationKind::List);
+        let intercept = match self.interceptor.before(&context).await {
+            Intercept::FailBefore(error) => return Err(error),
+            intercept => intercept,
+        };
+        let result = self
+            .inner
+            .list_child_prefixes(prefix, start_after, limit)
+            .await;
         let outcome = result_outcome(&result);
         Self::finish(&self.interceptor, &context, intercept, result, outcome)
     }

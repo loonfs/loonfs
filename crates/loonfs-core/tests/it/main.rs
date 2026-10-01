@@ -14,6 +14,7 @@ mod fork_lifecycle;
 mod inode_mutations;
 mod layout_acceptance;
 mod manifest_statistics;
+mod namespace_listing;
 mod path_intents;
 mod upload_sessions;
 mod visibility_equivalence;

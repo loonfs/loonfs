@@ -3,5 +3,6 @@
 //! runs its tests as threads instead of as separate processes.
 
 mod metrics_instrumented_object_store;
+mod namespace_listing;
 mod objectstore_conformance;
 mod provider_env;

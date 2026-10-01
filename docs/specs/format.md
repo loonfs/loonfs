@@ -297,7 +297,7 @@ A compare-and-swap (CAS) replaces an object only if its compare token still matc
 
 A mutable-object read must return the bytes and the compare token for those same bytes in one observation. Reading metadata and content separately is insufficient: a concurrent update could otherwise pair one version's payload with another version's token. Compare tokens, including ETags, are opaque. They are not assumed to be content digests.
 
-Successful writes and deletes require strong consistency. Prefix enumeration returns keys in ascending lexicographic order. The collection protocols depend on this behavior; “S3 compatible” is not, by itself, evidence of conformance.
+Successful writes and deletes require strong consistency. Prefix enumeration returns keys in ascending lexicographic order. The collection protocols depend on this behavior; “S3 compatible” is not, by itself, evidence of conformance. The layer must also list the child prefixes directly under a prefix, in the same order and one page per provider request, starting after a given key. A host uses this listing to enumerate namespaces without listing their objects.
 
 A provider must also apply each request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of the moment the client began the operation that sent it. This is the provider time that the reclamation grace reserves. The implementation cannot check this assumption. Section 11.4 explains what depends on it, and Appendix C.1 gives the numbers.
 

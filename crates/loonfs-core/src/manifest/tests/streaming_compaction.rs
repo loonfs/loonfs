@@ -1264,6 +1264,17 @@ impl ObjectStore for ReadRecorderStore {
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         self.inner.list_prefix_from_stream(prefix, start_after)
     }
+
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: loonfs_types::EffectiveLimit,
+    ) -> Result<loonfs_types::Page<String, String>, ObjectStoreError> {
+        self.inner
+            .list_child_prefixes(prefix, start_after, limit)
+            .await
+    }
 }
 
 /// What one merge cost the store, by section.

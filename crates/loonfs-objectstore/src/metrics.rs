@@ -6,12 +6,12 @@ use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
+    ObjectStoreError, ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
-use loonfs_types::Checksum;
+use loonfs_types::{Checksum, EffectiveLimit, Page};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{self, File};
@@ -106,7 +106,8 @@ pub enum ObjectStoreOperation {
     CompleteMultipartUpload,
     /// Measures abandoning a multipart upload and its parts.
     AbortMultipartUpload,
-    /// Measures a listing collected to completion.
+    /// Measures a listing returned whole: a full prefix listing, or one page
+    /// of child prefixes.
     ListPrefix,
     /// Measures a listing stream until completion or early drop.
     ListPrefixStream,
@@ -566,7 +567,30 @@ where
                 })
         })
         .await;
-        self.record_list(prefix, start.elapsed(), attempts, &result);
+        self.record_list(
+            prefix,
+            start.elapsed(),
+            attempts,
+            result.as_ref().map(Vec::len),
+        );
+        result
+    }
+
+    async fn list_child_prefixes(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: EffectiveLimit,
+    ) -> Result<Page<String, String>> {
+        let start = sample_clock();
+        let (result, attempts) =
+            counting_attempts(self.inner.list_child_prefixes(prefix, start_after, limit)).await;
+        self.record_list(
+            prefix,
+            start.elapsed(),
+            attempts,
+            result.as_ref().map(|page| page.items.len()),
+        );
         result
     }
 }
@@ -682,17 +706,21 @@ impl<S> InstrumentedObjectStore<S> {
         prefix: &str,
         elapsed: Duration,
         attempts: u32,
-        result: &Result<Vec<String>>,
+        listed: std::result::Result<usize, &ObjectStoreError>,
     ) {
+        let result = match listed {
+            Ok(_) => ObjectStoreResultClass::Ok,
+            Err(error) => error.class().into(),
+        };
         let mut sample = ObjectStoreMetricSample::new(
             ObjectStoreOperation::ListPrefix,
             prefix,
             elapsed,
             attempts,
-            classify_result(result),
+            result,
             self.store_kind.clone(),
         );
-        sample.item_count = result.as_ref().ok().map(|items| items.len() as u64);
+        sample.item_count = listed.ok().map(|items| items as u64);
         sample.range_class = Some(RangeClass::Prefix);
         self.record(sample);
     }
