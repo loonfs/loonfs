@@ -9,9 +9,9 @@ use crate::namespace::read_anchor::{
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
 use crate::wal::{prepare_wal_object, publish_wal_object};
-use loonfs_api::wire::control::{AcquiredWriter, WriterBlock};
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{AcquiredWriter, WriterBlock};
+use loonfs_types::NamespaceId;
 use std::sync::Arc;
 
 #[cfg(test)]

@@ -2,8 +2,8 @@
 //!
 //! [durable object family]: https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a8-object-keys
 
-use loonfs_api::wire::manifest::MetadataSegmentRef;
-use loonfs_api::{ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo};
+use loonfs_types::format::manifest::MetadataSegmentRef;
+use loonfs_types::{ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo};
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
 pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
@@ -95,11 +95,11 @@ mod tests {
         content_blob, hint, metadata_manifest_object, metadata_segment,
         metadata_segment_object_key, pin, upload_session, wal_object, wal_prefix,
     };
-    use loonfs_api::wire::manifest::{
+    use loonfs_types::format::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
     };
-    use loonfs_api::wire::sst_blocks::BlockHandle;
-    use loonfs_api::{
+    use loonfs_types::format::sst_blocks::BlockHandle;
+    use loonfs_types::{
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
     };
 

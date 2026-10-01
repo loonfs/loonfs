@@ -5,12 +5,6 @@
 //! with one hand-written expectation.
 
 use crate::common::read_context;
-use loonfs_api::options::StatOptions;
-use loonfs_api::v0::Commit;
-use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
-    NamespaceId, PageRequest, RevisionNo,
-};
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{
@@ -18,6 +12,12 @@ use loonfs_core::{
     NamespaceWriterEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_types::api::v0::Commit;
+use loonfs_types::options::StatOptions;
+use loonfs_types::{
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    NamespaceId, PageRequest, RevisionNo,
+};
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 
@@ -35,7 +35,7 @@ impl VisibilityHarness {
         let engine = NamespaceWriterEngine::writer(
             Arc::clone(&store),
             namespace_id,
-            loonfs_api::WriterId::parse("visibility-equivalence").expect("writer id"),
+            loonfs_types::WriterId::parse("visibility-equivalence").expect("writer id"),
         );
         engine
             .bootstrap_namespace(
@@ -157,7 +157,7 @@ impl VisibilityHarness {
             source_path: AbsolutePath::parse(source_path).expect("valid source path"),
             destination_path: AbsolutePath::parse(destination_path)
                 .expect("valid destination path"),
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -175,7 +175,7 @@ impl VisibilityHarness {
             source_path: AbsolutePath::parse(source_path).expect("valid source path"),
             destination_path: AbsolutePath::parse(destination_path)
                 .expect("valid destination path"),
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -569,7 +569,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
                 source_path: AbsolutePath::parse("/reverse/branch").expect("valid source path"),
                 destination_path: AbsolutePath::parse("/safe/reverse-branch")
                     .expect("valid destination path"),
-                precondition: loonfs_api::DestinationPrecondition {
+                precondition: loonfs_types::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -593,7 +593,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
                 source_path: AbsolutePath::parse("/source/branch").expect("valid source path"),
                 destination_path: AbsolutePath::parse("/safe/branch")
                     .expect("valid destination path"),
-                precondition: loonfs_api::DestinationPrecondition {
+                precondition: loonfs_types::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -925,7 +925,7 @@ async fn drain_compaction(
             .engine
             .metadata_compaction_step(
                 loonfs_core::MetadataCompactionPolicy::default(),
-                loonfs_api::CompactorEpoch(0),
+                loonfs_types::CompactorEpoch(0),
             )
             .await
             .expect("compact metadata");

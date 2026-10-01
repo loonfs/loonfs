@@ -16,14 +16,14 @@ use loonfs::{
     MetadataCache, MetadataMaintenanceOptions, NamespaceId, PageRequest, ReadOnly,
     SharedObjectStore, StatOptions, DEFAULT_MAX_HEAD_STATE_BYTES,
 };
-use loonfs_api::{
-    AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, NamespaceAccess,
-    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId, MAX_ACCESS_GRANT_ENTRIES,
-    MAX_ATTRIBUTE_ENTRIES,
-};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{
     attribute_key, attribute_text, namespace_id, page_limit, test_actor,
+};
+use loonfs_types::{
+    AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, NamespaceAccess,
+    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId, MAX_ACCESS_GRANT_ENTRIES,
+    MAX_ATTRIBUTE_ENTRIES,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, BTreeSet};

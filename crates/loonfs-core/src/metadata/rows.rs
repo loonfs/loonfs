@@ -3,13 +3,13 @@
 
 use super::indexes::MetadataIndexes;
 use crate::heap_bytes::HeapBytes;
-use loonfs_api::wire::manifest::{
+use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
     CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindingRecord,
     InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
-use loonfs_api::wire::wal::WalCommitPayload;
-use loonfs_api::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
+use loonfs_types::format::wal::WalCommitPayload;
+use loonfs_types::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
 use std::mem::size_of;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,7 +209,7 @@ impl MetadataState {
 
     pub fn find_content_publication(
         &self,
-        content_id: &loonfs_api::ContentId,
+        content_id: &loonfs_types::ContentId,
     ) -> Option<ChangeSeq> {
         self.indexes.content_publication(content_id)
     }

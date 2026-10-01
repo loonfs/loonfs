@@ -1,8 +1,8 @@
 //! [`CommitRequest`]: the one filesystem commit language, before planning.
 
-use loonfs_api::{ActorId, CommitId, CommitPrecondition, Subject};
+use loonfs_types::{ActorId, CommitId, CommitPrecondition, Subject};
 
-/// The operation language a commit is written in, owned by `loonfs-api` and
+/// The operation language a commit is written in, owned by `loonfs-types` and
 /// used here unchanged.
 ///
 /// There is one spelling of a pre-planning operation across the workspace:
@@ -11,7 +11,7 @@ use loonfs_api::{ActorId, CommitId, CommitPrecondition, Subject};
 /// fingerprint preimage is a separate, frozen spelling, and the planner's
 /// `operation_fingerprint_input` is the only place this one is renamed
 /// into it.
-pub use loonfs_api::FilesystemOperation;
+pub use loonfs_types::FilesystemOperation;
 
 /// A request to commit one or more filesystem operations.
 ///
@@ -19,7 +19,7 @@ pub use loonfs_api::FilesystemOperation;
 /// previous ones. Either all operations are committed or none are. Requests
 /// with one operation use the same planning, fingerprint, and retry logic.
 ///
-/// This is the wire [`CommitRequest`](loonfs_api::CommitRequest) minus the
+/// This is the wire [`CommitRequest`](loonfs_types::CommitRequest) minus the
 /// content tokens: proofs are checked at the surface that accepts them, and
 /// what reaches the planner is the commit itself.
 ///

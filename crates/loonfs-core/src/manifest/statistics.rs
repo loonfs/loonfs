@@ -7,10 +7,12 @@ use crate::error::{CoreError, Result};
 use crate::namespace::control::{load_current_manifest, LoadedManifest};
 use crate::pin::load_pin_basis;
 use crate::pin::record::load_pin;
-use loonfs_api::wire::control::{ForkBasis, ManifestRef, NamespaceStatus};
-use loonfs_api::wire::manifest::{ManifestActivity, MetadataRowFamily, NamespaceManifestEnvelope};
-use loonfs_api::{NamespaceId, PinId, WalNo};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{ForkBasis, ManifestRef, NamespaceStatus};
+use loonfs_types::format::manifest::{
+    ManifestActivity, MetadataRowFamily, NamespaceManifestEnvelope,
+};
+use loonfs_types::{NamespaceId, PinId, WalNo};
 use std::collections::BTreeMap;
 
 /// Statistics through the selected manifest's folded head. Newer WAL commits

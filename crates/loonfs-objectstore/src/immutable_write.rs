@@ -6,7 +6,7 @@ use crate::{
     ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use bytes::Bytes;
-use loonfs_api::OperationDeadline;
+use loonfs_types::OperationDeadline;
 use thiserror::Error;
 
 /// Failure to verify that an immutable key contains the requested bytes.

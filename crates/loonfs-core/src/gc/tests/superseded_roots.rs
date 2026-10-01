@@ -4,8 +4,8 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::manifest::{compaction_step, fold_wal, CompactionStepOutcome};
 use crate::namespace::control::{load_current_manifest, raise_hint, LoadedManifest};
-use loonfs_api::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_segment_object_key;
+use loonfs_types::MetadataFamilyGroup;
 
 async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> LoadedManifest {
     let setup = context(1_000);
@@ -30,7 +30,7 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
     let outcome = compaction_step(
         store,
         namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         Default::default(),
         MetadataCompactionPolicy::CompactImmediately,
     )

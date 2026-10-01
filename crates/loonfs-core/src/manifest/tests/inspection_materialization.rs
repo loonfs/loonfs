@@ -18,12 +18,12 @@ use super::super::validate::{
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::store_waves::STORE_READ_WAVE;
 use futures::future::try_join_all;
-use loonfs_api::wire::manifest::{
-    MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
-};
-use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::{
+    MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
+};
+use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 
 #[cfg(test)]
 pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore + ?Sized>(

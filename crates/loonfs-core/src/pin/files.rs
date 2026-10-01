@@ -4,12 +4,12 @@ use super::read_basis::{load_user_pin_basis, PinBasis};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::manifest::MetadataSegmentCache;
 use crate::metadata::MetadataView;
-use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
-use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
+use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
+use loonfs_types::{
     ChangeSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, PinId, RevisionNo,
 };
-use loonfs_objectstore::ObjectStore;
 
 /// Minimum number of inode rows scanned at once.
 const INODE_SCAN_WAVE_ROWS: usize = 64;

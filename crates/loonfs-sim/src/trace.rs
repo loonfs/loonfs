@@ -3,7 +3,7 @@
 use crate::fault::ObjectStoreFault;
 use crate::object_operation::ObjectOperation;
 use crate::rng::SimSeed;
-use loonfs_api::ActorId;
+use loonfs_types::ActorId;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 

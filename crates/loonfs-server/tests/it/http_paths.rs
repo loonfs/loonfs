@@ -4,10 +4,10 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::{DeleteDirectoryBehavior, DestinationBehavior};
 use loonfs_client::{ClientError, CopyOptions, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::{DeleteDirectoryBehavior, DestinationBehavior};
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -25,7 +25,7 @@ async fn http_stat_omits_the_root_name_and_carries_named_child_names() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -73,7 +73,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -117,7 +117,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
             &loonfs_test_support::test_actor(),
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,
@@ -159,7 +159,7 @@ async fn http_name_collision_reports_readable_error_message() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -225,7 +225,7 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

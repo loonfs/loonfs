@@ -7,7 +7,6 @@ use crate::provider_env::{
 };
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
-use loonfs_api::{Checksum, ContentId};
 use loonfs_objectstore::abs::{azure_abs, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{gcp_gcs, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::content_blob;
@@ -18,6 +17,7 @@ use loonfs_objectstore::s3_compatible::{
 };
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{AwsS3Credentials, ObjectStore};
+use loonfs_types::{Checksum, ContentId};
 use tempfile::TempDir;
 
 #[test]
@@ -327,7 +327,7 @@ async fn assert_provider_conformance(store: &dyn ObjectStore, direct_put_proven:
 
 /// Checks that every provider resumes after the given key in sorted order.
 async fn assert_start_after_contract(store: &dyn ObjectStore) {
-    let run_id = loonfs_api::generated_id("list");
+    let run_id = loonfs_types::generated_id("list");
     let prefix = format!("start-after/{run_id}/");
     let keys = [
         format!("{prefix}a"),
@@ -388,7 +388,7 @@ async fn assert_start_after_contract(store: &dyn ObjectStore) {
 /// direct PUT enabled, so they must return stored checksums. Every other probe
 /// check must pass for every provider.
 async fn assert_store_contract_probe_passes(store: &dyn ObjectStore, direct_put_proven: bool) {
-    let run_id = loonfs_api::generated_id("probe");
+    let run_id = loonfs_types::generated_id("probe");
     let report = run_store_contract_probe(store, &run_id).await;
     let acceptable = report.checks.iter().all(|check| match check.outcome {
         StoreProbeOutcome::Passed => true,
@@ -416,7 +416,7 @@ fn probe_report_lines(report: &StoreProbeReport) -> String {
 /// Returns the object key used by the stored-checksum test.
 fn stored_checksum_test_key() -> String {
     content_blob(
-        &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         &ContentId::parse("con_9a41c07d55e2410fb3c6d8e1f2a3b4c5").expect("valid content id"),
     )
 }
@@ -463,7 +463,7 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
 /// The content key a streamed-write exercise writes to and cleans up.
 fn streamed_write_key() -> String {
     content_blob(
-        &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         &ContentId::parse("con_5723ea9d1c4b48f0a1d2e3f4a5b6c7d8").expect("valid content id"),
     )
 }

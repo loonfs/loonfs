@@ -4,10 +4,10 @@ use super::*;
 use crate::config::StoreConfig;
 use crate::resolve::ResolvedTarget;
 use loonfs::{MaintenanceConclusion, MetadataMaintenanceOptions};
-use loonfs_api::NamespaceId;
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
+use loonfs_types::NamespaceId;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -24,7 +24,7 @@ async fn embedded_writes_drain_maintenance_before_the_wal_backpressure_cap() {
         .create_namespace(
             &namespace,
             &actor,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("namespace");
@@ -79,7 +79,7 @@ async fn seed_wal_backlog(store: &SharedObjectStore, namespace_id: &NamespaceId)
         namespace_id,
         PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD,
         &MutationContext {
-            writer_id: loonfs_api::WriterId::parse(format!("{namespace_id}-tail"))
+            writer_id: loonfs_types::WriterId::parse(format!("{namespace_id}-tail"))
                 .expect("writer id"),
             now_ms: 1_000,
         },

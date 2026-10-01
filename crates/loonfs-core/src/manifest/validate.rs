@@ -5,12 +5,12 @@ use super::error::ManifestLoadError;
 use super::row::manifest_row_commit_seq;
 use super::runs::{runs_in_materialization_order, MetadataFamilyGroup, MetadataRunManifest};
 use super::scan::ordered_manifest_segments;
-use loonfs_api::wire::manifest::{
+use loonfs_objectstore::keys::metadata_segment_object_key;
+use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
     NamespaceManifestPayload, RunTier, METADATA_SEGMENT_ENCODING,
 };
-use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
-use loonfs_objectstore::keys::metadata_segment_object_key;
+use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 #[cfg(test)]
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -74,7 +74,7 @@ pub(super) fn validate_manifest_materialization_ranges(
 
     if payload.runs.is_empty() {
         if payload.head_seq == ChangeSeq(0)
-            && payload.next_inode_id == loonfs_api::FIRST_ALLOCATABLE_INODE_ID
+            && payload.next_inode_id == loonfs_types::FIRST_ALLOCATABLE_INODE_ID
             && payload.next_run_no == RunNo(0)
         {
             return Ok(());

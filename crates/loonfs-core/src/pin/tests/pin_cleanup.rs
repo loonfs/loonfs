@@ -1,9 +1,9 @@
 //! Collection recovery after failed or concurrent pin cleanup.
 
 use super::*;
-use loonfs_api::wire::control::PinOwner;
 use loonfs_objectstore::keys::{self, pin_prefix};
 use loonfs_test_support::stores::MetadataMapStore;
+use loonfs_types::format::control::PinOwner;
 
 #[tokio::test]
 async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup() {
@@ -208,7 +208,7 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
     for (index, id) in ids.iter().enumerate() {
         record::write_pin(
             &store,
-            &loonfs_api::wire::control::PinPayload {
+            &loonfs_types::format::control::PinPayload {
                 pin_id: id.clone(),
                 namespace_id: namespace_id.clone(),
                 head_seq: manifest.state.manifest().head_seq,

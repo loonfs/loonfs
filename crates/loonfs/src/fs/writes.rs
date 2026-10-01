@@ -674,7 +674,7 @@ impl Namespace<Writable> {
             FilesystemOperation::MovePath {
                 source_path: loonfs_core::path::parse_mutation_path(source_path)?,
                 destination_path: loonfs_core::path::parse_mutation_path(destination_path)?,
-                precondition: loonfs_api::DestinationPrecondition {
+                precondition: loonfs_types::DestinationPrecondition {
                     behavior: options.behavior,
                     expected_inode_id: options.expected_destination_inode_id,
                     expected_revision_no: options.expected_destination_revision_no,
@@ -729,7 +729,7 @@ impl Namespace<Writable> {
             FilesystemOperation::CopyPath {
                 source_path: loonfs_core::path::parse_mutation_path(source_path)?,
                 destination_path: loonfs_core::path::parse_mutation_path(destination_path)?,
-                precondition: loonfs_api::DestinationPrecondition {
+                precondition: loonfs_types::DestinationPrecondition {
                     behavior: options.behavior,
                     expected_inode_id: options.expected_destination_inode_id,
                     expected_revision_no: options.expected_destination_revision_no,
@@ -885,7 +885,7 @@ impl Namespace<Writable> {
             actor,
             &options.commit,
             FilesystemOperation::UpdateAccess {
-                path: loonfs_api::AbsolutePath::parse(absolute_path)
+                path: loonfs_types::AbsolutePath::parse(absolute_path)
                     .map_err(|error| loonfs_core::Error::InvalidPath(error.to_string()))?,
                 boundary: access.boundary,
                 grants: access.grants,

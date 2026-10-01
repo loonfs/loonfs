@@ -5,17 +5,17 @@ use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation, Inlin
 use loonfs::{
     CreateNamespaceOptions, InlineContentPolicy, LoonFs, Namespace, SharedObjectStore, Writable,
 };
-use loonfs_api::{
-    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
-    DestinationBehavior, ErrorCode, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope,
-    PrincipalSet, Subject, SubjectId,
-};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation,
     RecordingStore,
+};
+use loonfs_types::{
+    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
+    DestinationBehavior, ErrorCode, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope,
+    PrincipalSet, Subject, SubjectId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

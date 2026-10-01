@@ -9,10 +9,10 @@ use crate::error::{CoreError, Result};
 use crate::manifest::MetadataSegmentCache;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
-use loonfs_api::wire::control::PinOwner;
-use loonfs_api::{Checkpoint, DeleteSnapshotResponse, NamespaceId, PinId};
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_types::format::control::PinOwner;
+use loonfs_types::{Checkpoint, DeleteSnapshotResponse, NamespaceId, PinId};
 use std::sync::Arc;
 
 /// Resolves the read basis a live snapshot lease pins.

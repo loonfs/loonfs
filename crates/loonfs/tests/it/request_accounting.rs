@@ -11,12 +11,12 @@ use loonfs::{
     LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId, PageRequest, PaginationPolicy,
     PutFileOptions, SharedObjectStore, Writable,
 };
-use loonfs_api::AbsolutePath;
+use loonfs_types::AbsolutePath;
 
-use loonfs_api::wire::manifest::{decode_namespace_manifest_json, RunTier};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
+use loonfs_types::format::manifest::{decode_namespace_manifest_json, RunTier};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -274,7 +274,7 @@ async fn warm_phase_request_accounting() {
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,
@@ -296,7 +296,7 @@ async fn warm_phase_request_accounting() {
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,

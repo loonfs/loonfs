@@ -7,15 +7,15 @@ use crate::error::CoreError;
 use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::Deadline;
-use loonfs_api::wire::control::{ControlObjectKind, HintPayload, ManifestRef};
-use loonfs_api::CompactorEpoch;
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{ControlObjectKind, HintPayload, ManifestRef};
+use loonfs_types::CompactorEpoch;
+use loonfs_types::NamespaceId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentManifest {
-    pub envelope: std::sync::Arc<loonfs_api::wire::manifest::NamespaceManifestEnvelope>,
+    pub envelope: std::sync::Arc<loonfs_types::format::manifest::NamespaceManifestEnvelope>,
 }
 
 impl CurrentManifest {
@@ -26,11 +26,11 @@ impl CurrentManifest {
         )
     }
 
-    pub fn retention_floor_seq(&self) -> loonfs_api::ChangeSeq {
+    pub fn retention_floor_seq(&self) -> loonfs_types::ChangeSeq {
         self.envelope.payload().retention_floor_seq
     }
 
-    pub fn folded_wal_no(&self) -> loonfs_api::WalNo {
+    pub fn folded_wal_no(&self) -> loonfs_types::WalNo {
         self.envelope.payload().folded_wal_no
     }
 
@@ -87,7 +87,7 @@ pub(crate) async fn load_hint<S: ObjectStore + ?Sized>(
 pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_no: loonfs_api::ManifestNo,
+    manifest_no: loonfs_types::ManifestNo,
     known: Option<LoadedHint>,
     deadline: &Deadline,
 ) -> crate::error::Result<LoadedHint> {
@@ -105,11 +105,11 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
             break;
         }
         let bytes =
-            loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &raised)
+            loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &raised)
                 .map_err(|error| CoreError::Codec {
-                    object_key: object_key.clone(),
-                    message: error.to_string(),
-                })?;
+                object_key: object_key.clone(),
+                message: error.to_string(),
+            })?;
         match store
             .compare_and_swap(&object_key, &current.etag, bytes::Bytes::from(bytes))
             .await
@@ -140,7 +140,7 @@ pub(crate) async fn load_current_manifest<S: ObjectStore + ?Sized>(
         .ok_or_else(|| ControlObjectLoadError::MissingObject {
             object_key: loonfs_objectstore::keys::metadata_manifest_object(
                 namespace_id,
-                &loonfs_api::ManifestNo(1),
+                &loonfs_types::ManifestNo(1),
             ),
         })
 }
@@ -163,7 +163,7 @@ pub(crate) async fn load_current_manifest_with_hint<S: ObjectStore + ?Sized>(
         .ok_or_else(|| ControlObjectLoadError::MissingObject {
             object_key: loonfs_objectstore::keys::metadata_manifest_object(
                 namespace_id,
-                &loonfs_api::ManifestNo(1),
+                &loonfs_types::ManifestNo(1),
             ),
         })
 }
@@ -179,7 +179,7 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
     };
     loop {
         let mut manifest_no = hint.state.manifest_no;
-        if manifest_no == loonfs_api::ManifestNo(0) {
+        if manifest_no == loonfs_types::ManifestNo(0) {
             return Err(ControlObjectLoadError::Codec {
                 object_key: hint.object_key,
                 message: "manifest hint must be at least one".to_owned(),
@@ -217,7 +217,7 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
             hint = refreshed;
             continue;
         }
-        if current.is_none() && manifest_no != loonfs_api::ManifestNo(1) {
+        if current.is_none() && manifest_no != loonfs_types::ManifestNo(1) {
             return Err(ControlObjectLoadError::Codec {
                 object_key: hint.object_key,
                 message: format!("hinted manifest `{manifest_no}` is missing"),
@@ -230,7 +230,7 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
 pub(crate) async fn load_manifest_by_number<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_no: loonfs_api::ManifestNo,
+    manifest_no: loonfs_types::ManifestNo,
 ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
     let object_key = loonfs_objectstore::keys::metadata_manifest_object(namespace_id, &manifest_no);
     let envelope = crate::manifest::load_namespace_manifest_envelope_if_present(
@@ -285,13 +285,13 @@ pub async fn load_namespace_current_manifest<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use crate::time::StdMonotonicTimer;
-    use loonfs_api::ManifestNo;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::{
         FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
         RecordedOperation, RecordingStore,
     };
+    use loonfs_types::ManifestNo;
     use std::sync::Arc;
 
     async fn seed_hint(store: &LocalFsStore, namespace_id: &NamespaceId) -> LoadedHint {
@@ -300,7 +300,7 @@ mod tests {
             manifest_no: ManifestNo(1),
         };
         let bytes =
-            loonfs_api::wire::control::encode_control_state(ControlObjectKind::Hint, &state)
+            loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &state)
                 .expect("hint");
         store
             .put_if_absent(&hint(namespace_id), bytes.into())

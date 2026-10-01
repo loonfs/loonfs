@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "The representative LoonFS HTTP binding."
+description = "The LoonFS HTTP API as a library: routes, handlers, and the OpenAPI document."
 repository.workspace = true
 homepage.workspace = true
 keywords = ["filesystem", "object-storage", "http", "axum"]
@@ -22,7 +22,7 @@ form_urlencoded.workspace = true
 futures.workspace = true
 http.workspace = true
 loonfs.workspace = true
-loonfs-api.workspace = true
+loonfs-types.workspace = true
 loonfs-objectstore.workspace = true
 loonfs-grep.workspace = true
 serde.workspace = true
@@ -43,7 +43,7 @@ tempfile.workspace = true
 ureq.workspace = true
 
 [features]
-openapi = ["dep:utoipa", "loonfs-api/openapi"]
+openapi = ["dep:utoipa", "loonfs-types/openapi"]
 
 [lints]
 workspace = true

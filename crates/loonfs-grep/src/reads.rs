@@ -8,8 +8,8 @@ use loonfs::{
     CheckpointFilesPager, CoreError, CurrentFileState, ListCheckpointFilesOptions, Namespace,
     NamespaceMetadata, ReadOnly, ReadView, StatOptions, MAX_RESOLVE_CURRENT_FILES,
 };
-use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
-use loonfs_api::{
+use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
+use loonfs_types::{
     AbsolutePath, ChangeSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
     PageRequest, PaginationPolicy, PathEntry, PinId, RevisionNo, Subject,
 };
@@ -172,7 +172,7 @@ impl NamespaceReadView<'_> {
             .stat_with_options(
                 absolute_path.as_str(),
                 &StatOptions {
-                    include_attributes: loonfs_api::AttributeInclusion::Omit,
+                    include_attributes: loonfs_types::AttributeInclusion::Omit,
                     snapshot_id: None,
                 },
             )
@@ -282,7 +282,7 @@ fn invalid_page_limit(error: LimitError) -> GrepError {
 mod tests {
     use super::{page_limit, resolve_batch_size};
     use loonfs::MAX_RESOLVE_CURRENT_FILES;
-    use loonfs_api::{LimitError, DEFAULT_MAX_PAGE_LIMIT};
+    use loonfs_types::{LimitError, DEFAULT_MAX_PAGE_LIMIT};
 
     #[test]
     fn page_limits_enforce_the_pagination_contract() {

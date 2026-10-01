@@ -10,8 +10,8 @@ use crate::namespace::state::NamespaceReadState;
 use crate::store_waves::STORE_READ_WAVE;
 use crate::RuntimeReadContext;
 use futures::{stream, StreamExt};
-use loonfs_api::{NamespaceId, WalNo, MAX_PUBLIC_INTEGER};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{NamespaceId, WalNo, MAX_PUBLIC_INTEGER};
 use std::sync::Arc;
 
 pub(crate) struct DiscoveredTail {

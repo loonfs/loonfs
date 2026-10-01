@@ -11,13 +11,13 @@ use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::pin::record::pin_key_ids;
 use crate::wal::{live_folded_wal_no, object_is_required};
 use futures::StreamExt;
-use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{ManifestNo, NamespaceId, WalNo};
 use loonfs_objectstore::keys::{
     metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key, pin_prefix,
 };
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::{ManifestNo, NamespaceId, WalNo};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

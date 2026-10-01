@@ -1,7 +1,7 @@
 //! The current manifest used by namespace readers.
 
-use loonfs_api::wire::control::ManifestRef;
-use loonfs_api::ManifestNo;
+use loonfs_types::format::control::ManifestRef;
+use loonfs_types::ManifestNo;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataBasis(pub ManifestRef);

@@ -157,7 +157,7 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<CreateDownloadByInodeResponse> {
-        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
+        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
             self.base_url
@@ -217,7 +217,7 @@ impl Client {
             &download.content_ref,
             format!(
                 "inode {} revision {}",
-                loonfs_api::public_inode_id::encode(download.inode_id),
+                loonfs_types::public_inode_id::encode(download.inode_id),
                 download.revision_no
             ),
             start_offset,

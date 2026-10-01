@@ -13,7 +13,7 @@ use loonfs::metrics::{
     RESULT_MISS, RESULT_OK,
 };
 use loonfs::{StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind};
-use loonfs_api::{MetadataSegmentId, NamespaceId};
+use loonfs_types::{MetadataSegmentId, NamespaceId};
 use mixtrics::metrics::RegistryOps;
 use std::path::Path;
 use std::sync::atomic::Ordering;

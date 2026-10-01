@@ -2,12 +2,13 @@
 //! replay paths.
 
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::wal::{WalObjectEnvelope, WalObjectPayload};
-use loonfs_api::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
+use loonfs_types::format::wal::{WalObjectEnvelope, WalObjectPayload};
+use loonfs_types::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub(crate) type PreparedWalObject = loonfs_api::wire::envelope::EncodedEnvelope<WalObjectPayload>;
+pub(crate) type PreparedWalObject =
+    loonfs_types::format::envelope::EncodedEnvelope<WalObjectPayload>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WalObjectError {
@@ -138,14 +139,14 @@ pub enum WalTailLoadError {
 }
 
 impl WalTailLoadError {
-    pub fn code(&self) -> loonfs_api::ErrorCode {
+    pub fn code(&self) -> loonfs_types::ErrorCode {
         match self {
             Self::ReadWal {
                 class: crate::error::StoreFailureClass::PermissionDenied,
                 ..
-            } => loonfs_api::ErrorCode::StoragePermissionDenied,
-            Self::ReadWal { .. } => loonfs_api::ErrorCode::ServerError,
-            _ => loonfs_api::ErrorCode::NamespaceCorrupt,
+            } => loonfs_types::ErrorCode::StoragePermissionDenied,
+            Self::ReadWal { .. } => loonfs_types::ErrorCode::ServerError,
+            _ => loonfs_types::ErrorCode::NamespaceCorrupt,
         }
     }
 }

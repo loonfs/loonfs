@@ -2,8 +2,6 @@
 
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
-use loonfs_api::wire::manifest::{ActivityCounter, ManifestActivity, MetadataRowFamily};
-use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior};
 use loonfs_core::cache::HeadStateCache;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::{
@@ -17,6 +15,10 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+};
+use loonfs_types::format::manifest::{ActivityCounter, ManifestActivity, MetadataRowFamily};
+use loonfs_types::{
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;

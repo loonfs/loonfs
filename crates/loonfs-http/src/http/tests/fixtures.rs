@@ -2,13 +2,13 @@
 
 use crate::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces};
 use loonfs::{LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode, TraceStoreKind};
-use loonfs_api::WriterId;
 use loonfs_grep::{
     new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_objectstore::{
     local_fs_store::LocalFsStore, presign::DirectTransferIssuers, ConfiguredObjectStoreKind,
 };
+use loonfs_types::WriterId;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;

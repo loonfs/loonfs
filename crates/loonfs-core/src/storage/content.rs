@@ -9,13 +9,13 @@ use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceC
 use crate::storage::content_admission::PreparedContent;
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_api::{
-    Checksum, ContentId, ContentRef, ContentRefValidationError, ErrorCode, NamespaceId, PathEntry,
-    Sha256, StreamingChecksum,
-};
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{
     ByteRange, ByteStream, ImmutableWriteError, ObjectStore, ObjectStoreError, PutMode,
+};
+use loonfs_types::{
+    Checksum, ContentId, ContentRef, ContentRefValidationError, ErrorCode, NamespaceId, PathEntry,
+    Sha256, StreamingChecksum,
 };
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -815,12 +815,12 @@ mod tests {
         CoreError, DurableContentValidationError, FileContentStream, NonZeroU64,
     };
     use bytes::Bytes;
-    use loonfs_api::{Checksum, ContentId, ContentRef, ContentRefKind, PathEntry};
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::ids::content_ref;
     use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use loonfs_types::{Checksum, ContentId, ContentRef, ContentRefKind, PathEntry};
     use tempfile::tempdir;
 
     async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
@@ -930,7 +930,7 @@ mod tests {
         let bytes = b"transferred straight to the provider";
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(bytes),
@@ -963,7 +963,7 @@ mod tests {
         let bytes = b"provider-assembled bytes";
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc64nvme(bytes),
@@ -1066,7 +1066,7 @@ mod tests {
 
         let first = stage_bytes_under_content_id(
             &store,
-            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
         )
@@ -1074,7 +1074,7 @@ mod tests {
         .expect("first stage");
         let second = stage_bytes_under_content_id(
             &store,
-            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
         )
@@ -1118,23 +1118,23 @@ mod tests {
 
     fn test_entry() -> PathEntry {
         PathEntry {
-            namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-            path: loonfs_api::AbsolutePath::parse("/file.bin").expect("absolute path"),
-            inode_id: loonfs_api::InodeId(1),
-            created_by: loonfs_api::ActorId::loonfs(),
+            namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+            path: loonfs_types::AbsolutePath::parse("/file.bin").expect("absolute path"),
+            inode_id: loonfs_types::InodeId(1),
+            created_by: loonfs_types::ActorId::loonfs(),
             created_at_ms: 1,
-            kind: loonfs_api::PathEntryKind::File {
-                revision_no: loonfs_api::RevisionNo(1),
+            kind: loonfs_types::PathEntryKind::File {
+                revision_no: loonfs_types::RevisionNo(1),
                 size_bytes: 0,
                 content_ref: ContentRef::blob_v1(
-                    loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-                    loonfs_api::ContentId::generate(),
+                    loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+                    loonfs_types::ContentId::generate(),
                     b"",
                 ),
-                revision_committed_by: loonfs_api::ActorId::loonfs(),
+                revision_committed_by: loonfs_types::ActorId::loonfs(),
                 revision_committed_at_ms: 1,
             },
-            head_seq: loonfs_api::ChangeSeq(1),
+            head_seq: loonfs_types::ChangeSeq(1),
             parent_inode_id: None,
             display_name: None,
             binding_version: None,
@@ -1412,7 +1412,7 @@ mod tests {
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize + 5);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: Checksum::crc32c(&bytes),
@@ -1471,7 +1471,7 @@ mod tests {
         let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
         let content_ref = ContentRef {
             kind: ContentRefKind::BlobV1,
-            owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
             checksum: checksum(&bytes),

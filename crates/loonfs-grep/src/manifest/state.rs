@@ -1,8 +1,8 @@
 //! Constructor-validated grep manifest payload and its discovery hint.
 
 use super::error::GrepManifestStateError;
-use loonfs_api::wire::sst_blocks::BlockHandle;
-use loonfs_api::{ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId, RunNo};
+use loonfs_types::format::sst_blocks::BlockHandle;
+use loonfs_types::{ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId, RunNo};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -71,7 +71,7 @@ impl GrepIndexStatus {
     }
 }
 
-impl From<&GrepIndexStatus> for loonfs_api::v0::GrepIndexLifecycle {
+impl From<&GrepIndexStatus> for loonfs_types::api::v0::GrepIndexLifecycle {
     fn from(status: &GrepIndexStatus) -> Self {
         match status {
             GrepIndexStatus::Disabled {} => Self::Disabled,
@@ -266,9 +266,9 @@ impl GrepManifestState {
     pub(super) fn ensure_successor(
         &self,
         successor: &Self,
-    ) -> Result<(), loonfs_api::wire::manifest::ManifestChainError> {
+    ) -> Result<(), loonfs_types::format::manifest::ManifestChainError> {
         let invalid = |field: &str| {
-            Err(loonfs_api::wire::manifest::ManifestChainError {
+            Err(loonfs_types::format::manifest::ManifestChainError {
                 field: field.to_owned(),
             })
         };

@@ -4,8 +4,6 @@
 
 use crate::common::{mutation_context, namespace_engine, read_context};
 use bytes::Bytes;
-use loonfs_api::AbsolutePath;
-use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
@@ -18,6 +16,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_types::AbsolutePath;
+use loonfs_types::{ChangeSeq, NamespaceId};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -43,14 +43,14 @@ async fn put_file<S: ObjectStore + ?Sized>(
             store,
             vec![CommitCandidate::prepared(
                 CommitRequest::single(
-                    loonfs_api::CommitId::generate(),
+                    loonfs_types::CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(absolute_path).expect("path"),
                         content_ref: Some(content_ref),
                         inline_content: None,
-                        behavior: loonfs_api::DestinationBehavior::NoReplace,
+                        behavior: loonfs_types::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
                     },
@@ -126,7 +126,7 @@ async fn reads_commits_and_change_feed_never_list() {
     engine
         .resolve_path(
             "/docs/hello.txt",
-            loonfs_api::options::StatOptions::default(),
+            loonfs_types::options::StatOptions::default(),
             &ctx,
         )
         .await
@@ -134,11 +134,11 @@ async fn reads_commits_and_change_feed_never_list() {
     engine
         .list_path_page(
             "/docs",
-            loonfs_api::PageRequest {
+            loonfs_types::PageRequest {
                 limit: loonfs_test_support::ids::page_limit(1024),
                 cursor: None,
             },
-            loonfs_api::options::ListOptions::default(),
+            loonfs_types::options::ListOptions::default(),
             &ctx,
         )
         .await

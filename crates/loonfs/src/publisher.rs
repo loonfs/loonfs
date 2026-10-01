@@ -26,9 +26,6 @@ use crate::trace::{phase_event, phase_span};
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error};
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
-use loonfs_api::v0::Commit;
-use loonfs_api::wire::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
-use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
 use loonfs_core::commit::{
     is_retryable_wal_publish, settle_publish_attempt, CommitFingerprint, WalPublishError,
 };
@@ -36,6 +33,9 @@ use loonfs_core::limits::{CONTENTION_RETRY_LIMIT, FOLD_AT_WAL_OBJECTS};
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionState, WriterSessionState};
 use loonfs_core::time::{Deadline, Observation};
 use loonfs_objectstore::timing::MonotonicTimer;
+use loonfs_types::api::v0::Commit;
+use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
+use loonfs_types::{ChangeSeq, CommitId, NamespaceId};
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};

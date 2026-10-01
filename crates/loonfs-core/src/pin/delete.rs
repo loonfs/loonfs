@@ -2,8 +2,8 @@
 
 use super::record::{delete_pin, load_owned_pin, PinOwnerKind};
 use crate::error::Result;
-use loonfs_api::{DeleteCheckpointResponse, NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{DeleteCheckpointResponse, NamespaceId, PinId};
 
 pub(super) async fn delete_owned_pin<S: ObjectStore + ?Sized>(
     store: &S,

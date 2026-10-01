@@ -11,17 +11,17 @@ use crate::namespace::writer_epoch::{acquire_writer, acquire_writer_epoch};
 use crate::path::read::load_current_metadata_view;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::wire::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
-use loonfs_api::{
-    AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
-    NamespaceId, WalNo, WriterEpoch, WriterId,
-};
 use loonfs_objectstore::keys::{hint, metadata_manifest_object, wal_object, wal_prefix};
 use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
     OperationClass, RecordingStore,
+};
+use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
+use loonfs_types::{
+    AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
+    NamespaceId, WalNo, WriterEpoch, WriterId,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -198,7 +198,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::metadata_manifest_object(
             &namespace_id,
-            &loonfs_api::ManifestNo(3),
+            &loonfs_types::ManifestNo(3),
         )),
         OperationClass::PutCreateIfAbsent,
     );
@@ -335,7 +335,7 @@ pub(crate) async fn publish<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine,
     store: &S,
     name: &str,
-) -> crate::error::Result<loonfs_api::Commit> {
+) -> crate::error::Result<loonfs_types::Commit> {
     engine
         .publish_batch(
             store,
@@ -463,9 +463,9 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     publish(&mut engine, &store, "one").await.expect("one");
     publish(&mut engine, &store, "two").await.expect("two");
-    let hint_bytes = loonfs_api::wire::control::encode_control_state(
-        loonfs_api::wire::control::ControlObjectKind::Hint,
-        &loonfs_api::wire::control::HintPayload {
+    let hint_bytes = loonfs_types::format::control::encode_control_state(
+        loonfs_types::format::control::ControlObjectKind::Hint,
+        &loonfs_types::format::control::HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
         },

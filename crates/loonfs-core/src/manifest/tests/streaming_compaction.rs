@@ -434,7 +434,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
 ) -> MetadataCompactionJobOutcome {
     let timer = Arc::new(StdMonotonicTimer::default());
     let publication = CompactionPublication {
-        compactor_epoch: loonfs_api::CompactorEpoch(0),
+        compactor_epoch: loonfs_types::CompactorEpoch(0),
         compaction: Deadline::start(timer.clone()),
         publication: Deadline::start(timer.clone()),
     };
@@ -550,7 +550,7 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
     let report = super::super::compaction_step(
         store,
         namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         merge_everything_policy(),
         MetadataCompactionPolicy::default(),
     )
@@ -640,7 +640,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
     let report = super::super::compaction_step(
         &store,
         &namespace_id,
-        loonfs_api::CompactorEpoch(0),
+        loonfs_types::CompactorEpoch(0),
         starving_policy(),
         MetadataCompactionPolicy::default(),
     )
@@ -691,7 +691,7 @@ async fn a_small_group_over_the_step_budget_starts_a_job_without_counting_merges
         let report = super::super::compaction_step(
             &store,
             &namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::SizeTiered,
         )
@@ -751,7 +751,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         let report = super::super::compaction_step(
             &store,
             &namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -798,7 +798,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
         let report = super::super::compaction_step(
             &store,
             &namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1395,12 +1395,12 @@ async fn install_synthetic_bindings_base(
             crate::metadata::DirentryBindingRecord {
                 parent_inode_id: parent,
                 name_key: NameKey::parse(&name).expect("name key"),
-                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                 },
                 child_inode_id: InodeId(100_000 + index),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(1),
                 delta_index: delta,
@@ -1411,12 +1411,12 @@ async fn install_synthetic_bindings_base(
                 parent_inode_id: parent,
                 name_key: NameKey::parse(&name).expect("name key"),
                 child_inode_id: InodeId(100_000 + index),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
                 delta_index: delta,
-                state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+                state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
             },
         ));
     }
@@ -1782,8 +1782,8 @@ async fn large_compaction_inputs(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
 ) -> (Vec<MetadataRunManifest>, Vec<MetadataRow>) {
-    use loonfs_api::wire::manifest::AttributesRevisionRecord;
-    use loonfs_api::{AttributeKey, AttributeValue, Attributes, AttributesRevisionNo};
+    use loonfs_types::format::manifest::AttributesRevisionRecord;
+    use loonfs_types::{AttributeKey, AttributeValue, Attributes, AttributesRevisionNo};
 
     let mut runs = Vec::new();
     let mut sequential = Vec::new();
@@ -1805,7 +1805,7 @@ async fn large_compaction_inputs(
                 committed_seq: ChangeSeq(run + 1),
                 commit_id: CommitId::parse(format!("c_{run}")).expect("commit id"),
                 delta_index: 0,
-                committed_by: loonfs_api::ActorId::loonfs(),
+                committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 attributes: Attributes::new(BTreeMap::from([(
                     AttributeKey::parse("value").expect("key"),
@@ -2243,7 +2243,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
         let report = super::super::compaction_step(
             &store,
             &namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -2381,7 +2381,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
         let report = super::super::compaction_step(
             store,
             namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
         )
@@ -2431,7 +2431,7 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
         let outcome = run_metadata_compaction_job(
             &dying_store,
             &namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             &spec,
             policy,
             &cancellation,
@@ -2592,7 +2592,7 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
     assert_eq!(segments.manifest().payload().manifest_no, manifest_no);
     assert_eq!(
         segments.manifest().payload().activity,
-        loonfs_api::wire::manifest::ManifestActivity {
+        loonfs_types::format::manifest::ManifestActivity {
             content_bytes: activity_before
                 .content_bytes
                 .checked_add(b"raced the finalizer\n".len() as u64)
@@ -2866,7 +2866,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     let next_epoch = super::super::compactor::claim_compactor(&store, &namespace)
         .await
         .expect("another claim");
-    assert_eq!(next_epoch, loonfs_api::CompactorEpoch(epoch.0 + 1));
+    assert_eq!(next_epoch, loonfs_types::CompactorEpoch(epoch.0 + 1));
     let store = RecordingStore::new(store, KeyPredicate::any());
     let outcome = finalize_metadata_compaction(
         &store,
@@ -2939,7 +2939,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
             store.inner(),
             Default::default(),
             &crate::MutationContext {
-                writer_id: loonfs_api::WriterId::parse("deleter").expect("writer"),
+                writer_id: loonfs_types::WriterId::parse("deleter").expect("writer"),
                 now_ms: 5_000,
             },
         )
@@ -2971,7 +2971,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     )
     .await
     .expect_err("a tombstone ends the namespace");
-    assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceDeleted);
+    assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceDeleted);
 }
 
 #[tokio::test]

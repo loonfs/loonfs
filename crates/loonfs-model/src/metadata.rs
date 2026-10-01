@@ -11,8 +11,8 @@
 //! `ActorId::loonfs()`, and the initial empty attribute state has no
 //! actor or timestamp because it is not stored as a revision.
 
-use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::{ActorId, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
+use loonfs_types::format::wal::WalDelta;
+use loonfs_types::{ActorId, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetadataState {
@@ -38,7 +38,7 @@ pub struct InodeRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirentryBindingRecord {
     pub parent_inode_id: InodeId,
-    pub name_key: loonfs_api::NameKey,
+    pub name_key: loonfs_types::NameKey,
     pub child_inode_id: InodeId,
     pub committed_seq: ChangeSeq,
     pub delta_index: u32,
@@ -48,14 +48,14 @@ pub struct DirentryBindingRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirentryBindingState {
     Bound {
-        display_name: loonfs_api::DisplayName,
+        display_name: loonfs_types::DisplayName,
     },
     Unbound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentPublicationRecord {
-    pub content_id: loonfs_api::ContentId,
+    pub content_id: loonfs_types::ContentId,
     pub committed_seq: ChangeSeq,
     pub delta_index: u32,
 }
@@ -357,8 +357,8 @@ impl MetadataState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::wire::manifest::DeltaPosition;
-    use loonfs_api::NameKey;
+    use loonfs_types::format::manifest::DeltaPosition;
+    use loonfs_types::NameKey;
 
     fn commit_id() -> CommitId {
         CommitId::parse("c_model_metadata").expect("commit id")
@@ -375,11 +375,11 @@ mod tests {
                 delta_index: 7,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("persisted-key").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Report.TXT")
+                display_name: loonfs_types::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
             }],
         );
@@ -399,10 +399,10 @@ mod tests {
                 WalDelta::TombstoneSubtree {
                     delta_index: 1,
                     root_inode_id: InodeId(2),
-                    deleted_binding: loonfs_api::wire::manifest::DeletedBinding {
+                    deleted_binding: loonfs_types::format::manifest::DeletedBinding {
                         parent_inode_id: InodeId(1),
                         name_key: NameKey::parse("report.txt").expect("valid name key"),
-                        display_name: loonfs_api::DisplayName::parse("Report.TXT")
+                        display_name: loonfs_types::DisplayName::parse("Report.TXT")
                             .expect("valid display name"),
                     },
                 },

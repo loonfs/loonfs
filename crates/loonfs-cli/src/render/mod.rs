@@ -12,8 +12,8 @@ use crate::commands::{
 };
 use crate::config::ConfigSource;
 use crate::error::CliError;
-use loonfs_api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
-use loonfs_api::{
+use loonfs_types::api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
+use loonfs_types::{
     AttributeValue, CheckpointOwnerSummary, GcResponse, NamespaceId, WalFoldStepOutcome,
 };
 use serde::Serialize;
@@ -127,12 +127,14 @@ mod tests {
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
-    use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse};
-    use loonfs_api::{
+    use loonfs_client::ClientError;
+    use loonfs_types::api::v0::{
+        StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
+    };
+    use loonfs_types::{
         AbsolutePath, AttributesProjection, ChangeSeq, DisplayName, InodeId, NamespaceId,
         PathEntry, PathEntryKind,
     };
-    use loonfs_client::ClientError;
 
     const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
         arn:aws:iam::123456789012:role/private-role private-bucket \
@@ -165,7 +167,7 @@ mod tests {
     }
 
     fn rendered_remote_error(server_boundary: &str) -> serde_json::Value {
-        let body: loonfs_api::ApiError =
+        let body: loonfs_types::ApiError =
             serde_json::from_str(server_boundary).expect("server boundary is valid JSON");
         let error = CliError::from(ClientError::from_api_error(400, body));
         let failure = CommandFailure {
@@ -215,8 +217,8 @@ mod tests {
             assert!(rendered.contains(&public_message), "{rendered}");
         }
 
-        let remote_boundary = serde_json::to_string(&loonfs_api::ApiError {
-            code: loonfs_api::ErrorCode::StoragePermissionDenied
+        let remote_boundary = serde_json::to_string(&loonfs_types::ApiError {
+            code: loonfs_types::ErrorCode::StoragePermissionDenied
                 .as_str()
                 .to_owned(),
             feature: None,
@@ -226,7 +228,7 @@ mod tests {
             details: None,
         })
         .expect("remote boundary serializes");
-        let body: loonfs_api::ApiError =
+        let body: loonfs_types::ApiError =
             serde_json::from_str(&remote_boundary).expect("remote boundary is valid JSON");
         let remote_failure = CommandFailure {
             kind: CommandKind::ConfigShow,
@@ -327,7 +329,7 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             path: AbsolutePath::parse(path).expect("absolute path"),
             inode_id: InodeId(if display_name.is_some() { 2 } else { 1 }),
-            created_by: loonfs_api::ActorId::loonfs(),
+            created_by: loonfs_types::ActorId::loonfs(),
             created_at_ms: 1_752_624_000_000,
             kind: PathEntryKind::Directory {},
             head_seq: ChangeSeq(3),
@@ -375,11 +377,11 @@ mod tests {
     fn stat_with_attribute(value: AttributeValue) -> CommandOutput {
         let mut entry = path_entry("/docs", Some("docs"));
         entry.attributes = Some(AttributesProjection {
-            attributes_revision_no: loonfs_api::AttributesRevisionNo(1),
-            attributes_updated_by: Some(loonfs_api::ActorId::loonfs()),
+            attributes_revision_no: loonfs_types::AttributesRevisionNo(1),
+            attributes_updated_by: Some(loonfs_types::ActorId::loonfs()),
             attributes_updated_at_ms: Some(1_752_624_000_000),
-            attributes: loonfs_api::Attributes::new(std::collections::BTreeMap::from([(
-                loonfs_api::AttributeKey::parse("note").expect("attribute key"),
+            attributes: loonfs_types::Attributes::new(std::collections::BTreeMap::from([(
+                loonfs_types::AttributeKey::parse("note").expect("attribute key"),
                 value,
             )]))
             .expect("attribute map"),
@@ -753,7 +755,7 @@ mod tests {
     #[test]
     fn gc_summaries_report_counts_retention_and_namespace_retirement() {
         use super::summaries::gc_summary;
-        use loonfs_api::{GcResponse, RetainedReason};
+        use loonfs_types::{GcResponse, RetainedReason};
 
         let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
         pass.deleted.wal_objects = 2;

@@ -6,9 +6,9 @@ use super::{
     DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     TombstoneRowAction,
 };
-use loonfs_api::wire::manifest::DirentryBindingState;
-use loonfs_api::wire::wal::{WalCommitPayload, WalDelta};
-use loonfs_api::{ActorId, ChangeSeq, CommitId};
+use loonfs_types::format::manifest::DirentryBindingState;
+use loonfs_types::format::wal::{WalCommitPayload, WalDelta};
+use loonfs_types::{ActorId, ChangeSeq, CommitId};
 
 impl MetadataState {
     pub fn apply_committed_wal_deltas(

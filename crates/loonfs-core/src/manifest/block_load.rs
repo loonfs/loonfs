@@ -9,11 +9,11 @@ use super::error::ManifestLoadError;
 use super::scan::Readahead;
 use super::validate::validate_manifest_row_seq_range;
 use bytes::Bytes;
-use loonfs_api::wire::manifest::{MetadataRow, MetadataSegmentRef};
-use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, DecodedDataBlock};
-use loonfs_api::ChangeSeq;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::{MetadataRow, MetadataSegmentRef};
+use loonfs_types::format::sst_blocks::{index_blocks_for_key_range, DecodedDataBlock};
+use loonfs_types::ChangeSeq;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -285,7 +285,7 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
 mod tests {
     use super::super::cache::MetadataSegmentBlockKind;
     use super::*;
-    use loonfs_api::wire::sst_blocks::{decode_filter_block, SegmentBlocksBuilder};
+    use loonfs_types::format::sst_blocks::{decode_filter_block, SegmentBlocksBuilder};
 
     fn key(kind: MetadataSegmentBlockKind, offset: u64) -> MetadataSegmentCacheKey {
         MetadataSegmentCacheKey {
@@ -322,9 +322,9 @@ mod tests {
     }
 
     fn manifest_block() -> DecodedMetadataSegmentBlock {
-        let manifest = loonfs_api::wire::manifest::decode_namespace_manifest_json(include_bytes!(
-            "../../../loonfs-api/tests/golden/manifest.v1.json"
-        ))
+        let manifest = loonfs_types::format::manifest::decode_namespace_manifest_json(
+            include_bytes!("../../../loonfs-types/tests/golden/manifest.v1.json"),
+        )
         .expect("valid manifest fixture");
         DecodedMetadataSegmentBlock::Manifest {
             manifest: (Arc::new(manifest), Arc::new(Vec::new()), 0),

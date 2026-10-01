@@ -12,11 +12,11 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
     wal: &PreparedWalObject,
     tip: &crate::time::Observation,
 ) -> crate::error::Result<()> {
-    if wal.document_len() > loonfs_api::wire::wal::MAX_WAL_OBJECT_BYTES {
+    if wal.document_len() > loonfs_types::format::wal::MAX_WAL_OBJECT_BYTES {
         return Err(crate::error::CoreError::Internal(format!(
             "WAL document is {} bytes, over `MAX_WAL_OBJECT_BYTES` ({})",
             wal.document_len(),
-            loonfs_api::wire::wal::MAX_WAL_OBJECT_BYTES,
+            loonfs_types::format::wal::MAX_WAL_OBJECT_BYTES,
         )));
     }
     let payload = wal.envelope().payload();

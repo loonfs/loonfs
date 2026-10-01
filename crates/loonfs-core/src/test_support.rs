@@ -24,20 +24,19 @@ use std::sync::Mutex;
 #[cfg(any(test, feature = "test-support"))]
 pub async fn append_wal_objects<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &loonfs_api::NamespaceId,
+    namespace_id: &loonfs_types::NamespaceId,
     count: u64,
     context: &crate::MutationContext,
 ) -> crate::error::Result<()> {
     let mut engine = crate::publish::NamespaceCommitEngine::new(namespace_id.clone());
     for _ in 0..count {
-        let commit_id = loonfs_api::CommitId::generate();
-        let path =
-            loonfs_api::AbsolutePath::parse(format!("/wal-tail-{commit_id}")).map_err(|error| {
-                crate::error::CoreError::Internal(format!("test WAL-tail path: {error}"))
-            })?;
+        let commit_id = loonfs_types::CommitId::generate();
+        let path = loonfs_types::AbsolutePath::parse(format!("/wal-tail-{commit_id}")).map_err(
+            |error| crate::error::CoreError::Internal(format!("test WAL-tail path: {error}")),
+        )?;
         let request = crate::publish::CommitRequest::single(
             commit_id,
-            loonfs_api::ActorId::loonfs(),
+            loonfs_types::ActorId::loonfs(),
             None,
             crate::publish::FilesystemOperation::CreateDirectory {
                 path,

@@ -2,7 +2,6 @@
 
 use crate::common::{control, default_page_limit, GrepHost};
 use loonfs::{LoonFs, SharedObjectStore};
-use loonfs_api::{ErrorCode, ManifestNo, PageRequest};
 use loonfs_grep::keyspace::manifest_key;
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GREP_GC_GRACE_WINDOW_MS};
@@ -11,6 +10,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
+use loonfs_types::{ErrorCode, ManifestNo, PageRequest};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 

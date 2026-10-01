@@ -2,9 +2,9 @@
 
 use crate::config::absolute_env_path;
 use crate::error::CliError;
-use loonfs_api::v0::{CommitRequest, CompletedUploadPart, FilesystemOperation};
-use loonfs_api::{ActorId, Checksum, ChecksumAlgorithm, Commit, CommitId, ErrorCode, UploadId};
 use loonfs_client::{MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions};
+use loonfs_types::api::v0::{CommitRequest, CompletedUploadPart, FilesystemOperation};
+use loonfs_types::{ActorId, Checksum, ChecksumAlgorithm, Commit, CommitId, ErrorCode, UploadId};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -25,7 +25,7 @@ struct UploadState {
     source: SourceIdentity,
     actor_id: ActorId,
     options: PutFileOptions,
-    subject: Option<loonfs_api::Subject>,
+    subject: Option<loonfs_types::Subject>,
     progress: UploadProgress,
 }
 
@@ -81,13 +81,15 @@ impl UploadJournal {
     pub(crate) async fn replay(
         &self,
         client: &loonfs_client::Client,
-        namespace_id: &loonfs_api::NamespaceId,
+        namespace_id: &loonfs_types::NamespaceId,
         request: &CommitRequest,
         actor_id: &ActorId,
-    ) -> Result<loonfs_api::Commit, crate::error::CliError> {
+    ) -> Result<loonfs_types::Commit, crate::error::CliError> {
         let error = match client.commit(namespace_id, actor_id, request).await {
             Ok(commit) => return Ok(commit),
-            Err(error) if error.code() == Some(loonfs_api::ErrorCode::ContentNotPrepared) => error,
+            Err(error) if error.code() == Some(loonfs_types::ErrorCode::ContentNotPrepared) => {
+                error
+            }
             Err(error) => return Err(error.into()),
         };
         let upload_id = match &self.lock().progress {
@@ -98,7 +100,7 @@ impl UploadJournal {
             return Err(error.into());
         };
         let session = client.get_upload(namespace_id, &upload_id).await?;
-        let loonfs_api::v0::UploadSessionStatus::Completed {
+        let loonfs_types::api::v0::UploadSessionStatus::Completed {
             content_token: Some(token),
             ..
         } = session.status
@@ -122,7 +124,7 @@ impl UploadJournal {
         source: SourceIdentity,
         actor_id: &ActorId,
         options: &PutFileOptions,
-        subject: Option<&loonfs_api::Subject>,
+        subject: Option<&loonfs_types::Subject>,
     ) -> io::Result<Self> {
         let key = journal_key(
             profile,
@@ -151,7 +153,7 @@ impl UploadJournal {
         source: SourceIdentity,
         actor_id: &ActorId,
         options: &PutFileOptions,
-        subject: Option<&loonfs_api::Subject>,
+        subject: Option<&loonfs_types::Subject>,
     ) -> io::Result<Self> {
         let parent = path.parent().expect("journal has a directory");
         std::fs::create_dir_all(parent).map_err(|error| journal_error(&path, error))?;
@@ -554,7 +556,7 @@ mod tests {
             .create_namespace(
                 spec.namespace(),
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("namespace");
@@ -643,7 +645,7 @@ mod tests {
             options.commit.commit_id.expect("chosen ID"),
             options.commit.message,
             FilesystemOperation::PutFile {
-                path: loonfs_api::AbsolutePath::parse("/file").expect("path"),
+                path: loonfs_types::AbsolutePath::parse("/file").expect("path"),
                 content_ref: Some(loonfs_test_support::ids::content_ref(b"data")),
                 inline_content: None,
                 behavior: options.behavior,
@@ -731,7 +733,7 @@ mod tests {
             let prepared = std::fs::read(&path).expect("prepared record");
             let kept = ErrorCode::ALL.into_iter().filter(|code| {
                 code.retryable_without_operator_action()
-                    || matches!(code.kind(), loonfs_api::ErrorKind::Unavailable)
+                    || matches!(code.kind(), loonfs_types::ErrorKind::Unavailable)
             });
             for code in kept.chain([
                 ErrorCode::CommitOutcomeUnknown,
@@ -910,11 +912,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("directory");
         let path = dir.path().join("upload.json");
         let options = options();
-        let mut subject = loonfs_api::Subject {
-            principal_scope: loonfs_api::PrincipalScope::parse("demo").expect("scope"),
-            subject_id: loonfs_api::SubjectId::parse("alice").expect("subject id"),
-            principals: loonfs_api::PrincipalSet::new(
-                [loonfs_api::PrincipalId::parse("writers").expect("principal id")]
+        let mut subject = loonfs_types::Subject {
+            principal_scope: loonfs_types::PrincipalScope::parse("demo").expect("scope"),
+            subject_id: loonfs_types::SubjectId::parse("alice").expect("subject id"),
+            principals: loonfs_types::PrincipalSet::new(
+                [loonfs_types::PrincipalId::parse("writers").expect("principal id")]
                     .into_iter()
                     .collect(),
             )
@@ -944,7 +946,7 @@ mod tests {
         assert!(resumed.resume().is_some());
         drop(resumed);
 
-        subject.subject_id = loonfs_api::SubjectId::parse("bob").expect("different subject id");
+        subject.subject_id = loonfs_types::SubjectId::parse("bob").expect("different subject id");
         let saved = std::fs::read(&path).expect("saved record");
         assert!(UploadJournal::open_at(
             path.clone(),

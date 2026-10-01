@@ -10,11 +10,11 @@ use crate::{
     ListPathEntriesResponse, Namespace, NamespaceId, PathEntry, PinId, ReadFileStreamOptions,
     RevisionNo, SharedObjectStore, StatOptions,
 };
-use loonfs_api::{
+use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
+use loonfs_types::{
     AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, PageRequest,
     TrashPageCursor,
 };
-use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -166,7 +166,7 @@ impl ReadView {
     /// head.
     pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
         let view = self.clone();
-        loonfs_api::Pager::new(move |request: PageRequest<ChangeSeq>| {
+        loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
             let view = view.clone();
             async move {
                 view.read(change_feed_page(
@@ -218,7 +218,7 @@ impl ReadView {
         let view = self.clone();
         let absolute_path = absolute_path.to_owned();
         let options = options.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let view = view.clone();
             let absolute_path = absolute_path.clone();
             let options = options.clone();
@@ -299,7 +299,7 @@ impl ReadView {
     ) -> InodeChildrenPager {
         let view = self.clone();
         let options = options.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let view = view.clone();
             let options = options.clone();
             async move {
@@ -460,17 +460,17 @@ impl ReadView {
 }
 
 /// A pager over directory entries.
-pub type PathEntriesPager = loonfs_api::Pager<ListPathEntriesResponse, Error>;
+pub type PathEntriesPager = loonfs_types::Pager<ListPathEntriesResponse, Error>;
 /// A pager over directory children addressed by inode.
-pub type InodeChildrenPager = loonfs_api::Pager<ListInodeChildrenResponse, Error>;
+pub type InodeChildrenPager = loonfs_types::Pager<ListInodeChildrenResponse, Error>;
 /// A pager over retained file revisions.
-pub type FileRevisionsPager = loonfs_api::Pager<ListFileRevisionsResponse, Error>;
+pub type FileRevisionsPager = loonfs_types::Pager<ListFileRevisionsResponse, Error>;
 /// A pager over recoverable deletions.
-pub type TrashPager = loonfs_api::Pager<loonfs_api::ListTrashResponse, Error>;
+pub type TrashPager = loonfs_types::Pager<loonfs_types::ListTrashResponse, Error>;
 /// A pager over committed changes.
-pub type ChangesPager = loonfs_api::Pager<ListChangesResponse, Error>;
+pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, Error>;
 /// A pager over the files a checkpoint pins.
-pub type CheckpointFilesPager = loonfs_api::Pager<CheckpointFilesPage, Error>;
+pub type CheckpointFilesPager = loonfs_types::Pager<CheckpointFilesPage, Error>;
 
 impl<M> Namespace<M> {
     fn read_view_from(
@@ -695,7 +695,7 @@ impl<M> Namespace<M> {
         let reader = self.read_only();
         let absolute_path = absolute_path.to_owned();
         let options = options.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
             let absolute_path = absolute_path.clone();
             let options = options.clone();
@@ -779,7 +779,7 @@ impl<M> Namespace<M> {
     ) -> InodeChildrenPager {
         let reader = self.read_only();
         let options = options.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
             let options = options.clone();
             async move {
@@ -1002,7 +1002,7 @@ impl<M> Namespace<M> {
         let reader = self.read_only();
         let checkpoint_id = checkpoint_id.clone();
         let options = *options;
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
             let checkpoint_id = checkpoint_id.clone();
             async move {
@@ -1113,7 +1113,7 @@ impl<M> Namespace<M> {
     /// delete recorded one.
     pub fn list_trash(&self) -> TrashPager {
         let reader = self.read_only();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
             async move { reader.trash_page(decode_page_request(request)?).await }
         })
@@ -1134,7 +1134,7 @@ impl<M> Namespace<M> {
     async fn trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
-    ) -> Result<loonfs_api::ListTrashResponse> {
+    ) -> Result<loonfs_types::ListTrashResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| {
@@ -1142,7 +1142,7 @@ impl<M> Namespace<M> {
                 async move {
                     let page = engine.list_trash_page(request, &read_context).await?;
                     let next_cursor = encode_next_cursor(page.next_cursor.as_ref())?;
-                    Ok(loonfs_api::ListTrashResponse {
+                    Ok(loonfs_types::ListTrashResponse {
                         namespace_id: self.namespace_id.clone(),
                         head_seq: read_context.head.seq,
                         entries: page.items,
@@ -1157,7 +1157,7 @@ impl<M> Namespace<M> {
     pub fn list_file_revisions(&self, absolute_path: &str) -> FileRevisionsPager {
         let reader = self.read_only();
         let absolute_path = absolute_path.to_owned();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
             let absolute_path = absolute_path.clone();
             async move {
@@ -1210,7 +1210,7 @@ impl<M> Namespace<M> {
     /// Lists the retained revisions of a file inode, newest first.
     pub fn list_file_revisions_by_inode(&self, inode_id: InodeId) -> FileRevisionsPager {
         let reader = self.read_only();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let reader = reader.clone();
             async move {
                 reader
@@ -1357,7 +1357,7 @@ impl<M> Namespace<M> {
     /// Lists the ordered change feed after `after_seq`.
     pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
         let reader = self.read_only();
-        loonfs_api::Pager::new(move |request: PageRequest<ChangeSeq>| {
+        loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
             let reader = reader.clone();
             async move {
                 reader

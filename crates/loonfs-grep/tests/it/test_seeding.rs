@@ -2,7 +2,7 @@
 //! public writer any embedded host uses.
 
 use loonfs::{CommitOptions, LoonFs, PutFileOptions, SharedObjectStore, Writable};
-use loonfs_api::{CommitId, NamespaceId};
+use loonfs_types::{CommitId, NamespaceId};
 
 pub(crate) async fn writer(
     store: SharedObjectStore,

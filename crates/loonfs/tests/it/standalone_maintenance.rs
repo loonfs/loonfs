@@ -159,7 +159,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
     for maintenance in [future, derived] {
         let object_key = loonfs_objectstore::keys::metadata_segment(
             &namespace_id,
-            &loonfs_api::MetadataSegmentId::generate(),
+            &loonfs_types::MetadataSegmentId::generate(),
         );
         store
             .put_if_absent(&object_key, b"unreferenced".as_slice().into())

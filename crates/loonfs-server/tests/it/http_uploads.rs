@@ -4,8 +4,13 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::{
-    v0::{
+use loonfs_client::{ClientError, NamespacePath};
+use loonfs_test_support::http::{
+    raw_agent, retry_on_macos_teardown_einval, retry_result_on_macos_teardown_einval,
+};
+use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_types::{
+    api::v0::{
         CompleteUploadBody, CreateUploadBody, FilesystemChange, UploadMode, UploadSession,
         UploadSessionStatus,
     },
@@ -13,11 +18,6 @@ use loonfs_api::{
     DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
     LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
 };
-use loonfs_client::{ClientError, NamespacePath};
-use loonfs_test_support::http::{
-    raw_agent, retry_on_macos_teardown_einval, retry_result_on_macos_teardown_einval,
-};
-use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -35,7 +35,7 @@ async fn http_upload_content_rejects_invalid_upload_id() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -76,7 +76,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -126,7 +126,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -180,7 +180,10 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         panic!("content PUT returns the open session with staged content");
     };
     assert_eq!(content_ref.size_bytes, 5);
-    assert_eq!(content_ref.checksum, loonfs_api::Checksum::sha256(b"hello"));
+    assert_eq!(
+        content_ref.checksum,
+        loonfs_types::Checksum::sha256(b"hello")
+    );
     let read = harness
         .client
         .get_upload(&namespace, &begin.upload_id)
@@ -214,7 +217,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -304,7 +307,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -436,7 +439,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -538,9 +541,9 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
 
 async fn complete_upload_session(
     harness: &crate::common::TestServer,
-    namespace: &loonfs_api::NamespaceId,
+    namespace: &loonfs_types::NamespaceId,
     bytes: &[u8],
-) -> (loonfs_api::UploadId, ContentRef, u64) {
+) -> (loonfs_types::UploadId, ContentRef, u64) {
     let begin = harness
         .client
         .create_upload(namespace, &CreateUploadBody::ServiceProxied {})
@@ -572,7 +575,7 @@ async fn complete_upload_session(
     (begin.upload_id.clone(), content_ref, completed_at_ms)
 }
 
-fn get_upload(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSession {
+fn get_upload(server_url: &str, upload_id: &loonfs_types::UploadId) -> UploadSession {
     retry_on_macos_teardown_einval(|| {
         let response = raw_agent()
             .get(&format!(
@@ -587,7 +590,7 @@ fn get_upload(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadSessi
 
 fn abort_upload(
     server_url: &str,
-    upload_id: &loonfs_api::UploadId,
+    upload_id: &loonfs_types::UploadId,
 ) -> Result<UploadSession, Box<ureq::Error>> {
     retry_result_on_macos_teardown_einval(|| {
         let response = raw_agent()

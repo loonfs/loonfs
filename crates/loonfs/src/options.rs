@@ -1,17 +1,17 @@
 //! Runtime options and request-to-options conversions.
 //!
 //! Options shared with the HTTP client are re-exported from
-//! [`loonfs_api::options`]. Runtime-only options remain in this module.
+//! [`loonfs_types::options`]. Runtime-only options remain in this module.
 //!
-//! Results are the `loonfs-api` wire shapes themselves, the same way handles
+//! Results are the `loonfs-types` wire shapes themselves, the same way handles
 //! already return `Commit` and `FoldWalResponse`.
 
 use crate::{Error, MetadataCompactionPolicy, Result};
-use loonfs_api::MetadataMaintenanceRequest;
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
+use loonfs_types::MetadataMaintenanceRequest;
 use std::num::{NonZeroU64, NonZeroUsize};
 
-pub use loonfs_api::options::{
+pub use loonfs_types::options::{
     AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateDirectoryOptions,
     DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions,
     PutFileOptions, StatOptions, UpdateAccessOptions, UpdateAttributesOptions,
@@ -120,7 +120,7 @@ pub struct CreateCheckpointOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadFileStreamOptions {
     /// Read this retained revision instead of the current content.
-    pub revision_no: Option<loonfs_api::RevisionNo>,
+    pub revision_no: Option<loonfs_types::RevisionNo>,
     /// Bytes one ranged read fetches, which is the most of the file the read
     /// holds at once. Defaults to
     /// [`CONTENT_READ_CHUNK_BYTES`](loonfs_core::CONTENT_READ_CHUNK_BYTES);

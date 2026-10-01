@@ -4,7 +4,7 @@ use super::{LoonFs, ReadOnly, Writable};
 use crate::fs::RuntimeCore;
 use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionState};
 use crate::{NamespaceId, Result};
-use loonfs_api::Subject;
+use loonfs_types::Subject;
 use std::fmt;
 use std::sync::Arc;
 

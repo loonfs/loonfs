@@ -12,11 +12,11 @@ use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, AttributesRevisionNo, DestinationBehavior,
     DisplayName, ExpectedFileState, InodeId, InodeKind,
 };
-use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_move_path<S: ObjectStore + ?Sized>(
     from_path: &AbsolutePath,

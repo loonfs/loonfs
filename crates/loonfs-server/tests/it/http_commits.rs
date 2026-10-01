@@ -8,17 +8,17 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::CommitRequest as CoreCommitRequest;
 use loonfs::{LoonFs, StoreConfig};
-use loonfs_api::v0::{
+use loonfs_client::{ClientError, NamespacePath};
+use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_types::api::v0::{
     AdvanceRetentionRequest, CreateCheckpointRequest, RunMaintenanceRequest, RunMaintenanceResponse,
 };
-use loonfs_api::{
-    v0::{Commit, FilesystemChange},
+use loonfs_types::{
+    api::v0::{Commit, FilesystemChange},
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, ContentRef,
     DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, FilesystemOperation, RevisionNo,
     ROOT_INODE_ID,
 };
-use loonfs_client::{ClientError, NamespacePath};
-use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
 const REPORTS_DIR: &str = "/reports";
@@ -106,7 +106,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .create_namespace(
             &remote_ns,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create remote namespace");
@@ -241,7 +241,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -346,7 +346,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -436,7 +436,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -542,7 +542,7 @@ async fn an_empty_operation_list_is_rejected() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -597,7 +597,7 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -661,7 +661,7 @@ async fn a_foreign_binding_precondition_identifies_the_version_field() {
             .create_namespace(
                 namespace,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");
@@ -697,7 +697,7 @@ async fn a_foreign_binding_precondition_identifies_the_version_field() {
                     parents: false,
                 },
             )
-            .preconditions(vec![loonfs_api::CommitPrecondition::PathBinding {
+            .preconditions(vec![loonfs_types::CommitPrecondition::PathBinding {
                 path: absolute(REPORTS_DIR),
                 expected_inode_id: current.inode_id,
                 expected_binding_version: Some(foreign.binding_version.expect("named binding")),
@@ -744,7 +744,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -895,7 +895,7 @@ async fn a_batch_replays_under_its_commit_id() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -988,7 +988,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             FilesystemOperation::MovePath {
                 source_path: absolute("/reports/2026"),
                 destination_path: absolute("/reports/2025"),
-                precondition: loonfs_api::DestinationPrecondition {
+                precondition: loonfs_types::DestinationPrecondition {
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -1051,7 +1051,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         FilesystemOperation::MovePath {
             source_path: absolute("/reports/2026"),
             destination_path: absolute("/reports/2025"),
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1128,7 +1128,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -1171,7 +1171,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
             "path": FIRST_FILE,
             "content_ref": second.content_ref.clone(),
             "behavior": "replace",
-            "expected_inode_id": loonfs_api::public_inode_id::encode(observed.inode_id)
+            "expected_inode_id": loonfs_types::public_inode_id::encode(observed.inode_id)
         });
         put[precondition] = serde_json::json!(1);
         serde_json::json!({

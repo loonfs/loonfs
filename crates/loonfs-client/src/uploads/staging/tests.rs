@@ -10,12 +10,12 @@
 use super::*;
 use crate::scripted_transport::{self, Outcome};
 use futures::stream::StreamExt;
-use loonfs_api::v0::UploadMode;
-use loonfs_api::{
+use loonfs_test_support::ids::content_ref;
+use loonfs_types::api::v0::UploadMode;
+use loonfs_types::{
     CapabilityDocument, ContentId, ContentRef, ContentRefKind, API_GROUP_FILESYSTEM_V0,
     FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
-use loonfs_test_support::ids::content_ref;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -348,7 +348,7 @@ struct RecordingJournal {
     began: Mutex<Option<(UploadId, u64, ChecksumAlgorithm)>>,
     parts: Mutex<Vec<CompletedUploadPart>>,
     request: Mutex<Option<CommitRequest>>,
-    actor_id: Mutex<Option<loonfs_api::ActorId>>,
+    actor_id: Mutex<Option<loonfs_types::ActorId>>,
 }
 
 impl RecordingJournal {
@@ -387,7 +387,7 @@ impl PutFileJournal for RecordingJournal {
     fn commit_prepared(
         &self,
         request: &CommitRequest,
-        actor_id: &loonfs_api::ActorId,
+        actor_id: &loonfs_types::ActorId,
         _upload_id: Option<&UploadId>,
     ) -> std::io::Result<()> {
         *self.request.lock().expect("journal lock") = Some(request.clone());
@@ -514,7 +514,7 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
     let payload = payload(TEST_PAYLOAD_BYTES);
     let uploaded = ContentRef {
         kind: ContentRefKind::BlobV1,
-        owner_namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         content_id: ContentId::generate(),
         size_bytes: payload.len() as u64,
         checksum: Checksum::crc32c(&payload),
@@ -597,7 +597,7 @@ async fn a_proxied_put_streams_its_body() {
         json(&UploadSession {
             namespace_id: namespace_id(),
             upload_id: upload_id(),
-            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
                 checksum_algorithm: None,
@@ -641,7 +641,7 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
         json(&UploadSession {
             namespace_id: namespace_id(),
             upload_id: upload_id(),
-            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
                 checksum_algorithm: None,
@@ -942,7 +942,7 @@ impl PutFileJournal for FailingJournal {
     fn commit_prepared(
         &self,
         _: &CommitRequest,
-        _: &loonfs_api::ActorId,
+        _: &loonfs_types::ActorId,
         _: Option<&UploadId>,
     ) -> std::io::Result<()> {
         Err(std::io::Error::other("journal disk full"))
@@ -1048,7 +1048,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         json(&UploadSession {
             namespace_id: namespace_id(),
             upload_id: upload_id(),
-            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
                 checksum_algorithm: None,
@@ -1073,9 +1073,9 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
     let mut options = PutFileOptions::default();
     options.commit.commit_id = Some(CommitId::parse("saved-put").expect("ID"));
     options.commit.message = Some("original message".to_owned());
-    options.behavior = loonfs_api::DestinationBehavior::Replace;
-    options.expected_inode_id = Some(loonfs_api::InodeId(7));
-    options.expected_revision_no = Some(loonfs_api::RevisionNo(9));
+    options.behavior = loonfs_types::DestinationBehavior::Replace;
+    options.expected_inode_id = Some(loonfs_types::InodeId(7));
+    options.expected_revision_no = Some(loonfs_types::RevisionNo(9));
     client_without_retry(&transport)
         .put_file_stream_resumable(
             &spec(),
@@ -1148,9 +1148,9 @@ fn inline_capabilities() -> Outcome {
     json(&CapabilityDocument {
         protocol_version: PROTOCOL_VERSION.to_owned(),
         api_groups: vec![API_GROUP_FILESYSTEM_V0.to_owned()],
-        features: [(loonfs_api::FEATURE_COMMIT_INLINE_CONTENT.to_owned(), true)].into(),
+        features: [(loonfs_types::FEATURE_COMMIT_INLINE_CONTENT.to_owned(), true)].into(),
         limits: [(
-            loonfs_api::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION.to_owned(),
+            loonfs_types::LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION.to_owned(),
             4,
         )]
         .into(),

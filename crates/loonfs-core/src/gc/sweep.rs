@@ -7,9 +7,9 @@ use crate::context::MutationContext;
 use crate::control_update::load_upload_session_state;
 use crate::error::{CoreError, Result};
 use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
-use loonfs_api::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
 use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
 
 pub(super) struct Sweep<'a, 'store, S: ObjectStore + ?Sized> {
     pub(super) store: &'store S,

@@ -2,13 +2,13 @@
 
 use loonfs::AccessState;
 use loonfs::{CreateNamespaceOptions, Error, LoonFs, PutFileOptions, SharedObjectStore, Writable};
-use loonfs_api::{
-    AccessGrants, AccessRight, AccessRights, ContentRef, ErrorCode, NamespaceAccess, NamespaceId,
-    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
-};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_types::{
+    AccessGrants, AccessRight, AccessRights, ContentRef, ErrorCode, NamespaceAccess, NamespaceId,
+    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -49,7 +49,7 @@ async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_i
         namespace_id,
         &loonfs::GcOptions::default(),
         &loonfs_core::MutationContext {
-            writer_id: loonfs_api::WriterId::parse("import-access-gc").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("import-access-gc").expect("writer id"),
             now_ms,
         },
     )
@@ -325,7 +325,7 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
             grace_window_ms: loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,
         },
         &loonfs_core::MutationContext {
-            writer_id: loonfs_api::WriterId::parse("collector").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("collector").expect("writer id"),
             now_ms: loonfs::current_time_ms().expect("clock")
                 + loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_MS
                 + 1,

@@ -42,7 +42,7 @@ fn delete_options_select_recursive_behavior() {
         &loonfs_test_support::test_actor(),
         &DeleteOptions {
             behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-            commit: loonfs_api::options::CommitOptions {
+            commit: loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: None,
                 message: None,
@@ -86,7 +86,7 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
         &loonfs_test_support::test_actor(),
         &PutFileOptions {
             behavior: DestinationBehavior::Replace,
-            commit: loonfs_api::options::CommitOptions {
+            commit: loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: None,
                 message: None,
@@ -229,7 +229,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
             &loonfs_test_support::test_actor(),
             &DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,
@@ -313,7 +313,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
             &loonfs_test_support::test_actor(),
             &DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,
@@ -662,7 +662,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
             &loonfs_test_support::test_actor(),
             &DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,
@@ -689,7 +689,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
         &loonfs_test_support::test_actor(),
         &DeleteOptions {
             behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
-            commit: loonfs_api::options::CommitOptions {
+            commit: loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: None,
                 message: None,

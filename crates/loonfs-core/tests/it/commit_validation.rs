@@ -7,11 +7,6 @@
 
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
-use loonfs_api::{
-    v0::{FilesystemChange, UploadSessionStatus},
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
-    NamespaceId, RevisionNo,
-};
 use loonfs_core::content::{
     mint_content_token, store_bytes_as_content, verify_content_token, ContentTokenError,
 };
@@ -24,10 +19,15 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_types::{
+    api::v0::{FilesystemChange, UploadSessionStatus},
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    NamespaceId, RevisionNo,
+};
 use std::sync::Arc;
 use tempfile::tempdir;
 
-fn put_file(absolute_path: &str, content_ref: loonfs_api::ContentRef) -> FilesystemOperation {
+fn put_file(absolute_path: &str, content_ref: loonfs_types::ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(absolute_path).expect("path"),
         content_ref: Some(content_ref),
@@ -360,7 +360,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
                 FilesystemOperation::MovePath {
                     source_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
                     destination_path: AbsolutePath::parse("/docs/moved.txt").expect("path"),
-                    precondition: loonfs_api::DestinationPrecondition {
+                    precondition: loonfs_types::DestinationPrecondition {
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -999,7 +999,7 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
         .expect("stage third");
 
     let replace =
-        |content_ref: loonfs_api::ContentRef, expected: u64| FilesystemOperation::PutFile {
+        |content_ref: loonfs_types::ContentRef, expected: u64| FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/with_preconditions.txt").expect("path"),
             content_ref: Some(content_ref),
             inline_content: None,

@@ -20,7 +20,7 @@ mod visibility;
 
 pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
 pub use self::rows::MetadataState;
-pub use loonfs_api::wire::manifest::{
+pub use loonfs_types::format::manifest::{
     AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
     DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
@@ -39,7 +39,7 @@ pub(crate) use self::view_session::{
     LeafRevisionPrefetch, MetadataViewSession, VisibleChildEntry,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
-pub(crate) use loonfs_api::wire::manifest::ActiveDeletionRecord;
+pub(crate) use loonfs_types::format::manifest::ActiveDeletionRecord;
 
 #[cfg(test)]
 pub(crate) use self::rows::MetadataStateBuilder;

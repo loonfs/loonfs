@@ -3,13 +3,13 @@
 use super::*;
 use loonfs::engine::{Deadline, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs::CoreError;
-use loonfs_api::{ManifestNo, RunNo};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass, RecordingStore,
 };
+use loonfs_types::{ManifestNo, RunNo};
 use std::sync::Arc;
 
 async fn publication_returning_at_budget(drop_acknowledgement: bool) {

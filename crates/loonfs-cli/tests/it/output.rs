@@ -539,7 +539,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     // the smallest integration fixture that produces a continuation cursor.
     let local = harness.temp_dir.path().join("listing");
     fs::create_dir(&local).expect("create listing fixture");
-    for index in 0..=loonfs_api::DEFAULT_PAGE_LIMIT {
+    for index in 0..=loonfs_types::DEFAULT_PAGE_LIMIT {
         fs::write(local.join(format!("f{index:04}.txt")), b"x").expect("write listing entry");
     }
     let uploaded = harness.run(&[
@@ -559,7 +559,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     let human_lines = default_human_stdout.lines().collect::<Vec<_>>();
     assert_eq!(
         human_lines.len(),
-        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
+        loonfs_types::DEFAULT_PAGE_LIMIT as usize + 1
     );
     assert!(human_lines
         .last()
@@ -578,7 +578,10 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     assert!(first_data["head_seq"].is_u64());
     assert!(first_data.get("head_drift").is_none());
     let first_entries = first_data["entries"].as_array().expect("first page");
-    assert_eq!(first_entries.len(), loonfs_api::DEFAULT_PAGE_LIMIT as usize);
+    assert_eq!(
+        first_entries.len(),
+        loonfs_types::DEFAULT_PAGE_LIMIT as usize
+    );
     let cursor = first_data["next_cursor"]
         .as_str()
         .expect("default JSON page carries a cursor");
@@ -587,14 +590,14 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
     assert_success(&followed_jsonl);
     assert_eq!(
         stdout_string(&followed_jsonl).lines().count(),
-        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
+        loonfs_types::DEFAULT_PAGE_LIMIT as usize + 1
     );
 
     let all = harness.run(&["ls", "/listing", "--all"]);
     assert_success(&all);
     assert_eq!(
         stdout_string(&all).lines().count(),
-        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
+        loonfs_types::DEFAULT_PAGE_LIMIT as usize + 1
     );
     assert!(!stdout_string(&all).contains("more entries exist"));
 
@@ -610,7 +613,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
             .as_array()
             .expect("all entries")
             .len(),
-        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
+        loonfs_types::DEFAULT_PAGE_LIMIT as usize + 1
     );
     assert!(bounded_json_data.get("next_cursor").is_none());
 
@@ -622,7 +625,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
         .collect::<Vec<_>>();
     assert_eq!(
         jsonl_entries.len(),
-        loonfs_api::DEFAULT_PAGE_LIMIT as usize + 1
+        loonfs_types::DEFAULT_PAGE_LIMIT as usize + 1
     );
     assert!(jsonl_entries
         .iter()
@@ -631,7 +634,7 @@ fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
         .iter()
         .map(|entry| entry["path"].as_str().expect("entry path"))
         .collect::<Vec<_>>();
-    let expected_paths = (0..=loonfs_api::DEFAULT_PAGE_LIMIT)
+    let expected_paths = (0..=loonfs_types::DEFAULT_PAGE_LIMIT)
         .map(|index| format!("/listing/f{index:04}.txt"))
         .collect::<Vec<_>>();
     assert_eq!(actual_paths, expected_paths);

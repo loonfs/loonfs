@@ -5,20 +5,20 @@
 use crate::common::{start_server, test_config};
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_api::{
-    v0::{
-        CompleteUploadBody, ObjectTransferAccess, UploadContentClaim, UploadMode,
-        UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
-    },
-    ChangeSeq, Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, DestinationBehavior,
-    FilesystemOperation, NamespaceId,
-};
 use loonfs_client::{Client, ClientError, NamespacePath, PayloadSource};
 use loonfs_objectstore::{
     AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
 };
 use loonfs_server::{ServerConfig, StoreConfig};
 use loonfs_test_support::http::raw_agent;
+use loonfs_types::{
+    api::v0::{
+        CompleteUploadBody, ObjectTransferAccess, UploadContentClaim, UploadMode,
+        UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
+    },
+    ChangeSeq, Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, DestinationBehavior,
+    FilesystemOperation, NamespaceId,
+};
 use std::fmt;
 use std::io::Read as _;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -157,7 +157,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         .create_namespace(
             &namespace_id,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -670,7 +670,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
         .create_namespace(
             &namespace_id,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -1000,7 +1000,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .create_namespace(
             &namespace_id,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -1191,7 +1191,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             &loonfs_test_support::test_actor(),
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
                     message: None,
@@ -1210,7 +1210,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             &loonfs_test_support::test_actor(),
             &loonfs_client::PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
                     message: None,
@@ -1304,7 +1304,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
 fn put_options(commit_id: &str) -> loonfs_client::PutFileOptions {
     loonfs_client::PutFileOptions {
         behavior: DestinationBehavior::NoReplace,
-        commit: loonfs_api::options::CommitOptions {
+        commit: loonfs_types::options::CommitOptions {
             preconditions: Vec::new(),
             commit_id: Some(CommitId::parse(commit_id).expect("valid commit id")),
             message: None,

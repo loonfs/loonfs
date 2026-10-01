@@ -12,9 +12,9 @@ use loonfs::{
     MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
     MaintenanceProbe, MaintenanceRunReport, NamespaceId, NamespacePublication, Result,
 };
-use loonfs_api::{ErrorCode, RunMaintenanceResponse};
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{ErrorCode, RunMaintenanceResponse};
 use std::sync::Arc;
 
 /// Identity of the grep index job wherever it is registered.
@@ -230,7 +230,7 @@ fn probe_failure(namespace_id: &NamespaceId, error: GrepError) -> loonfs::Error 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::ChangeSeq;
+    use loonfs_types::ChangeSeq;
 
     #[test]
     fn a_caught_up_index_is_idle_and_a_disabled_one_is_not_enabled() {

@@ -24,12 +24,12 @@ fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow> {
             MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse(&name).expect("name"),
-                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_api::DisplayName::parse(&name).expect("display name"),
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                 },
                 child_inode_id: InodeId(index as u64 + 2),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(sequence),
                 delta_index: 0,
@@ -341,7 +341,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 &descriptor,
                 ChangeSeq(1),
                 &lower,
-                loonfs_api::wire::sst_blocks::string_prefix_upper_bound(&lower).as_deref(),
+                loonfs_types::format::sst_blocks::string_prefix_upper_bound(&lower).as_deref(),
                 1,
                 scan::Readahead::Stored,
             )

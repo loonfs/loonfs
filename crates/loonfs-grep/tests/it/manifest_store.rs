@@ -4,7 +4,6 @@
 
 use bytes::Bytes;
 use loonfs::engine::Deadline;
-use loonfs_api::{ChangeSeq, ErrorCode, ManifestNo, NamespaceId, RunNo};
 use loonfs_grep::keyspace::{grep_prefix, hint_key, manifest_key, manifests_prefix};
 use loonfs_grep::manifest::{
     encode_grep_hint, encode_grep_manifest, load_current_grep_manifest, load_grep_manifest,
@@ -20,6 +19,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
 };
+use loonfs_types::{ChangeSeq, ErrorCode, ManifestNo, NamespaceId, RunNo};
 use std::sync::Arc;
 
 #[tokio::test]

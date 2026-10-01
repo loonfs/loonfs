@@ -11,12 +11,6 @@ use crate::{
     CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PageRequest,
     SharedObjectStore,
 };
-use loonfs_api::wire::manifest::MetadataRowFamily;
-use loonfs_api::{
-    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
-    MetadataCompactionOutcome, MonotonicTimer, NamespaceAccess, PrincipalId, PrincipalScope,
-    PrincipalSet, Subject, SubjectId,
-};
 use loonfs_core::test_support::STORE_READ_WAVE;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -24,6 +18,12 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{
     ConcurrencyWatchStore, KeyPredicate, LatencyStore, RecordingStore,
+};
+use loonfs_types::format::manifest::MetadataRowFamily;
+use loonfs_types::{
+    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
+    MetadataCompactionOutcome, MonotonicTimer, NamespaceAccess, PrincipalId, PrincipalScope,
+    PrincipalSet, Subject, SubjectId,
 };
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;

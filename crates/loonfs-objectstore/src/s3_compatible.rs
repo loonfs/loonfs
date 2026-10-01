@@ -26,8 +26,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use base64::Engine as _;
-use loonfs_api::{wire::hex::hex_encode_bytes, SecretString};
-use loonfs_api::{Checksum, ChecksumAlgorithm};
+use loonfs_types::{format::hex::hex_encode_bytes, SecretString};
+use loonfs_types::{Checksum, ChecksumAlgorithm};
 use object_store::aws::{AmazonS3Builder, Checksum as ProviderChecksum};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::sync::Arc;

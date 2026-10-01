@@ -16,10 +16,10 @@ use crate::{
     NamespaceId, PinId, SharedObjectStore, SnapshotSummary, WalFoldStepOutcome,
 };
 use crate::{ChangeSeq, Error, Result};
-use loonfs_api::CompactorEpoch;
-use loonfs_api::PageRequest;
 use loonfs_core::cache::NamespaceStorageDiagnostics;
 use loonfs_core::CheckpointPageCursor;
+use loonfs_types::CompactorEpoch;
+use loonfs_types::PageRequest;
 use tokio::time::Instant;
 use tracing::Instrument;
 
@@ -37,7 +37,7 @@ enum CompactionStep {
 }
 
 /// A pager over existing checkpoints.
-pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, Error>;
+pub type CheckpointsPager = loonfs_types::Pager<ListCheckpointsResponse, Error>;
 
 fn metadata_compaction_response(
     namespace_id: &NamespaceId,
@@ -135,7 +135,7 @@ impl Maintenance {
 
     async fn count_live_checkpoints(&self, namespace_id: &NamespaceId) -> Result<(u64, u64)> {
         let now_ms = self.core.now_ms()?;
-        let page_limit = loonfs_api::PaginationPolicy::default().max_limit();
+        let page_limit = loonfs_types::PaginationPolicy::default().max_limit();
         let mut cursor = None;
         let mut live_checkpoints = 0_u64;
         let mut live_snapshots = 0_u64;
@@ -143,13 +143,13 @@ impl Maintenance {
             let page = self
                 .engine(namespace_id)
                 .list_checkpoints_page(PageRequest {
-                    limit: loonfs_api::EffectiveLimit::new(page_limit),
+                    limit: loonfs_types::EffectiveLimit::new(page_limit),
                     cursor,
                 })
                 .await
                 .map_err(Error::from)?;
             for checkpoint in page.items {
-                if let loonfs_api::CheckpointOwnerSummary::User { .. } = checkpoint.owner {
+                if let loonfs_types::CheckpointOwnerSummary::User { .. } = checkpoint.owner {
                     live_checkpoints = live_checkpoints.saturating_add(1);
                 } else if SnapshotSummary::from_checkpoint(checkpoint)
                     .is_some_and(|snapshot| snapshot.is_live(now_ms))
@@ -675,7 +675,7 @@ impl Maintenance {
     pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
         let maintenance = self.clone();
         let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(move |request| {
+        loonfs_types::Pager::new(move |request| {
             let maintenance = maintenance.clone();
             let namespace_id = namespace_id.clone();
             async move {
@@ -821,11 +821,11 @@ impl crate::Namespace<crate::Writable> {
     /// root grant, through a commit no subject check applies to.
     pub async fn recover_administrator(
         &self,
-        principal_id: &loonfs_api::PrincipalId,
-        actor: &loonfs_api::ActorId,
-    ) -> Result<loonfs_api::RecoverAdministratorResponse> {
-        use loonfs_api::v0::FilesystemChange;
-        use loonfs_api::{AccessGrants, AccessRight, AccessRights};
+        principal_id: &loonfs_types::PrincipalId,
+        actor: &loonfs_types::ActorId,
+    ) -> Result<loonfs_types::RecoverAdministratorResponse> {
+        use loonfs_types::api::v0::FilesystemChange;
+        use loonfs_types::{AccessGrants, AccessRight, AccessRights};
 
         let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
         let (boundary, grants, current) = engine.root_access(&context).await?;
@@ -845,14 +845,14 @@ impl crate::Namespace<crate::Writable> {
             })
         })?;
         let request = crate::publish::CommitRequest::single(
-            loonfs_api::CommitId::generate(),
+            loonfs_types::CommitId::generate(),
             actor.clone(),
             Some("administrator recovery".to_owned()),
             crate::publish::FilesystemOperation::UpdateAccess {
-                path: loonfs_api::AbsolutePath::root(),
+                path: loonfs_types::AbsolutePath::root(),
                 boundary,
                 grants,
-                expected_inode_id: Some(loonfs_api::ROOT_INODE_ID),
+                expected_inode_id: Some(loonfs_types::ROOT_INODE_ID),
                 expected_access_revision_no: Some(current),
             },
         );
@@ -873,7 +873,7 @@ impl crate::Namespace<crate::Writable> {
                     "administrator recovery published no access change".to_owned(),
                 ))
             })?;
-        Ok(loonfs_api::RecoverAdministratorResponse {
+        Ok(loonfs_types::RecoverAdministratorResponse {
             namespace_id: commit.namespace_id,
             commit_id: commit.commit_id,
             committed_seq: commit.committed_seq,

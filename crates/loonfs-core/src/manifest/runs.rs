@@ -3,19 +3,19 @@
 use super::block_load::DEFAULT_BLOCK_MEMO_BYTES;
 use super::cache::{block_memo_bytes, MetadataSegmentCache};
 use crate::heap_bytes::{arc_bytes, HeapBytes};
-use loonfs_api::wire::manifest::{
+use loonfs_types::format::manifest::{
     MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope,
     NamespaceManifestPayload, RunTier,
 };
-use loonfs_api::{ChangeSeq, RunNo};
+use loonfs_types::{ChangeSeq, RunNo};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 
-pub(super) use loonfs_api::wire::sst_blocks::{
+pub(super) use loonfs_types::format::sst_blocks::{
     DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_ROWS,
     DEFAULT_MAX_COMPACTION_INPUT_RUNS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
-pub use loonfs_api::MetadataFamilyGroup;
+pub use loonfs_types::MetadataFamilyGroup;
 
 pub(super) const MANIFEST_ROW_FAMILIES: [MetadataRowFamily; 11] = [
     MetadataRowFamily::Inodes,
@@ -75,7 +75,7 @@ impl Default for MetadataLsmPolicy {
             max_delta_runs: const { NonZeroUsize::new(DEFAULT_MAX_DELTA_RUNS).unwrap() },
             max_rows_per_segment: const { NonZeroUsize::new(DEFAULT_MAX_ROWS_PER_SEGMENT).unwrap() },
             target_segment_bytes: const {
-                NonZeroUsize::new(loonfs_api::wire::sst_blocks::DEFAULT_TARGET_SEGMENT_BYTES)
+                NonZeroUsize::new(loonfs_types::format::sst_blocks::DEFAULT_TARGET_SEGMENT_BYTES)
                     .unwrap()
             },
             max_input_runs_per_step: const {

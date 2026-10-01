@@ -2,13 +2,13 @@
 
 use super::*;
 use crate::metadata::{InMemoryMetadataView, MetadataState};
-use loonfs_api::wire::manifest::{DeletedBinding, DeltaPosition};
-use loonfs_api::wire::wal::WalDelta;
-use loonfs_api::ContentId;
-use loonfs_api::{
+use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition};
+use loonfs_types::format::wal::WalDelta;
+use loonfs_types::ContentId;
+use loonfs_types::{
     AttributeKey, AttributeValue, Attributes, ContentRef, InodeId, InodeKind, NameKey, RevisionNo,
 };
-use loonfs_api::{ChangeSeq, CommitId};
+use loonfs_types::{ChangeSeq, CommitId};
 
 fn commit_id(committed_seq: ChangeSeq) -> CommitId {
     CommitId::parse(format!("c_overlay_{}", committed_seq.0)).expect("commit id")
@@ -20,7 +20,7 @@ fn assert_overlay_matches_replay(committed_seq: ChangeSeq, deltas: &[WalDelta]) 
     replayed.apply_committed_wal_deltas_mut(
         committed_seq,
         &commit_id(committed_seq),
-        &loonfs_api::ActorId::loonfs(),
+        &loonfs_types::ActorId::loonfs(),
         4_200,
         deltas,
     );
@@ -42,7 +42,7 @@ fn overlay_rows(committed_seq: ChangeSeq, deltas: &[WalDelta]) -> MetadataState 
     );
     view.apply_deltas_mut(
         &commit_id(committed_seq),
-        &loonfs_api::ActorId::loonfs(),
+        &loonfs_types::ActorId::loonfs(),
         4_200,
         deltas,
     );
@@ -81,7 +81,7 @@ fn assert_row_categories_equal(overlay: &MetadataState, replayed: &MetadataState
 
 fn content_ref(seed: u8) -> ContentRef {
     ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &[seed; 12],
     )
@@ -116,10 +116,10 @@ fn create_dir_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Docs").expect("valid display name"),
+                display_name: loonfs_types::DisplayName::parse("Docs").expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::Directory,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::Directory,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
             },
         ],
@@ -140,11 +140,11 @@ fn create_file_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("note.txt").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Note.TXT")
+                display_name: loonfs_types::DisplayName::parse("Note.TXT")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
             },
             WalDelta::AppendFileRevision {
@@ -192,10 +192,10 @@ fn delete_file_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 0,
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("note.txt").expect("name key"),
-                display_name: loonfs_api::DisplayName::parse("Note.TXT").expect("display name"),
+                display_name: loonfs_types::DisplayName::parse("Note.TXT").expect("display name"),
                 child_inode_id: InodeId(4),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: ChangeSeq(8),
@@ -208,7 +208,8 @@ fn delete_file_overlay_rows_match_replayed_wal_deltas() {
                 deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(2),
                     name_key: NameKey::parse("note.txt").expect("name key"),
-                    display_name: loonfs_api::DisplayName::parse("Note.TXT").expect("display name"),
+                    display_name: loonfs_types::DisplayName::parse("Note.TXT")
+                        .expect("display name"),
                 },
             },
         ],
@@ -224,10 +225,10 @@ fn rename_of_preexisting_binding_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 0,
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("old.txt").expect("name key"),
-                display_name: loonfs_api::DisplayName::parse("Old.TXT").expect("display name"),
+                display_name: loonfs_types::DisplayName::parse("Old.TXT").expect("display name"),
                 child_inode_id: InodeId(4),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: ChangeSeq(11),
@@ -238,11 +239,11 @@ fn rename_of_preexisting_binding_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 1,
                 parent_inode_id: InodeId(3),
                 name_key: NameKey::parse("new.txt").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("New.TXT")
+                display_name: loonfs_types::DisplayName::parse("New.TXT")
                     .expect("valid display name"),
                 child_inode_id: InodeId(4),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
             },
         ],
@@ -264,11 +265,11 @@ fn rename_of_same_commit_binding_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("draft.md").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Draft.md")
+                display_name: loonfs_types::DisplayName::parse("Draft.md")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
             },
             WalDelta::AppendFileRevision {
@@ -281,10 +282,10 @@ fn rename_of_same_commit_binding_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 3,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("draft.md").expect("name key"),
-                display_name: loonfs_api::DisplayName::parse("Draft.md").expect("display name"),
+                display_name: loonfs_types::DisplayName::parse("Draft.md").expect("display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: committed_seq,
@@ -295,11 +296,11 @@ fn rename_of_same_commit_binding_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 4,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("final.md").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Final.md")
+                display_name: loonfs_types::DisplayName::parse("Final.md")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
             },
         ],
@@ -313,7 +314,7 @@ fn update_attributes_overlay_rows_match_replayed_wal_deltas() {
         &[WalDelta::AppendAttributesRevision {
             delta_index: 0,
             inode_id: InodeId(4),
-            attributes_revision_no: loonfs_api::AttributesRevisionNo(1),
+            attributes_revision_no: loonfs_types::AttributesRevisionNo(1),
             attributes: attributes([("owner", "ada")]),
         }],
     );
@@ -327,14 +328,14 @@ fn cleared_attributes_overlay_rows_match_replayed_wal_deltas() {
             WalDelta::AppendAttributesRevision {
                 delta_index: 0,
                 inode_id: InodeId(4),
-                attributes_revision_no: loonfs_api::AttributesRevisionNo(1),
+                attributes_revision_no: loonfs_types::AttributesRevisionNo(1),
                 attributes: attributes([("owner", "ada")]),
             },
             WalDelta::AppendAttributesRevision {
                 delta_index: 1,
                 inode_id: InodeId(4),
-                attributes_revision_no: loonfs_api::AttributesRevisionNo(2),
-                attributes: loonfs_api::Attributes::default(),
+                attributes_revision_no: loonfs_types::AttributesRevisionNo(2),
+                attributes: loonfs_types::Attributes::default(),
             },
         ],
     );
@@ -349,10 +350,10 @@ fn delete_subtree_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("attic").expect("name key"),
-                display_name: loonfs_api::DisplayName::parse("Attic").expect("display name"),
+                display_name: loonfs_types::DisplayName::parse("Attic").expect("display name"),
                 child_inode_id: InodeId(5),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: ChangeSeq(22),
@@ -365,7 +366,7 @@ fn delete_subtree_overlay_rows_match_replayed_wal_deltas() {
                 deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(1),
                     name_key: NameKey::parse("attic").expect("name key"),
-                    display_name: loonfs_api::DisplayName::parse("Attic").expect("display name"),
+                    display_name: loonfs_types::DisplayName::parse("Attic").expect("display name"),
                 },
             },
         ],
@@ -387,10 +388,10 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Docs").expect("valid display name"),
+                display_name: loonfs_types::DisplayName::parse("Docs").expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::Directory,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::Directory,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
             },
             WalDelta::CreateInode {
@@ -402,11 +403,11 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 3,
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("note.txt").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Note.txt")
+                display_name: loonfs_types::DisplayName::parse("Note.txt")
                     .expect("valid display name"),
                 child_inode_id: InodeId(3),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
             },
             WalDelta::AppendFileRevision {
@@ -425,10 +426,10 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 6,
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("note.txt").expect("name key"),
-                display_name: loonfs_api::DisplayName::parse("Note.txt").expect("display name"),
+                display_name: loonfs_types::DisplayName::parse("Note.txt").expect("display name"),
                 child_inode_id: InodeId(3),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: committed_seq,
@@ -439,11 +440,11 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 7,
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("renamed.txt").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("Renamed.txt")
+                display_name: loonfs_types::DisplayName::parse("Renamed.txt")
                     .expect("valid display name"),
                 child_inode_id: InodeId(3),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
             },
             WalDelta::AppendFileRevision {
@@ -456,10 +457,11 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 9,
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("renamed.txt").expect("name key"),
-                display_name: loonfs_api::DisplayName::parse("Renamed.txt").expect("display name"),
+                display_name: loonfs_types::DisplayName::parse("Renamed.txt")
+                    .expect("display name"),
                 child_inode_id: InodeId(3),
-                child_kind: loonfs_api::InodeKind::File,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: committed_seq,
@@ -472,7 +474,7 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(2),
                     name_key: NameKey::parse("renamed.txt").expect("name key"),
-                    display_name: loonfs_api::DisplayName::parse("Renamed.txt")
+                    display_name: loonfs_types::DisplayName::parse("Renamed.txt")
                         .expect("display name"),
                 },
             },
@@ -480,10 +482,10 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 delta_index: 11,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("name key"),
-                display_name: loonfs_api::DisplayName::parse("Docs").expect("display name"),
+                display_name: loonfs_types::DisplayName::parse("Docs").expect("display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::Directory,
-                child_created_by: loonfs_api::ActorId::loonfs(),
+                child_kind: loonfs_types::InodeKind::Directory,
+                child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
                 target: DeltaPosition {
                     seq: committed_seq,
@@ -496,7 +498,7 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 deleted_binding: DeletedBinding {
                     parent_inode_id: InodeId(1),
                     name_key: NameKey::parse("docs").expect("name key"),
-                    display_name: loonfs_api::DisplayName::parse("Docs").expect("display name"),
+                    display_name: loonfs_types::DisplayName::parse("Docs").expect("display name"),
                 },
             },
         ],
@@ -517,10 +519,10 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             delta_index: 1,
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("a").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
+            display_name: loonfs_types::DisplayName::parse("a").expect("valid display name"),
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::Directory,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::Directory,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
         },
         WalDelta::CreateInode {
@@ -532,10 +534,10 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             delta_index: 3,
             parent_inode_id: InodeId(2),
             name_key: NameKey::parse("f").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("f").expect("valid display name"),
+            display_name: loonfs_types::DisplayName::parse("f").expect("valid display name"),
             child_inode_id: InodeId(3),
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
         },
         WalDelta::AppendFileRevision {
@@ -556,10 +558,10 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             delta_index: 1,
             parent_inode_id: InodeId(2),
             name_key: NameKey::parse("f").expect("name key"),
-            display_name: loonfs_api::DisplayName::parse("f").expect("display name"),
+            display_name: loonfs_types::DisplayName::parse("f").expect("display name"),
             child_inode_id: InodeId(3),
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             target: DeltaPosition {
                 seq: first_seq,
@@ -570,10 +572,10 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             delta_index: 2,
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("f2").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("f2").expect("valid display name"),
+            display_name: loonfs_types::DisplayName::parse("f2").expect("valid display name"),
             child_inode_id: InodeId(3),
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
         },
     ];
@@ -585,14 +587,14 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
     replayed.apply_committed_wal_deltas_mut(
         first_seq,
         &commit_id(first_seq),
-        &loonfs_api::ActorId::loonfs(),
+        &loonfs_types::ActorId::loonfs(),
         4_200,
         &first_deltas,
     );
     replayed.apply_committed_wal_deltas_mut(
         second_seq,
         &commit_id(second_seq),
-        &loonfs_api::ActorId::loonfs(),
+        &loonfs_types::ActorId::loonfs(),
         4_200,
         &second_deltas,
     );

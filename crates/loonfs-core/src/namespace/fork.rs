@@ -10,17 +10,17 @@ use crate::manifest::load_namespace_manifest_envelope;
 use crate::pin::record::{delete_failed_pin, load_owned_pin, write_pin, PinOwnerKind};
 use crate::pin::{classify_live_snapshot, create_pin};
 use crate::time::{Deadline, MonotonicTimer};
-use loonfs_api::wire::control::{ForkBasis, NamespaceStatus, PinOwner, PinPayload};
-use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::{ManifestNo, NamespaceId, NamespaceMetadata, PinId, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{ForkBasis, NamespaceStatus, PinOwner, PinPayload};
+use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::{ManifestNo, NamespaceId, NamespaceMetadata, PinId, WriterEpoch};
 use std::sync::Arc;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
-    actor_id: &loonfs_api::ActorId,
+    actor_id: &loonfs_types::ActorId,
     snapshot_id: Option<&PinId>,
     context: &MutationContext,
     timer: Arc<dyn MonotonicTimer>,
@@ -79,10 +79,10 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         fork_basis: Some(fork_basis),
         manifest_no: ManifestNo(1),
         retention_floor_seq: fork_seq,
-        folded_wal_no: loonfs_api::WalNo(0),
+        folded_wal_no: loonfs_types::WalNo(0),
         writer_epoch: WriterEpoch(0),
         writer: None,
-        compactor_epoch: loonfs_api::CompactorEpoch(0),
+        compactor_epoch: loonfs_types::CompactorEpoch(0),
         status: NamespaceStatus::Active {},
         activity: Default::default(),
         ..source_manifest.payload().clone()

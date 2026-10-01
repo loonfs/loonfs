@@ -632,7 +632,7 @@ mod tests {
             })
         );
 
-        let request: crate::v0::CommitRequest = serde_json::from_value(serde_json::json!({
+        let request: crate::api::v0::CommitRequest = serde_json::from_value(serde_json::json!({
             "commit_id": "same-token-shape",
             "content_tokens": [completion_token],
             "operations": [{

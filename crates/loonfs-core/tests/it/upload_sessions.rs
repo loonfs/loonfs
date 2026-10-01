@@ -6,12 +6,6 @@
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
-use loonfs_api::v0::CompleteMultipartUploadRequest;
-use loonfs_api::{
-    wire::control::{ControlObjectKind, UploadSessionMode, UploadSessionPayload},
-    ContentRef, DestinationBehavior, NamespaceId, UploadId,
-};
-use loonfs_api::{Checksum, ChecksumAlgorithm};
 use loonfs_core::{
     DirectPutUploadTarget, Error as CoreError, ErrorCode, MutationContext, ResolvedUploadCompletion,
 };
@@ -21,6 +15,12 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
+use loonfs_types::api::v0::CompleteMultipartUploadRequest;
+use loonfs_types::{
+    format::control::{ControlObjectKind, UploadSessionMode, UploadSessionPayload},
+    ContentRef, DestinationBehavior, NamespaceId, UploadId,
+};
+use loonfs_types::{Checksum, ChecksumAlgorithm};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -29,7 +29,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::v0::UploadSession, CoreError> {
+) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
         .begin_upload(None)
         .await
@@ -52,7 +52,7 @@ async fn upload_content<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     bytes: &[u8],
     context: &MutationContext,
-) -> Result<loonfs_api::v0::UploadSession, CoreError> {
+) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
     namespace_engine(store, namespace_id, context)
         .upload_content(upload_id, None, bytes)
         .await
@@ -63,7 +63,7 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     context: &MutationContext,
-) -> Result<loonfs_api::v0::UploadSession, CoreError> {
+) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
     let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id).await?;
     namespace_engine(store, namespace_id, context)
         .complete_upload(
@@ -110,7 +110,7 @@ async fn begin_upload_rejects_missing_and_deleted_namespaces() {
     loonfs_core::NamespaceWriterEngine::writer(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         namespace_id.clone(),
-        loonfs_api::WriterId::parse("writer-a").expect("writer id"),
+        loonfs_types::WriterId::parse("writer-a").expect("writer id"),
     )
     .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
     .await
@@ -245,8 +245,8 @@ mod streamed_content {
     }
 
     async fn staging_cleanup_schedule(forget_before_resume: bool) {
-        use loonfs_api::v0::UploadSessionStatus;
-        use loonfs_api::wire::control::decode_control_object;
+        use loonfs_types::api::v0::UploadSessionStatus;
+        use loonfs_types::format::control::decode_control_object;
 
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -340,8 +340,8 @@ mod streamed_content {
     }
 
     async fn owned_stream_expiry_schedule(forget_before_resume: bool) {
-        use loonfs_api::wire::control::{decode_control_object, UploadSessionRecordStatus};
         use loonfs_objectstore::keys::upload_session_prefix;
+        use loonfs_types::format::control::{decode_control_object, UploadSessionRecordStatus};
 
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -465,7 +465,7 @@ mod streamed_content {
         upload_id: &UploadId,
         bytes: &[u8],
         context: &MutationContext,
-    ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
+    ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
         namespace_engine(store, namespace_id, context)
             .upload_streamed_content(upload_id, None, body(bytes))
             .await
@@ -681,12 +681,12 @@ mod streamed_content {
 /// providers' actual multipart behaviour.
 mod direct_multipart {
     use super::*;
-    use loonfs_api::options::DirectMultipartUploadOptions;
-    use loonfs_api::v0::{CompletedUploadPart, UploadContentClaim};
-    use loonfs_api::wire::control::{decode_control_object, UploadSessionRecordStatus};
     use loonfs_core::{gc_namespace, GcOptions};
     use loonfs_objectstore::keys::content_blob;
     use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
+    use loonfs_types::api::v0::{CompletedUploadPart, UploadContentClaim};
+    use loonfs_types::format::control::{decode_control_object, UploadSessionRecordStatus};
+    use loonfs_types::options::DirectMultipartUploadOptions;
     use std::sync::Arc;
 
     const PART: &[u8] = b"a part's worth of bytes, repeated enough to be a part\n";
@@ -802,7 +802,7 @@ mod direct_multipart {
         upload_id: &UploadId,
         request: &CompleteMultipartUploadRequest,
         context: &MutationContext,
-    ) -> Result<loonfs_api::v0::UploadSession, CoreError> {
+    ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
         let catalog =
             loonfs_core::control::load_namespace_catalog_entry(store, namespace_id).await?;
         namespace_engine(store, namespace_id, context)

@@ -9,7 +9,9 @@ use crate::{
     MaintenanceHintObserver, MetadataCache, NamespaceId, NamespacePublication, ObjectStore,
 };
 use crate::{Error, Result, SharedObjectStore};
-use loonfs_api::{
+use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache, StoredMetadataBlockCache};
+use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
+use loonfs_types::{
     decode_cursor, encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page,
     PageCursor, PageRequest, PaginationPolicy, Subject, WriterId, API_GROUP_FILESYSTEM_V0,
     API_GROUP_MAINTENANCE_V0, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
@@ -18,8 +20,6 @@ use loonfs_api::{
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
     LIMIT_GC_MIN_GRACE_WINDOW_MS, MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
-use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache, StoredMetadataBlockCache};
-use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub(crate) struct RuntimeCore {
 pub(crate) struct RuntimeCoreInner {
     pub(crate) store: SharedObjectStore,
     pub(crate) config: ReadConfig,
-    pub(crate) timer: Arc<dyn loonfs_api::MonotonicTimer>,
+    pub(crate) timer: Arc<dyn loonfs_types::MonotonicTimer>,
     pub(crate) wall_clock: Arc<dyn crate::WallClock>,
     pub(crate) metadata_cache: MetadataCache,
     /// This core's views of `metadata_cache`, under the scope the cache
@@ -147,7 +147,7 @@ impl RuntimeCore {
         metadata_cache: MetadataCache,
         stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
         instruments: Arc<RuntimeInstruments>,
-        timer: Arc<dyn loonfs_api::MonotonicTimer>,
+        timer: Arc<dyn loonfs_types::MonotonicTimer>,
         wall_clock: Arc<dyn crate::WallClock>,
     ) -> Self {
         let (metadata_segment_cache, head_state) = metadata_cache.bind(

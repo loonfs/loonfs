@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::metadata::{AttributesRevisionRecord, MetadataStateBuilder, MetadataView};
-use loonfs_api::{AttributeKey, AttributeValue, Attributes, AttributesRevisionNo};
+use loonfs_types::{AttributeKey, AttributeValue, Attributes, AttributesRevisionNo};
 use std::collections::BTreeMap;
 
 fn attributes(entries: &[(&str, &str)]) -> Attributes {
@@ -33,7 +33,7 @@ fn attributes_record(
         committed_seq: ChangeSeq(seq),
         commit_id: CommitId::parse(format!("c_attributes_{seq}")).expect("commit id"),
         delta_index: 0,
-        committed_by: loonfs_api::ActorId::loonfs(),
+        committed_by: loonfs_types::ActorId::loonfs(),
         committed_at_ms: 1_000 + seq,
         attributes: attributes(entries),
     }
@@ -121,7 +121,7 @@ fn the_merge_keeps_a_latest_empty_revision() {
             committed_seq: ChangeSeq(4),
             commit_id: CommitId::parse("c_attributes_4").expect("commit id"),
             delta_index: 0,
-            committed_by: loonfs_api::ActorId::loonfs(),
+            committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 1_004,
             attributes: Attributes::default(),
         },

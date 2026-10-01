@@ -29,11 +29,11 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::load_current_manifest_if_present;
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::wire::manifest::{MetadataRowFamily, MetadataSegmentRef};
-use loonfs_api::CompactorEpoch;
-use loonfs_api::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
+use loonfs_types::CompactorEpoch;
+use loonfs_types::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1082,19 +1082,19 @@ pub(super) fn manifest_load_failure(error: ManifestLoadError) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::RowDigest;
-    use loonfs_api::wire::manifest::MetadataRow;
-    use loonfs_api::{ChangeSeq, DisplayName, InodeId, NameKey};
+    use loonfs_types::format::manifest::MetadataRow;
+    use loonfs_types::{ChangeSeq, DisplayName, InodeId, NameKey};
 
     fn bind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
             },
             child_inode_id: InodeId(42),
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(bind_seq),
             delta_index: 0,
@@ -1106,12 +1106,12 @@ mod tests {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
             child_inode_id: InodeId(42),
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(bind_seq + 1),
             delta_index: 0,
-            state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         })
     }
 

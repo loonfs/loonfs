@@ -10,10 +10,10 @@ use crate::args::{
 use crate::config::{absolute_env_path, validate_remote_client_config, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
-use loonfs_api::{ActorId, PrincipalId, PrincipalScope, SecretString, SubjectId};
 use loonfs_objectstore::{
     AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, GcpGcsCredentials,
 };
+use loonfs_types::{ActorId, PrincipalId, PrincipalScope, SecretString, SubjectId};
 use std::path::{Path, PathBuf};
 
 const AWS_REGIONS: &[&str] = &[
@@ -1515,7 +1515,7 @@ mod tests {
     #[test]
     fn relative_local_roots_remove_dots_and_keep_parents_without_creating_paths() {
         let current_directory = std::env::current_dir().expect("current directory");
-        let name = loonfs_api::generated_id("local-root");
+        let name = loonfs_types::generated_id("local-root");
         let missing_root = current_directory.join(&name);
         let input = std::path::Path::new(&name).join("./child//../store");
         assert!(!missing_root.exists());

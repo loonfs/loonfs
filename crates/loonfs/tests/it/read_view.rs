@@ -247,10 +247,10 @@ async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
 
 #[tokio::test]
 async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manifest_advance() {
-    use loonfs_api::wire::manifest::MetadataRowFamily;
     use loonfs_core::control::load_namespace_current_manifest;
     use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
     use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use loonfs_types::format::manifest::MetadataRowFamily;
     use std::sync::Arc;
 
     let directory = tempdir().expect("tempdir");
@@ -322,7 +322,7 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
     loonfs_core::NamespaceEngine::writer(
         store.clone(),
         namespace_id.clone(),
-        loonfs_api::WriterId::parse("manifest-advance").expect("writer id"),
+        loonfs_types::WriterId::parse("manifest-advance").expect("writer id"),
     )
     .claim_compactor()
     .await
@@ -343,9 +343,9 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
 
 #[tokio::test]
 async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_is_missing() {
-    use loonfs_api::wire::manifest::MetadataRowFamily;
     use loonfs_core::control::load_namespace_current_manifest;
     use loonfs_objectstore::{keys, ObjectStore};
+    use loonfs_types::format::manifest::MetadataRowFamily;
 
     let directory = tempdir().expect("tempdir");
     let store = store(directory.path());
@@ -477,14 +477,14 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         })
         .await
         .expect("list first snapshot page");
-    let cursor = loonfs_api::decode_cursor::<loonfs::DirectoryPageCursor>(
+    let cursor = loonfs_types::decode_cursor::<loonfs::DirectoryPageCursor>(
         first_page.next_cursor.as_deref().expect("next cursor"),
     )
     .expect("decode cursor");
     assert_eq!(cursor.pin_id.as_ref(), Some(&first_snapshot.checkpoint_id));
     let mut unbound_cursor = cursor.clone();
     unbound_cursor.pin_id = None;
-    let unbound_cursor = loonfs_api::encode_cursor(&unbound_cursor).expect("encode cursor");
+    let unbound_cursor = loonfs_types::encode_cursor(&unbound_cursor).expect("encode cursor");
     let cursor = first_page.next_cursor.clone().expect("next cursor");
 
     runtime

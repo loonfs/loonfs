@@ -2,7 +2,7 @@
 //!
 //! This crate contains reusable fault-injection stores, instrumentation,
 //! runtime helpers, pagination constructors, and HTTP setup. It depends only
-//! on `loonfs-api` and `loonfs-objectstore`, which lets `loonfs-core` use it
+//! on `loonfs-types` and `loonfs-objectstore`, which lets `loonfs-core` use it
 //! without a dependency cycle. Helpers that require higher-level crate types
 //! stay in the crate that owns those types.
 

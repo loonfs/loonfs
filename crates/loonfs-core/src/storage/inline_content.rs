@@ -1,7 +1,7 @@
 //! Content bytes carried by a commit with their ordinary blob reference.
 
 use bytes::Bytes;
-use loonfs_api::{ContentId, ContentRef, NamespaceId};
+use loonfs_types::{ContentId, ContentRef, NamespaceId};
 
 /// Keeps bytes with a reference built from them, so the two agree by construction.
 #[derive(Debug, Clone, PartialEq, Eq)]

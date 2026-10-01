@@ -5,13 +5,13 @@ use super::error::CommitOperand;
 use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
-use loonfs_api::wire::manifest::DeletedBinding;
-use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::DeletedBinding;
+use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
+use loonfs_types::{
     next_public_ordinal, AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo,
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
-use loonfs_objectstore::ObjectStore;
 
 #[derive(Debug, Default)]
 pub(crate) struct CommitNumbering {
@@ -821,7 +821,7 @@ async fn validate_rename_does_not_cycle<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod ordinal_tests {
     use super::*;
-    use loonfs_api::MAX_PUBLIC_INTEGER;
+    use loonfs_types::MAX_PUBLIC_INTEGER;
 
     #[test]
     fn revision_advancement_accepts_the_maximum_and_rejects_the_next_value() {

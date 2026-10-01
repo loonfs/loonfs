@@ -19,7 +19,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
-use loonfs_api::{sha256_digest, Checksum};
+use loonfs_types::{sha256_digest, Checksum};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -883,7 +883,7 @@ mod tests {
     async fn listing_tolerates_entries_that_vanish_mid_walk() {
         let temp_dir = test_dir("listing-races");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
         store
             .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
             .await
@@ -914,7 +914,7 @@ mod tests {
 
         let answer = store
             .head(&hint(
-                &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
+                &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
             ))
             .await
             .expect("head succeeds");
@@ -953,7 +953,7 @@ mod tests {
     async fn ranged_reads_answer_their_range_and_refuse_impossible_ones() {
         let temp_dir = test_dir("ranged-reads");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
         let payload = Bytes::from_static(b"0123456789");
         store
             .put(&key, payload.clone(), PutMode::Overwrite)
@@ -998,7 +998,7 @@ mod tests {
         ));
         assert!(store
             .get(
-                &hint(&loonfs_api::NamespaceId::parse("ns-missing").expect("valid namespace id")),
+                &hint(&loonfs_types::NamespaceId::parse("ns-missing").expect("valid namespace id")),
                 range(0, 4)
             )
             .await
@@ -1015,7 +1015,7 @@ mod tests {
         let temp_dir = test_dir("atomic-replacement");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local fs store"));
         let key = hint(
-            &loonfs_api::NamespaceId::parse("ns-atomic-replacement").expect("valid namespace id"),
+            &loonfs_types::NamespaceId::parse("ns-atomic-replacement").expect("valid namespace id"),
         );
         store
             .put(
@@ -1072,8 +1072,8 @@ mod tests {
         let temp_dir = test_dir("delete");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = upload_session(
-            &loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"),
-            &loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
+            &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
+            &loonfs_types::UploadId::parse("upl_00000000000000000000000000000001")
                 .expect("valid upload id"),
         );
 
@@ -1094,7 +1094,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn compare_and_swap_is_safe_across_store_instances() {
         let temp_dir = test_dir("cross-instance-cas");
-        let key = hint(&loonfs_api::NamespaceId::parse("ns-cas").expect("valid namespace id"));
+        let key = hint(&loonfs_types::NamespaceId::parse("ns-cas").expect("valid namespace id"));
         let seed = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         seed.put(&key, Bytes::from_static(b"0"), PutMode::CreateIfAbsent)
             .await
@@ -1152,7 +1152,8 @@ mod tests {
     async fn listings_hide_scratch_files_and_reject_scratch_keys() {
         let temp_dir = test_dir("scratch");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = hint(&loonfs_api::NamespaceId::parse("ns-scratch").expect("valid namespace id"));
+        let key =
+            hint(&loonfs_types::NamespaceId::parse("ns-scratch").expect("valid namespace id"));
         store
             .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
             .await

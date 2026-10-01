@@ -15,9 +15,9 @@ use loonfs::{
     MetadataMaintenanceOptions,
 };
 #[cfg(feature = "openapi")]
-use loonfs_api::ApiError;
-use loonfs_api::ChangeSeq;
-use loonfs_api::{
+use loonfs_types::ApiError;
+use loonfs_types::ChangeSeq;
+use loonfs_types::{
     AccessRight, CapabilityDocument, Checkpoint, CreateCheckpointRequest, CreateNamespaceRequest,
     CreateSnapshotRequest, DeleteCheckpointResponse, DeleteSnapshotResponse, ErrorCode,
     ExtendSnapshotRequest, ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse,
@@ -72,7 +72,7 @@ pub(super) struct CheckpointPageQuery {
         summary = "Get capabilities",
         description = "Returns a summary of supported features and limits.",
         responses(
-            (status = 200, description = "Capability document", body = loonfs_api::CapabilityDocument),
+            (status = 200, description = "Capability document", body = loonfs_types::CapabilityDocument),
             (status = 400, description = "Unknown query parameter", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             crate::http::openapi::UnavailableResponses
@@ -82,7 +82,7 @@ pub(super) struct CheckpointPageQuery {
 pub(super) async fn get_capabilities(
     State(state): State<BindingState>,
     AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
+) -> Result<Json<loonfs_types::CapabilityDocument>, ApiResponseError> {
     let mut capabilities = state.runtime.capabilities();
     if let Some(threshold) = state.options.inline_content.inline_content_threshold_bytes {
         set_feature(&mut capabilities, FEATURE_COMMIT_INLINE_CONTENT, true);
@@ -216,7 +216,7 @@ pub(super) async fn get_capabilities(
         description = "Creates a new empty namespace.",
         request_body = CreateNamespaceRequest,
         responses(
-            (status = 200, description = "Namespace created", body = loonfs_api::NamespaceMetadata),
+            (status = 200, description = "Namespace created", body = loonfs_types::NamespaceMetadata),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 409, description = "Namespace already exists", body = ApiError),
@@ -231,7 +231,7 @@ pub(super) async fn create_namespace(
     ActorHeader(actor_id): ActorHeader,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
-) -> Result<Json<loonfs_api::NamespaceMetadata>, ApiResponseError> {
+) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
     if let NamespaceAccess::Acl { root_grants, .. } = &request.access {
         if !root_grants
             .iter()
@@ -271,7 +271,7 @@ pub(super) async fn create_namespace(
         description = "Returns the current head and retention state for a namespace.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Namespace", body = loonfs_api::NamespaceMetadata),
+            (status = 200, description = "Namespace", body = loonfs_types::NamespaceMetadata),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -284,7 +284,7 @@ pub(super) async fn get_namespace(
     State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<loonfs_api::NamespaceMetadata>, ApiResponseError> {
+) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
     let namespace = state.runtime.namespace(&namespace_id);
     let response = namespace
         .metadata()
@@ -305,7 +305,7 @@ pub(super) async fn get_namespace(
         description = "Returns namespace state together with the current manifest and visible WAL tail.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Namespace diagnostics", body = loonfs_api::NamespaceDiagnostics),
+            (status = 200, description = "Namespace diagnostics", body = loonfs_types::NamespaceDiagnostics),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -318,7 +318,7 @@ pub(super) async fn get_namespace_diagnostics(
     State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<loonfs_api::NamespaceDiagnostics>, ApiResponseError> {
+) -> Result<Json<loonfs_types::NamespaceDiagnostics>, ApiResponseError> {
     let diagnostics = state
         .maintenance
         .diagnostics(&namespace_id)
@@ -345,7 +345,7 @@ pub(super) async fn get_namespace_diagnostics(
             ("expected_head_seq" = Option<ChangeSeq>, Query, description = "Delete only if the namespace head is still at this sequence")
         ),
         responses(
-            (status = 200, description = "Namespace deleted", body = loonfs_api::DeleteNamespaceResponse),
+            (status = 200, description = "Namespace deleted", body = loonfs_types::DeleteNamespaceResponse),
             (status = 400, description = "Invalid request", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -360,7 +360,7 @@ pub(super) async fn delete_namespace(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DeleteNamespaceQuery>,
-) -> Result<Json<loonfs_api::DeleteNamespaceResponse>, ApiResponseError> {
+) -> Result<Json<loonfs_types::DeleteNamespaceResponse>, ApiResponseError> {
     let options = DeleteNamespaceOptions {
         expected_head_seq: query
             .expected_head_seq
@@ -403,7 +403,7 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
         params(("namespace_id" = String, Path, description = "Source namespace id")),
         request_body = ForkNamespaceRequest,
         responses(
-            (status = 200, description = "Namespace forked", body = loonfs_api::NamespaceMetadata),
+            (status = 200, description = "Namespace forked", body = loonfs_types::NamespaceMetadata),
             (status = 400, description = "Invalid namespace id", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Source namespace or snapshot not found", body = ApiError),
@@ -421,7 +421,7 @@ pub(super) async fn fork_namespace(
     NamespaceIdPath(source_namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceRequest>,
-) -> Result<Json<loonfs_api::NamespaceMetadata>, ApiResponseError> {
+) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime
@@ -558,7 +558,7 @@ pub(super) async fn list_snapshots(
         description = "Extends a live snapshot without passing its lifetime limit. Repeating the request has the same result.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = loonfs_api::PinId, Path, description = "Snapshot id")
+            ("snapshot_id" = loonfs_types::PinId, Path, description = "Snapshot id")
         ),
         request_body = ExtendSnapshotRequest,
         responses(
@@ -619,7 +619,7 @@ pub(super) async fn extend_snapshot(
         description = "Deletes a snapshot pin. A missing id returns snapshot_not_found.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("snapshot_id" = loonfs_api::PinId, Path, description = "Snapshot id")
+            ("snapshot_id" = loonfs_types::PinId, Path, description = "Snapshot id")
         ),
         responses(
             (status = 200, description = "Snapshot record deleted", body = DeleteSnapshotResponse),

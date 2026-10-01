@@ -105,9 +105,9 @@ fn send_errors_surface_the_root_cause_and_the_url() {
 
 #[tokio::test]
 async fn pin_deletes_send_once_after_transport_failure() {
-    let namespace_id = loonfs_api::NamespaceId::parse("demo").expect("namespace id");
+    let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
     let pin_id =
-        loonfs_api::PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id");
+        loonfs_types::PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id");
     for snapshot in [true, false] {
         let transport = scripted_transport::failures(2);
         let mut client = deadline_client(&transport);
@@ -186,7 +186,7 @@ where
 
 #[tokio::test]
 async fn services_receive_identical_body_and_identity_on_retries_but_not_provider_requests() {
-    use loonfs_api::{PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId};
+    use loonfs_types::{PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 

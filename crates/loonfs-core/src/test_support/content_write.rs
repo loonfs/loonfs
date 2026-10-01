@@ -5,8 +5,8 @@ use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::path::mutation_path::parse_mutation_path;
 use crate::storage::content::{prepare_stored_content, stage_bytes_under_content_id};
 use crate::storage::content_admission::PreparedContent;
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::NamespaceId;
 
 pub(super) async fn store_file_bytes_before_metadata_publish<S: ObjectStore + ?Sized>(
     store: &S,
@@ -19,7 +19,7 @@ pub(super) async fn store_file_bytes_before_metadata_publish<S: ObjectStore + ?S
     let stored = stage_bytes_under_content_id(
         store,
         catalog.namespace_id().clone(),
-        loonfs_api::ContentId::generate(),
+        loonfs_types::ContentId::generate(),
         bytes,
     )
     .await?;

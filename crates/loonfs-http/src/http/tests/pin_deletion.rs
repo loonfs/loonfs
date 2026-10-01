@@ -2,8 +2,8 @@
 
 use super::*;
 use axum::http::Method;
-use loonfs_api::PinId;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+use loonfs_types::PinId;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 

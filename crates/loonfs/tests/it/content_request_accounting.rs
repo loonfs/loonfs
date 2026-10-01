@@ -11,11 +11,11 @@ use loonfs::{
     CommitId, CoreError, DestinationBehavior, Error, ErrorCode, LoonFs, NamespaceId,
     PutFileOptions, RevisionNo, SharedObjectStore, Writable, CONTENT_READ_CHUNK_BYTES,
 };
-use loonfs_api::ContentId;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, RecordingStore,
 };
+use loonfs_types::ContentId;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -256,7 +256,7 @@ async fn prepare_content_performs_one_content_put_and_no_reads() {
 
     let content_ref = prepared.content_ref();
     assert_eq!(content_ref.size_bytes, bytes.len() as u64);
-    assert_eq!(content_ref.checksum, loonfs_api::Checksum::sha256(bytes));
+    assert_eq!(content_ref.checksum, loonfs_types::Checksum::sha256(bytes));
     assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
 }
 
@@ -420,7 +420,7 @@ async fn prepare_content_ref_rejects_bytes_that_do_not_match_the_ref() {
         .expect("open namespace");
     let content_ref = harness.stage_content(b"real bytes").await;
     let mut lying_ref = content_ref.clone();
-    lying_ref.checksum = loonfs_api::Checksum::crc64nvme(b"other bytes");
+    lying_ref.checksum = loonfs_types::Checksum::crc64nvme(b"other bytes");
 
     let error = namespace
         .prepare_content_ref(lying_ref)
@@ -441,7 +441,7 @@ async fn prepare_content_ref_accepts_a_matching_crc64nvme_ref() {
         .expect("open namespace");
     let bytes = b"direct-uploaded bytes";
     let mut content_ref = harness.stage_content(bytes).await;
-    content_ref.checksum = loonfs_api::Checksum::crc64nvme(bytes);
+    content_ref.checksum = loonfs_types::Checksum::crc64nvme(bytes);
 
     let prepared = namespace
         .prepare_content_ref(content_ref)
@@ -451,7 +451,7 @@ async fn prepare_content_ref_accepts_a_matching_crc64nvme_ref() {
     assert_eq!(prepared.content_ref().size_bytes, bytes.len() as u64);
     assert_eq!(
         prepared.content_ref().checksum,
-        loonfs_api::Checksum::sha256(bytes),
+        loonfs_types::Checksum::sha256(bytes),
         "the destination may use its own checksum algorithm"
     );
 }
@@ -475,7 +475,7 @@ async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
     assert_eq!(prepared.content_ref().size_bytes, bytes.len() as u64);
     assert_eq!(
         prepared.content_ref().checksum,
-        loonfs_api::Checksum::sha256(&bytes)
+        loonfs_types::Checksum::sha256(&bytes)
     );
     assert_content_counts(harness.recording.snapshot(), 1, 2, 1, bytes.len());
 }
@@ -576,7 +576,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .expect("open namespace");
     let bytes = b"direct provider upload";
     let begin = namespace
-        .create_direct_put_upload_target(loonfs_api::ChecksumAlgorithm::Sha256)
+        .create_direct_put_upload_target(loonfs_types::ChecksumAlgorithm::Sha256)
         .await
         .expect("begin direct put");
     harness.recording.reset();
@@ -594,7 +594,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
             Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
                 content: loonfs::UploadContentClaim {
                     size_bytes: bytes.len() as u64,
-                    checksum: loonfs_api::Checksum::sha256(bytes),
+                    checksum: loonfs_types::Checksum::sha256(bytes),
                 },
             })
         })
@@ -771,7 +771,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,

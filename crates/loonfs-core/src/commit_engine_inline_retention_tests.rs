@@ -9,8 +9,8 @@ use crate::manifest::{
 };
 use crate::path::read::{load_metadata_view, ReadLoadContext};
 use crate::pin::{create_pin, load_snapshot_read_basis};
-use loonfs_api::wire::control::PinOwner;
 use loonfs_test_support::stores::MetadataMapStore;
+use loonfs_types::format::control::PinOwner;
 
 fn replace(namespace_id: &NamespaceId, bytes: &'static [u8]) -> CommitCandidate {
     let value = inline(namespace_id, Bytes::from_static(bytes));
@@ -44,7 +44,7 @@ async fn compact_and_check_pair(
         let outcome = compaction_step(
             store,
             namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             MetadataLsmPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
         )

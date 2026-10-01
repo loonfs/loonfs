@@ -15,7 +15,7 @@ use crate::gcs::GcpGcsStoreConfig;
 use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use crate::{ConfiguredObjectStore, ConfiguredObjectStoreKind, ObjectStoreError};
 use http::Uri;
-use loonfs_api::SecretString;
+use loonfs_types::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

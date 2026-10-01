@@ -10,8 +10,8 @@ use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::inline_content::InlineContent;
 use base64::Engine as _;
-use loonfs_api::v0::ContentToken;
-use loonfs_api::{ContentId, ContentRef, NamespaceId, UploadId};
+use loonfs_types::api::v0::ContentToken;
+use loonfs_types::{ContentId, ContentRef, NamespaceId, UploadId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -293,8 +293,8 @@ mod tests {
     use super::{mint_content_token, verify_content_token, CompletedUploadEvidence};
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use crate::namespace::state::NamespaceReadState;
-    use loonfs_api::v0::ContentToken;
-    use loonfs_api::{ContentId, ContentRef, NamespaceId};
+    use loonfs_types::api::v0::ContentToken;
+    use loonfs_types::{ContentId, ContentRef, NamespaceId};
 
     fn catalog_entry(namespace_id: NamespaceId) -> VerifiedNamespaceCatalogEntry {
         VerifiedNamespaceCatalogEntry::from_head(&NamespaceReadState::initial(

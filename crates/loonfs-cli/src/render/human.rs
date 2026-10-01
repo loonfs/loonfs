@@ -5,8 +5,8 @@ use super::*;
 use crate::commands::{TrashListing, TreeTransferFailures};
 use crate::config::{CliConfig, ProfileConfig};
 use crate::profiles::ProfileSummary;
-use loonfs_api::{ChangeSeq, CommitId, FileRevision, GrepMatch, PathEntry};
 use loonfs_objectstore::StoreConfig;
+use loonfs_types::{ChangeSeq, CommitId, FileRevision, GrepMatch, PathEntry};
 
 use super::human_maintenance::*;
 
@@ -343,7 +343,7 @@ fn human_path_entry_details(entry: &PathEntry) -> String {
         format!("created_by: {}", render_actor(&entry.created_by)),
         format!("created: {}", format_utc_ms(entry.created_at_ms)),
     ]);
-    if let loonfs_api::PathEntryKind::File {
+    if let loonfs_types::PathEntryKind::File {
         revision_no,
         size_bytes,
         content_ref,
@@ -500,7 +500,7 @@ fn human_config_show_degraded(error: &str, config_toml: &str) -> String {
     format!("warning: {error}\nshowing the file as parsed, secrets masked:\n\n{config_toml}")
 }
 
-fn human_capabilities(document: &loonfs_api::CapabilityDocument) -> String {
+fn human_capabilities(document: &loonfs_types::CapabilityDocument) -> String {
     let mut api_groups = document.api_groups.clone();
     api_groups.sort();
 
@@ -587,7 +587,7 @@ fn single_line(message: &str) -> String {
     message.lines().collect::<Vec<_>>().join(" | ")
 }
 
-pub(crate) fn human_path_entry(entry: &loonfs_api::PathEntry) -> String {
+pub(crate) fn human_path_entry(entry: &loonfs_types::PathEntry) -> String {
     let size = entry
         .size_bytes()
         .map(|value: u64| value.to_string())
@@ -602,7 +602,7 @@ pub(crate) fn human_path_entry(entry: &loonfs_api::PathEntry) -> String {
     )
 }
 
-fn render_actor(actor: &loonfs_api::ActorId) -> String {
+fn render_actor(actor: &loonfs_types::ActorId) -> String {
     actor.to_string()
 }
 

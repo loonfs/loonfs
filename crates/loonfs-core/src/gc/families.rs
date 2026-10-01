@@ -1,11 +1,11 @@
 //! Object families swept by namespace collection.
 
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::{
     metadata_manifest_prefix, metadata_segment_prefix, pin_prefix, upload_session_prefix,
     wal_prefix,
 };
 use loonfs_objectstore::layout::{manifest_no_of, parse_object_key, DurableObjectFamily};
+use loonfs_types::NamespaceId;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CandidateFamily {

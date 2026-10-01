@@ -5,7 +5,7 @@ use crate::Namespaces;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs_api::{
+use loonfs_types::{
     ApiError, CommitId, ErrorCode, ErrorDetails, ErrorKind, NamespaceId, NamespaceIdValidationError,
 };
 

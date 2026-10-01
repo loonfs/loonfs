@@ -5,12 +5,12 @@ use crate::codec::IndexRow;
 use crate::manifest::GrepSegmentRef;
 use crate::{GrepError, Result};
 use loonfs::StoreFailureClass;
-use loonfs_api::wire::sst_blocks::{
+use loonfs_objectstore::{ByteRange, ObjectStore};
+use loonfs_types::format::sst_blocks::{
     decode_data_block_rows, decode_filter_block, decode_index_block, BlockHandle, DecodedDataBlock,
     SegmentFilter, SegmentIndexEntry,
 };
-use loonfs_api::IndexSegmentId;
-use loonfs_objectstore::{ByteRange, ObjectStore};
+use loonfs_types::IndexSegmentId;
 use std::sync::Arc;
 
 /// Largest index segment object fetched whole on first touch, in stored bytes.
@@ -342,13 +342,13 @@ mod tests {
     };
     use crate::codec::{Gram, GramPosting};
     use bytes::Bytes;
-    use loonfs_api::wire::sst_blocks::{decode_index_block, SegmentBlocksBuilder};
-    use loonfs_api::{InodeId, RevisionNo};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{ByteRange, ObjectStore, PutMode, Result as StoreResult};
     use loonfs_test_support::stores::{
         delegate_object_store, ConcurrencyWatchStore, KeyPredicate, RecordingStore,
     };
+    use loonfs_types::format::sst_blocks::{decode_index_block, SegmentBlocksBuilder};
+    use loonfs_types::{InodeId, RevisionNo};
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use tempfile::tempdir;

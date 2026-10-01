@@ -3,12 +3,12 @@
 use loonfs::{
     DestinationBehavior, LoonFs, PageRequest, PutFileOptions, SharedObjectStore, StatOptions,
 };
-use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_core::test_support::STORE_READ_WAVE;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{ConcurrencyWatchStore, KeyPredicate, RecordingStore};
+use loonfs_types::format::manifest::MetadataRowFamily;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -90,7 +90,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
             .put_file_with_options(
                 &format!("/files/{index:03}.txt"),
                 &vec![b'b'; index + 2],
-                &loonfs_api::ActorId::parse("editor").expect("actor"),
+                &loonfs_types::ActorId::parse("editor").expect("actor"),
                 &PutFileOptions {
                     behavior: DestinationBehavior::Replace,
                     ..Default::default()

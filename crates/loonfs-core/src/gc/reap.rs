@@ -6,9 +6,9 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::pin::record::load_pin_at_key;
-use loonfs_api::wire::control::PinOwner;
-use loonfs_api::RetainedReason;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_types::format::control::PinOwner;
+use loonfs_types::RetainedReason;
 
 pub(super) enum PinSweep {
     DeleteFork,

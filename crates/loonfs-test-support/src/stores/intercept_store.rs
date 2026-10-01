@@ -4,11 +4,11 @@ use super::{OperationContext, OperationKind};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
-use loonfs_api::Checksum;
 use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
     ObjectStoreError, PutMode, StoredObjectChecksum,
 };
+use loonfs_types::Checksum;
 use std::fmt::Debug;
 use std::sync::Arc;
 

@@ -7,9 +7,9 @@ use crate::cache::{HeadStateCache, MetadataSegmentCache, WalTailProjectionCacheK
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::storage::content::{ContentLocation, DurableContentValidationError};
 use crate::{NamespaceEngine, RuntimeReadContext};
-use loonfs_api::{DestinationPrecondition, RevisionNo, WalNo};
 use loonfs_objectstore::keys::{content_blob, wal_object};
 use loonfs_objectstore::PutMode;
+use loonfs_types::{DestinationPrecondition, RevisionNo, WalNo};
 use std::num::NonZeroU64;
 
 fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadContext {
@@ -490,8 +490,11 @@ async fn refused_materialization_leaves_proxied_content_readable() {
             .expect_err("write denied"),
     ];
     for error in errors {
-        assert_eq!(error.code(), loonfs_api::ErrorCode::ContentNotMaterialized);
-        assert_eq!(error.kind(), loonfs_api::ErrorKind::Unavailable);
+        assert_eq!(
+            error.code(),
+            loonfs_types::ErrorCode::ContentNotMaterialized
+        );
+        assert_eq!(error.kind(), loonfs_types::ErrorKind::Unavailable);
     }
     assert_eq!(failing.attempts(), 2);
     assert_no_writes(&store);
@@ -557,7 +560,7 @@ async fn inline_checksum_failures_match_object_validation() {
     record.inline_content[0].content_id = corrupt_ref.content_id.clone();
     record.inline_content[0].bytes = b"wrong".to_vec();
     let key = wal_object(&publisher.namespace_id, &payload.wal_no);
-    let bytes = loonfs_api::wire::wal::encode_wal_object_envelope_zstd(payload)
+    let bytes = loonfs_types::format::wal::encode_wal_object_envelope_zstd(payload)
         .expect("codec does not hash")
         .into_bytes();
     store
@@ -582,7 +585,7 @@ async fn inline_checksum_failures_match_object_validation() {
     let fold_error = fold_wal(&store, &publisher.namespace_id)
         .await
         .expect_err("corrupt tail");
-    assert_eq!(fold_error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
+    assert_eq!(fold_error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
     assert_eq!(fold_error.to_string(), error.to_string());
     assert_no_writes(&store);
     let key = content_blob(&publisher.namespace_id, &corrupt_ref.content_id);

@@ -1,7 +1,7 @@
 //! Transactional inode allocation for one publish batch.
 
 use crate::error::{CoreError, Result};
-use loonfs_api::InodeId;
+use loonfs_types::InodeId;
 
 /// Returns the next inode ID, or `None` at the limit.
 pub(crate) fn next_inode_after(inode_id: InodeId) -> Option<InodeId> {

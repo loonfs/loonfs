@@ -3,7 +3,7 @@
 use super::*;
 use crate::metadata::access::{access_fixture_cases, access_fixture_state, effective_rights};
 use crate::metadata::{AccessRevisionRecord, MetadataView};
-use loonfs_api::{AccessGrants, AccessRevisionNo, AccessRight, PrincipalId};
+use loonfs_types::{AccessGrants, AccessRevisionNo, AccessRight, PrincipalId};
 
 fn access_record(
     revision: u64,
@@ -17,7 +17,7 @@ fn access_record(
         committed_seq: ChangeSeq(seq),
         commit_id: CommitId::parse(format!("c_access_{seq}")).expect("commit id"),
         delta_index: 0,
-        committed_by: loonfs_api::ActorId::loonfs(),
+        committed_by: loonfs_types::ActorId::loonfs(),
         committed_at_ms: 1_000 + seq,
         boundary,
         grants: AccessGrants::new(BTreeMap::from([(

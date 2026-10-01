@@ -7,7 +7,6 @@ use crate::path::read::load_current_metadata_view;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
 use crate::wal::tests::publish;
-use loonfs_api::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId, WriterId};
 use loonfs_objectstore::{
     keys::{hint, metadata_manifest_object},
     local_fs_store::LocalFsStore,
@@ -16,6 +15,7 @@ use loonfs_objectstore::{
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
+use loonfs_types::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId, WriterId};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -30,7 +30,7 @@ fn context() -> MutationContext {
 fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
     use super::bootstrap::bootstrap_metadata_state;
     use crate::metadata::AccessRevisionRecord;
-    use loonfs_api::{
+    use loonfs_types::{
         AccessGrants, AccessRevisionNo, AccessRights, ActorId, ChangeSeq, NamespaceAccess,
         PrincipalId, PrincipalScope, ROOT_INODE_ID,
     };
@@ -53,7 +53,7 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
             inode_id: ROOT_INODE_ID,
             access_revision_no: AccessRevisionNo(0),
             committed_seq: ChangeSeq(0),
-            commit_id: loonfs_api::wire::control::genesis_commit_id(),
+            commit_id: loonfs_types::format::control::genesis_commit_id(),
             delta_index: 0,
             committed_by: ActorId::loonfs(),
             committed_at_ms: 1_000,
@@ -114,7 +114,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         &source,
         &context(),
         &actor_id,
-        &loonfs_api::NamespaceAccess::unrestricted(),
+        &loonfs_types::NamespaceAccess::unrestricted(),
         true,
     )
     .await

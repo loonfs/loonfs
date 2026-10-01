@@ -2,7 +2,7 @@
 
 use super::super::*;
 use futures::StreamExt as _;
-use loonfs_api::v0::UploadMode;
+use loonfs_types::api::v0::UploadMode;
 use std::sync::{Arc, Mutex};
 
 /// Minimum payload size for streaming and multipart uploads.
@@ -60,7 +60,7 @@ pub trait PutFileJournal: Send + Sync {
     fn commit_prepared(
         &self,
         request: &CommitRequest,
-        actor_id: &loonfs_api::ActorId,
+        actor_id: &loonfs_types::ActorId,
         upload_id: Option<&UploadId>,
     ) -> std::io::Result<()>;
 }

@@ -8,11 +8,11 @@ use super::KeyPredicate;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, StreamExt};
-use loonfs_api::Checksum;
 use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
     ObjectStoreError, PutMode, StoredObjectChecksum,
 };
+use loonfs_types::Checksum;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 

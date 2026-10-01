@@ -1,8 +1,8 @@
 //! Applies retention rules while rows are streamed in key order.
 
 use crate::error::{CoreError, Result};
-use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_api::{ChangeSeq, InodeId};
+use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
+use loonfs_types::{ChangeSeq, InodeId};
 
 /// One row a retention operator kept, and the family it belongs to.
 pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
@@ -267,7 +267,7 @@ impl BindingRetention {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::{AccessRevisionNo, AttributesRevisionNo, DisplayName, InodeId, NameKey};
+    use loonfs_types::{AccessRevisionNo, AttributesRevisionNo, DisplayName, InodeId, NameKey};
 
     fn floor() -> ChangeSeq {
         ChangeSeq(100)
@@ -280,7 +280,7 @@ mod tests {
         committed_seq: u64,
     ) -> MetadataRow {
         let commit_id =
-            loonfs_api::CommitId::parse(format!("c_row_{committed_seq}")).expect("commit id");
+            loonfs_types::CommitId::parse(format!("c_row_{committed_seq}")).expect("commit id");
         if family == MetadataRowFamily::Access {
             MetadataRow::AccessRevision(crate::metadata::AccessRevisionRecord {
                 inode_id: InodeId(inode),
@@ -288,7 +288,7 @@ mod tests {
                 committed_seq: ChangeSeq(committed_seq),
                 commit_id,
                 delta_index: 0,
-                committed_by: loonfs_api::ActorId::loonfs(),
+                committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 1_000 + committed_seq,
                 boundary: false,
                 grants: Default::default(),
@@ -300,7 +300,7 @@ mod tests {
                 committed_seq: ChangeSeq(committed_seq),
                 commit_id,
                 delta_index: 0,
-                committed_by: loonfs_api::ActorId::loonfs(),
+                committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 1_000 + committed_seq,
                 attributes: Default::default(),
             })
@@ -311,12 +311,12 @@ mod tests {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
             },
             child_inode_id: InodeId(42),
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(bind_seq),
             delta_index: 0,
@@ -328,12 +328,12 @@ mod tests {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
             child_inode_id: InodeId(42),
-            child_kind: loonfs_api::InodeKind::File,
-            child_created_by: loonfs_api::ActorId::loonfs(),
+            child_kind: loonfs_types::InodeKind::File,
+            child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(unbind_seq),
             delta_index: 0,
-            state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         })
     }
 
@@ -399,13 +399,13 @@ mod tests {
             root_inode_id: InodeId(9),
             deletion_seq: ChangeSeq(3),
             action: ActiveDeletionRowAction::Listed {
-                inode_kind: loonfs_api::InodeKind::Directory,
+                inode_kind: loonfs_types::InodeKind::Directory,
                 deleted_at_ms: 1_000,
-                deleted_by: loonfs_api::ActorId::loonfs(),
-                deleted_binding: loonfs_api::wire::manifest::DeletedBinding {
+                deleted_by: loonfs_types::ActorId::loonfs(),
+                deleted_binding: loonfs_types::format::manifest::DeletedBinding {
                     parent_inode_id: InodeId(1),
-                    name_key: loonfs_api::NameKey::parse("deleted").expect("valid name key"),
-                    display_name: loonfs_api::DisplayName::parse("deleted")
+                    name_key: loonfs_types::NameKey::parse("deleted").expect("valid name key"),
+                    display_name: loonfs_types::DisplayName::parse("deleted")
                         .expect("valid display name"),
                 },
             },

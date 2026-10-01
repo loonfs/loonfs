@@ -1,8 +1,8 @@
 //! Typed failures for grep manifest state, encoding, loading, and publication.
 
 use loonfs::StoreFailureClass;
-use loonfs_api::wire::envelope::EnvelopeCodecError;
-use loonfs_api::{IndexSegmentId, NamespaceId, RunNo};
+use loonfs_types::format::envelope::EnvelopeCodecError;
+use loonfs_types::{IndexSegmentId, NamespaceId, RunNo};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

@@ -20,17 +20,17 @@ use crate::path::write::{CommitRequest, FilesystemOperation};
 use crate::pin::record::delete_pin;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::v0::GcResponse;
-use loonfs_api::wire::control::{
-    decode_control_object, ControlObjectKind, PinOwner, PinPayload, ProxiedStaging,
-    UploadSessionMode, UploadSessionPayload, UploadSessionRecordStatus,
-};
-use loonfs_api::{ContentRef, ManifestNo, NamespaceId, PinId, UploadId};
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
     metadata_segment_prefix, pin_prefix, wal_prefix,
 };
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::api::v0::GcResponse;
+use loonfs_types::format::control::{
+    decode_control_object, ControlObjectKind, PinOwner, PinPayload, ProxiedStaging,
+    UploadSessionMode, UploadSessionPayload, UploadSessionRecordStatus,
+};
+use loonfs_types::{ContentRef, ManifestNo, NamespaceId, PinId, UploadId};
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -41,13 +41,13 @@ use crate::namespace::fork::fork_namespace;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::read::load_current_metadata_view;
 use bytes::Bytes;
-use loonfs_api::AttributeInclusion;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
     OperationContext, OperationKind, RecordingStore,
 };
+use loonfs_types::AttributeInclusion;
 use tempfile::tempdir;
 
 mod concurrent_retirement;
@@ -219,23 +219,23 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
 }
 
 async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) -> String {
-    let upload_id = loonfs_api::UploadId::parse("upl_0123456789abcdef0123456789abcdef")
+    let upload_id = loonfs_types::UploadId::parse("upl_0123456789abcdef0123456789abcdef")
         .expect("valid upload id");
-    let state = loonfs_api::wire::control::UploadSessionPayload {
+    let state = loonfs_types::format::control::UploadSessionPayload {
         namespace_id: namespace_id.clone(),
 
         upload_id: upload_id.clone(),
-        content_id: loonfs_api::ContentId::generate(),
+        content_id: loonfs_types::ContentId::generate(),
         subject_id: None,
         mode: UploadSessionMode::ServiceProxied {
             staging: ProxiedStaging::Idle,
         },
-        status: loonfs_api::wire::control::UploadSessionRecordStatus::Open {
+        status: loonfs_types::format::control::UploadSessionRecordStatus::Open {
             expires_at_ms: 1_000 + UPLOAD_SESSION_LEASE_MS,
         },
     };
-    let bytes = loonfs_api::wire::control::encode_control_state(
-        loonfs_api::wire::control::ControlObjectKind::UploadSession,
+    let bytes = loonfs_types::format::control::encode_control_state(
+        loonfs_types::format::control::ControlObjectKind::UploadSession,
         &state,
     )
     .expect("encode session");
@@ -299,7 +299,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .expect("bootstrap");
     let mut content_keys = publish_owned_content(&store, &namespace_id, 2).await;
     let unreferenced_key =
-        loonfs_objectstore::keys::content_blob(&namespace_id, &loonfs_api::ContentId::generate());
+        loonfs_objectstore::keys::content_blob(&namespace_id, &loonfs_types::ContentId::generate());
     store
         .put_if_absent(&unreferenced_key, Bytes::from_static(b"unreferenced"))
         .await
@@ -337,7 +337,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .expect("gc pass after segment grace");
     assert_eq!(
         report.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner::default()
+        loonfs_types::DeletedCheckpointsByOwner::default()
     );
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests >= 1);
@@ -886,14 +886,14 @@ async fn publish_completed_content<S: ObjectStore>(
             store,
             vec![CommitCandidate::prepared(
                 CommitRequest::single(
-                    loonfs_api::CommitId::generate(),
+                    loonfs_types::CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
                     FilesystemOperation::PutFile {
-                        path: loonfs_api::AbsolutePath::parse(path).expect("path"),
+                        path: loonfs_types::AbsolutePath::parse(path).expect("path"),
                         content_ref: Some(content_ref),
                         inline_content: None,
-                        behavior: loonfs_api::DestinationBehavior::NoReplace,
+                        behavior: loonfs_types::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
                     },
@@ -1070,7 +1070,7 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
                 .flat_map(|run| &run.segments)
                 .filter(|segment| {
                     segment.family
-                        == loonfs_api::wire::manifest::MetadataRowFamily::ContentPublications
+                        == loonfs_types::format::manifest::MetadataRowFamily::ContentPublications
                 })
                 .map(loonfs_objectstore::keys::metadata_segment_object_key)
                 .collect()
@@ -1142,7 +1142,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
         .await
         .expect("advance floor");
 
-    let orphan = metadata_segment(&namespace_id, &loonfs_api::MetadataSegmentId::generate());
+    let orphan = metadata_segment(&namespace_id, &loonfs_types::MetadataSegmentId::generate());
     store
         .put_if_absent(&orphan, Bytes::from_static(b"unused"))
         .await
@@ -1306,7 +1306,7 @@ async fn a_pass_names_a_pin_it_could_not_advance() {
 
     assert_eq!(
         report.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner::default()
+        loonfs_types::DeletedCheckpointsByOwner::default()
     );
     assert_eq!(report.retained.checkpoint_not_deletable, 1);
 }
@@ -1474,7 +1474,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         let report = crate::manifest::compaction_step(
             &store,
             &namespace_id,
-            loonfs_api::CompactorEpoch(0),
+            loonfs_types::CompactorEpoch(0),
             merge_policy,
             MetadataCompactionPolicy::default(),
         )
@@ -1563,7 +1563,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .expect("first gc pass");
     assert_eq!(
         first_pass.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner::default()
+        loonfs_types::DeletedCheckpointsByOwner::default()
     );
 
     let second_pass = gc_namespace(&store, &namespace_id, &options(), &aged)
@@ -1572,7 +1572,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     assert_eq!(second_pass.deleted.manifests, 0);
     assert_eq!(
         second_pass.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner::default()
+        loonfs_types::DeletedCheckpointsByOwner::default()
     );
 
     let keeper = crate::pin::record::load_pin(&store, &namespace_id, &first.checkpoint_id)
@@ -1620,7 +1620,7 @@ async fn gc_retains_active_checkpoint_bases() {
     assert_eq!(report.deleted.manifests, 3);
     assert_eq!(
         report.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner::default()
+        loonfs_types::DeletedCheckpointsByOwner::default()
     );
     let first_record = crate::pin::record::load_pin(&store, &namespace_id, &first.checkpoint_id)
         .await
@@ -2128,7 +2128,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(
         report.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner::default()
+        loonfs_types::DeletedCheckpointsByOwner::default()
     );
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
     assert!(report.retained.total() > 0);
@@ -2306,7 +2306,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
 
 #[tokio::test]
 async fn gc_keeps_pinned_and_current_numbers_and_preserves_discovery_from_a_lagging_hint() {
-    use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};
+    use loonfs_types::format::control::{encode_control_state, ControlObjectKind, HintPayload};
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -2417,12 +2417,12 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
         .collect();
     let old = metadata_segment(
         &namespace_id,
-        &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
+        &loonfs_types::MetadataSegmentId::parse("seg_00000000000000000000000000000001")
             .expect("segment"),
     );
     let young = metadata_segment(
         &namespace_id,
-        &loonfs_api::MetadataSegmentId::parse("seg_00000000000000000000000000000002")
+        &loonfs_types::MetadataSegmentId::parse("seg_00000000000000000000000000000002")
             .expect("segment"),
     );
     for key in [&old, &young] {
@@ -2578,7 +2578,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     .expect("before creation grace");
     assert_eq!(
         before.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner::default()
+        loonfs_types::DeletedCheckpointsByOwner::default()
     );
     let abandoned = gc_namespace(
         &store,
@@ -2601,7 +2601,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     .expect("before expiry grace");
     assert_eq!(
         before_expiry.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner::default()
+        loonfs_types::DeletedCheckpointsByOwner::default()
     );
     let expired = gc_namespace(
         &store,
@@ -2633,7 +2633,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         .expect("retire");
     assert_eq!(
         retired.deleted_checkpoints_by_owner,
-        loonfs_api::DeletedCheckpointsByOwner {
+        loonfs_types::DeletedCheckpointsByOwner {
             user: 2,
             ..Default::default()
         }
@@ -2680,7 +2680,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
     let error = gc_namespace(&store, &namespace_id, &options(), &context(GRACE_MS * 3))
         .await
         .expect_err("missing pin manifest");
-    assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceCorrupt);
+    assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
     assert!(error.to_string().contains(&loonfs_objectstore::keys::pin(
         &namespace_id,
         &initial.checkpoint_id
@@ -2778,12 +2778,12 @@ async fn create_on_a_deleted_id_fails_before_and_after_content_reclamation() {
                 &namespace_id,
                 &deadline,
                 &loonfs_test_support::test_actor(),
-                &loonfs_api::NamespaceAccess::unrestricted(),
+                &loonfs_types::NamespaceAccess::unrestricted(),
                 allow_existing,
             )
             .await
             .expect_err("deleted id");
-            assert_eq!(error.code(), loonfs_api::ErrorCode::NamespaceDeleted);
+            assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceDeleted);
             assert_eq!(store.counts().puts, 0);
             assert_eq!(store.counts().compare_and_swaps, 0);
             assert_eq!(store.counts().deletes, 0);

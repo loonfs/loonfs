@@ -123,7 +123,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
 
     let replace = PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        commit: loonfs_api::options::CommitOptions {
+        commit: loonfs_types::options::CommitOptions {
             preconditions: Vec::new(),
             commit_id: None,
             message: None,
@@ -278,7 +278,7 @@ fn directory_cursor_from_the_future_is_rejected() {
     assert_core_error_kind(
         block_on(fs.list(&namespace_id, "/docs").page(PageRequest {
             limit: page_limit(2),
-            cursor: Some(loonfs_api::encode_cursor(&cursor).expect("encode cursor")),
+            cursor: Some(loonfs_types::encode_cursor(&cursor).expect("encode cursor")),
         })),
         ErrorCode::InvalidRequest,
     );
@@ -742,7 +742,7 @@ fn inode_children_cursor_from_the_future_is_rejected() {
             fs.list_by_inode(&namespace_id, docs.inode_id)
                 .page(PageRequest {
                     limit: page_limit(2),
-                    cursor: Some(loonfs_api::encode_cursor(&cursor).expect("encode cursor")),
+                    cursor: Some(loonfs_types::encode_cursor(&cursor).expect("encode cursor")),
                 }),
         ),
         ErrorCode::InvalidRequest,

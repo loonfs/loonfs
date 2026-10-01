@@ -1,7 +1,7 @@
 //! Errors shared by every mutable control-object loader.
 
 use crate::error::StoreFailureClass;
-use loonfs_api::NamespaceId;
+use loonfs_types::NamespaceId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -51,8 +51,8 @@ pub enum ControlObjectLoadError {
 }
 
 impl ControlObjectLoadError {
-    pub fn code(&self) -> loonfs_api::ErrorCode {
-        use loonfs_api::ErrorCode;
+    pub fn code(&self) -> loonfs_types::ErrorCode {
+        use loonfs_types::ErrorCode;
 
         match self {
             Self::MissingObject { .. } => ErrorCode::NamespaceNotFound,

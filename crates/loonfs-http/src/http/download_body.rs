@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use loonfs::{FileContentStream, SharedObjectStore};
-use loonfs_api::NamespaceId;
+use loonfs_types::NamespaceId;
 use tokio::sync::OwnedSemaphorePermit;
 
 /// Keeps admission until the stream finishes or is abandoned. No Content-Length

@@ -4,7 +4,7 @@ use super::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
 use crate::{Client, ClientError, NamespaceId, PayloadSource, Result};
 use bytes::BytesMut;
 use futures::StreamExt;
-use loonfs_api::{
+use loonfs_types::{
     FEATURE_COMMIT_INLINE_CONTENT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
 

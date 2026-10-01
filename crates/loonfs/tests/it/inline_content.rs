@@ -2,11 +2,6 @@
 
 use bytes::Bytes;
 use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore};
-use loonfs_api::{
-    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, ContentRef,
-    DestinationBehavior, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet,
-    RevisionNo, Subject, SubjectId, WriterId,
-};
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
@@ -18,6 +13,11 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
     KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+};
+use loonfs_types::{
+    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, ContentRef,
+    DestinationBehavior, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet,
+    RevisionNo, Subject, SubjectId, WriterId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

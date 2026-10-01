@@ -4,9 +4,9 @@ use super::publish::{update_manifest, ManifestChange};
 use crate::error::Result;
 use crate::namespace::{control::ensure_namespace_live, state::NamespaceReadState};
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::CompactorEpoch;
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::CompactorEpoch;
+use loonfs_types::NamespaceId;
 use std::sync::Arc;
 
 pub(crate) async fn claim_compactor<S: ObjectStore + ?Sized>(

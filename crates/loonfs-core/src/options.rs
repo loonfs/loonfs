@@ -1,12 +1,12 @@
 //! Per-operation options structs for the engine surface.
 
-use loonfs_api::ChangeSeq;
+use loonfs_types::ChangeSeq;
 
 /// Options for creating a namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateNamespaceOptions {
     /// Access mode the namespace is created with.
-    pub access: loonfs_api::NamespaceAccess,
+    pub access: loonfs_types::NamespaceAccess,
     /// If true, creating an already-existing namespace is treated as success.
     pub allow_existing: bool,
 }
@@ -14,7 +14,7 @@ pub struct CreateNamespaceOptions {
 impl Default for CreateNamespaceOptions {
     fn default() -> Self {
         Self {
-            access: loonfs_api::NamespaceAccess::Unrestricted {},
+            access: loonfs_types::NamespaceAccess::Unrestricted {},
             allow_existing: false,
         }
     }
@@ -37,7 +37,7 @@ mod tests {
         assert_eq!(
             CreateNamespaceOptions::default(),
             CreateNamespaceOptions {
-                access: loonfs_api::NamespaceAccess::Unrestricted {},
+                access: loonfs_types::NamespaceAccess::Unrestricted {},
                 allow_existing: false,
             }
         );

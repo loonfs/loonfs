@@ -5,9 +5,9 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_current_manifest;
 use futures::StreamExt;
-use loonfs_api::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest};
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest};
 use serde::{Deserialize, Serialize};
 
 /// Resume position for a checkpoint listing.
@@ -115,11 +115,11 @@ pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod cursor_tests {
     use super::*;
-    use loonfs_api::{decode_cursor, encode_cursor, DirectoryPageCursor, NameKey};
+    use loonfs_types::{decode_cursor, encode_cursor, DirectoryPageCursor, NameKey};
 
     #[test]
     fn cursor_decode_tolerates_additive_fields() {
-        let token = loonfs_api::wire::hex::hex_encode_bytes(
+        let token = loonfs_types::format::hex::hex_encode_bytes(
             &serde_json::to_vec(&serde_json::json!({
                 "format_version": 1,
                 "kind": "checkpoint_inventory",
@@ -141,9 +141,9 @@ mod cursor_tests {
     #[test]
     fn cursor_is_operation_bound() {
         let directory = DirectoryPageCursor {
-            head_seq: loonfs_api::ChangeSeq(1),
+            head_seq: loonfs_types::ChangeSeq(1),
             pin_id: None,
-            directory_inode_id: loonfs_api::InodeId(1),
+            directory_inode_id: loonfs_types::InodeId(1),
             last_name_key: NameKey::parse("entry").expect("name key"),
         };
         let token = encode_cursor(&directory).expect("encode directory cursor");

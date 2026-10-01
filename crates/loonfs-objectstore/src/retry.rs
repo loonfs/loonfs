@@ -2,7 +2,7 @@
 
 use crate::attempts::count_retry_attempt;
 use crate::{PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_OPERATION_DEADLINE};
-use loonfs_api::{transport_retry_backoff, OperationDeadline, TransportRetryPolicy};
+use loonfs_types::{transport_retry_backoff, OperationDeadline, TransportRetryPolicy};
 use std::future::Future;
 use std::time::Duration;
 

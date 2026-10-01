@@ -9,11 +9,11 @@ use super::publish_path_planning::{
 use crate::authorize::{Absence, Replacement};
 use crate::commit::{CandidateAllocation, CommitOp};
 use crate::error::{CoreError, Result};
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     AccessRight, AccessRights, BindingVersion, ContentRef, DeleteDirectoryBehavior,
     DestinationBehavior, DisplayName, ExpectedFileState, InodeId, InodeKind, RevisionNo,
 };
-use loonfs_objectstore::ObjectStore;
 
 pub(super) enum NewChild {
     Directory,

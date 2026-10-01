@@ -10,8 +10,8 @@ use crate::keyspace::{hint_key, manifest_key};
 use bytes::Bytes;
 use loonfs::engine::{Deadline, Observation, METADATA_PUBLICATION_BUDGET_MS};
 use loonfs::{CoreError, StoreFailureClass};
-use loonfs_api::{ManifestNo, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_types::{ManifestNo, NamespaceId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedGrepHint {

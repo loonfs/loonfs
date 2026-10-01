@@ -61,7 +61,7 @@ pub struct CreateDownloadByInodeResponse {
 #[cfg(test)]
 mod tests {
     use super::{CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse};
-    use crate::v0::ObjectTransferAccess;
+    use crate::api::v0::ObjectTransferAccess;
     use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, PinId, RevisionNo};
     use std::collections::BTreeMap;
 

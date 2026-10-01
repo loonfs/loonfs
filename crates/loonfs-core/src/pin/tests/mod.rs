@@ -25,7 +25,6 @@ use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::{ManifestNo, NamespaceId, PinId};
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
 };
@@ -36,6 +35,7 @@ use loonfs_objectstore::{
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
+use loonfs_types::{ManifestNo, NamespaceId, PinId};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;

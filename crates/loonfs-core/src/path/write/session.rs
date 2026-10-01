@@ -10,14 +10,14 @@ use crate::commit_engine::CommitCandidate;
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::wal::WalCommitPayload;
-#[cfg(test)]
-use loonfs_api::AbsolutePath;
-#[cfg(test)]
-use loonfs_api::CommitPrecondition;
-#[cfg(test)]
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::wal::WalCommitPayload;
+#[cfg(test)]
+use loonfs_types::AbsolutePath;
+#[cfg(test)]
+use loonfs_types::CommitPrecondition;
+#[cfg(test)]
+use loonfs_types::NamespaceId;
 
 /// Working view of one publish attempt.
 ///
@@ -92,7 +92,7 @@ impl PublishPlanningSession {
     pub(crate) fn commit_candidate(
         &mut self,
         allocation: CandidateAllocation,
-    ) -> Result<loonfs_api::InodeId> {
+    ) -> Result<loonfs_types::InodeId> {
         self.inode_allocator.commit_candidate(allocation)
     }
 
@@ -118,14 +118,14 @@ mod tests {
     use crate::storage::content::store_bytes_as_content;
     use crate::storage::content_admission::PreparedContent;
     use crate::test_support::ops::create;
-    use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_types::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
     use std::collections::BTreeSet;
     use tempfile::tempdir;
 
     fn test_context() -> MutationContext {
         MutationContext {
-            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1,
         }
     }
@@ -149,7 +149,7 @@ mod tests {
     fn put_file_candidate(
         commit_id: &str,
         absolute_path: &str,
-        content_ref: loonfs_api::ContentRef,
+        content_ref: loonfs_types::ContentRef,
     ) -> CommitCandidate {
         let admission = PreparedContent::for_durable_content_write(content_ref.clone());
         CommitCandidate::prepared(
@@ -213,7 +213,7 @@ mod tests {
             .expect("load view")
             .resolve_path(
                 absolute_path,
-                loonfs_api::AttributeInclusion::Omit,
+                loonfs_types::AttributeInclusion::Omit,
                 &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
             )
             .await
@@ -529,7 +529,7 @@ mod tests {
             .expect("load view")
             .resolve_path(
                 "/docs/doomed.txt",
-                loonfs_api::AttributeInclusion::Omit,
+                loonfs_types::AttributeInclusion::Omit,
                 &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
             )
             .await

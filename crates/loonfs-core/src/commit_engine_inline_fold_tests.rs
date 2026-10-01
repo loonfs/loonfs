@@ -3,10 +3,10 @@
 use super::*;
 use crate::namespace::control::load_current_manifest;
 use crate::storage::content::content_object_key_for_ref;
-use loonfs_api::ErrorCode;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError, OperationClass};
+use loonfs_types::ErrorCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn family(operation: &RecordedOperation) -> Option<DurableObjectFamily> {

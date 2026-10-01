@@ -10,7 +10,6 @@ use loonfs::{
     Error, LoonFs, LoonFsBuilder, MetadataCache, NamespaceId, ReadOnly, SharedObjectStore,
     SnapshotPolicy, Writable, WriterFence,
 };
-use loonfs_api::wire::control::NamespaceStatus;
 use loonfs_core::control::NamespaceReadState;
 use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -18,6 +17,7 @@ use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
 };
+use loonfs_types::format::control::NamespaceStatus;
 use std::sync::Arc;
 use tempfile::tempdir;
 

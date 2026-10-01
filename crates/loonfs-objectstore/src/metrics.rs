@@ -11,7 +11,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
-use loonfs_api::Checksum;
+use loonfs_types::Checksum;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{self, File};

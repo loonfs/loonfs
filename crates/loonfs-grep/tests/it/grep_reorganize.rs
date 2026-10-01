@@ -4,10 +4,6 @@ use crate::common::GrepHost;
 use bytes::Bytes;
 use loonfs::engine::{Deadline, SegmentBlockKind};
 use loonfs::SharedObjectStore;
-use loonfs_api::wire::sst_blocks::{
-    decode_data_block_rows, decode_index_block, BuiltSegmentBlocks, SegmentBlocksBuilder,
-};
-use loonfs_api::{ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, RevisionNo, RunNo};
 use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
 use loonfs_grep::keyspace::{segment_key, segments_prefix};
 use loonfs_grep::manifest::{
@@ -22,6 +18,12 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{ConcurrencyWatchStore, KeyPredicate, RecordingStore};
+use loonfs_types::format::sst_blocks::{
+    decode_data_block_rows, decode_index_block, BuiltSegmentBlocks, SegmentBlocksBuilder,
+};
+use loonfs_types::{
+    ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, RevisionNo, RunNo,
+};
 use std::sync::Arc;
 use tempfile::tempdir;
 

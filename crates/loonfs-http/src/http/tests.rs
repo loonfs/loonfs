@@ -23,19 +23,19 @@ use axum::http::StatusCode;
 use fixtures::{test_app, test_options, TestAppOptions, TestOptions};
 use futures::stream::StreamExt;
 use loonfs::{DeleteOptions, LoonFs, PutFileOptions, TraceMode, TraceStoreKind, Writable};
-use loonfs_api::{
-    AttributesRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
-};
-use loonfs_api::{
-    CapabilityDocument, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    GrepRequest, NamespaceId, RevisionNo, FEATURE_QUERY_GREP,
-};
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{hint_key as grep_hint_key, manifest_key as grep_manifest_key};
 use loonfs_grep::manifest::{encode_grep_hint, GrepHint};
 use loonfs_grep::GrepWorker;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
+use loonfs_types::{
+    AttributesRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
+};
+use loonfs_types::{
+    CapabilityDocument, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    GrepRequest, NamespaceId, RevisionNo, FEATURE_QUERY_GREP,
+};
 use std::path::Path;
 
 fn options_with_store(store: SharedObjectStore) -> TestAppOptions {
@@ -252,7 +252,7 @@ fn error_status_mapping_matches_the_api_spec_table() {
     for code in ErrorCode::ALL {
         let documented_status = documented.remove(code.as_str()).unwrap_or_else(|| {
             panic!(
-                "`{}` is registered in loonfs-api but missing from the api.md error table",
+                "`{}` is registered in loonfs-types but missing from the api.md error table",
                 code.as_str()
             )
         });
@@ -379,19 +379,21 @@ fn error_detail_fields_match_the_api_spec_table() {
         operation_index: Some(0),
         fenced_writer_epoch: Some(WriterEpoch::from(1)),
         active_writer_epoch: Some(WriterEpoch::from(2)),
-        active_writer_id: Some(loonfs_api::WriterId::parse("writer").expect("writer id")),
+        active_writer_id: Some(loonfs_types::WriterId::parse("writer").expect("writer id")),
         active_acquired_at_ms: Some(1),
         inode_id: Some(InodeId(1)),
         expected_inode_id: Some(InodeId(2)),
         actual_inode_id: Some(InodeId(3)),
-        expected_binding_version: Some(loonfs_api::BindingVersion::parse("aaaa").expect("version")),
-        actual_binding_version: Some(loonfs_api::BindingVersion::parse("bbbb").expect("version")),
+        expected_binding_version: Some(
+            loonfs_types::BindingVersion::parse("aaaa").expect("version"),
+        ),
+        actual_binding_version: Some(loonfs_types::BindingVersion::parse("bbbb").expect("version")),
         expected_revision_no: Some(RevisionNo::from(1)),
         actual_revision_no: Some(RevisionNo::from(2)),
         expected_attributes_revision_no: Some(AttributesRevisionNo::from(1)),
         actual_attributes_revision_no: Some(AttributesRevisionNo::from(2)),
-        expected_access_revision_no: Some(loonfs_api::AccessRevisionNo(1)),
-        actual_access_revision_no: Some(loonfs_api::AccessRevisionNo(2)),
+        expected_access_revision_no: Some(loonfs_types::AccessRevisionNo(1)),
+        actual_access_revision_no: Some(loonfs_types::AccessRevisionNo(2)),
         after_seq: Some(ChangeSeq::from(2)),
         retention_floor_seq: Some(ChangeSeq::from(3)),
         expected_deletion_seq: Some(ChangeSeq::from(4)),
@@ -448,7 +450,7 @@ fn assert_api_spec_error_codes_are_registered(spec: &str) {
             continue;
         }
         // Valid inode IDs are examples, not error codes.
-        if loonfs_api::public_inode_id::decode(token).is_ok() {
+        if loonfs_types::public_inode_id::decode(token).is_ok() {
             continue;
         }
         assert!(
@@ -614,7 +616,7 @@ fn data_wal_put_for(
             bytes,
             mode: PutMode::CreateIfAbsent,
         } if operation.key().starts_with(&prefix) => {
-            loonfs_api::wire::wal::decode_wal_object_envelope_zstd(bytes)
+            loonfs_types::format::wal::decode_wal_object_envelope_zstd(bytes)
                 .is_ok_and(|envelope| !envelope.payload().records.is_empty())
         }
         _ => false,
@@ -666,14 +668,14 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("diagnostics body");
-    let diagnostics: loonfs_api::NamespaceDiagnostics =
+    let diagnostics: loonfs_types::NamespaceDiagnostics =
         serde_json::from_slice(&body).expect("namespace diagnostics response");
     assert_eq!(diagnostics.namespace_id, namespace_id);
     assert_eq!(diagnostics.head_seq, ChangeSeq(1));
     assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
         diagnostics.current_manifest_no,
-        Some(loonfs_api::ManifestNo(2))
+        Some(loonfs_types::ManifestNo(2))
     );
     assert_eq!(diagnostics.wal_tail_objects, 2);
     assert_eq!(diagnostics.live_snapshots, 0);
@@ -732,7 +734,7 @@ async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
     let body = axum::body::to_bytes(slow.into_body(), usize::MAX)
         .await
         .expect("deadline body");
-    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("deadline envelope");
+    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("deadline envelope");
     assert_eq!(error.code, ErrorCode::DeadlineExceeded.as_str());
     assert_eq!(error.request_id.as_deref(), Some(request_id.as_str()));
     assert!(error.message.contains("request_deadline_ms"));
@@ -920,11 +922,11 @@ async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_surviv
         &*store,
         &missing_manifest,
         missing_manifest.clone(),
-        loonfs_api::ManifestNo(11),
+        loonfs_types::ManifestNo(11),
     )
     .await;
 
-    let manifest_no = loonfs_api::ManifestNo(12);
+    let manifest_no = loonfs_types::ManifestNo(12);
     store
         .put_overwrite(
             &grep_manifest_key(&corrupt_manifest, &manifest_no),
@@ -944,7 +946,7 @@ async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_surviv
         &*store,
         &identity_mismatch,
         NamespaceId::parse("different-grep-identity").expect("different namespace id"),
-        loonfs_api::ManifestNo(13),
+        loonfs_types::ManifestNo(13),
     )
     .await;
 
@@ -978,7 +980,7 @@ async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_surviv
 async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-error-conflict");
-    let manifest_key = grep_manifest_key(&namespace_id, &loonfs_api::ManifestNo(1));
+    let manifest_key = grep_manifest_key(&namespace_id, &loonfs_types::ManifestNo(1));
     let fault_store = Arc::new(FailStore::matching(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
         move |context: &OperationContext<'_>| {
@@ -1031,7 +1033,7 @@ async fn runtime_created_state_is_readable_through_http() {
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
                     message: None,
@@ -1067,7 +1069,7 @@ async fn http_created_state_is_readable_through_runtime() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace through http");
@@ -1132,7 +1134,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
                 &loonfs_test_support::test_actor(),
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
-                    commit: loonfs_api::options::CommitOptions {
+                    commit: loonfs_types::options::CommitOptions {
                         preconditions: Vec::new(),
                         commit_id: None,
                         message: None,
@@ -1247,7 +1249,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
                 &loonfs_test_support::test_actor(),
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
-                    commit: loonfs_api::options::CommitOptions {
+                    commit: loonfs_types::options::CommitOptions {
                         preconditions: Vec::new(),
                         commit_id: None,
                         message: None,
@@ -1444,7 +1446,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
             &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: None,
                     message: None,
@@ -1519,7 +1521,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
             .expect("read head");
     assert_eq!(
         head.writer.expect("writer block").writer_id,
-        loonfs_api::WriterId::parse("server-writer").expect("writer id")
+        loonfs_types::WriterId::parse("server-writer").expect("writer id")
     );
 
     harness.server.abort();
@@ -1898,7 +1900,7 @@ async fn http_namespace_json_body_over_the_limit_answers_content_too_large() {
     let body = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .expect("response body");
-    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("API error");
+    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("API error");
     assert_eq!(error.code, ErrorCode::ContentTooLarge.as_str());
     state.runtime.shutdown().await.expect("writer shutdown");
 }
@@ -1940,7 +1942,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let session = client
         .create_upload(
             &namespace,
-            &loonfs_api::v0::CreateUploadBody::ServiceProxied {},
+            &loonfs_types::api::v0::CreateUploadBody::ServiceProxied {},
         )
         .await
         .expect("begin a proxied upload session");
@@ -2053,8 +2055,9 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
 
     let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
     let key = loonfs_objectstore::keys::content_blob(
-        &loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
-        &loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+        &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        &loonfs_types::ContentId::parse("con_0123456789abcdef0123456789abcdef")
+            .expect("content id"),
     );
     // Use HTTP-sized chunks so the store must regroup them.
     let chunks: Vec<Bytes> = payload
@@ -2231,10 +2234,10 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
     assert!(resumed["next_cursor"].is_null());
 
     // A cursor from a head ahead of the serving one was not issued for it.
-    let mut future_cursor: loonfs_api::FileRevisionsPageCursor =
-        loonfs_api::decode_cursor(&cursor).expect("decode revisions cursor");
-    future_cursor.head_seq = loonfs_api::ChangeSeq(future_cursor.head_seq.0 + 1000);
-    let future_cursor = loonfs_api::encode_cursor(&future_cursor).expect("encode future cursor");
+    let mut future_cursor: loonfs_types::FileRevisionsPageCursor =
+        loonfs_types::decode_cursor(&cursor).expect("decode revisions cursor");
+    future_cursor.head_seq = loonfs_types::ChangeSeq(future_cursor.head_seq.0 + 1000);
+    let future_cursor = loonfs_types::encode_cursor(&future_cursor).expect("encode future cursor");
     let error = raw_agent()
         .get(&format!(
             "http://{addr}/v0/namespaces/demo/filesystem/revisions"
@@ -2393,7 +2396,11 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     );
     assert_api_error(
         client
-            .read_file_revision_by_inode(&namespace_id("demo"), inode_id, loonfs_api::RevisionNo(1))
+            .read_file_revision_by_inode(
+                &namespace_id("demo"),
+                inode_id,
+                loonfs_types::RevisionNo(1),
+            )
             .await,
         503,
         "server_busy",
@@ -2445,7 +2452,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
             .read_file_revision_by_inode(
                 &namespace_id("demo"),
                 inode_id,
-                loonfs_api::RevisionNo(1),
+                loonfs_types::RevisionNo(1),
             )
             .await
             .expect("a freed slot admits the inode read"),
@@ -2581,7 +2588,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
             .read_file_revision_by_inode(
                 &namespace_id("demo"),
                 big_inode_id,
-                loonfs_api::RevisionNo(1),
+                loonfs_types::RevisionNo(1),
             )
             .await,
         413,
@@ -2599,7 +2606,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
             .read_file_revision_by_inode(
                 &namespace_id("demo"),
                 small_inode_id,
-                loonfs_api::RevisionNo(1),
+                loonfs_types::RevisionNo(1),
             )
             .await
             .expect("small inode content fits under the limit")
@@ -2672,7 +2679,7 @@ async fn write_grep_hint(
     store: &dyn ObjectStore,
     stored_namespace_id: &NamespaceId,
     hint_namespace_id: NamespaceId,
-    manifest_no: loonfs_api::ManifestNo,
+    manifest_no: loonfs_types::ManifestNo,
 ) {
     let envelope = encode_grep_hint(GrepHint {
         namespace_id: hint_namespace_id,
@@ -2827,7 +2834,7 @@ async fn write_file_bytes(
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                     message: None,
@@ -2853,7 +2860,7 @@ async fn delete_path_recursive(
             &loonfs_test_support::test_actor(),
             &DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
                     message: None,
@@ -2896,15 +2903,15 @@ fn assert_api_error<T: std::fmt::Debug>(
 /// verification) runs end to end without a real bucket.
 mod direct_download {
     use super::*;
-    use loonfs_api::{
-        v0::UploadContentClaim, Checksum, ChecksumAlgorithm, RevisionNo,
-        FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-        LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
-        LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    };
     use loonfs_objectstore::presign::{
         DirectGetIssuer, DirectPutIssuer, DirectTransferIssuers, PresignedGetRequest,
         PresignedPutRequest, PresignedUrl,
+    };
+    use loonfs_types::{
+        api::v0::UploadContentClaim, Checksum, ChecksumAlgorithm, RevisionNo,
+        FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+        LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
+        LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -3015,7 +3022,7 @@ mod direct_download {
                     String::from_utf8_lossy(&bytes)
                 );
                 if denied {
-                    let error: loonfs_api::ApiError =
+                    let error: loonfs_types::ApiError =
                         serde_json::from_slice(&bytes).expect("error");
                     assert_eq!(error.code, ErrorCode::ContentNotMaterialized.as_str());
                     assert_eq!(recording.count(OperationClass::Put), 0);
@@ -3030,9 +3037,11 @@ mod direct_download {
                     continue;
                 }
                 let grant: serde_json::Value = serde_json::from_slice(&bytes).expect("grant");
-                let access: loonfs_api::v0::ObjectTransferAccess =
+                let access: loonfs_types::api::v0::ObjectTransferAccess =
                     serde_json::from_value(grant["access"].clone()).expect("access");
-                let loonfs_api::v0::ObjectTransferAccess::PresignedUrl { method, url, .. } = access;
+                let loonfs_types::api::v0::ObjectTransferAccess::PresignedUrl {
+                    method, url, ..
+                } = access;
                 assert_eq!(method, "GET");
                 let response = objects
                     .clone()
@@ -3098,7 +3107,7 @@ mod direct_download {
             let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .expect("response body");
-            let error: loonfs_api::ApiError = serde_json::from_slice(&bytes).expect("API error");
+            let error: loonfs_types::ApiError = serde_json::from_slice(&bytes).expect("API error");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
             assert_eq!(error.param.as_deref(), Some(param));
         }
@@ -3386,7 +3395,7 @@ mod direct_download {
             .create_namespace(
                 &namespace,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");
@@ -3468,7 +3477,7 @@ mod direct_download {
             .create_namespace(
                 &namespace,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");
@@ -3534,7 +3543,7 @@ mod direct_download {
             .create_namespace(
                 &namespace,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");
@@ -3657,7 +3666,7 @@ mod direct_download {
             .create_namespace(
                 &namespace_id,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");
@@ -3671,9 +3680,10 @@ mod direct_download {
                 .get_upload(&namespace_id, &begin.upload_id)
                 .await
                 .expect("read open direct_put session");
-            assert_eq!(session.mode, loonfs_api::v0::UploadMode::DirectPut);
-            let loonfs_api::v0::UploadSessionStatus::Open {
-                access: Some(loonfs_api::v0::ObjectTransferAccess::PresignedUrl { method, .. }),
+            assert_eq!(session.mode, loonfs_types::api::v0::UploadMode::DirectPut);
+            let loonfs_types::api::v0::UploadSessionStatus::Open {
+                access:
+                    Some(loonfs_types::api::v0::ObjectTransferAccess::PresignedUrl { method, .. }),
                 ..
             } = session.status
             else {
@@ -3686,7 +3696,7 @@ mod direct_download {
             .complete_upload(
                 &namespace_id,
                 &begin.upload_id,
-                &loonfs_api::v0::CompleteUploadBody::DirectMultipart {
+                &loonfs_types::api::v0::CompleteUploadBody::DirectMultipart {
                     content: UploadContentClaim {
                         size_bytes: 5,
                         checksum: Checksum::sha256(b"hello"),
@@ -3742,7 +3752,7 @@ mod direct_download {
             .create_namespace(
                 &namespace,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");
@@ -3806,7 +3816,7 @@ mod direct_download {
             .create_namespace(
                 &namespace,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");
@@ -3866,7 +3876,7 @@ mod direct_download {
             .create_namespace(
                 &namespace,
                 &loonfs_test_support::test_actor(),
-                loonfs_api::NamespaceAccess::unrestricted(),
+                loonfs_types::NamespaceAccess::unrestricted(),
             )
             .await
             .expect("create namespace");
@@ -4036,7 +4046,7 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
-    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
+    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error");
     assert_eq!(error.code, ErrorCode::StaleHead.as_str());
     let details = error.details.expect("details");
     assert_eq!(details.precondition_index, Some(0));
@@ -4089,14 +4099,14 @@ async fn scoped_commit_precondition_returns_409_with_its_index() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
-    let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
+    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error");
     assert_eq!(error.code, ErrorCode::StaleRevision.as_str());
     let details = error.details.expect("details");
     assert_eq!(details.precondition_index, Some(1));
-    assert_eq!(details.inode_id, Some(loonfs_api::InodeId(99)));
+    assert_eq!(details.inode_id, Some(loonfs_types::InodeId(99)));
     assert_eq!(
         details.expected_revision_no,
-        Some(loonfs_api::RevisionNo(1))
+        Some(loonfs_types::RevisionNo(1))
     );
     assert_eq!(details.actual_revision_no, None);
     assert_eq!(details.operation_index, None);

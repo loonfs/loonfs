@@ -2,21 +2,21 @@
 
 use crate::common::commit_split_support::{bootstrap_namespace, submit_commit};
 use crate::common::{namespace_engine, read_context};
-use loonfs_api::options::{ListOptions, StatOptions};
-use loonfs_api::v0::FilesystemChange;
-use loonfs_api::{
-    AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId,
-    CommitPrecondition, DestinationBehavior, DisplayName, ErrorCode, InodeId, NamespaceAccess,
-    NamespaceId, PrincipalId, PrincipalScope, ROOT_INODE_ID,
-};
-use loonfs_api::{
-    AttributeInclusion, ChangeSeq, ContentRef, Page, PageRequest, PaginationPolicy, RevisionNo,
-    TrashEntry, TrashPageCursor,
-};
 use loonfs_core::publish::{CommitRequest, FilesystemOperation};
 use loonfs_core::{CreateNamespaceOptions, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::api::v0::FilesystemChange;
+use loonfs_types::options::{ListOptions, StatOptions};
+use loonfs_types::{
+    AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId,
+    CommitPrecondition, DestinationBehavior, DisplayName, ErrorCode, InodeId, NamespaceAccess,
+    NamespaceId, PrincipalId, PrincipalScope, ROOT_INODE_ID,
+};
+use loonfs_types::{
+    AttributeInclusion, ChangeSeq, ContentRef, Page, PageRequest, PaginationPolicy, RevisionNo,
+    TrashEntry, TrashPageCursor,
+};
 use tempfile::tempdir;
 
 fn grants(principal: &str, rights: &[AccessRight]) -> AccessGrants {
@@ -284,11 +284,11 @@ async fn access_rows_survive_a_fold_and_the_counter_keeps_going() {
     );
 }
 
-fn subject(id: &str, principals: &[&str]) -> loonfs_api::Subject {
-    loonfs_api::Subject {
+fn subject(id: &str, principals: &[&str]) -> loonfs_types::Subject {
+    loonfs_types::Subject {
         principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-        subject_id: loonfs_api::SubjectId::parse(id).expect("subject id"),
-        principals: loonfs_api::PrincipalSet::new(
+        subject_id: loonfs_types::SubjectId::parse(id).expect("subject id"),
+        principals: loonfs_types::PrincipalSet::new(
             principals
                 .iter()
                 .map(|id| PrincipalId::parse(id).expect("principal id"))
@@ -320,7 +320,7 @@ fn create_directory(path: &str) -> FilesystemOperation {
     }
 }
 
-fn put(path: &str, content_ref: &loonfs_api::ContentRef) -> FilesystemOperation {
+fn put(path: &str, content_ref: &loonfs_types::ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
         content_ref: Some(content_ref.clone()),
@@ -334,7 +334,7 @@ fn put(path: &str, content_ref: &loonfs_api::ContentRef) -> FilesystemOperation 
 fn delete(path: &str) -> FilesystemOperation {
     FilesystemOperation::DeletePath {
         path: AbsolutePath::parse(path).expect("path"),
-        behavior: loonfs_api::DeleteDirectoryBehavior::NonRecursive,
+        behavior: loonfs_types::DeleteDirectoryBehavior::NonRecursive,
         expected_inode_id: None,
     }
 }
@@ -343,7 +343,7 @@ fn move_path(from: &str, to: &str) -> FilesystemOperation {
     FilesystemOperation::MovePath {
         source_path: AbsolutePath::parse(from).expect("source"),
         destination_path: AbsolutePath::parse(to).expect("destination"),
-        precondition: loonfs_api::DestinationPrecondition {
+        precondition: loonfs_types::DestinationPrecondition {
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -355,9 +355,9 @@ async fn commit_as(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    subject: loonfs_api::Subject,
+    subject: loonfs_types::Subject,
     operation: FilesystemOperation,
-) -> Result<loonfs_api::Commit, loonfs_core::Error> {
+) -> Result<loonfs_types::Commit, loonfs_core::Error> {
     submit_commit(
         store,
         namespace_id,
@@ -488,7 +488,7 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
             FilesystemOperation::DeleteByInode {
                 inode_id: kept.inode_id,
                 expected_binding_version: kept.binding_version.expect("binding"),
-                behavior: loonfs_api::DeleteDirectoryBehavior::NonRecursive,
+                behavior: loonfs_types::DeleteDirectoryBehavior::NonRecursive,
             },
             Some(ErrorCode::InodeNotFound),
         ),
@@ -496,7 +496,7 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
             "stranger",
             FilesystemOperation::DeletePath {
                 path: AbsolutePath::parse("/team/kept").expect("path"),
-                behavior: loonfs_api::DeleteDirectoryBehavior::NonRecursive,
+                behavior: loonfs_types::DeleteDirectoryBehavior::NonRecursive,
                 expected_inode_id: Some(wrong_inode),
             },
             Some(ErrorCode::PathNotFound),
@@ -506,12 +506,12 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
             FilesystemOperation::UpdateAttributes {
                 path: AbsolutePath::parse("/team/kept").expect("path"),
                 set: std::collections::BTreeMap::from([(
-                    loonfs_api::AttributeKey::parse("owner").expect("key"),
-                    loonfs_api::AttributeValue::parse("ada").expect("value"),
+                    loonfs_types::AttributeKey::parse("owner").expect("key"),
+                    loonfs_types::AttributeValue::parse("ada").expect("value"),
                 )]),
                 remove: Vec::new(),
                 expected_inode_id: Some(wrong_inode),
-                expected_attributes_revision_no: Some(loonfs_api::AttributesRevisionNo(0)),
+                expected_attributes_revision_no: Some(loonfs_types::AttributesRevisionNo(0)),
             },
             Some(ErrorCode::PathNotFound),
         ),
@@ -531,7 +531,7 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
             FilesystemOperation::DeleteByInode {
                 inode_id: kept.inode_id,
                 expected_binding_version: deleted.binding_version.expect("binding"),
-                behavior: loonfs_api::DeleteDirectoryBehavior::NonRecursive,
+                behavior: loonfs_types::DeleteDirectoryBehavior::NonRecursive,
             },
             Some(ErrorCode::InodeNotFound),
         ),
@@ -873,7 +873,7 @@ async fn submit_operation(
     commit_id: CommitId,
     operation: FilesystemOperation,
     context: &MutationContext,
-) -> Result<loonfs_api::Commit, loonfs_core::Error> {
+) -> Result<loonfs_types::Commit, loonfs_core::Error> {
     submit_commit(
         store,
         namespace_id,
@@ -902,7 +902,7 @@ async fn resolve_path(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     path: &str,
-) -> Result<loonfs_api::PathEntry, loonfs_core::Error> {
+) -> Result<loonfs_types::PathEntry, loonfs_core::Error> {
     read_engine(store, namespace_id, "prn_root")
         .resolve_path(
             path,
@@ -1535,7 +1535,7 @@ async fn inode_move_authorizes_the_destination_before_state_errors() {
                 expected_binding_version,
                 destination_parent_inode_id,
                 destination_display_name: DisplayName::parse("moved").expect("display name"),
-                precondition: loonfs_api::DestinationPrecondition::default(),
+                precondition: loonfs_types::DestinationPrecondition::default(),
             },
         )
         .await
@@ -1560,7 +1560,7 @@ async fn path_copy_hides_an_unreadable_destination_parent_kind() {
             FilesystemOperation::CopyPath {
                 source_path: AbsolutePath::parse("/team/file").expect("source path"),
                 destination_path: AbsolutePath::parse(destination).expect("destination path"),
-                precondition: loonfs_api::DestinationPrecondition::default(),
+                precondition: loonfs_types::DestinationPrecondition::default(),
             },
         )
         .await
@@ -1579,7 +1579,7 @@ async fn path_copy_hides_an_unreadable_destination_parent_kind() {
             FilesystemOperation::CopyPath {
                 source_path: AbsolutePath::parse(source).expect("source path"),
                 destination_path: AbsolutePath::parse(destination).expect("destination path"),
-                precondition: loonfs_api::DestinationPrecondition::default(),
+                precondition: loonfs_types::DestinationPrecondition::default(),
             },
         )
         .await
@@ -1617,8 +1617,8 @@ async fn attribute_updates_hide_an_unreadable_parent_kind() {
             FilesystemOperation::UpdateAttributes {
                 path: AbsolutePath::parse(path).expect("path"),
                 set: std::collections::BTreeMap::from([(
-                    loonfs_api::AttributeKey::parse("owner").expect("key"),
-                    loonfs_api::AttributeValue::parse("ada").expect("value"),
+                    loonfs_types::AttributeKey::parse("owner").expect("key"),
+                    loonfs_types::AttributeValue::parse("ada").expect("value"),
                 )]),
                 remove: Vec::new(),
                 expected_inode_id: None,

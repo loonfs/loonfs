@@ -6,8 +6,8 @@ use super::{ReplayedWalTail, ValidatedWalObject, ValidatedWalTail};
 use crate::commit::next_inode_after;
 use crate::namespace::state::NamespaceReadState;
 use bytes::Bytes;
-use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalObjectEnvelope};
-use loonfs_api::{ChangeSeq, InodeId};
+use loonfs_types::format::wal::{WalCommitDelta, WalDelta, WalObjectEnvelope};
+use loonfs_types::{ChangeSeq, InodeId};
 
 pub(crate) fn project_validated_wal_tail(
     base_head: &NamespaceReadState,

@@ -1,13 +1,13 @@
 //! Hosted inline publication, retry identity, and admission contracts.
 
 use super::*;
-use loonfs_api::v0::FilesystemChange;
-use loonfs_api::{
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
+use loonfs_types::api::v0::FilesystemChange;
+use loonfs_types::{
     Commit, ContentRef, FEATURE_COMMIT_INLINE_CONTENT,
     LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
-use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
-use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt;
@@ -178,7 +178,7 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
     assert_eq!(harness.family_requests(DurableObjectFamily::ContentBlob), 0);
     let (_, reference) = created_content(&first);
     assert_eq!(reference.size_bytes, 4);
-    assert_eq!(reference.checksum, loonfs_api::Checksum::sha256(b"same"));
+    assert_eq!(reference.checksum, loonfs_types::Checksum::sha256(b"same"));
     assert_eq!(reference.owner_namespace_id, harness.namespace);
     harness.read("/file", b"same").await;
     harness.store.reset();
@@ -227,9 +227,9 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    let completed: loonfs_api::v0::UploadSession =
+    let completed: loonfs_types::api::v0::UploadSession =
         serde_json::from_slice(&completed).expect("completion");
-    let loonfs_api::v0::UploadSessionStatus::Completed {
+    let loonfs_types::api::v0::UploadSessionStatus::Completed {
         content_ref,
         content_token,
         ..
@@ -347,7 +347,7 @@ async fn inode_inline_operations_and_overflow_staging_keep_retry_identity() {
         .await
         .expect("get")
         .expect("WAL");
-    let decoded = loonfs_api::wire::wal::decode_wal_object_envelope_zstd(&wal).expect("decode");
+    let decoded = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&wal).expect("decode");
     assert_eq!(decoded.payload().records[0].inline_content.len(), 1);
     harness.read("/first", b"same").await;
     harness.read("/second", b"same").await;

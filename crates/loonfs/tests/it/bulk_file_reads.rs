@@ -514,7 +514,7 @@ async fn foreign_metadata_segment_owners(
         .await
         .expect("read manifest")
         .expect("manifest object exists");
-    loonfs_api::wire::manifest::decode_namespace_manifest_json(&bytes)
+    loonfs_types::format::manifest::decode_namespace_manifest_json(&bytes)
         .expect("decode manifest")
         .into_payload()
         .runs
@@ -723,7 +723,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
                 readable: true,
                 current_revision_no: None,
                 current_path: Some(
-                    loonfs_api::AbsolutePath::parse("/m").expect("valid absolute path")
+                    loonfs_types::AbsolutePath::parse("/m").expect("valid absolute path")
                 ),
             },
         ]
@@ -736,7 +736,7 @@ fn visible_file(inode_id: InodeId, revision_no: RevisionNo, path: &str) -> Curre
         visible: true,
         readable: true,
         current_revision_no: Some(revision_no),
-        current_path: Some(loonfs_api::AbsolutePath::parse(path).expect("valid absolute path")),
+        current_path: Some(loonfs_types::AbsolutePath::parse(path).expect("valid absolute path")),
     }
 }
 

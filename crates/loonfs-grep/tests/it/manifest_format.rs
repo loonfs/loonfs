@@ -12,14 +12,14 @@ use crate::golden_formats::{
     segment_id, segment_ref, ACTIVE_MANIFEST_FIXTURE, BACKFILLING_MANIFEST_FIXTURE,
     DISABLED_MANIFEST_FIXTURE, HINT_FIXTURE,
 };
-use loonfs_api::wire::envelope::EnvelopeCodecError;
-use loonfs_api::{ChangeSeq, RunNo};
 use loonfs_grep::manifest::{
     decode_grep_hint, decode_grep_manifest, encode_grep_manifest, GrepEnvelopeCodecError,
     GrepIndexState, GrepIndexStatus, GrepManifestState, GrepManifestStateError,
     GrepReorganizeState,
 };
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::format::envelope::EnvelopeCodecError;
+use loonfs_types::{ChangeSeq, RunNo};
 
 /// One envelope field no grep encoder writes, spelled as the fragment a
 /// probe appends after the payload.
@@ -29,7 +29,7 @@ const UNKNOWN_ENVELOPE_FIELD: &str = ",\"future_envelope\":{\"retained\":true}";
 /// checksum so a probe tests the rule it names rather than the corruption
 /// check that would otherwise fire first. `extra_envelope` is written after
 /// the payload, for probes that need an envelope field no encoder writes.
-/// The core control families are probed the same way in `loonfs-api`.
+/// The core control families are probed the same way in `loonfs-types`.
 fn edited_document(
     fixture: &str,
     extra_envelope: &str,
@@ -39,7 +39,7 @@ fn edited_document(
         serde_json::from_slice(&read_golden(fixture)).expect("decode a grep fixture");
     edit(&mut document["payload"]);
     let payload = serde_json::to_string(&document["payload"]).expect("encode the edited payload");
-    let payload_checksum = serde_json::Value::from(loonfs_api::sha256_digest(payload.as_bytes()));
+    let payload_checksum = serde_json::Value::from(loonfs_types::sha256_digest(payload.as_bytes()));
     format!(
         "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{payload_checksum},\
          \"payload\":{payload}{extra_envelope}}}",
@@ -250,7 +250,7 @@ fn constructor_rejects_reorganization_segment_mismatch() {
     assert!(matches!(
         GrepManifestState::new(
             namespace_id("docs"),
-            loonfs_api::ManifestNo(1),
+            loonfs_types::ManifestNo(1),
             GrepIndexStatus::Active {
                 built_through_seq: ChangeSeq(7),
                 next_event_index: 0,
@@ -270,7 +270,7 @@ fn constructor_rejects_a_segment_with_no_rows() {
     assert!(matches!(
         GrepManifestState::new(
             namespace_id("docs"),
-            loonfs_api::ManifestNo(1),
+            loonfs_types::ManifestNo(1),
             GrepIndexStatus::Active {
                 built_through_seq: ChangeSeq(7),
                 next_event_index: 0,

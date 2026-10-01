@@ -3,10 +3,10 @@
 
 use super::*;
 use crate::error::CoreError;
-use loonfs_api::wire::manifest::DeletedBinding;
-use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_api::ContentId;
-use loonfs_api::{
+use loonfs_types::format::manifest::DeletedBinding;
+use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::ContentId;
+use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
     Attributes, AttributesRevisionNo, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
     RevisionNo,
@@ -24,7 +24,7 @@ fn name_key(value: &str) -> NameKey {
     NameKey::parse(value).expect("valid name key")
 }
 
-fn fingerprint(value: &str) -> loonfs_api::CommitFingerprint {
+fn fingerprint(value: &str) -> loonfs_types::CommitFingerprint {
     serde_json::from_value(value.into()).expect("fingerprint")
 }
 
@@ -32,7 +32,7 @@ fn deleted_binding(parent_inode_id: InodeId, display_name: &str) -> DeletedBindi
     DeletedBinding {
         parent_inode_id,
         name_key: name_key(display_name),
-        display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
+        display_name: loonfs_types::DisplayName::parse(display_name).expect("valid display name"),
     }
 }
 
@@ -49,7 +49,7 @@ fn commit_rows_reject_inline_content_and_decode_without_it() {
         inline_content: Vec::new(),
     };
     assert_eq!(
-        row_decode::commit_from_manifest_row(loonfs_api::wire::manifest::MetadataRow::Commit(
+        row_decode::commit_from_manifest_row(loonfs_types::format::manifest::MetadataRow::Commit(
             record.clone()
         ))
         .expect("decode commit row"),
@@ -62,7 +62,7 @@ fn commit_rows_reject_inline_content_and_decode_without_it() {
         bytes: b"inline".to_vec(),
     });
     let error = row_decode::commit_from_manifest_row(
-        loonfs_api::wire::manifest::MetadataRow::Commit(invalid),
+        loonfs_types::format::manifest::MetadataRow::Commit(invalid),
     )
     .expect_err("commit rows must not carry inline content");
     assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
@@ -83,7 +83,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
             inode_id: InodeId(7),
             revision_no: RevisionNo(1),
             content_ref: ContentRef::blob_v1(
-                loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+                loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                 ContentId::generate(),
                 b"revision",
             ),
@@ -154,9 +154,10 @@ fn bind_direntry_replay_uses_persisted_name_key() {
             delta_index: 7,
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("persisted-key").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("Report.TXT").expect("valid display name"),
+            display_name: loonfs_types::DisplayName::parse("Report.TXT")
+                .expect("valid display name"),
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::File,
+            child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
         }],
@@ -196,12 +197,12 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
         vec![DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("persisted-key").expect("valid name key"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_api::DisplayName::parse("Report.TXT")
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_types::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
             },
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::File,
+            child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(1),
@@ -257,12 +258,12 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("valid name key"),
-                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_api::DisplayName::parse("docs")
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_types::DisplayName::parse("docs")
                         .expect("valid display name"),
                 },
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::Directory,
+                child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(1),
@@ -271,12 +272,12 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             DirentryBindingRecord {
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("report.txt").expect("valid name key"),
-                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_api::DisplayName::parse("report.txt")
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_types::DisplayName::parse("report.txt")
                         .expect("valid display name"),
                 },
                 child_inode_id: InodeId(3),
-                child_kind: loonfs_api::InodeKind::File,
+                child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
@@ -320,12 +321,12 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             delta_index: 0,
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::Directory,
+            child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
-            target: loonfs_api::wire::manifest::DeltaPosition {
+            target: loonfs_types::format::manifest::DeltaPosition {
                 seq: ChangeSeq(1),
                 delta_index: 0,
             },
@@ -347,9 +348,9 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             delta_index: 0,
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("renamed").expect("valid name key"),
-            display_name: loonfs_api::DisplayName::parse("renamed").expect("valid display name"),
+            display_name: loonfs_types::DisplayName::parse("renamed").expect("valid display name"),
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::Directory,
+            child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
         }],
@@ -429,12 +430,12 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("report").expect("valid name key"),
-                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_api::DisplayName::parse("report")
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_types::DisplayName::parse("report")
                         .expect("valid display name"),
                 },
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
+                child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(1),
@@ -444,22 +445,22 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("report").expect("valid name key"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
+                child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
                 delta_index: 0,
-                state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+                state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
             },
             DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("report").expect("valid name key"),
-                state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_api::DisplayName::parse("report")
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                    display_name: loonfs_types::DisplayName::parse("report")
                         .expect("valid display name"),
                 },
                 child_inode_id: InodeId(3),
-                child_kind: loonfs_api::InodeKind::File,
+                child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
@@ -515,12 +516,12 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
         vec![DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_api::DisplayName::parse("Report.TXT")
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_types::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
             },
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::File,
+            child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(1),
@@ -584,12 +585,12 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
 #[test]
 fn metadata_builder_tracks_the_highest_row_sequence() {
     let content_ref = ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         b"first revision bytes",
     );
     let replacement_ref = ContentRef::blob_v1(
-        loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         b"second revision bytes",
     );
@@ -829,10 +830,10 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("contested").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("contested")
+                display_name: loonfs_types::DisplayName::parse("contested")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::Directory,
+                child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
             },
@@ -845,10 +846,10 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 3,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("deleted").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("deleted")
+                display_name: loonfs_types::DisplayName::parse("deleted")
                     .expect("valid display name"),
                 child_inode_id: InodeId(4),
-                child_kind: loonfs_api::InodeKind::Directory,
+                child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
             },
@@ -864,13 +865,13 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("contested").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("contested")
+                display_name: loonfs_types::DisplayName::parse("contested")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::Directory,
+                child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
-                target: loonfs_api::wire::manifest::DeltaPosition {
+                target: loonfs_types::format::manifest::DeltaPosition {
                     seq: ChangeSeq(1),
                     delta_index: 1,
                 },
@@ -879,10 +880,10 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("renamed-away").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("renamed-away")
+                display_name: loonfs_types::DisplayName::parse("renamed-away")
                     .expect("valid display name"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::Directory,
+                child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
             },
@@ -890,13 +891,13 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 2,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("deleted").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("deleted")
+                display_name: loonfs_types::DisplayName::parse("deleted")
                     .expect("valid display name"),
                 child_inode_id: InodeId(4),
-                child_kind: loonfs_api::InodeKind::Directory,
+                child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
-                target: loonfs_api::wire::manifest::DeltaPosition {
+                target: loonfs_types::format::manifest::DeltaPosition {
                     seq: ChangeSeq(1),
                     delta_index: 3,
                 },
@@ -918,10 +919,10 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("contested").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("contested")
+                display_name: loonfs_types::DisplayName::parse("contested")
                     .expect("valid display name"),
                 child_inode_id: InodeId(3),
-                child_kind: loonfs_api::InodeKind::Directory,
+                child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
             },
@@ -1048,12 +1049,12 @@ fn has_visible_children_sees_through_unbinds() {
         vec![DirentryBindingRecord {
             parent_inode_id: dir,
             name_key: NameKey::parse("doc.txt").expect("valid name key"),
-            state: loonfs_api::wire::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_api::DisplayName::parse("doc.txt")
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                display_name: loonfs_types::DisplayName::parse("doc.txt")
                     .expect("valid display name"),
             },
             child_inode_id: InodeId(2),
-            child_kind: loonfs_api::InodeKind::File,
+            child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(2),
@@ -1086,12 +1087,12 @@ fn has_visible_children_sees_through_unbinds() {
                 parent_inode_id: dir,
                 name_key: NameKey::parse("doc.txt").expect("valid name key"),
                 child_inode_id: InodeId(2),
-                child_kind: loonfs_api::InodeKind::File,
+                child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(3),
                 delta_index: 0,
-                state: loonfs_api::wire::manifest::DirentryBindingState::Unbound,
+                state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
             }],
         ]
         .concat(),

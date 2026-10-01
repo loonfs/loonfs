@@ -143,7 +143,7 @@ macro_rules! __delegate_object_store_method {
             key: &'key str,
             provider_upload_id: &'upload str,
             parts: &'parts [::loonfs_objectstore::MultipartPart],
-            checksum: &'checksum ::loonfs_api::Checksum,
+            checksum: &'checksum ::loonfs_types::Checksum,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<
                     Output = Result<(), ::loonfs_objectstore::ObjectStoreError>,

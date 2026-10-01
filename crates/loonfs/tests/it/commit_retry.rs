@@ -9,9 +9,9 @@ use loonfs::{
     ByteStream, ChangeSeq, CommitId, CompactionStepOutcome, CreateDirectoryOptions,
     DestinationBehavior, NamespaceId, PutFileOptions, RevisionNo,
 };
-use loonfs_api::ActorId;
-use loonfs_api::ErrorCode;
 use loonfs_test_support::ids::first_page;
+use loonfs_types::ActorId;
+use loonfs_types::ErrorCode;
 use tempfile::tempdir;
 
 const PATH: &str = "/docs/retry.txt";
@@ -29,7 +29,7 @@ fn streamed(payload: &[u8], chunk_bytes: usize) -> ByteStream {
 fn options(commit_id: &CommitId) -> PutFileOptions {
     PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        commit: loonfs_api::options::CommitOptions {
+        commit: loonfs_types::options::CommitOptions {
             preconditions: Vec::new(),
             commit_id: Some(commit_id.clone()),
             message: None,
@@ -635,7 +635,7 @@ async fn a_changed_message_on_mkdir_still_conflicts() {
         .expect("open namespace");
     let commit_id = CommitId::parse("pinned-mkdir").expect("valid commit id");
     let options = |message: &str| CreateDirectoryOptions {
-        commit: loonfs_api::options::CommitOptions {
+        commit: loonfs_types::options::CommitOptions {
             preconditions: Vec::new(),
             commit_id: Some(commit_id.clone()),
             message: Some(message.to_owned()),

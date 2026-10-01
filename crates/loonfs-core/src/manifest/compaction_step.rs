@@ -23,14 +23,14 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::wire::envelope::EncodedEnvelope;
-use loonfs_api::wire::manifest::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::envelope::EncodedEnvelope;
+use loonfs_types::format::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope, NamespaceManifestPayload,
     RunTier,
 };
-use loonfs_api::CompactorEpoch;
-use loonfs_api::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
-use loonfs_objectstore::ObjectStore;
+use loonfs_types::CompactorEpoch;
+use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -799,13 +799,13 @@ pub(super) fn build_replacement_manifest(
 mod planning_tests {
     use super::super::runs::{runs_newest_first, MetadataFamilySegments};
     use super::*;
-    use loonfs_api::wire::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
+    use loonfs_types::format::manifest::{decode_namespace_manifest_json, MetadataRowFamily};
 
     // The planner only reads descriptors. Give valid descriptor shapes arbitrary
     // stored lengths to exercise GiB-scale layouts without allocating their data.
     fn runs(sizes: &[u64]) -> Vec<MetadataRunManifest> {
         let manifest = decode_namespace_manifest_json(include_bytes!(
-            "../../../loonfs-api/tests/golden/manifest.v1.json"
+            "../../../loonfs-types/tests/golden/manifest.v1.json"
         ))
         .expect("manifest fixture");
         let mut template = runs_newest_first(manifest.payload()).remove(0);

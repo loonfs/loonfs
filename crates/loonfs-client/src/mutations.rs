@@ -3,8 +3,8 @@
 use super::*;
 use crate::transport::SendPolicy;
 use crate::uploads::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
-use loonfs_api::options::{AccessState, AttributeChanges};
-use loonfs_api::ActorId;
+use loonfs_types::options::{AccessState, AttributeChanges};
+use loonfs_types::ActorId;
 
 fn commit_id_or_generated(commit: &CommitOptions) -> CommitId {
     commit.commit_id.clone().unwrap_or_else(CommitId::generate)
@@ -467,7 +467,7 @@ impl Client {
                 FilesystemOperation::MovePath {
                     source_path: source_path.absolute_path().clone(),
                     destination_path: destination_path.absolute_path().clone(),
-                    precondition: loonfs_api::DestinationPrecondition {
+                    precondition: loonfs_types::DestinationPrecondition {
                         behavior: options.behavior,
                         expected_inode_id: options.expected_destination_inode_id,
                         expected_revision_no: options.expected_destination_revision_no,
@@ -517,7 +517,7 @@ impl Client {
                 FilesystemOperation::CopyPath {
                     source_path: source_path.absolute_path().clone(),
                     destination_path: destination_path.absolute_path().clone(),
-                    precondition: loonfs_api::DestinationPrecondition {
+                    precondition: loonfs_types::DestinationPrecondition {
                         behavior: options.behavior,
                         expected_inode_id: options.expected_destination_inode_id,
                         expected_revision_no: options.expected_destination_revision_no,
@@ -621,13 +621,13 @@ impl Client {
 mod tests {
     use super::*;
     use crate::transport::{retryable_transport_failure, DEFAULT};
-    use loonfs_api::{ContentId, ErrorCode};
+    use loonfs_types::{ContentId, ErrorCode};
     use std::fs;
     use tempfile::tempdir;
 
     fn test_content_ref(bytes: &[u8]) -> ContentRef {
         ContentRef::blob_v1(
-            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
         )
@@ -845,7 +845,7 @@ mod tests {
                 .create_namespace(
                     &namespace_id,
                     &loonfs_test_support::test_actor(),
-                    loonfs_api::NamespaceAccess::unrestricted(),
+                    loonfs_types::NamespaceAccess::unrestricted(),
                 )
                 .await,
             &transport,
@@ -961,7 +961,7 @@ mod tests {
     async fn retry_policy_read_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let response = NamespaceMetadata {
-            access: loonfs_api::NamespaceAccessMode::Unrestricted {},
+            access: loonfs_types::NamespaceAccessMode::Unrestricted {},
             created_at_ms: 1_000,
             created_by: loonfs_test_support::test_actor(),
             fork_basis: None,
@@ -1023,12 +1023,12 @@ mod tests {
     #[tokio::test]
     async fn retry_policy_proxied_upload_content_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
+        let upload_id = loonfs_types::UploadId::parse("upl_00000000000000000000000000000001")
             .expect("valid upload id");
         let response = UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
-            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
                 checksum_algorithm: None,
@@ -1053,13 +1053,13 @@ mod tests {
     #[tokio::test]
     async fn retry_policy_upload_completion_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
+        let upload_id = loonfs_types::UploadId::parse("upl_00000000000000000000000000000001")
             .expect("valid upload id");
         let content_ref = test_content_ref(b"content");
         let response = UploadSession {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
-            mode: loonfs_api::v0::UploadMode::ServiceProxied,
+            mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Completed {
                 completed_at_ms: 1,
                 content_ref: content_ref.clone(),
@@ -1111,7 +1111,7 @@ mod tests {
             let response = UploadSession {
                 namespace_id: namespace_id.clone(),
                 upload_id: upload_id.clone(),
-                mode: loonfs_api::v0::UploadMode::ServiceProxied,
+                mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
                 status,
             };
             let transport =

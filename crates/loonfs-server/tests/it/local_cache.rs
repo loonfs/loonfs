@@ -2,10 +2,10 @@
 
 use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, scrape, series, start_graceful_server};
-use loonfs_api::CreateCheckpointRequest;
 use loonfs_client::NamespacePath;
 use loonfs_server::{LocalCacheConfig, MaintenanceMode, ServerConfig};
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::CreateCheckpointRequest;
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -65,7 +65,7 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

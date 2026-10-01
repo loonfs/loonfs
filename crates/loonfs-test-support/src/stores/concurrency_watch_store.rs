@@ -16,11 +16,11 @@ use super::KeyPredicate;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::Checksum;
 use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
     ObjectStoreError, PutMode, StoredObjectChecksum,
 };
+use loonfs_types::Checksum;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Concurrent requests observed for one operation class.

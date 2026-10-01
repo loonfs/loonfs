@@ -3,9 +3,9 @@
 use crate::error::CliError;
 use crate::resolve::ResolvedTarget;
 use loonfs::{MaintenanceConclusion, MaintenanceJobId};
-use loonfs_api::v0::GrepIndexLifecycle;
-use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+use loonfs_types::api::v0::GrepIndexLifecycle;
+use loonfs_types::{ChangeSeq, NamespaceId};
 use std::future::Future;
 
 impl ResolvedTarget {
@@ -178,8 +178,8 @@ pub(super) async fn rest_between_status_checks() {
 #[cfg(test)]
 mod tests {
     use super::{wait_for_grep_index, GrepWaitProgress, GrepWaitStep, StepBudget};
-    use loonfs_api::v0::GrepIndexLifecycle;
-    use loonfs_api::ChangeSeq;
+    use loonfs_types::api::v0::GrepIndexLifecycle;
+    use loonfs_types::ChangeSeq;
     use std::cell::Cell;
 
     #[tokio::test]
@@ -212,7 +212,7 @@ mod tests {
                 Ok(GrepIndexLifecycle::Backfilling {
                     captured_seq: ChangeSeq(3),
                     cursor_inode_id: None,
-                    checkpoint_id: loonfs_api::PinId::parse(
+                    checkpoint_id: loonfs_types::PinId::parse(
                         "pin_00000000000000000001-0123456789abcdef",
                     )
                     .expect("checkpoint id"),

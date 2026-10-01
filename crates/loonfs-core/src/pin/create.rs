@@ -8,9 +8,9 @@ use crate::error::CoreError;
 use crate::error::Result;
 use crate::manifest::{try_fold_wal, MetadataLsmPolicy, TryFoldWal};
 use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_api::wire::control::{PinOwner, PinPayload};
-use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{PinOwner, PinPayload};
+use loonfs_types::{NamespaceId, PinId};
 use std::sync::Arc;
 
 /// Longest accepted user checkpoint name. A label bound, not a durable
@@ -61,7 +61,7 @@ pub(crate) async fn create_pin_at_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     owner: PinOwner,
-    manifest: loonfs_api::wire::control::ManifestRef,
+    manifest: loonfs_types::format::control::ManifestRef,
     context: &MutationContext,
 ) -> Result<PinPayload> {
     validate_pin_owner(&owner)?;

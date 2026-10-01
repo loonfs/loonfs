@@ -4,9 +4,9 @@ use crate::context::MutationContext;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::fork::target_retains_pin;
-use loonfs_api::wire::control::{ForkBasis, PinPayload};
-use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{ForkBasis, PinPayload};
+use loonfs_types::NamespaceId;
 
 pub(super) async fn delete_source_pin<S: ObjectStore + ?Sized>(
     store: &S,

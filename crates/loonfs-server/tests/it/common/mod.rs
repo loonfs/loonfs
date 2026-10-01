@@ -7,13 +7,13 @@
     reason = "test helpers preserve the client's structured error type"
 )]
 
-use loonfs_api::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use loonfs_client::{Client, ClientConfig, ListOptions, NamespacePath};
 use loonfs_server::{
     app, serve_with_shutdown, AppOptions, GrepConfig, GrepMode, MaintenanceMode,
     MetadataCacheOverrides, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
 };
 use loonfs_test_support::http::raw_agent;
+use loonfs_types::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::net::SocketAddr;
@@ -322,7 +322,7 @@ pub(crate) fn test_config(
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
-        max_merge_input_bytes: loonfs_api::wire::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+        max_merge_input_bytes: loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
         manifest_revalidation_interval_ms: None,
         max_block_memo_bytes: None,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
@@ -336,11 +336,13 @@ pub(crate) fn test_config(
 pub(crate) mod http_split_support {
     #![allow(dead_code)]
 
-    use loonfs_api::{
-        v0::{CompleteUploadBody, ContentToken, CreateUploadBody, UploadMode, UploadSessionStatus},
+    use loonfs_client::{Client, PutFileOptions};
+    use loonfs_types::{
+        api::v0::{
+            CompleteUploadBody, ContentToken, CreateUploadBody, UploadMode, UploadSessionStatus,
+        },
         CommitRequest, ContentRef, DestinationBehavior, NamespaceId,
     };
-    use loonfs_client::{Client, PutFileOptions};
 
     use loonfs_server::{ServerConfig, StoreConfig};
 

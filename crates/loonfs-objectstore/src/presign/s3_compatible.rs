@@ -18,8 +18,8 @@ use crate::presign::v4::{
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use base64::Engine as _;
-use loonfs_api::wire::hex::hex_decode_bytes;
-use loonfs_api::{Checksum, ChecksumAlgorithm};
+use loonfs_types::format::hex::hex_decode_bytes;
+use loonfs_types::{Checksum, ChecksumAlgorithm};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 

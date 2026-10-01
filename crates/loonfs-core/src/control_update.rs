@@ -7,13 +7,13 @@ use crate::control_object::{
 use crate::error::CoreError;
 use crate::limits::CONTENTION_RETRY_LIMIT;
 use bytes::Bytes;
-use loonfs_api::wire::control::{
+use loonfs_objectstore::keys::upload_session;
+use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
+use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
     UploadSessionPayload, UploadSessionRecordStatus,
 };
-use loonfs_api::{NamespaceId, UploadId};
-use loonfs_objectstore::keys::upload_session;
-use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
+use loonfs_types::{NamespaceId, UploadId};
 use std::future::Future;
 
 /// An attempt whose write may have landed reads it back before it answers.

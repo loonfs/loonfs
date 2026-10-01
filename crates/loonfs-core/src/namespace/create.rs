@@ -5,11 +5,11 @@ use crate::error::{CoreError, Result};
 use crate::manifest::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use crate::time::Deadline;
 use bytes::Bytes;
-use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};
-use loonfs_api::wire::manifest::NamespaceManifestPayload;
-use loonfs_api::ManifestNo;
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_types::format::control::{encode_control_state, ControlObjectKind, HintPayload};
+use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::ManifestNo;
 use serde::Serialize;
 
 pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(

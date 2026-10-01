@@ -1,7 +1,7 @@
 //! Path parsing helpers shared by the read and write paths.
 
 use crate::error::{CoreError, Result};
-use loonfs_api::{AbsolutePath, DisplayName, PathError};
+use loonfs_types::{AbsolutePath, DisplayName, PathError};
 
 pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<AbsolutePath> {
     AbsolutePath::parse(absolute_path).map_err(map_path_error_to_core)

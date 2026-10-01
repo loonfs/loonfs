@@ -10,15 +10,15 @@
 use loonfs::{
     LoonFs, Maintenance, MaintenanceConclusion, MaintenanceJob, ReadOnly, SharedObjectStore,
 };
-use loonfs_api::v0::{GrepIndex, GrepIndexLifecycle};
-use loonfs_api::{
-    ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse, NamespaceId, PaginationPolicy, RunNo,
-};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepDisableOutcome, GrepEnableOutcome, GrepError,
     GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+};
+use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
+use loonfs_types::{
+    ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse, NamespaceId, PaginationPolicy, RunNo,
 };
 use std::sync::Arc;
 
@@ -188,15 +188,15 @@ impl GrepHost {
 /// Durable control objects these tests assert on directly.
 ///
 /// They read the same bytes the runtime writes, decoded through the
-/// envelope codec `loonfs-api` publishes — the durable format is a
+/// envelope codec `loonfs-types` publishes — the durable format is a
 /// specified artifact, so a test can check it without reaching into the
 /// engine that produced it.
 pub(crate) mod control {
     use loonfs::control::NamespaceReadState;
     use loonfs::SharedObjectStore;
-    use loonfs_api::wire::control::{decode_control_object, ControlObjectKind, PinPayload};
-    use loonfs_api::{NamespaceId, PinId};
     use loonfs_objectstore::keys;
+    use loonfs_types::format::control::{decode_control_object, ControlObjectKind, PinPayload};
+    use loonfs_types::{NamespaceId, PinId};
 
     async fn control_bytes(store: &SharedObjectStore, object_key: &str) -> Option<Vec<u8>> {
         store

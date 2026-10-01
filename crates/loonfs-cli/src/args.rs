@@ -2,12 +2,12 @@
 
 use crate::progress::ProgressMode;
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
-use loonfs_api::InodeId;
+use loonfs_types::InodeId;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
 fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
-    loonfs_api::public_inode_id::decode(value).map_err(|error| error.to_string())
+    loonfs_types::public_inode_id::decode(value).map_err(|error| error.to_string())
 }
 
 const TOP_LEVEL_HELP_TEMPLATE: &str = "\

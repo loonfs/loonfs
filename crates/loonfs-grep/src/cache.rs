@@ -7,7 +7,7 @@ use loonfs::engine::{
     SegmentBlockKind, SegmentCacheKey,
 };
 use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
-use loonfs_api::wire::sst_blocks::DEFAULT_TARGET_BLOCK_BYTES;
+use loonfs_types::format::sst_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use std::sync::Arc;
 
 /// Default decoded-byte budget for cached grep manifests and segment blocks.
@@ -93,7 +93,7 @@ mod tests {
         DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockCacheMetrics, GrepBlockKind,
     };
     use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
-    use loonfs_api::wire::sst_blocks::DecodedDataBlock;
+    use loonfs_types::format::sst_blocks::DecodedDataBlock;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 

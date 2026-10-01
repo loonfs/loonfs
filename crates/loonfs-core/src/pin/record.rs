@@ -8,11 +8,13 @@ use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_current_manifest;
 use bytes::Bytes;
-use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, PinOwner, PinPayload};
-use loonfs_api::{NamespaceId, PinId};
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{
+    encode_control_state, ControlObjectKind, PinOwner, PinPayload,
+};
+use loonfs_types::{NamespaceId, PinId};
 
 pub(crate) fn encode_pin(record: &PinPayload) -> crate::error::Result<Bytes> {
     let object_key = pin(&record.namespace_id, &record.pin_id);
@@ -201,9 +203,9 @@ pub(crate) async fn verify_pin_basis<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_api::ChangeSeq;
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_types::ChangeSeq;
     use tempfile::{tempdir, TempDir};
 
     fn local_store() -> (TempDir, LocalFsStore) {
@@ -237,7 +239,8 @@ mod tests {
     #[tokio::test]
     async fn listed_loader_rejects_a_different_durable_family() {
         let (_directory, store) = local_store();
-        let object_key = hint(&loonfs_api::NamespaceId::parse("demo").expect("valid namespace id"));
+        let object_key =
+            hint(&loonfs_types::NamespaceId::parse("demo").expect("valid namespace id"));
 
         let error = load_pin_at_key(&store, &object_key)
             .await

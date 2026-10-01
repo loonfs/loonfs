@@ -16,16 +16,16 @@ use crate::metadata::{
     SubtreeTombstoneRecord,
 };
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::manifest::lookup_keys;
-use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::wire::wal::WalCommitPayload;
-use loonfs_api::{
-    AbsolutePath, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId, InodeId,
-    InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
-};
 #[cfg(test)]
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::lookup_keys;
+use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
+use loonfs_types::format::wal::WalCommitPayload;
+use loonfs_types::{
+    AbsolutePath, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId, InodeId,
+    InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
+};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
@@ -84,7 +84,7 @@ pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
 pub(crate) struct AttributesProjection {
     pub(crate) revision_no: AttributesRevisionNo,
     pub(crate) attributes: Attributes,
-    pub(crate) updated_by: Option<loonfs_api::ActorId>,
+    pub(crate) updated_by: Option<loonfs_types::ActorId>,
     pub(crate) updated_at_ms: Option<u64>,
 }
 
@@ -528,7 +528,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 
     pub(crate) async fn find_content_publication(
         &self,
-        content_id: &loonfs_api::ContentId,
+        content_id: &loonfs_types::ContentId,
     ) -> Result<Option<ChangeSeq>, CoreError> {
         if let Some(seq) = self
             .row_states()
@@ -973,7 +973,7 @@ fn access_order_key(record: &AccessRevisionRecord) -> (AccessRevisionNo, ChangeS
     )
 }
 
-fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, loonfs_api::ChangeSeq, u32) {
+fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, loonfs_types::ChangeSeq, u32) {
     (record.revision_no, record.committed_seq, record.delta_index)
 }
 

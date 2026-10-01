@@ -15,10 +15,6 @@ use loonfs::{
     MaintenanceProbe, MaintenanceRunReport, SharedObjectStore, StoredMetadataBlockCache, TraceMode,
     TraceStoreKind, Writable,
 };
-use loonfs_api::{
-    CapabilityDocument, ChangeSeq, GrepRequest, NamespaceId, PaginationPolicy,
-    API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0,
-};
 use loonfs_client::{Client, ClientConfig};
 use loonfs_grep::keyspace::hint_key as grep_hint_key;
 use loonfs_grep::manifest::load_current_grep_manifest;
@@ -28,6 +24,10 @@ use loonfs_objectstore::{local_fs_store::LocalFsStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationClass, OperationContext, OperationKind,
+};
+use loonfs_types::{
+    CapabilityDocument, ChangeSeq, GrepRequest, NamespaceId, PaginationPolicy,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -311,7 +311,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace over http");
@@ -965,7 +965,7 @@ fn data_wal_put_for(
             bytes,
             mode: PutMode::CreateIfAbsent,
         } if operation.key().starts_with(&prefix) => {
-            loonfs_api::wire::wal::decode_wal_object_envelope_zstd(bytes)
+            loonfs_types::format::wal::decode_wal_object_envelope_zstd(bytes)
                 .is_ok_and(|envelope| !envelope.payload().records.is_empty())
         }
         _ => false,
@@ -999,7 +999,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
-        max_merge_input_bytes: loonfs_api::wire::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+        max_merge_input_bytes: loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
         manifest_revalidation_interval_ms: None,
         max_block_memo_bytes: None,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,

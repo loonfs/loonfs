@@ -18,14 +18,14 @@ use super::stored_block_cache::{
 };
 use crate::heap_bytes::index_block_heap_bytes;
 use bytes::Bytes;
-use loonfs_api::wire::hex::hex_decode_bytes;
-use loonfs_api::wire::manifest::MetadataSegmentRef;
-use loonfs_api::wire::sst_blocks::{
+use loonfs_objectstore::keys::metadata_segment_object_key;
+use loonfs_objectstore::{ByteRange, ObjectStore};
+use loonfs_types::format::hex::hex_decode_bytes;
+use loonfs_types::format::manifest::MetadataSegmentRef;
+use loonfs_types::format::sst_blocks::{
     decode_data_block, decode_filter_block, decode_index_block, BlockHandle, SegmentFilter,
     SegmentIndexEntry, SstBlockCodecError,
 };
-use loonfs_objectstore::keys::metadata_segment_object_key;
-use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::sync::Arc;
 
 pub(super) fn segment_block_cache_key(

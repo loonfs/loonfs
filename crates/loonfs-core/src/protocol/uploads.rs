@@ -31,22 +31,22 @@ use crate::storage::content::{
 };
 use crate::storage::content_admission::{CompletedUploadEvidence, PreparedContent};
 use bytes::Bytes;
-use loonfs_api::options::DirectMultipartUploadOptions;
-use loonfs_api::v0::{
-    CompleteMultipartUploadRequest, CompletedUploadPart, UploadContentClaim, UploadMode,
-    UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
-};
-use loonfs_api::wire::control::{
-    encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
-    UploadSessionPayload, UploadSessionRecordStatus,
-};
-use loonfs_api::{
-    Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, NamespaceAccess,
-    NamespaceId, Subject, SubjectId, UploadId,
-};
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::{
     ByteStream, MultipartPart, ObjectMetadata, ObjectStore, PROVIDER_MULTIPART_PART_BYTES,
+};
+use loonfs_types::api::v0::{
+    CompleteMultipartUploadRequest, CompletedUploadPart, UploadContentClaim, UploadMode,
+    UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
+};
+use loonfs_types::format::control::{
+    encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
+    UploadSessionPayload, UploadSessionRecordStatus,
+};
+use loonfs_types::options::DirectMultipartUploadOptions;
+use loonfs_types::{
+    Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, NamespaceAccess,
+    NamespaceId, Subject, SubjectId, UploadId,
 };
 use std::num::NonZeroU64;
 
@@ -1599,13 +1599,13 @@ fn content_failure(error: DurableContentValidationError) -> CoreError {
 mod tests {
     use super::*;
     use crate::test_support::ops::create;
-    use loonfs_api::wire::control::decode_control_object;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
     use loonfs_test_support::stores::{
         BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, OperationContext,
         OperationKind, RecordingStore,
     };
+    use loonfs_types::format::control::decode_control_object;
     use tempfile::tempdir;
 
     const BYTES: &[u8] = b"terminal states\n";
@@ -1785,7 +1785,7 @@ mod tests {
 
     fn context(now_ms: u64) -> MutationContext {
         MutationContext {
-            writer_id: loonfs_api::WriterId::parse("upload-test").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("upload-test").expect("writer id"),
             now_ms,
         }
     }

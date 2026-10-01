@@ -8,8 +8,8 @@ use loonfs::{
     MaintenanceJobId, MaintenanceProbe, MaintenanceRegistry, MaintenanceRunReport,
     MaintenanceRunner, NamespaceAdvanceHint, NamespacePublication, Result, SharedObjectStore,
 };
-use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_types::{ChangeSeq, NamespaceId};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;

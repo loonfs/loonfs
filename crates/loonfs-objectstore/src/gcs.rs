@@ -12,7 +12,7 @@ use crate::{
     ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig, StoredObjectChecksum,
 };
 use async_trait::async_trait;
-use loonfs_api::Checksum;
+use loonfs_types::Checksum;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::GoogleCloudStorageBuilder;
 use std::sync::Arc;

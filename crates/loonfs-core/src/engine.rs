@@ -29,21 +29,21 @@ use crate::storage::content::{
     StreamedPayloadKind,
 };
 use crate::storage::content_admission::PreparedContent;
-use loonfs_api::options::{DirectMultipartUploadOptions, ListOptions, StatOptions};
-use loonfs_api::v0::{
+use loonfs_objectstore::{ByteStream, ObjectStore};
+use loonfs_types::api::v0::{
     Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
-use loonfs_api::wire::control::PinOwner;
-use loonfs_api::CompactorEpoch;
-use loonfs_api::EffectiveLimit;
-use loonfs_api::{
+use loonfs_types::format::control::PinOwner;
+use loonfs_types::options::{DirectMultipartUploadOptions, ListOptions, StatOptions};
+use loonfs_types::CompactorEpoch;
+use loonfs_types::EffectiveLimit;
+use loonfs_types::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, CommitId, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
     FileBytes, FileRevision, FileRevisionsPageCursor, FoldWalResponse, InodeId, NamespaceAccess,
     NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo, Subject,
     TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
-use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use tracing::Instrument;
@@ -245,7 +245,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub async fn root_access(
         &self,
         context: &RuntimeReadContext,
-    ) -> Result<(bool, loonfs_api::AccessGrants, loonfs_api::AccessRevisionNo)> {
+    ) -> Result<(
+        bool,
+        loonfs_types::AccessGrants,
+        loonfs_types::AccessRevisionNo,
+    )> {
         if matches!(context.head.access, NamespaceAccess::Unrestricted {}) {
             return Err(CoreError::NamespaceUnrestricted {
                 namespace_id: self.namespace_id.clone(),
@@ -259,8 +263,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         Ok(row.map_or(
             (
                 false,
-                loonfs_api::AccessGrants::default(),
-                loonfs_api::AccessRevisionNo(0),
+                loonfs_types::AccessGrants::default(),
+                loonfs_types::AccessRevisionNo(0),
             ),
             |row| (row.boundary, row.grants, row.access_revision_no),
         ))
@@ -446,7 +450,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// the namespace's status after manifest 1 is installed.
     pub async fn bootstrap_namespace(
         &self,
-        actor_id: &loonfs_api::ActorId,
+        actor_id: &loonfs_types::ActorId,
         options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         bootstrap::bootstrap_namespace(
@@ -467,7 +471,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn fork_namespace(
         &self,
         target: &NamespaceId,
-        actor_id: &loonfs_api::ActorId,
+        actor_id: &loonfs_types::ActorId,
         snapshot_id: Option<&PinId>,
     ) -> Result<NamespaceMetadata> {
         fork::fork_namespace(
@@ -1064,7 +1068,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn stage_owned_bytes(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&loonfs_api::SubjectId>,
+        subject_id: Option<&loonfs_types::SubjectId>,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         crate::protocol::stage_owned_bytes(
@@ -1088,7 +1092,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn import_content_ref(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&loonfs_api::SubjectId>,
+        subject_id: Option<&loonfs_types::SubjectId>,
         content_ref: &ContentRef,
     ) -> Result<PreparedContent>
     where
@@ -1116,7 +1120,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn stage_owned_stream(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&loonfs_api::SubjectId>,
+        subject_id: Option<&loonfs_types::SubjectId>,
         body: ByteStream,
     ) -> Result<PreparedContent> {
         crate::protocol::stage_owned_stream(
@@ -1238,7 +1242,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub async fn list_checkpoints_page(
         &self,
         request: PageRequest<CheckpointPageCursor>,
-    ) -> Result<Page<loonfs_api::Checkpoint, CheckpointPageCursor>> {
+    ) -> Result<Page<loonfs_types::Checkpoint, CheckpointPageCursor>> {
         crate::pin::list_checkpoints_page(&self.store, &self.namespace_id, request).await
     }
 }
@@ -1407,7 +1411,7 @@ mod tests {
         let changes = reader
             .list_changes_after(
                 ChangeSeq(0),
-                loonfs_api::PaginationPolicy::default()
+                loonfs_types::PaginationPolicy::default()
                     .resolve_limit(None)
                     .expect("default limit"),
                 &context,

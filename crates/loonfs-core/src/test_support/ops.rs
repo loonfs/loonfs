@@ -7,22 +7,22 @@ use crate::error::{CoreError, Result};
 use crate::path::mutation_path::parse_mutation_path;
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use crate::storage::content_admission::PreparedContent;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     Commit, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
 };
-use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn create<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_api::NamespaceMetadata> {
+) -> Result<loonfs_types::NamespaceMetadata> {
     crate::namespace::bootstrap::bootstrap_namespace(
         store,
         namespace_id,
         context,
         &loonfs_test_support::test_actor(),
-        &loonfs_api::NamespaceAccess::unrestricted(),
+        &loonfs_types::NamespaceAccess::unrestricted(),
         false,
     )
     .await
@@ -241,7 +241,7 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
         FilesystemOperation::MovePath {
             source_path: parse_mutation_path(source_path)?,
             destination_path: parse_mutation_path(destination_path)?,
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

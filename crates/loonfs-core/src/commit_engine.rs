@@ -20,13 +20,15 @@ use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, MonotonicTimer, Observation, StdMonotonicTimer};
 use crate::wal::ProjectedWalTail;
-use loonfs_api::v0::Commit;
-use loonfs_api::wire::control::AcquiredWriter;
-use loonfs_api::wire::wal::{MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES};
-#[cfg(test)]
-use loonfs_api::ChangeSeq;
-use loonfs_api::{CommitId, ContentId, DeleteNamespaceResponse, ManifestNo, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::api::v0::Commit;
+use loonfs_types::format::control::AcquiredWriter;
+use loonfs_types::format::wal::{
+    MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+};
+#[cfg(test)]
+use loonfs_types::ChangeSeq;
+use loonfs_types::{CommitId, ContentId, DeleteNamespaceResponse, ManifestNo, NamespaceId};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -74,14 +76,14 @@ fn rejected_token_reasons(rejections: &[(ContentId, ContentTokenError)]) -> Stri
 
 impl CommitCandidate {
     /// Uses the handle subject to authorize this publication.
-    pub fn with_subject(mut self, subject: loonfs_api::Subject) -> Self {
+    pub fn with_subject(mut self, subject: loonfs_types::Subject) -> Self {
         self.request.subject = Some(subject);
         self.maintenance = false;
         self
     }
 
     /// Supplies the subject used to own content staged for this candidate.
-    pub fn subject(&self) -> Option<&loonfs_api::Subject> {
+    pub fn subject(&self) -> Option<&loonfs_types::Subject> {
         self.request.subject.as_ref()
     }
 
@@ -306,7 +308,7 @@ impl CommitCandidate {
             for principal_id in subject.principals.iter() {
                 bytes.0 = bytes
                     .0
-                    .saturating_add(std::mem::size_of::<loonfs_api::PrincipalId>());
+                    .saturating_add(std::mem::size_of::<loonfs_types::PrincipalId>());
                 serde_json::to_writer(&mut bytes, principal_id)
                     .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
             }
@@ -701,7 +703,7 @@ impl NamespaceCommitEngine {
         let since = match (folded, &mut self.publish_tail) {
             (Some(folded), Some(position))
                 if fold_observed.is_some()
-                    && folded.response.outcome == loonfs_api::FoldWalOutcome::Published =>
+                    && folded.response.outcome == loonfs_types::FoldWalOutcome::Published =>
             {
                 position.reanchor_after_fold(folded.basis.clone())
             }
@@ -1077,15 +1079,15 @@ mod tests {
     use crate::namespace::control::load_namespace_read_state;
     use crate::test_support::ops::create;
     use futures::StreamExt;
-    use loonfs_api::{
-        ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
-        WriterEpoch,
-    };
     use loonfs_objectstore::keys::wal_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{
         BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    };
+    use loonfs_types::{
+        ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+        WriterEpoch,
     };
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1093,7 +1095,7 @@ mod tests {
 
     fn context(writer_id: &str) -> MutationContext {
         MutationContext {
-            writer_id: loonfs_api::WriterId::parse(writer_id).expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse(writer_id).expect("writer id"),
             now_ms: 1_000,
         }
     }
@@ -1104,7 +1106,7 @@ mod tests {
             loonfs_test_support::test_actor(),
             None,
             FilesystemOperation::CreateDirectory {
-                path: loonfs_api::AbsolutePath::parse(format!("/{name}")).expect("valid path"),
+                path: loonfs_types::AbsolutePath::parse(format!("/{name}")).expect("valid path"),
                 parents: false,
             },
         )
@@ -1129,7 +1131,7 @@ mod tests {
                 >= empty_annotation + 4096
         );
         let proof = PreparedContent::for_durable_content_write(ContentRef::blob_v1(
-            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             b"proof",
         ));
@@ -1199,7 +1201,7 @@ mod tests {
             message: None,
             operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
                 .map(|index| FilesystemOperation::CreateDirectory {
-                    path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
+                    path: loonfs_types::AbsolutePath::parse(format!("/dir-{index}"))
                         .expect("valid path"),
                     parents: false,
                 })
@@ -1210,7 +1212,7 @@ mod tests {
             .expect("operation limits must not affect identity");
 
         let content_ref = ContentRef::blob_v1(
-            loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             b"proof",
         );
@@ -1230,7 +1232,7 @@ mod tests {
             subject: None,
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
             operations: vec![FilesystemOperation::CreateDirectory {
-                path: loonfs_api::AbsolutePath::parse("/docs").expect("valid path"),
+                path: loonfs_types::AbsolutePath::parse("/docs").expect("valid path"),
                 parents: false,
             }],
         });
@@ -1249,7 +1251,7 @@ mod tests {
             message: None,
             operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
                 .map(|index| FilesystemOperation::CreateDirectory {
-                    path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
+                    path: loonfs_types::AbsolutePath::parse(format!("/dir-{index}"))
                         .expect("valid path"),
                     parents: false,
                 })
@@ -1269,7 +1271,7 @@ mod tests {
             message: None,
             operations: (0..crate::limits::MAX_COMMIT_OPERATIONS)
                 .map(|index| FilesystemOperation::CreateDirectory {
-                    path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
+                    path: loonfs_types::AbsolutePath::parse(format!("/dir-{index}"))
                         .expect("valid path"),
                     parents: false,
                 })
@@ -1283,7 +1285,7 @@ mod tests {
     #[test]
     fn a_message_past_the_byte_ceiling_is_rejected() {
         let operations = vec![FilesystemOperation::CreateDirectory {
-            path: loonfs_api::AbsolutePath::parse("/docs").expect("valid path"),
+            path: loonfs_types::AbsolutePath::parse("/docs").expect("valid path"),
             parents: false,
         }];
 
@@ -1879,7 +1881,7 @@ mod tests {
         crate::pin::create_pin(
             &store,
             &namespace_id,
-            loonfs_api::wire::control::PinOwner::User {
+            loonfs_types::format::control::PinOwner::User {
                 name: "test-pin".to_owned(),
                 expires_at_ms: None,
             },

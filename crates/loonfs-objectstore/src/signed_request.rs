@@ -3,7 +3,7 @@
 use crate::object_store::Result;
 use crate::presign::PresignedUrl;
 use crate::{ObjectStoreError, StoredObjectChecksum};
-use loonfs_api::Checksum;
+use loonfs_types::Checksum;
 use object_store::client::{HttpClient, HttpRequestBody};
 
 const RETRYABLE_SIGNED_ERROR_CODES: &[&str] = &[

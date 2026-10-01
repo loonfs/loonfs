@@ -7,14 +7,14 @@ use crate::namespace::control::{
 };
 use crate::time::Deadline;
 use bytes::Bytes;
-use loonfs_api::wire::control::ManifestRef;
-use loonfs_api::wire::envelope::EncodedEnvelope;
-use loonfs_api::wire::manifest::{
-    encode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestPayload,
-};
-use loonfs_api::{ManifestNo, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_types::format::control::ManifestRef;
+use loonfs_types::format::envelope::EncodedEnvelope;
+use loonfs_types::format::manifest::{
+    encode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestPayload,
+};
+use loonfs_types::{ManifestNo, NamespaceId};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

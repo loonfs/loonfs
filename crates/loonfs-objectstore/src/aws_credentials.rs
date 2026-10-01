@@ -5,7 +5,7 @@ use crate::ObjectStoreError;
 use async_trait::async_trait;
 use aws_config::default_provider::credentials::DefaultCredentialsChain;
 use aws_credential_types::provider::SharedCredentialsProvider;
-use loonfs_api::SecretString;
+use loonfs_types::SecretString;
 use object_store::aws::AwsCredential;
 use object_store::client::CredentialProvider;
 use std::fmt;
@@ -243,7 +243,7 @@ mod tests {
     use super::aws_credentials_source;
     use crate::test_support::{aws_environment_lock, isolated_aws_environment};
     use crate::{AwsS3Credentials, ObjectStoreError};
-    use loonfs_api::SecretString;
+    use loonfs_types::SecretString;
     use std::fs;
 
     #[tokio::test(flavor = "current_thread")]

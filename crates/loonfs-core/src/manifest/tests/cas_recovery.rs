@@ -1,7 +1,7 @@
 //! Numbered publication, discovery, and retention contracts.
 
 use super::*;
-use loonfs_api::wire::control::{encode_control_state, ControlObjectKind, HintPayload};
+use loonfs_types::format::control::{encode_control_state, ControlObjectKind, HintPayload};
 
 #[tokio::test]
 async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
@@ -100,9 +100,9 @@ async fn a_manifest_put_that_lands_nowhere_and_loses_its_answer_has_an_unknown_o
 #[tokio::test]
 async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
     use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
-    use loonfs_api::wire::control::ForkBasis;
     use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::MetadataMapStore;
+    use loonfs_types::format::control::ForkBasis;
 
     for fork in [false, true] {
         for elapsed_ms in [
@@ -266,7 +266,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         if newer_head {
             let session = Arc::new(std::sync::Mutex::new(
                 crate::commit_engine::WriterSessionState::Acquired(
-                    loonfs_api::wire::control::AcquiredWriter {
+                    loonfs_types::format::control::AcquiredWriter {
                         writer_id: context.writer_id.clone(),
                         writer_epoch: current.state.envelope.payload().writer_epoch,
                     },
@@ -279,14 +279,14 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                     &store,
                     vec![crate::commit_engine::CommitCandidate::new(
                         crate::path::write::CommitRequest {
-                            commit_id: loonfs_api::CommitId::generate(),
+                            commit_id: loonfs_types::CommitId::generate(),
                             actor_id: loonfs_test_support::ids::test_actor(),
                             subject: None,
                             message: None,
                             preconditions: Vec::new(),
                             operations: vec![
                                 crate::path::write::FilesystemOperation::CreateDirectory {
-                                    path: loonfs_api::AbsolutePath::parse("/file").expect("path"),
+                                    path: loonfs_types::AbsolutePath::parse("/file").expect("path"),
                                     parents: false,
                                 },
                             ],
@@ -593,7 +593,7 @@ async fn a_fold_whose_manifest_put_lands_without_an_answer_reports_published() {
     store.fail_next(1);
     let folded = fold::fold_wal(&store, &namespace_id).await.expect("fold");
     assert_eq!(store.remaining(), 0);
-    assert_eq!(folded.outcome, loonfs_api::FoldWalOutcome::Published);
+    assert_eq!(folded.outcome, loonfs_types::FoldWalOutcome::Published);
     assert_eq!(
         folded.manifest_no,
         predecessor.successor().expect("next number")
@@ -642,11 +642,12 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
         .expect("statistics");
     assert_eq!(
         statistics.activity,
-        loonfs_api::wire::manifest::ManifestActivity {
-            content_bytes: loonfs_api::wire::manifest::ActivityCounter::parse(4).expect("activity"),
-            file_revisions: loonfs_api::wire::manifest::ActivityCounter::parse(1)
+        loonfs_types::format::manifest::ManifestActivity {
+            content_bytes: loonfs_types::format::manifest::ActivityCounter::parse(4)
                 .expect("activity"),
-            mutations: loonfs_api::wire::manifest::ActivityCounter::parse(1).expect("activity"),
+            file_revisions: loonfs_types::format::manifest::ActivityCounter::parse(1)
+                .expect("activity"),
+            mutations: loonfs_types::format::manifest::ActivityCounter::parse(1).expect("activity"),
         }
     );
 }
@@ -833,13 +834,13 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
     let epoch = super::super::compactor::claim_compactor(&store, &namespace_id)
         .await
         .expect("claim");
-    assert_eq!(epoch, loonfs_api::CompactorEpoch(2));
+    assert_eq!(epoch, loonfs_types::CompactorEpoch(2));
     let current = load_current_manifest(&store, &namespace_id)
         .await
         .expect("current manifest");
     assert_eq!(current.state.envelope.payload().manifest_no, ManifestNo(3));
     assert_eq!(
         current.state.envelope.payload().compactor_epoch,
-        loonfs_api::CompactorEpoch(2)
+        loonfs_types::CompactorEpoch(2)
     );
 }

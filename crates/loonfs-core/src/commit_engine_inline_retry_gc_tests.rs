@@ -3,8 +3,8 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::{gc_namespace, GcOptions};
-use loonfs_api::ErrorCode;
 use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, OperationClass};
+use loonfs_types::ErrorCode;
 
 #[tokio::test]
 async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_commit() {

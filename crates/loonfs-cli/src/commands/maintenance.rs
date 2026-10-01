@@ -22,13 +22,13 @@ use crate::error::CliError;
 use crate::resolve::parse_namespace_id;
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
-use loonfs_api::v0::GrepIndexLifecycle;
-use loonfs_api::{
+use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
+use loonfs_types::api::v0::GrepIndexLifecycle;
+use loonfs_types::{
     AdvanceRetentionRequest, ChangeSeq, CreateCheckpointRequest, ErrorCode, GcRequest,
     MetadataCompactionRequest, MetadataMaintenanceRequest, PinId, PrincipalId,
     RecoverAdministratorRequest, RunMaintenanceRequest,
 };
-use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -197,7 +197,7 @@ async fn run_maintenance_checkpoint_list(
                 .page(page_request(cursor, limit)?)
                 .await?)
         },
-        |_: &loonfs_api::ListCheckpointsResponse| {},
+        |_: &loonfs_types::ListCheckpointsResponse| {},
     )
     .await
     .map_err(|error| context.fail(kind, error))?;
@@ -398,7 +398,7 @@ async fn run_maintenance_store_probe(
     let response = context
         .target
         .client
-        .probe_store(&loonfs_api::v0::StoreProbeRequest {})
+        .probe_store(&loonfs_types::api::v0::StoreProbeRequest {})
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -485,7 +485,7 @@ pub(crate) async fn run_changes(
                 .page(page_request(cursor, limit)?)
                 .await?)
         },
-        |_: &loonfs_api::v0::ListChangesResponse| {},
+        |_: &loonfs_types::api::v0::ListChangesResponse| {},
     )
     .await
     .map_err(|error| context.fail(kind, error))?;

@@ -8,15 +8,15 @@ use crate::metadata::MetadataState;
 use crate::store_waves::STORE_WRITE_WAVE;
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, TryStreamExt};
-use loonfs_api::wire::manifest::{
+use loonfs_objectstore::keys::metadata_segment_object_key;
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
 };
 #[cfg(test)]
-pub(super) use loonfs_api::wire::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
-use loonfs_api::wire::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
-use loonfs_api::{ChangeSeq, MetadataSegmentId, NamespaceId};
-use loonfs_objectstore::keys::metadata_segment_object_key;
-use loonfs_objectstore::ObjectStore;
+pub(super) use loonfs_types::format::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
+use loonfs_types::format::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
+use loonfs_types::{ChangeSeq, MetadataSegmentId, NamespaceId};
 use std::future::Future;
 
 /// Most encoded segment bytes one fold or compaction holds while their puts

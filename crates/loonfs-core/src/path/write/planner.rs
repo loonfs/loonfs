@@ -22,16 +22,16 @@ use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::{
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::{
     next_public_ordinal, ChangeSeq, ContentId, DestinationPrecondition, NamespaceId,
     PreconditionFields, MAX_PUBLIC_INTEGER,
 };
-use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
 /// Computes the semantic fingerprint of a mutation request.
 ///
-/// `loonfs-api` owns the fingerprint algorithm so clients and the core use
+/// `loonfs-types` owns the fingerprint algorithm so clients and the core use
 /// the same definition. The commit ID is excluded: it identifies the request
 /// record, while the fingerprint identifies the requested mutation.
 pub(crate) fn commit_fingerprint(
@@ -39,7 +39,7 @@ pub(crate) fn commit_fingerprint(
     request: &CommitRequest,
     inline_content_ids: &BTreeSet<ContentId>,
 ) -> Result<CommitFingerprint> {
-    loonfs_api::semantic_commit_fingerprint(
+    loonfs_types::semantic_commit_fingerprint(
         namespace_id,
         &request.actor_id,
         request.subject.as_ref().map(|subject| &subject.subject_id),
@@ -49,8 +49,8 @@ pub(crate) fn commit_fingerprint(
         inline_content_ids,
     )
     .map_err(|error| match error {
-        loonfs_api::SemanticFingerprintError::InlineChecksumAlgorithm { .. }
-        | loonfs_api::SemanticFingerprintError::InvalidContentSource => {
+        loonfs_types::SemanticFingerprintError::InlineChecksumAlgorithm { .. }
+        | loonfs_types::SemanticFingerprintError::InvalidContentSource => {
             CoreError::InvalidCommitRequest(error.to_string())
         }
         error => CoreError::Internal(format!("failed to fingerprint mutation: {error}")),
@@ -310,9 +310,9 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
 }
 
 fn prepared_reference<'a>(
-    content_ref: &'a Option<loonfs_api::ContentRef>,
+    content_ref: &'a Option<loonfs_types::ContentRef>,
     inline_content: &Option<Vec<u8>>,
-) -> Result<&'a loonfs_api::ContentRef> {
+) -> Result<&'a loonfs_types::ContentRef> {
     match (content_ref, inline_content) {
         (Some(reference), None) => Ok(reference),
         _ => Err(CoreError::InvalidCommitRequest(
@@ -330,11 +330,11 @@ mod tests {
     use crate::storage::content::store_bytes_as_content;
     use crate::test_support::ops::create;
     use crate::test_support::ops::{delete_path, put_file};
-    use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
-    use loonfs_api::{
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
+    use loonfs_types::{
         AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     };
-    use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
     #[derive(Debug)]
@@ -345,7 +345,7 @@ mod tests {
 
     fn test_context() -> MutationContext {
         MutationContext {
-            writer_id: loonfs_api::WriterId::parse("writer").expect("writer id"),
+            writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
             now_ms: 1,
         }
     }

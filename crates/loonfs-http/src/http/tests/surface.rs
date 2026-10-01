@@ -37,8 +37,8 @@ async fn binding_routes_exclude_host_routes_and_preserve_maintenance_admission()
             let body = axum::body::to_bytes(response.into_body(), 4096)
                 .await
                 .expect("body");
-            let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
-            assert_eq!(error.code, loonfs_api::ErrorCode::RouteNotFound.as_str());
+            let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error");
+            assert_eq!(error.code, loonfs_types::ErrorCode::RouteNotFound.as_str());
             assert_eq!(error.request_id.as_deref(), Some(request_id.as_str()));
         }
         let response = router
@@ -68,13 +68,13 @@ async fn binding_routes_exclude_host_routes_and_preserve_maintenance_admission()
         let body = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .expect("body");
-        let error: loonfs_api::ApiError = serde_json::from_slice(&body).expect("error");
+        let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error");
         assert_eq!(
             error.code,
             if serves_maintenance {
-                loonfs_api::ErrorCode::NamespaceNotFound
+                loonfs_types::ErrorCode::NamespaceNotFound
             } else {
-                loonfs_api::ErrorCode::RouteNotFound
+                loonfs_types::ErrorCode::RouteNotFound
             }
             .as_str()
         );

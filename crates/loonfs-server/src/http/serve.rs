@@ -497,7 +497,7 @@ pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
 /// Runs the object-store contract probe against the store this config builds.
 pub async fn probe_store(config: &ServerConfig) -> Result<StoreProbeReport, ServeError> {
     let store = config.object_store()?.into_shared();
-    let run_id = loonfs_api::generated_id("probe");
+    let run_id = loonfs_types::generated_id("probe");
     Ok(run_store_contract_probe(store.as_ref(), &run_id).await)
 }
 

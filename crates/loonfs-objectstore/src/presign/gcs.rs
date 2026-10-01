@@ -16,8 +16,8 @@ use crate::presign::v4::{
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use base64::Engine as _;
-use loonfs_api::wire::hex::hex_encode_bytes;
-use loonfs_api::{Checksum, ChecksumAlgorithm};
+use loonfs_types::format::hex::hex_encode_bytes;
+use loonfs_types::{Checksum, ChecksumAlgorithm};
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use std::collections::BTreeMap;
@@ -324,7 +324,7 @@ mod tests {
     };
     use crate::test_support::{gcs_fixture_service_account_key_file, GCS_FIXTURE_CLIENT_EMAIL};
     use crate::ObjectStoreError;
-    use loonfs_api::ChecksumAlgorithm;
+    use loonfs_types::ChecksumAlgorithm;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CONTENT_KEY: &str = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";

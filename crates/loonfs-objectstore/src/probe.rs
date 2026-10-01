@@ -15,8 +15,8 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse};
-use loonfs_api::{Checksum, ChecksumAlgorithm};
+use loonfs_types::api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse};
+use loonfs_types::{Checksum, ChecksumAlgorithm};
 
 /// Prefix for objects created by store probes.
 pub const PROBE_RUN_PREFIX: &str = "probe-runs";

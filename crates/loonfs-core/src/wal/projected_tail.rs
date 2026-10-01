@@ -4,9 +4,9 @@ use super::frame::WalObjectError;
 use crate::heap_bytes::{arc_bytes, hash_map_table_bytes, HeapBytes};
 use crate::metadata::MetadataState;
 use bytes::Bytes;
-use loonfs_api::wire::manifest::ManifestActivity;
-use loonfs_api::wire::wal::{committed_activity, WalCommitPayload};
-use loonfs_api::{ContentId, ContentRef};
+use loonfs_types::format::manifest::ManifestActivity;
+use loonfs_types::format::wal::{committed_activity, WalCommitPayload};
+use loonfs_types::{ContentId, ContentRef};
 use std::collections::HashMap;
 
 /// Holds the WAL tail after a manifest as rows and the inline content they name.

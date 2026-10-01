@@ -11,7 +11,7 @@ use axum::Json;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
-use loonfs_api::{
+use loonfs_types::{
     AbsolutePath, ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, Subject,
     SubjectId,
 };
@@ -733,7 +733,7 @@ mod tests {
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .expect("error body");
-            let error: loonfs_api::ApiError =
+            let error: loonfs_types::ApiError =
                 serde_json::from_slice(&body).expect("error envelope");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
         }
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn api_commit_decode_reports_operation_field_pointer() {
-        let error = decode_json::<loonfs_api::CommitRequest>(
+        let error = decode_json::<loonfs_types::CommitRequest>(
             br#"{
                 "commit_id": "invalid-path",
                 "operations": [{ "kind": "create_directory", "path": "relative" }]
@@ -783,7 +783,7 @@ mod tests {
         .expect_err("relative operation path is invalid");
         assert_eq!(error.param(), Some("/operations/0/path"));
 
-        let error = decode_json::<loonfs_api::CommitRequest>(
+        let error = decode_json::<loonfs_types::CommitRequest>(
             br#"{
                 "commit_id": "invalid-source-path",
                 "operations": [{
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn api_commit_decode_rejects_a_body_actor() {
-        let error = decode_json::<loonfs_api::CommitRequest>(
+        let error = decode_json::<loonfs_types::CommitRequest>(
             br#"{
             "commit_id": "stale-actor",
             "actor_id": "test-service",
@@ -822,7 +822,7 @@ mod tests {
 
     #[test]
     fn ambiguous_operation_fields_do_not_report_a_param() {
-        let error = decode_json::<loonfs_api::CommitRequest>(
+        let error = decode_json::<loonfs_types::CommitRequest>(
             br#"{
                 "commit_id": "invalid-paths",
                 "operations": [{

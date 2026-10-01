@@ -10,12 +10,12 @@ use loonfs::{
     ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions,
     NamespaceId, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
 };
-use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_types::format::manifest::decode_namespace_manifest_json;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -416,7 +416,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         .payload()
         .runs
         .iter()
-        .filter(|run| run.tier == loonfs_api::wire::manifest::RunTier::Delta)
+        .filter(|run| run.tier == loonfs_types::format::manifest::RunTier::Delta)
         .collect::<Vec<_>>();
     assert!(!delta_files.is_empty());
     assert!(delta_files.iter().any(|run| run.run_seq == ChangeSeq(2)));
@@ -534,7 +534,7 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
                 .expect("manifest before fencing");
         assert_eq!(
             before.state.compactor_epoch(),
-            loonfs_api::CompactorEpoch(2)
+            loonfs_types::CompactorEpoch(2)
         );
 
         if run_job {
@@ -578,7 +578,7 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
                 .expect("manifest after publication");
         assert_eq!(
             published.state.compactor_epoch(),
-            loonfs_api::CompactorEpoch(3)
+            loonfs_types::CompactorEpoch(3)
         );
         assert!(published.state.manifest().manifest_no > before.state.manifest().manifest_no);
     }
@@ -664,7 +664,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
                 .expect("new claim");
         assert_eq!(
             current.state.compactor_epoch(),
-            loonfs_api::CompactorEpoch(3)
+            loonfs_types::CompactorEpoch(3)
         );
         blocked.release();
     };
@@ -689,7 +689,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
             .expect("current epoch");
     assert_eq!(
         current.state.compactor_epoch(),
-        loonfs_api::CompactorEpoch(3),
+        loonfs_types::CompactorEpoch(3),
         "a delayed result for epoch 1 must not evict epoch 3 and force another claim",
     );
 }

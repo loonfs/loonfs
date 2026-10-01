@@ -1,7 +1,7 @@
 //! Adds publication metadata to the validated deltas for the WAL payload.
 
 use super::PreparedCommit;
-use loonfs_api::wire::wal::{WalCommitPayload, WalInlineContent};
+use loonfs_types::format::wal::{WalCommitPayload, WalInlineContent};
 
 pub(crate) fn wal_payload_from_prepared_commit(commit: &PreparedCommit) -> WalCommitPayload {
     let prepared = &commit.commit;
@@ -28,8 +28,8 @@ pub(crate) fn wal_payload_from_prepared_commit(commit: &PreparedCommit) -> WalCo
 mod tests {
     use super::*;
     use crate::commit::{CommitFingerprint, CommitPlan};
-    use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
-    use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WriterEpoch};
+    use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
+    use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WriterEpoch};
 
     fn test_fingerprint() -> CommitFingerprint {
         serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint")
@@ -53,7 +53,7 @@ mod tests {
                     delta: WalDelta::CreateInode {
                         delta_index: 0,
                         inode_id: InodeId(2),
-                        inode_kind: loonfs_api::InodeKind::Directory,
+                        inode_kind: loonfs_types::InodeKind::Directory,
                     },
                 },
                 WalCommitDelta {
@@ -62,11 +62,11 @@ mod tests {
                         delta_index: 1,
                         parent_inode_id: InodeId(1),
                         name_key: NameKey::parse("docs").expect("valid name key"),
-                        display_name: loonfs_api::DisplayName::parse("docs")
+                        display_name: loonfs_types::DisplayName::parse("docs")
                             .expect("valid display name"),
                         child_inode_id: InodeId(2),
-                        child_kind: loonfs_api::InodeKind::Directory,
-                        child_created_by: loonfs_api::ActorId::loonfs(),
+                        child_kind: loonfs_types::InodeKind::Directory,
+                        child_created_by: loonfs_types::ActorId::loonfs(),
                         child_created_at_ms: 4_200,
                     },
                 },

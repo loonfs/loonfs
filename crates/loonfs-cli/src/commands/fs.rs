@@ -28,16 +28,16 @@ use crate::error::CliError;
 use crate::payload::{LocalPayload, STDIN_PATH};
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::uploads::{SourceIdentity, UploadJournal};
-use loonfs_api::v0::UploadSessionStatus;
-use loonfs_api::PinId;
-use loonfs_api::{
-    AbsolutePath, AttributeKey, AttributeValue, AttributesRevisionNo, ChangeSeq, Commit, CommitId,
-    DeleteDirectoryBehavior, DestinationBehavior, InodeKind, ListPathEntriesResponse, NamespaceId,
-    RevisionNo,
-};
 use loonfs_client::{
     AttributeChanges, CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath,
     PutFileOptions, UpdateAttributesOptions,
+};
+use loonfs_types::api::v0::UploadSessionStatus;
+use loonfs_types::PinId;
+use loonfs_types::{
+    AbsolutePath, AttributeKey, AttributeValue, AttributesRevisionNo, ChangeSeq, Commit, CommitId,
+    DeleteDirectoryBehavior, DestinationBehavior, InodeKind, ListPathEntriesResponse, NamespaceId,
+    RevisionNo,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -81,7 +81,7 @@ async fn follow_path_entry_pages(
     pagination: &PaginationArgs,
     cursor: Option<&str>,
     snapshot_id: Option<&PinId>,
-    mut visit: impl FnMut(Vec<loonfs_api::PathEntry>) -> Result<(), CliError>,
+    mut visit: impl FnMut(Vec<loonfs_types::PathEntry>) -> Result<(), CliError>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut heads = ListingHeadObservation::default();
     let mut followed = None;
@@ -347,7 +347,7 @@ pub(crate) async fn run_filesystem_grep(
         .map(|path| parse_user_path_arg("--path-prefix", path, true))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let mut request = loonfs_api::GrepRequest {
+    let mut request = loonfs_types::GrepRequest {
         pattern: args.pattern.clone(),
         case_insensitive: args.ignore_case,
         path_prefix,
@@ -692,7 +692,7 @@ pub(super) async fn stream_download_to_file(
 /// Writes one listing page and makes it visible before the next fetch.
 fn write_path_entries_page(
     stdout: &mut impl Write,
-    entries: &[loonfs_api::PathEntry],
+    entries: &[loonfs_types::PathEntry],
     jsonl: bool,
 ) -> io::Result<()> {
     if jsonl {
@@ -787,7 +787,7 @@ pub(crate) async fn run_filesystem_trash(
                 .page(page_request(cursor, limit)?)
                 .await?)
         },
-        |_: &loonfs_api::ListTrashResponse| {},
+        |_: &loonfs_types::ListTrashResponse| {},
     )
     .await
     .map_err(|error| context.fail(kind, error))?;
@@ -830,7 +830,7 @@ pub(crate) async fn run_filesystem_revisions(
                 .page(page_request(cursor, limit)?)
                 .await?)
         },
-        |_: &loonfs_api::ListFileRevisionsResponse| {},
+        |_: &loonfs_types::ListFileRevisionsResponse| {},
     )
     .await
     .map_err(|error| context.fail(kind, error))?;
@@ -1413,7 +1413,7 @@ async fn resolve_transfer_destination(
     if existing.inode_kind() != InodeKind::Directory {
         return Ok(named);
     }
-    let leaf = loonfs_api::DisplayName::parse(source_leaf)
+    let leaf = loonfs_types::DisplayName::parse(source_leaf)
         .map_err(|error| CliError::invalid_request(error.to_string()).with_param("source_path"))?;
     Ok(NamespacePath::new(
         context.namespace().clone(),

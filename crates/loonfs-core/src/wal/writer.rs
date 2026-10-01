@@ -3,8 +3,8 @@
 use super::{PreparedWalObject, WalObjectError};
 use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::wal::{encode_wal_object_envelope_zstd, WalObjectPayload};
-use loonfs_api::{NamespaceId, WriterEpoch};
+use loonfs_types::format::wal::{encode_wal_object_envelope_zstd, WalObjectPayload};
+use loonfs_types::{NamespaceId, WriterEpoch};
 
 pub(crate) fn prepare_wal_object(
     namespace_id: NamespaceId,

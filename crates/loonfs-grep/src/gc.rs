@@ -14,9 +14,9 @@ use loonfs::engine::{
     UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
 use loonfs::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
-use loonfs_api::{ErrorCode, ManifestNo, NamespaceId};
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::{ErrorCode, ManifestNo, NamespaceId};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

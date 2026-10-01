@@ -13,9 +13,9 @@ use super::{
 };
 use crate::error::CoreError;
 use crate::store_waves::STORE_READ_WAVE;
-use loonfs_api::wire::manifest::lookup_keys;
-use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::lookup_keys;
+use loonfs_types::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 

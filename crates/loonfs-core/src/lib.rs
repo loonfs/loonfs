@@ -11,7 +11,7 @@
 //! which wrap this crate with caching and batching.
 //!
 //! ```no_run
-//! use loonfs_api::{AbsolutePath, ActorId, CommitId, NamespaceId};
+//! use loonfs_types::{AbsolutePath, ActorId, CommitId, NamespaceId};
 //! use loonfs_core::publish::{
 //!     FilesystemOperation, CommitRequest, NamespaceCommitEngine, CommitCandidate,
 //! };
@@ -19,7 +19,7 @@
 //! use loonfs_objectstore::timing::StdMonotonicTimer;
 //! use std::sync::Arc;
 //! use loonfs_core::{CreateNamespaceOptions, MutationContext, NamespaceEngine};
-//! use loonfs_api::WriterId;
+//! use loonfs_types::WriterId;
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
 //!
 //! let store = LocalFsStore::new(std::env::temp_dir())

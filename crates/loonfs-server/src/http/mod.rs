@@ -16,8 +16,8 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use loonfs_api::{ApiError, ErrorCode};
 use loonfs_http::{api_error_response, authenticate_routes, observe_routes};
+use loonfs_types::{ApiError, ErrorCode};
 
 fn router(state: AppState) -> Router {
     let binding = loonfs_http::router(state.binding.clone());

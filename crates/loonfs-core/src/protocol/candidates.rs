@@ -13,9 +13,9 @@ use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::inline_content::InlineContent;
-use loonfs_api::v0::Commit;
-use loonfs_api::{CommitId, ContentId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::api::v0::Commit;
+use loonfs_types::{CommitId, ContentId, NamespaceId};
 use std::collections::{HashMap, HashSet};
 
 pub(super) struct PreparedCandidateCommit {
@@ -235,7 +235,7 @@ pub(crate) fn validate_inline_content_references<'a>(
     request: &CommitRequest,
     inline_content: &'a [InlineContent],
     namespace_id: &NamespaceId,
-) -> Result<HashMap<&'a ContentId, &'a loonfs_api::ContentRef>> {
+) -> Result<HashMap<&'a ContentId, &'a loonfs_types::ContentRef>> {
     let references: HashSet<_> = request
         .operations
         .iter()

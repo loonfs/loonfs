@@ -5,8 +5,8 @@ use super::fs::commit_options;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{AccessSetArgs, CommandKind};
 use crate::error::CliError;
-use loonfs_api::{AccessGrants, AccessRevisionNo, AccessRight, AccessRights, PrincipalId};
 use loonfs_client::{AccessState, UpdateAccessOptions};
+use loonfs_types::{AccessGrants, AccessRevisionNo, AccessRight, AccessRights, PrincipalId};
 use std::collections::BTreeMap;
 use std::path::Path;
 

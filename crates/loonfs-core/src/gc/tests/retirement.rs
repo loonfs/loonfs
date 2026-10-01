@@ -182,9 +182,9 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &namespace_id,
         &upload.session.upload_id,
         None,
-        &[loonfs_api::v0::UploadPartChecksumClaim {
+        &[loonfs_types::api::v0::UploadPartChecksumClaim {
             part_number: 1,
-            checksum: loonfs_api::Checksum::crc64nvme(b"part"),
+            checksum: loonfs_types::Checksum::crc64nvme(b"part"),
         }],
         clock.now_ms(),
     )

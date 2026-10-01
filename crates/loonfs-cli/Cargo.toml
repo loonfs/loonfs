@@ -27,7 +27,7 @@ futures.workspace = true
 fs4.workspace = true
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 hostname = "0.4"
-loonfs-api.workspace = true
+loonfs-types.workspace = true
 loonfs-client.workspace = true
 loonfs.workspace = true
 loonfs-grep.workspace = true

@@ -19,11 +19,11 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
-use loonfs_api::wire::control::ManifestRef;
-use loonfs_api::wire::manifest::{decode_namespace_manifest_json, NamespaceManifestEnvelope};
-use loonfs_api::{ManifestNo, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::ManifestRef;
+use loonfs_types::format::manifest::{decode_namespace_manifest_json, NamespaceManifestEnvelope};
+use loonfs_types::{ManifestNo, NamespaceId};
 use std::sync::Arc;
 use tracing::Instrument;
 

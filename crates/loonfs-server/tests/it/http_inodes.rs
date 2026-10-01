@@ -4,14 +4,14 @@
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
-use loonfs_api::PageRequest;
-use loonfs_api::{ApiError, DeleteDirectoryBehavior, ErrorCode, InodeId, RevisionNo};
 use loonfs_client::AttributeChanges;
 use loonfs_client::{ClientError, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{
     attribute_key, attribute_text, first_page, namespace_id, page_limit,
 };
+use loonfs_types::PageRequest;
+use loonfs_types::{ApiError, DeleteDirectoryBehavior, ErrorCode, InodeId, RevisionNo};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
@@ -51,7 +51,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -130,7 +130,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
             .get(&format!(
                 "{}/v0/namespaces/{namespace}/inodes/{}/revisions",
                 harness.server_url,
-                loonfs_api::public_inode_id::encode(inode_id)
+                loonfs_types::public_inode_id::encode(inode_id)
             ))
             .set("authorization", "Bearer test-token")
             .call()
@@ -189,7 +189,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -265,7 +265,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .create_namespace(
             &deleted_namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create deleted namespace");
@@ -311,7 +311,7 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -341,7 +341,7 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
         .await
         .expect("stat directory")
         .inode_id;
-    let public_parent_inode_id = loonfs_api::public_inode_id::encode(parent_inode_id);
+    let public_parent_inode_id = loonfs_types::public_inode_id::encode(parent_inode_id);
 
     let first: Value = serde_json::from_reader(
         raw_agent()
@@ -450,7 +450,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -479,7 +479,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
             .client
             .list_by_inode(&namespace, directory_id)
             .page(PageRequest {
-                limit: page_limit(loonfs_api::DEFAULT_PAGE_LIMIT),
+                limit: page_limit(loonfs_types::DEFAULT_PAGE_LIMIT),
                 cursor: Some("not-a-cursor".to_owned()),
             })
             .await,
@@ -546,7 +546,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");

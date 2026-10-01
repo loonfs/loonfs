@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn scoped_key_helpers_keep_prefix_isolation() {
-        let hint_key = hint(&loonfs_api::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let hint_key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
         assert!(matches!(
             scope_object_key(Some("tenant-a"), &hint_key),
             Ok(scoped) if scoped == format!("tenant-a/{hint_key}")

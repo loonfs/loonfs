@@ -37,7 +37,7 @@ impl loonfs::WallClock for SettableWallClock {
 /// The GET of a WAL number that finds nothing.
 pub(crate) fn wal_probe(
     namespace_id: &NamespaceId,
-    wal_no: loonfs_api::WalNo,
+    wal_no: loonfs_types::WalNo,
 ) -> loonfs_test_support::stores::RecordedOperation {
     loonfs_test_support::stores::RecordedOperation::Get {
         key: format!("namespaces/{namespace_id}/wal/{:020}.wal.zst", wal_no.0),
@@ -49,7 +49,7 @@ pub(crate) fn wal_probe(
 pub(crate) fn assert_wal_probe(
     operations: Vec<loonfs_test_support::stores::RecordedOperation>,
     namespace_id: &NamespaceId,
-    wal_no: loonfs_api::WalNo,
+    wal_no: loonfs_types::WalNo,
 ) {
     assert_eq!(operations, vec![wal_probe(namespace_id, wal_no)]);
 }
@@ -63,7 +63,7 @@ pub(crate) fn data_wal_put_for(
             bytes,
             mode: loonfs_objectstore::PutMode::CreateIfAbsent,
         } if operation.key().starts_with(&prefix) => {
-            loonfs_api::wire::wal::decode_wal_object_envelope_zstd(bytes)
+            loonfs_types::format::wal::decode_wal_object_envelope_zstd(bytes)
                 .is_ok_and(|envelope| !envelope.payload().records.is_empty())
         }
         _ => false,
@@ -78,9 +78,9 @@ pub(crate) fn folded_manifest_put(
             bytes,
             mode: loonfs_objectstore::PutMode::CreateIfAbsent,
         } if operation.key().contains("/manifests/") => {
-            loonfs_api::wire::manifest::decode_namespace_manifest_json(bytes).is_ok_and(
+            loonfs_types::format::manifest::decode_namespace_manifest_json(bytes).is_ok_and(
                 |envelope| {
-                    envelope.payload().folded_wal_no > loonfs_api::WalNo(0)
+                    envelope.payload().folded_wal_no > loonfs_types::WalNo(0)
                         && !envelope.payload().status.is_deleted()
                 },
             )
@@ -245,7 +245,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         actor: &ActorId,
-    ) -> loonfs::Result<loonfs_api::NamespaceMetadata> {
+    ) -> loonfs::Result<loonfs_types::NamespaceMetadata> {
         self.writer.create_namespace(namespace_id, actor).await
     }
 
@@ -379,11 +379,11 @@ impl TestRuntime {
 }
 
 pub(crate) fn decode_directory_page_cursor(value: &str) -> DirectoryPageCursor {
-    loonfs_api::decode_cursor(value).expect("decode directory cursor")
+    loonfs_types::decode_cursor(value).expect("decode directory cursor")
 }
 
 pub(crate) fn decode_file_revisions_page_cursor(value: &str) -> loonfs::FileRevisionsPageCursor {
-    loonfs_api::decode_cursor(value).expect("decode file revisions cursor")
+    loonfs_types::decode_cursor(value).expect("decode file revisions cursor")
 }
 
 pub(crate) trait RuntimeTestExt {
@@ -391,12 +391,12 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         actor: &ActorId,
-    ) -> loonfs::Result<loonfs_api::NamespaceMetadata>;
+    ) -> loonfs::Result<loonfs_types::NamespaceMetadata>;
     fn fork_namespace_blocking(
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> loonfs::Result<loonfs_api::NamespaceMetadata>;
+    ) -> loonfs::Result<loonfs_types::NamespaceMetadata>;
     fn namespace_diagnostics_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -509,7 +509,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         actor: &ActorId,
-    ) -> loonfs::Result<loonfs_api::NamespaceMetadata> {
+    ) -> loonfs::Result<loonfs_types::NamespaceMetadata> {
         block_on(self.writer.create_namespace(namespace_id, actor))
     }
 
@@ -517,7 +517,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         source: &NamespaceId,
         target: &NamespaceId,
-    ) -> loonfs::Result<loonfs_api::NamespaceMetadata> {
+    ) -> loonfs::Result<loonfs_types::NamespaceMetadata> {
         block_on(
             self.writer
                 .fork_namespace(source, target, &loonfs_test_support::test_actor()),

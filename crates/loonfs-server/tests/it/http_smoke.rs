@@ -8,7 +8,9 @@ use loonfs::publish::{
     MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_MESSAGE_BYTES,
     MAX_COMMIT_OPERATIONS, MAX_COMMIT_PRECONDITIONS,
 };
-use loonfs_api::{
+use loonfs_client::{ClientError, NamespacePath, PutFileOptions};
+use loonfs_test_support::ids::{first_page, namespace_id};
+use loonfs_types::{
     ChangeSeq, CommitId, DestinationBehavior, InodeKind, API_GROUP_FILESYSTEM_V0,
     API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
     LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
@@ -21,8 +23,6 @@ use loonfs_api::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
-use loonfs_client::{ClientError, NamespacePath, PutFileOptions};
-use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -41,7 +41,7 @@ async fn delete_namespace_blocks_operations() {
         .create_namespace(
             &namespace,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -268,13 +268,13 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     ))
     .await;
 
-    let creator = loonfs_api::ActorId::parse("namespace-creator").expect("actor");
+    let creator = loonfs_types::ActorId::parse("namespace-creator").expect("actor");
     let created = harness
         .client
         .create_namespace(
             &namespace_id("demo"),
             &creator,
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -306,7 +306,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
             &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
-                commit: loonfs_api::options::CommitOptions {
+                commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
                     commit_id: Some(CommitId::parse("smoke-write-1").expect("valid commit id")),
                     message: None,
@@ -366,7 +366,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .create_namespace(
             &namespace_id("demo"),
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("create namespace");
@@ -388,7 +388,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .fork_namespace(
             &namespace_id("demo"),
             &namespace_id("clone"),
-            &loonfs_api::ActorId::parse("forker").expect("actor"),
+            &loonfs_types::ActorId::parse("forker").expect("actor"),
         )
         .await
         .expect("fork namespace");
@@ -399,7 +399,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert!(forked.created_at_ms > 0);
     assert_eq!(
         forked.fork_basis,
-        Some(loonfs_api::NamespaceForkBasis {
+        Some(loonfs_types::NamespaceForkBasis {
             source_namespace_id: namespace_id("demo"),
             source_head_seq: ChangeSeq(1),
         })
@@ -506,7 +506,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
         .create_namespace(
             &source,
             &loonfs_test_support::test_actor(),
-            loonfs_api::NamespaceAccess::unrestricted(),
+            loonfs_types::NamespaceAccess::unrestricted(),
         )
         .await
         .expect("namespace");
@@ -552,7 +552,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
     assert!(fork.created_at_ms > 0);
     assert_eq!(
         fork.fork_basis,
-        Some(loonfs_api::NamespaceForkBasis {
+        Some(loonfs_types::NamespaceForkBasis {
             source_namespace_id: source,
             source_head_seq: snapshot.captured_seq,
         })

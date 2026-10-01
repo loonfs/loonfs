@@ -4,13 +4,13 @@
 // Unexpected variants include the full event in the failure message.
 
 use crate::common::commit_split_support::*;
-use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
-use loonfs_api::{
+use loonfs_core::publish::FilesystemOperation;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_types::api::v0::{FilesystemChange, ListChangesResponse};
+use loonfs_types::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId,
     RevisionNo,
 };
-use loonfs_core::publish::FilesystemOperation;
-use loonfs_objectstore::local_fs_store::LocalFsStore;
 use tempfile::tempdir;
 
 fn commit_id(value: &str) -> CommitId {
@@ -100,7 +100,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
         FilesystemOperation::CopyPath {
             source_path: path("/report.txt"),
             destination_path: path("/copy.txt"),
-            precondition: loonfs_api::DestinationPrecondition {
+            precondition: loonfs_types::DestinationPrecondition {
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
