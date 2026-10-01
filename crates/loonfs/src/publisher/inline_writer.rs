@@ -177,7 +177,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     assert_eq!(writer.mode.publisher.shared.admission.used_requests(), 0);
     assert_eq!(
         namespace_reader
-            .get_file_bytes("/file")
+            .read_file("/file")
             .await
             .expect("first bytes")
             .bytes,
@@ -185,7 +185,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     );
     assert_eq!(
         namespace_reader
-            .get_file_bytes("/next")
+            .read_file("/next")
             .await
             .expect("next bytes")
             .bytes,
@@ -392,7 +392,7 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
     );
     assert_eq!(
         namespace_reader
-            .get_file_bytes("/file")
+            .read_file("/file")
             .await
             .expect("read")
             .bytes,
@@ -483,7 +483,7 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
             .expect("publish");
         assert_eq!(store.count(OperationClass::Put), 1);
         let reference = namespace_reader
-            .get_file_bytes(path)
+            .read_file(path)
             .await
             .expect("read")
             .entry
@@ -542,11 +542,7 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
             .await
             .expect("publish");
         assert_eq!(
-            namespace_reader
-                .get_file_bytes(&path)
-                .await
-                .expect("read")
-                .bytes,
+            namespace_reader.read_file(&path).await.expect("read").bytes,
             expected
         );
         store.reset();
@@ -616,10 +612,7 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
     assert!(records[0].inline_content.is_empty());
     assert_eq!(records[0].semantic_commit_fingerprint, fingerprint);
     assert!(family_requests(&store, DurableObjectFamily::ContentBlob) > 0);
-    let file = namespace_reader
-        .get_file_bytes("/fallback")
-        .await
-        .expect("read");
+    let file = namespace_reader.read_file("/fallback").await.expect("read");
     assert_eq!(file.bytes, b"next");
     assert_ne!(
         file.entry.content_ref().expect("reference").content_id,
@@ -827,7 +820,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
     for index in [0, VALUES - 1] {
         assert_eq!(
             namespace_reader
-                .get_file_bytes(&format!("/file-{index}"))
+                .read_file(&format!("/file-{index}"))
                 .await
                 .expect("read")
                 .bytes,
@@ -1196,7 +1189,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
         assert_eq!(usage.wal_tail_inline_bytes, 0);
         assert_eq!(
             namespace_reader
-                .get_file_bytes("/file")
+                .read_file("/file")
                 .await
                 .expect("read folded content")
                 .bytes,
@@ -1396,11 +1389,7 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
         ("/last", b"last"),
     ] {
         assert_eq!(
-            namespace_reader
-                .get_file_bytes(path)
-                .await
-                .expect("read")
-                .bytes,
+            namespace_reader.read_file(path).await.expect("read").bytes,
             bytes
         );
     }

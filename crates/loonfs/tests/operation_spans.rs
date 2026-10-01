@@ -76,10 +76,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
 
         let reader = writer.read_only();
         let namespace = reader.namespace(&namespace_id);
-        namespace
-            .get_path_entry("/", Default::default())
-            .await
-            .expect("stat namespace root");
+        namespace.stat("/").await.expect("stat namespace root");
         namespace.metadata().await.expect("read namespace state");
 
         LoonFs::builder_with_store(writer.object_store())

@@ -12,7 +12,8 @@ mod writes;
 
 pub use maintenance::CheckpointsPager;
 pub use reads::{
-    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, ReadView, TrashPager,
+    ChangesPager, CheckpointFilesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
+    ReadView, TrashPager,
 };
 pub use snapshots::{SnapshotPolicy, SnapshotsPager};
 

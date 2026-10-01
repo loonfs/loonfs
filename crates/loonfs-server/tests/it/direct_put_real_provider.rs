@@ -223,11 +223,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
     );
     assert_eq!(response.committed_seq, ChangeSeq(1));
 
-    let loaded = harness
-        .client
-        .get_file_bytes(&target, &Default::default())
-        .await
-        .expect("read file");
+    let loaded = harness.client.read_file(&target).await.expect("read file");
     assert_eq!(loaded, bytes);
 
     assert_direct_get_returns_the_written_bytes(&harness.client, &target, bytes).await;
@@ -907,13 +903,10 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
     assert_eq!(received, payload);
 
     // And the proxy still says no, which is what made the grant necessary.
-    // `get_file_bytes` is the plain proxied read with no fallback, so this
+    // `read_file` is the plain proxied read with no fallback, so this
     // asks the proxy directly rather than re-running the ladder.
     expect_client_rejection(
-        harness
-            .client
-            .get_file_bytes(&target, &Default::default())
-            .await,
+        harness.client.read_file(&target).await,
         "proxied read of an object past the read cap",
     );
 }
@@ -1153,7 +1146,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // these bytes.
     let loaded = harness
         .client
-        .get_file_bytes(&target, &Default::default())
+        .read_file(&target)
         .await
         .expect("read the assembled file");
     assert_eq!(loaded, payload);
@@ -1260,7 +1253,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&from_file, &Default::default())
+            .read_file(&from_file)
             .await
             .expect("read the file back"),
         payload,
@@ -1285,7 +1278,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&piped, &Default::default())
+            .read_file(&piped)
             .await
             .expect("read the piped payload back"),
         payload,

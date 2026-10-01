@@ -634,37 +634,23 @@ impl Maintenance {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Creates a checkpoint pager beginning at `request.cursor`.
-    pub fn list_checkpoints_pager(
-        &self,
-        namespace_id: &NamespaceId,
-        request: PageRequest<CheckpointPageCursor>,
-    ) -> CheckpointsPager {
-        let cursor = request.cursor.as_ref().map(|cursor| {
-            loonfs_api::encode_cursor(cursor).expect("typed checkpoint cursor should encode")
-        });
-        let limit = request.limit;
+    /// Lists existing checkpoints in ascending id order, including expired
+    /// checkpoints that garbage collection has not yet deleted. The cursor
+    /// resumes a live listing and does not create a snapshot.
+    pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
         let maintenance = self.clone();
         let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        loonfs_api::Pager::new(move |request| {
             let maintenance = maintenance.clone();
             let namespace_id = namespace_id.clone();
             async move {
-                let cursor = cursor
-                    .as_deref()
-                    .map(loonfs_api::decode_cursor)
-                    .transpose()
-                    .map_err(|error| crate::CoreError::InvalidCursor(error.to_string()))?;
                 maintenance
-                    .list_checkpoints_page(&namespace_id, PageRequest { limit, cursor })
+                    .checkpoints_page(&namespace_id, super::core::decode_page_request(request)?)
                     .await
             }
         })
     }
 
-    /// Lists one page of existing checkpoints in ascending id order, including
-    /// expired checkpoints that garbage collection has not yet deleted. The
-    /// cursor resumes a live listing and does not create a snapshot.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.list_checkpoints",
@@ -678,38 +664,22 @@ impl Maintenance {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_checkpoints_page(
+    async fn checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<ListCheckpointsResponse> {
         self.core.record_trace_context(&tracing::Span::current());
-        let (mut response, next_cursor) = self
-            .list_checkpoints_page_typed(namespace_id, request)
-            .await?;
-        response.next_cursor = super::core::encode_next_cursor(next_cursor.as_ref())?;
-        Ok(response)
-    }
-
-    async fn list_checkpoints_page_typed(
-        &self,
-        namespace_id: &NamespaceId,
-        request: PageRequest<CheckpointPageCursor>,
-    ) -> Result<(ListCheckpointsResponse, Option<CheckpointPageCursor>)> {
         let page = self
             .engine(namespace_id)
             .list_checkpoints_page(request)
             .await
             .map_err(Error::from)?;
-        let next_cursor = page.next_cursor;
-        Ok((
-            ListCheckpointsResponse {
-                namespace_id: namespace_id.clone(),
-                checkpoints: page.items,
-                next_cursor: None,
-            },
-            next_cursor,
-        ))
+        Ok(ListCheckpointsResponse {
+            namespace_id: namespace_id.clone(),
+            checkpoints: page.items,
+            next_cursor: super::core::encode_next_cursor(page.next_cursor.as_ref())?,
+        })
     }
 
     /// Deletes a user-owned pin. A missing id returns `checkpoint_not_found`.

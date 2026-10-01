@@ -19,7 +19,9 @@ use loonfs_core::control::load_namespace_current_manifest;
 use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ByteRange;
-use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
+use loonfs_test_support::ids::{
+    attribute_key, attribute_text, first_page, namespace_id, page_limit,
+};
 use loonfs_test_support::test_actor;
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::tempdir;
@@ -165,7 +167,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             .expect("update directory access");
     }
     let deleted_inode = source_namespace
-        .get_path_entry("/docs/deleted.txt", Default::default())
+        .stat("/docs/deleted.txt")
         .await
         .expect("file to delete")
         .inode_id;
@@ -174,7 +176,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         .await
         .expect("delete file");
     let restored_inode = source_namespace
-        .get_path_entry("/docs/recover.txt", Default::default())
+        .stat("/docs/recover.txt")
         .await
         .expect("file to recover")
         .inode_id;
@@ -363,14 +365,11 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .await
                     .expect("checkpoint view");
                 let historical = view
-                    .list_path_entries_page(
-                        path,
-                        PageRequest {
-                            limit: page_limit(16),
-                            cursor: None,
-                        },
-                        Default::default(),
-                    )
+                    .list(path)
+                    .page(PageRequest {
+                        limit: page_limit(16),
+                        cursor: None,
+                    })
                     .await
                     .expect("checkpoint listing");
                 assert_eq!(historical.head_seq, checkpoint.captured_seq, "{stage}");
@@ -408,7 +407,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             ] {
                 assert_eq!(
                     namespace_reader
-                        .get_file_bytes(path)
+                        .read_file(path)
                         .await
                         .expect("file bytes")
                         .bytes,
@@ -417,34 +416,33 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 );
             }
             let revisions = namespace_reader
-                .list_file_revisions_page(
-                    "/docs/renamed.txt",
-                    PageRequest {
-                        limit: page_limit(16),
-                        cursor: None,
-                    },
-                )
+                .list_file_revisions("/docs/renamed.txt")
+                .page(PageRequest {
+                    limit: page_limit(16),
+                    cursor: None,
+                })
                 .await
                 .expect("revision listing");
             assert_eq!(revisions.revisions.len(), 2, "{stage}: {namespace}");
             assert!(revisions.next_cursor.is_none());
             assert_eq!(
                 namespace_reader
-                    .get_file_revision_bytes("/docs/renamed.txt", RevisionNo(1))
+                    .read_file_revision("/docs/renamed.txt", RevisionNo(1))
                     .await
                     .expect("first revision bytes")
                     .bytes,
                 b"first revision"
             );
             let entry = namespace_reader
-                .get_path_entry("/docs/renamed.txt", Default::default())
+                .stat("/docs/renamed.txt")
                 .await
                 .expect("cleared attributes");
             let attributes = entry.attributes.expect("attribute projection");
             assert_eq!(attributes.attributes_revision_no, AttributesRevisionNo(2));
             assert_eq!(attributes.attributes, Attributes::default(), "{stage}");
             let trash = namespace_reader
-                .list_trash_page(PageRequest {
+                .list_trash()
+                .page(PageRequest {
                     limit: page_limit(16),
                     cursor: None,
                 })
@@ -460,7 +458,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             );
             assert_eq!(
                 namespace_reader
-                    .get_path_entry("/docs/restored.txt", Default::default())
+                    .stat("/docs/restored.txt")
                     .await
                     .expect("restored binding")
                     .inode_id,
@@ -469,7 +467,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             );
             if stage != "cold" {
                 let directory_inode = namespace_reader
-                    .get_path_entry("/docs/nested", Default::default())
+                    .stat("/docs/nested")
                     .await
                     .expect("directory")
                     .inode_id;
@@ -535,12 +533,13 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         }
         if head_seq > restored.committed_seq {
             expect_code(
-                fork_namespace.get_file_bytes("/later.txt").await,
+                fork_namespace.read_file("/later.txt").await,
                 ErrorCode::PathNotFound,
             );
             expect_code(
                 source_namespace
-                    .list_changes_page(ChangeSeq(0), Default::default())
+                    .list_changes(ChangeSeq(0))
+                    .page(first_page())
                     .await,
                 ErrorCode::RebootstrapRequired,
             );

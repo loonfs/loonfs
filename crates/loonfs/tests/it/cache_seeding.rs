@@ -50,7 +50,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
 
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
-    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read is served from the projection the put seeded");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
     let after_first = fs.metadata_cache_stats();
@@ -60,7 +60,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
 
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
-    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should reuse cached WAL-tail projection");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
     let after_second = fs.metadata_cache_stats();
@@ -75,7 +75,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     .expect("put other");
     block_on(fs.writer.drain()).expect("finish hints");
     recording.reset();
-    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("read after local mutation reuses the newly seeded projection");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(4));
     let after_mutation = fs.metadata_cache_stats();
@@ -370,9 +370,9 @@ fn a_cache_with_zero_limits_keeps_nothing() {
 
     block_on(fs.writer.drain()).expect("finish hints");
     raw_store.reset_wal_get_count();
-    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read should project WAL tail");
-    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should project WAL tail again");
     assert_eq!(raw_store.wal_get_count(), 10);
     let stats = fs.metadata_cache_stats();
@@ -413,7 +413,7 @@ fn one_namespace_head_state_bytes() -> usize {
     let shared_store = store(temp_dir.path());
     let (first, _) = two_namespaces_with_one_file(shared_store.clone());
     let fs = open_runtime(shared_store, "head-state-measure");
-    fs.get_file_bytes_blocking(&first, "/file.txt")
+    fs.read_file_blocking(&first, "/file.txt")
         .expect("cold read");
     fs.metadata_cache_stats().head_state_bytes
 }
@@ -436,9 +436,9 @@ fn head_state_evicts_by_bytes_anchors_included() {
         )
     });
 
-    fs.get_file_bytes_blocking(&first, "/file.txt")
+    fs.read_file_blocking(&first, "/file.txt")
         .expect("cache the first namespace's head state");
-    fs.get_file_bytes_blocking(&other, "/file.txt")
+    fs.read_file_blocking(&other, "/file.txt")
         .expect("cache the other namespace's head state");
     let after_other = fs.metadata_cache_stats();
     assert!(after_other.head_state_evictions > 0);
@@ -446,7 +446,7 @@ fn head_state_evicts_by_bytes_anchors_included() {
 
     raw_store.reset_control_get_counts();
     let file = fs
-        .get_file_bytes_blocking(&first, "/file.txt")
+        .read_file_blocking(&first, "/file.txt")
         .expect("reload the evicted head state");
     assert_eq!(file.bytes, b"first");
     // Discovery reads the starting hint and rechecks it after the final gap.
@@ -501,7 +501,7 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
         for namespace_id in &namespaces {
             reader
                 .namespace(namespace_id)
-                .get_path_entry("/", Default::default())
+                .stat("/")
                 .await
                 .expect("stat the root");
         }
@@ -559,7 +559,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let _view = block_on(namespace.read_view()).expect("view the seeded namespace");
     assert_wal_probe(recording.take(), &namespace_id, loonfs_api::WalNo(3));
     for _ in 0..2 {
-        fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
+        fs.read_file_blocking(&namespace_id, "/file.txt")
             .expect("read replays the uncached tail");
         let operations = recording.take();
         assert_eq!(operations.len(), 3);
@@ -762,7 +762,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
         .expect("checkpoint");
 
     let (stat, list) = tokio::join!(
-        fs.get_path_entry(&namespace_id, "/docs/file.txt"),
+        fs.stat(&namespace_id, "/docs/file.txt"),
         fs.list_path(&namespace_id, "/docs"),
     );
     let stat = stat.expect("stat file");
@@ -944,7 +944,7 @@ fn separate_runtime_instances_share_object_store_state() {
         .expect("put file");
 
     let file = reader
-        .get_file_bytes_blocking(&namespace_id, "/docs/shared.txt")
+        .read_file_blocking(&namespace_id, "/docs/shared.txt")
         .expect("read shared file");
     assert_eq!(file.bytes, b"shared");
 }
@@ -989,7 +989,7 @@ fn an_installed_stored_block_cache_is_filled_and_then_serves_a_later_runtime() {
         builder.stored_metadata_block_cache(stored_blocks.clone())
     });
     let file = filler
-        .get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+        .read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("read file");
     assert_eq!(file.bytes, b"file");
     let entries = filler

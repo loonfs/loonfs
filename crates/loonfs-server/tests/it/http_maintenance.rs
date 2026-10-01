@@ -13,7 +13,7 @@ use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
 type ApiResult<T> = Result<T, Box<ApiError>>;
@@ -295,14 +295,12 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         post_retention_advance(&server_url, namespace.as_str()).expect("repeat retention");
     assert_eq!(retention_floor(repeated), advanced);
 
-    let bytes = client
-        .get_file_bytes(&target, &Default::default())
-        .await
-        .expect("read file");
+    let bytes = client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello maintenance\n");
 
     match client
-        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes(&namespace, ChangeSeq(0))
+        .page(first_page())
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
@@ -310,7 +308,8 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     }
 
     let empty = client
-        .list_changes_page(&namespace, ChangeSeq(1), &Default::default())
+        .list_changes(&namespace, ChangeSeq(1))
+        .page(first_page())
         .await
         .expect("changes after floor");
     assert_eq!(empty.changes, Vec::new());
@@ -364,10 +363,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
         loonfs_api::DeletedCheckpointsByOwner::default()
     );
 
-    let bytes = client
-        .get_file_bytes(&target, &Default::default())
-        .await
-        .expect("read file");
+    let bytes = client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello gc\n");
 
     harness.server.abort();
@@ -442,10 +438,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     let gc = post_gc(&server_url, namespace.as_str()).expect("GC run");
     assert_eq!(gc.deleted.wal_objects, 0);
 
-    let bytes = client
-        .get_file_bytes(&target, &Default::default())
-        .await
-        .expect("read file");
+    let bytes = client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello step\n");
 
     harness.server.abort();
@@ -605,7 +598,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .expect("write file");
     post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
     client
-        .get_path_entry(&target, &Default::default())
+        .stat(&target)
         .await
         .expect("warm the first server after checkpoint maintenance");
 
@@ -623,15 +616,12 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .await
         .expect("corrupt manifest");
 
-    match cold_client
-        .get_path_entry(&target, &Default::default())
-        .await
-    {
+    match cold_client.stat(&target).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
         other => panic!("expected namespace_corrupt, got {other:?}"),
     }
     client
-        .get_path_entry(&target, &Default::default())
+        .stat(&target)
         .await
         .expect("warm server reads from its pinned head-plus-manifest pair");
 

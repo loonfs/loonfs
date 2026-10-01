@@ -99,7 +99,7 @@ async fn a_streamed_read_holds_one_chunk_of_its_file() {
     let namespace = reader.namespace(&namespace_id);
 
     let mut stream = namespace
-        .read_file_stream(PATH, chunked())
+        .read_file_stream_with_options(PATH, &chunked())
         .await
         .expect("open stream");
     assert_eq!(stream.size_bytes(), PAYLOAD_BYTES as u64);
@@ -146,7 +146,7 @@ async fn a_buffered_read_holds_the_whole_file() {
     let (namespace_id, watched, reader) = written_file(temp_dir.path(), &payload).await;
     let namespace = reader.namespace(&namespace_id);
 
-    let read = namespace.get_file_bytes(PATH).await.expect("buffered read");
+    let read = namespace.read_file(PATH).await.expect("buffered read");
 
     assert_eq!(read.bytes, payload);
     assert_eq!(
@@ -165,10 +165,7 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
 
     // Same length, different bytes: nothing but the digest can tell, which
     // is the case the read exists to catch.
-    let entry = namespace
-        .get_path_entry(PATH, Default::default())
-        .await
-        .expect("stat file");
+    let entry = namespace.stat(PATH).await.expect("stat file");
     let content_ref = entry.content_ref().cloned().expect("a file has content");
 
     let key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
@@ -180,7 +177,7 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
         .expect("overwrite content object");
 
     let mut stream = namespace
-        .read_file_stream(PATH, chunked())
+        .read_file_stream_with_options(PATH, &chunked())
         .await
         .expect("open stream");
     let error = loop {
@@ -230,9 +227,9 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .expect("replace");
 
     let historical = namespace
-        .read_file_stream(
+        .read_file_stream_with_options(
             PATH,
-            ReadFileStreamOptions {
+            &ReadFileStreamOptions {
                 revision_no: Some(RevisionNo(1)),
                 ..chunked()
             },
@@ -244,7 +241,7 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .await
         .expect("view snapshot");
     let snapshot_stream = view
-        .read_file_stream(PATH, chunked())
+        .read_file_stream_with_options(PATH, &chunked())
         .await
         .expect("snapshot stream");
     for mut stream in [historical, snapshot_stream] {
@@ -266,9 +263,9 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
     }
     assert!(watched.peaks().peak_live_bytes <= CHUNK_BYTES);
     assert!(
-        view.read_file_stream(
+        view.read_file_stream_with_options(
             PATH,
-            ReadFileStreamOptions {
+            &ReadFileStreamOptions {
                 revision_no: Some(RevisionNo(1)),
                 ..chunked()
             }

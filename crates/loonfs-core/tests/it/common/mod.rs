@@ -318,7 +318,7 @@ pub(crate) mod commit_split_support {
         namespace_engine(store, namespace_id, &mutation_context())
             .resolve_path(
                 absolute_path,
-                loonfs_api::options::StatPathOptions::default(),
+                loonfs_api::options::StatOptions::default(),
                 &context,
             )
             .await

@@ -12,7 +12,7 @@ use loonfs::{
 use loonfs_api::wire::control::PinOwner;
 use loonfs_api::{
     sha256_digest, AbsolutePath, ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse,
-    IndexSegmentId, PageRequest, PaginationPolicy, RunNo, MAX_PUBLIC_INTEGER,
+    IndexSegmentId, RunNo, MAX_PUBLIC_INTEGER,
 };
 use loonfs_grep::keyspace::{
     grep_prefix, hint_key, manifest_key, manifests_prefix, segment_key, segments_prefix,
@@ -596,15 +596,7 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
     assert!(matches!(error, GrepError::StoreUnavailable { .. }));
     assert_eq!(failing_store.attempts(), 1);
 
-    let request = PageRequest {
-        limit: PaginationPolicy::default()
-            .resolve_limit(None)
-            .expect("default page limit"),
-        cursor: None,
-    };
-    let mut pager = host
-        .maintenance
-        .list_checkpoints_pager(&namespace_id, request);
+    let mut pager = host.maintenance.list_checkpoints(&namespace_id);
     let checkpoints = pager
         .next()
         .await
@@ -1323,7 +1315,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
     let docs_inode_id = namespace
-        .get_path_entry("/docs", Default::default())
+        .stat("/docs")
         .await
         .expect("stat the directory")
         .inode_id;
@@ -1420,7 +1412,7 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
             .expect("write file before delete");
     }
     let docs_inode_id = namespace
-        .get_path_entry("/docs", Default::default())
+        .stat("/docs")
         .await
         .expect("stat docs before delete")
         .inode_id;
@@ -1536,7 +1528,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
     assert_eq!(error.code(), ErrorCode::IndexCorrupt);
     commit.expect("the filesystem commit is unaffected by grep");
     let read = namespace
-        .get_file_bytes("/during-failure.txt")
+        .read_file("/during-failure.txt")
         .await
         .expect("the committed file is readable");
     assert_eq!(read.bytes, b"isolated needle\n");

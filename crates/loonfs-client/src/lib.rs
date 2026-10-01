@@ -74,9 +74,9 @@ pub use ClientError as Error;
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
 pub use loonfs_api::options::{
     CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListInodeChildrenOptions,
-    ListPathEntriesOptions, MoveOptions, PutFileOptions, RestoreRevisionOptions, StatPathOptions,
-    UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
+    RestoreRevisionOptions, StatOptions, UndeleteOptions, UpdateAccessOptions,
+    UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.
@@ -122,7 +122,7 @@ impl Client {
     }
 
     /// Clones this client with the subject sent with every request.
-    pub fn as_subject(&self, subject: loonfs_api::Subject) -> Self {
+    pub fn with_subject(&self, subject: loonfs_api::Subject) -> Self {
         Self {
             subject: Some(subject),
             ..self.clone()

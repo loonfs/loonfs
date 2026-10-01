@@ -3,16 +3,17 @@
 use loonfs::publish::{CommitRequest, FilesystemOperation};
 use loonfs::{
     CreateNamespaceOptions, CreateSnapshotOptions, DeleteNamespaceOptions, ForkNamespaceOptions,
-    ListChangesOptions, LoonFs, SnapshotPolicy, StatPathOptions, Writable,
+    LoonFs, SnapshotPolicy, Writable,
 };
 use loonfs_api::v0::FilesystemChange;
+use loonfs_api::PageRequest;
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, ChangeSeq, CommitId,
     ErrorCode, NamespaceAccess, NamespaceAccessMode, NamespaceId, PrincipalId, PrincipalScope,
     PrincipalSet, Subject, SubjectId, ROOT_INODE_ID,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{first_page, namespace_id};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -109,7 +110,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
         access_mode()
     );
     member_fork_namespace
-        .get_path_entry("/", StatPathOptions::default())
+        .stat("/")
         .await
         .expect("inherited member grant");
     let now_ms = loonfs_core::time::current_time_ms().expect("clock");
@@ -184,7 +185,7 @@ async fn subject_scope_is_enforced_only_for_acl_namespaces() {
         .with_subject(wrong_scope.clone())
         .namespace(&namespace);
     let error = wrong_scope_namespace
-        .get_path_entry("/", StatPathOptions::default())
+        .stat("/")
         .await
         .expect_err("wrong-scope read");
     assert_eq!(error.code(), ErrorCode::Forbidden);
@@ -221,7 +222,7 @@ async fn subject_scope_is_enforced_only_for_acl_namespaces() {
         .with_subject(wrong_scope.clone())
         .namespace(&unrestricted);
     unrestricted_namespace
-        .get_path_entry("/", StatPathOptions::default())
+        .stat("/")
         .await
         .expect("unrestricted read");
     commit_as(
@@ -287,7 +288,8 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     .await
     .expect("administrator again");
     let feed = namespace_reader
-        .list_changes_page(ChangeSeq(0), ListChangesOptions { limit: None })
+        .list_changes(ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("feed");
     let root_rows: Vec<_> = feed
@@ -444,7 +446,7 @@ async fn snapshot_after_administrator_change() -> (
         .await
         .expect("seed snapshot content");
     let content = namespace_reader
-        .get_path_entry("/file", StatPathOptions::default())
+        .stat("/file")
         .await
         .expect("file")
         .content_ref()
@@ -503,7 +505,8 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
     let namespace_reader = revoked.namespace(&namespace);
     assert_eq!(
         namespace_reader
-            .list_changes_page(ChangeSeq(0), ListChangesOptions::default())
+            .list_changes(ChangeSeq(0))
+            .page(first_page())
             .await
             .expect_err("live feed rejects the old administrator")
             .code(),
@@ -514,23 +517,20 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
         .await
         .expect("load historical view");
     assert_eq!(
-        view.get_file_bytes("/file")
+        view.read_file("/file")
             .await
             .expect_err("ordinary snapshot reads use current authority")
             .code(),
         ErrorCode::PathNotFound
     );
     let changes = view
-        .list_changes_page(
-            ChangeSeq(0),
-            ListChangesOptions {
-                limit: Some(loonfs_api::EffectiveLimit::new(
-                    std::num::NonZeroU32::new(10).expect("limit"),
-                )),
-            },
-        )
+        .list_changes(ChangeSeq(0))
+        .page(PageRequest {
+            limit: loonfs_api::EffectiveLimit::new(std::num::NonZeroU32::new(10).expect("limit")),
+            cursor: None,
+        })
         .await;
-    let bytes = view.read_content_ref(&content, 100).await;
+    let bytes = view.read_content(&content, 100).await;
     assert!(
         matches!(&changes, Err(error) if error.code() == ErrorCode::Forbidden)
             && matches!(&bytes, Err(error) if error.code() == ErrorCode::Forbidden),
@@ -550,19 +550,16 @@ async fn snapshot_admin_reads_accept_the_current_administrator() {
         .await
         .expect("load historical view");
     let changes = view
-        .list_changes_page(
-            ChangeSeq(0),
-            ListChangesOptions {
-                limit: Some(loonfs_api::EffectiveLimit::new(
-                    std::num::NonZeroU32::new(10).expect("limit"),
-                )),
-            },
-        )
+        .list_changes(ChangeSeq(0))
+        .page(PageRequest {
+            limit: loonfs_api::EffectiveLimit::new(std::num::NonZeroU32::new(10).expect("limit")),
+            cursor: None,
+        })
         .await
         .expect("current administrator can read historical changes");
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(
-        view.read_content_ref(&content, 100)
+        view.read_content(&content, 100)
             .await
             .expect("current administrator can read historical content"),
         b"snapshot payload"

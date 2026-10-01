@@ -6,54 +6,44 @@ use crate::payload::LocalPayload;
 use crate::progress::ProgressReporter;
 use crate::resolve::ResolvedTarget;
 use crate::uploads::UploadJournal;
-use loonfs_api::v0::ListChangesResponse;
-use loonfs_api::{
-    ChangeSeq, Commit, InodeId, ListPathEntriesResponse, NamespaceId, PathEntry, PinId, RevisionNo,
-};
+use loonfs_api::{ChangeSeq, Commit, InodeId, NamespaceId, PathEntry, PinId, RevisionNo};
 use loonfs_client::{
-    DownloadOptions, ListChangesOptions, ListPathEntriesOptions, NamespacePath, PutFileOptions,
-    ReadFileOptions, StatPathOptions,
+    ChangesPager, DownloadOptions, ListChangesOptions, ListOptions, NamespacePath,
+    PathEntriesPager, PutFileOptions, ReadFileOptions, StatOptions,
 };
 use std::sync::Arc;
 
 impl ResolvedTarget {
-    pub(crate) async fn list_path_entries_page(
+    pub(crate) fn list_at_snapshot(
         &self,
         spec: &NamespacePath,
-        limit: Option<u32>,
-        cursor: Option<&str>,
         snapshot_id: Option<&PinId>,
-    ) -> Result<ListPathEntriesResponse, CliError> {
-        Ok(self
-            .client
-            .list_path_entries_page(
-                spec,
-                limit,
-                cursor,
-                &ListPathEntriesOptions {
-                    snapshot_id: snapshot_id.cloned(),
-                    ..ListPathEntriesOptions::default()
-                },
-            )
-            .await?)
+    ) -> PathEntriesPager {
+        self.client.list_with_options(
+            spec,
+            &ListOptions {
+                snapshot_id: snapshot_id.cloned(),
+                ..ListOptions::default()
+            },
+        )
     }
 
-    pub(crate) async fn get_path_entry_at_snapshot(
+    pub(crate) async fn stat_at_snapshot(
         &self,
         spec: &NamespacePath,
         snapshot_id: Option<&PinId>,
     ) -> Result<PathEntry, CliError> {
-        self.get_path_entry_projected(
+        self.stat_with_options(
             spec,
-            &StatPathOptions {
+            &StatOptions {
                 snapshot_id: snapshot_id.cloned(),
-                ..StatPathOptions::default()
+                ..StatOptions::default()
             },
         )
         .await
     }
 
-    pub(crate) async fn get_inode(
+    pub(crate) async fn stat_by_inode_at_snapshot(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -61,33 +51,32 @@ impl ResolvedTarget {
     ) -> Result<PathEntry, CliError> {
         Ok(self
             .client
-            .get_inode(
+            .stat_by_inode_with_options(
                 namespace_id,
                 inode_id,
-                &StatPathOptions {
+                &StatOptions {
                     snapshot_id: snapshot_id.cloned(),
-                    ..StatPathOptions::default()
+                    ..StatOptions::default()
                 },
             )
             .await?)
     }
 
-    pub(crate) async fn get_path_entry_without_attributes(
+    pub(crate) async fn stat_without_attributes(
         &self,
         spec: &NamespacePath,
     ) -> Result<PathEntry, CliError> {
-        self.get_path_entry_without_attributes_at_snapshot(spec, None)
-            .await
+        self.stat_without_attributes_at_snapshot(spec, None).await
     }
 
-    pub(crate) async fn get_path_entry_without_attributes_at_snapshot(
+    pub(crate) async fn stat_without_attributes_at_snapshot(
         &self,
         spec: &NamespacePath,
         snapshot_id: Option<&PinId>,
     ) -> Result<PathEntry, CliError> {
-        self.get_path_entry_projected(
+        self.stat_with_options(
             spec,
-            &StatPathOptions {
+            &StatOptions {
                 include_attributes: loonfs_api::AttributeInclusion::Omit,
                 snapshot_id: snapshot_id.cloned(),
             },
@@ -95,12 +84,12 @@ impl ResolvedTarget {
         .await
     }
 
-    async fn get_path_entry_projected(
+    async fn stat_with_options(
         &self,
         spec: &NamespacePath,
-        options: &StatPathOptions,
+        options: &StatOptions,
     ) -> Result<PathEntry, CliError> {
-        Ok(self.client.get_path_entry(spec, options).await?)
+        Ok(self.client.stat_with_options(spec, options).await?)
     }
 
     pub(crate) async fn open_file_download(
@@ -133,7 +122,7 @@ impl ResolvedTarget {
         }
         Ok(FileDownload::Proxied(
             self.client
-                .read_file_stream(
+                .read_file_stream_with_options(
                     spec,
                     &ReadFileOptions {
                         revision_no,
@@ -163,23 +152,18 @@ impl ResolvedTarget {
             .await?)
     }
 
-    pub(crate) async fn list_changes_page(
+    pub(crate) fn list_changes_at_snapshot(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
-        limit: Option<u32>,
         snapshot_id: Option<&PinId>,
-    ) -> Result<ListChangesResponse, CliError> {
-        Ok(self
-            .client
-            .list_changes_page(
-                namespace_id,
-                after_seq,
-                &ListChangesOptions {
-                    limit,
-                    snapshot_id: snapshot_id.cloned(),
-                },
-            )
-            .await?)
+    ) -> ChangesPager {
+        self.client.list_changes_with_options(
+            namespace_id,
+            after_seq,
+            &ListChangesOptions {
+                snapshot_id: snapshot_id.cloned(),
+            },
+        )
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::args::PageLimitArgs;
 use crate::error::CliError;
-use loonfs_api::PagedResponse;
+use loonfs_api::{PageRequest, PagedResponse, PaginationPolicy};
 use std::future::Future;
 use std::io::{self, Write};
 
@@ -110,6 +110,19 @@ pub(super) fn write_jsonl_page<T: serde::Serialize>(
         stdout.write_all(b"\n")?;
     }
     stdout.flush()
+}
+
+/// Names one page for the client. The limit meets the pagination contract
+/// here, with the error the server gives, because a page request holds only
+/// a valid limit.
+pub(super) fn page_request<C>(
+    cursor: Option<C>,
+    limit: Option<u32>,
+) -> Result<PageRequest<C>, CliError> {
+    let limit = PaginationPolicy::default()
+        .resolve_limit(limit)
+        .map_err(|error| CliError::invalid_request(error.to_string()).with_param("limit"))?;
+    Ok(PageRequest { limit, cursor })
 }
 
 impl PagePlan {

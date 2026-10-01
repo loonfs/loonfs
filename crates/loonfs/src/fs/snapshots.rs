@@ -58,32 +58,19 @@ impl SnapshotPolicy {
 pub type SnapshotsPager = loonfs_api::Pager<ListSnapshotsResponse, Error>;
 
 impl<M> Namespace<M> {
-    /// Creates a snapshot pager beginning at `request.cursor`.
-    pub fn list_snapshots_pager(
-        &self,
-        request: PageRequest<CheckpointPageCursor>,
-    ) -> SnapshotsPager {
-        let cursor = request.cursor.as_ref().map(|cursor| {
-            loonfs_api::encode_cursor(cursor).expect("typed checkpoint cursor should encode")
-        });
-        let limit = request.limit;
+    /// Lists live snapshots.
+    pub fn list_snapshots(&self) -> SnapshotsPager {
         let reader = self.read_only();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        loonfs_api::Pager::new(move |request| {
             let reader = reader.clone();
             async move {
-                let cursor = cursor
-                    .as_deref()
-                    .map(loonfs_api::decode_cursor)
-                    .transpose()
-                    .map_err(|error| crate::CoreError::InvalidCursor(error.to_string()))?;
                 reader
-                    .list_snapshots_page(PageRequest { limit, cursor })
+                    .snapshots_page(super::core::decode_page_request(request)?)
                     .await
             }
         })
     }
 
-    /// Lists one page of live snapshots.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_snapshots",
@@ -97,7 +84,7 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_snapshots_page(
+    async fn snapshots_page(
         &self,
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<ListSnapshotsResponse> {

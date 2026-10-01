@@ -125,7 +125,7 @@ async fn reads_commits_and_change_feed_never_list() {
     engine
         .resolve_path(
             "/docs/hello.txt",
-            loonfs_api::options::StatPathOptions::default(),
+            loonfs_api::options::StatOptions::default(),
             &ctx,
         )
         .await
@@ -137,7 +137,7 @@ async fn reads_commits_and_change_feed_never_list() {
                 limit: loonfs_test_support::ids::page_limit(1024),
                 cursor: None,
             },
-            loonfs_api::options::ListPathEntriesOptions::default(),
+            loonfs_api::options::ListOptions::default(),
             &ctx,
         )
         .await

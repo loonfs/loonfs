@@ -4,12 +4,15 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
+use loonfs_api::PageRequest;
 use loonfs_api::{ActorId, ChangeSeq, DestinationBehavior, RevisionNo};
 use loonfs_client::{
     CopyOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions, RestoreRevisionOptions,
     UndeleteOptions, UpdateAttributesOptions,
 };
-use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
+use loonfs_test_support::ids::{
+    attribute_key, attribute_text, first_page, namespace_id, page_limit,
+};
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -26,7 +29,8 @@ fn path(absolute_path: &str) -> NamespacePath {
 async fn change_at(harness: &crate::common::TestServer, seq: ChangeSeq) -> loonfs_api::v0::Commit {
     harness
         .client
-        .list_changes_page(&namespace_id("demo"), ChangeSeq(0), &Default::default())
+        .list_changes(&namespace_id("demo"), ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("list changes")
         .changes
@@ -55,11 +59,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .await
         .expect("create namespace");
 
-    let root = harness
-        .client
-        .get_path_entry(&path("/"), &Default::default())
-        .await
-        .expect("stat root");
+    let root = harness.client.stat(&path("/")).await.expect("stat root");
     assert_eq!(root.created_by, ActorId::loonfs());
     assert!(root.created_at_ms > 0);
     let root_attributes = root.attributes.expect("root attributes");
@@ -81,7 +81,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     assert_eq!(create_change.committed_by, creator);
     let created = harness
         .client
-        .get_path_entry(&path("/implicit/parent/report.txt"), &Default::default())
+        .stat(&path("/implicit/parent/report.txt"))
         .await
         .expect("stat created file");
     assert_eq!(created.created_by, creator);
@@ -90,7 +90,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     for parent_path in ["/implicit", "/implicit/parent"] {
         let parent = harness
             .client
-            .get_path_entry(&path(parent_path), &Default::default())
+            .stat(&path(parent_path))
             .await
             .expect("stat implicit parent");
         assert_eq!(parent.created_by, creator);
@@ -112,7 +112,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .expect("replace file");
     let replaced = harness
         .client
-        .get_path_entry(&path("/implicit/parent/report.txt"), &Default::default())
+        .stat(&path("/implicit/parent/report.txt"))
         .await
         .expect("stat replaced file");
     assert_eq!(replaced.created_by, creator);
@@ -131,7 +131,11 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .expect("restore first revision");
     let revisions = harness
         .client
-        .list_file_revisions_page(&path("/implicit/parent/report.txt"), Some(10), None)
+        .list_file_revisions(&path("/implicit/parent/report.txt"))
+        .page(PageRequest {
+            limit: page_limit(10),
+            cursor: None,
+        })
         .await
         .expect("list revisions");
     assert_eq!(
@@ -158,7 +162,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let copy_change = change_at(&harness, copy.committed_seq).await;
     let copied = harness
         .client
-        .get_path_entry(&path("/copy.txt"), &Default::default())
+        .stat(&path("/copy.txt"))
         .await
         .expect("stat copy");
     assert_eq!(copied.created_by, copier);
@@ -177,7 +181,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .expect("move file");
     let after_move = harness
         .client
-        .get_path_entry(&path("/moved.txt"), &Default::default())
+        .stat(&path("/moved.txt"))
         .await
         .expect("stat moved file");
     assert_eq!(after_move.created_by, before_move.created_by);
@@ -202,7 +206,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let update_change = change_at(&harness, update.committed_seq).await;
     let updated = harness
         .client
-        .get_path_entry(&path("/moved.txt"), &Default::default())
+        .stat(&path("/moved.txt"))
         .await
         .expect("stat attributes")
         .attributes
@@ -222,7 +226,11 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let delete_change = change_at(&harness, delete.committed_seq).await;
     let trash = harness
         .client
-        .list_trash_page(&namespace, Some(10), None)
+        .list_trash(&namespace)
+        .page(PageRequest {
+            limit: page_limit(10),
+            cursor: None,
+        })
         .await
         .expect("list trash");
     assert_eq!(trash.entries.len(), 1);
@@ -251,7 +259,11 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     );
     assert!(harness
         .client
-        .list_trash_page(&namespace, Some(10), None)
+        .list_trash(&namespace)
+        .page(PageRequest {
+            limit: page_limit(10),
+            cursor: None
+        })
         .await
         .expect("list trash after undelete")
         .entries

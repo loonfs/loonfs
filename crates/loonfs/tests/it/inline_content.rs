@@ -106,11 +106,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
             .await
             .expect("namespace");
         let content_ref = publish_inline(&store, &namespace_id, None).await;
-        let inode_id = namespace
-            .get_path_entry("/file", Default::default())
-            .await
-            .expect("entry")
-            .inode_id;
+        let inode_id = namespace.stat("/file").await.expect("entry").inode_id;
         recording.reset();
         let object_key = if by_inode {
             namespace
@@ -250,10 +246,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
         } else {
             assert!(source_operations.is_empty());
         }
-        let file = namespace
-            .get_file_bytes(path)
-            .await
-            .expect("imported bytes");
+        let file = namespace.read_file(path).await.expect("imported bytes");
         assert_eq!(file.bytes, b"inline content");
         let imported_ref = file.entry.content_ref().expect("reference");
         assert_eq!(imported_ref.owner_namespace_id, destination);
@@ -301,10 +294,7 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
         .expect("import before folding");
     assert_eq!(recording.count(OperationClass::Head), 0);
     assert_eq!(recording.count(OperationClass::Read), 0);
-    let file = namespace
-        .get_file_bytes("/file")
-        .await
-        .expect("imported bytes");
+    let file = namespace.read_file("/file").await.expect("imported bytes");
     assert_eq!(file.bytes, b"inline content");
     assert_eq!(file.entry.revision_no(), Some(RevisionNo(2)));
     let imported_ref = file.entry.content_ref().expect("reference");
@@ -366,10 +356,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             .delete(DeleteNamespaceOptions::default())
             .await
             .expect("delete source");
-        let entry = fork_namespace
-            .get_path_entry("/file", Default::default())
-            .await
-            .expect("fork entry");
+        let entry = fork_namespace.stat("/file").await.expect("fork entry");
         let content_ref = entry.content_ref().expect("fork reference");
         assert_eq!(content_ref.owner_namespace_id, source);
 
@@ -385,7 +372,7 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
             .expect("import after owner deletion");
         assert_eq!(recording.take_get_keys(), vec![source_key]);
         let file = destination_namespace
-            .get_file_bytes("/imported")
+            .read_file("/imported")
             .await
             .expect("imported bytes");
         assert_eq!(file.bytes, b"inline content");

@@ -125,19 +125,12 @@ async fn read_during_compaction_and_collection(
     } else {
         None
     };
-    let captured = runtime_namespace
-        .get_path_entry("/a", Default::default())
-        .await
-        .expect("captured entry");
+    let captured = runtime_namespace.stat("/a").await.expect("captured entry");
     store.block_next();
     let read = async {
         match &view {
-            Some(view) => view.get_path_entry("/a", Default::default()).await,
-            None => {
-                cold_namespace
-                    .get_path_entry("/a", Default::default())
-                    .await
-            }
+            Some(view) => view.stat("/a").await,
+            None => cold_namespace.stat("/a").await,
         }
     };
     let maintenance = async {
@@ -210,15 +203,12 @@ async fn read_during_compaction_and_collection(
         .expect("fresh reader");
     let fresh_namespace = fresh.namespace(&namespace);
     let current = fresh_namespace
-        .get_file_bytes("/a")
+        .read_file("/a")
         .await
         .expect("current data remains readable");
     assert_eq!(current.bytes, b"current");
     if let Ok(entry) = &result {
-        let current_entry = fresh_namespace
-            .get_path_entry("/a", Default::default())
-            .await
-            .expect("current entry");
+        let current_entry = fresh_namespace.stat("/a").await.expect("current entry");
         assert_eq!(entry, if durable { &captured } else { &current_entry });
     }
     runtime.writer.shutdown().await.expect("shutdown");
@@ -250,7 +240,7 @@ async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
     let before_read = reader.metadata_cache().stats();
     let again = reader
         .namespace(&entry.namespace_id)
-        .get_path_entry("/a", Default::default())
+        .stat("/a")
         .await
         .expect("the read after the stale-head retry");
     assert_eq!(again, entry);
@@ -357,10 +347,7 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
 
     for view in [snapshot_view, checkpoint_view] {
         store.reset();
-        assert_core_error_kind(
-            view.get_path_entry("/file", Default::default()).await,
-            ErrorCode::NamespaceCorrupt,
-        );
+        assert_core_error_kind(view.stat("/file").await, ErrorCode::NamespaceCorrupt);
         assert_eq!(store.count(OperationClass::Put), 0);
         assert_eq!(store.count(OperationClass::Delete), 0);
     }
@@ -452,15 +439,11 @@ async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_i
         .expect("delete pinned segment");
 
     assert_core_error_kind(
-        snapshot_view
-            .get_path_entry("/file", Default::default())
-            .await,
+        snapshot_view.stat("/file").await,
         ErrorCode::SnapshotNotFound,
     );
     assert_core_error_kind(
-        checkpoint_view
-            .get_path_entry("/file", Default::default())
-            .await,
+        checkpoint_view.stat("/file").await,
         ErrorCode::CheckpointNotFound,
     );
     runtime.writer.shutdown().await.expect("shutdown");
@@ -514,14 +497,11 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .resolve_limit(Some(2))
         .expect("page limit");
     let first_page = first_view
-        .list_path_entries_page(
-            "/",
-            PageRequest {
-                limit,
-                cursor: None,
-            },
-            Default::default(),
-        )
+        .list("/")
+        .page(PageRequest {
+            limit,
+            cursor: None,
+        })
         .await
         .expect("list first snapshot page");
     let cursor = loonfs_api::decode_cursor::<loonfs::DirectoryPageCursor>(
@@ -529,6 +509,10 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     )
     .expect("decode cursor");
     assert_eq!(cursor.pin_id.as_ref(), Some(&first_snapshot.checkpoint_id));
+    let mut unbound_cursor = cursor.clone();
+    unbound_cursor.pin_id = None;
+    let unbound_cursor = loonfs_api::encode_cursor(&unbound_cursor).expect("encode cursor");
+    let cursor = first_page.next_cursor.clone().expect("next cursor");
 
     runtime
         .put_file_bytes(
@@ -556,42 +540,31 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
 
     assert_core_error_kind(
         second_view
-            .list_path_entries_page(
-                "/",
-                PageRequest {
-                    limit,
-                    cursor: Some(cursor.clone()),
-                },
-                Default::default(),
-            )
+            .list("/")
+            .page(PageRequest {
+                limit,
+                cursor: Some(cursor.clone()),
+            })
             .await,
         ErrorCode::InvalidRequest,
     );
-    let mut unbound_cursor = cursor.clone();
-    unbound_cursor.pin_id = None;
     assert_core_error_kind(
         second_view
-            .list_path_entries_page(
-                "/",
-                PageRequest {
-                    limit,
-                    cursor: Some(unbound_cursor.clone()),
-                },
-                Default::default(),
-            )
+            .list("/")
+            .page(PageRequest {
+                limit,
+                cursor: Some(unbound_cursor.clone()),
+            })
             .await,
         ErrorCode::InvalidRequest,
     );
     assert_core_error_kind(
         namespace
-            .list_path_entries_page(
-                "/",
-                PageRequest {
-                    limit,
-                    cursor: Some(cursor.clone()),
-                },
-                Default::default(),
-            )
+            .list("/")
+            .page(PageRequest {
+                limit,
+                cursor: Some(cursor.clone()),
+            })
             .await,
         ErrorCode::InvalidRequest,
     );
@@ -600,41 +573,32 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .expect("listed entry has root parent");
     assert_core_error_kind(
         namespace
-            .list_inode_children_page(
-                root_inode_id,
-                PageRequest {
-                    limit,
-                    cursor: Some(cursor.clone()),
-                },
-                Default::default(),
-            )
+            .list_by_inode(root_inode_id)
+            .page(PageRequest {
+                limit,
+                cursor: Some(cursor.clone()),
+            })
             .await,
         ErrorCode::InvalidRequest,
     );
 
     assert_core_error_kind(
         first_view
-            .list_path_entries_page(
-                "/",
-                PageRequest {
-                    limit,
-                    cursor: Some(unbound_cursor),
-                },
-                Default::default(),
-            )
+            .list("/")
+            .page(PageRequest {
+                limit,
+                cursor: Some(unbound_cursor),
+            })
             .await,
         ErrorCode::InvalidRequest,
     );
 
     let second_page = first_view
-        .list_path_entries_page(
-            "/",
-            PageRequest {
-                limit,
-                cursor: Some(cursor),
-            },
-            Default::default(),
-        )
+        .list("/")
+        .page(PageRequest {
+            limit,
+            cursor: Some(cursor),
+        })
         .await
         .expect("resume the original snapshot");
     assert_eq!(
@@ -690,39 +654,30 @@ async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
         .resolve_limit(Some(2))
         .expect("page limit");
     let first_page = views[0]
-        .list_path_entries_page(
-            "/",
-            PageRequest {
-                limit,
-                cursor: None,
-            },
-            Default::default(),
-        )
+        .list("/")
+        .page(PageRequest {
+            limit,
+            cursor: None,
+        })
         .await
         .expect("list first checkpoint page");
-    let cursor = loonfs_api::decode_cursor::<loonfs::DirectoryPageCursor>(
-        first_page.next_cursor.as_deref().expect("next cursor"),
-    )
-    .expect("decode cursor");
+    let cursor = first_page.next_cursor.clone().expect("next cursor");
     let request = PageRequest {
         limit,
         cursor: Some(cursor),
     };
 
     assert_core_error_kind(
-        namespace
-            .list_path_entries_page("/", request.clone(), Default::default())
-            .await,
+        namespace.list("/").page(request.clone()).await,
         ErrorCode::InvalidRequest,
     );
     assert_core_error_kind(
-        views[1]
-            .list_path_entries_page("/", request.clone(), Default::default())
-            .await,
+        views[1].list("/").page(request.clone()).await,
         ErrorCode::InvalidRequest,
     );
     let second_page = views[0]
-        .list_path_entries_page("/", request, Default::default())
+        .list("/")
+        .page(request)
         .await
         .expect("resume the original checkpoint");
     assert_eq!(
@@ -761,7 +716,7 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
     let view = namespace.read_view().await.expect("read view");
     assert_eq!(view.head_seq(), created.committed_seq);
     let before = view
-        .get_path_entry("/before.txt", Default::default())
+        .stat("/before.txt")
         .await
         .expect("resolve initial file");
 
@@ -788,12 +743,12 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
         .expect("create file after the view");
 
     let after_commits = view
-        .get_path_entry("/before.txt", Default::default())
+        .stat("/before.txt")
         .await
         .expect("resolve file through the view");
     assert_eq!(after_commits.revision_no(), before.revision_no());
     assert_eq!(
-        view.read_content_ref(
+        view.read_content(
             after_commits.content_ref().expect("file content reference"),
             64,
         )
@@ -802,22 +757,19 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
         b"before"
     );
     let later_error = view
-        .get_path_entry("/later.txt", Default::default())
+        .stat("/later.txt")
         .await
         .expect_err("later file is absent from the view");
     assert_eq!(later_error.code(), ErrorCode::PathNotFound);
 
     let page = view
-        .list_path_entries_page(
-            "/",
-            PageRequest {
-                limit: PaginationPolicy::default()
-                    .resolve_limit(None)
-                    .expect("default page limit"),
-                cursor: None,
-            },
-            Default::default(),
-        )
+        .list("/")
+        .page(PageRequest {
+            limit: PaginationPolicy::default()
+                .resolve_limit(None)
+                .expect("default page limit"),
+            cursor: None,
+        })
         .await
         .expect("list root through the view");
     assert_eq!(page.head_seq, view.head_seq());
@@ -835,12 +787,12 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
     assert_eq!(states[0].current_revision_no, before.revision_no());
 
     let latest = namespace
-        .get_file_bytes("/before.txt")
+        .read_file("/before.txt")
         .await
         .expect("read latest replacement");
     assert_eq!(latest.bytes, b"after");
     namespace
-        .get_path_entry("/later.txt", Default::default())
+        .stat("/later.txt")
         .await
         .expect("latest view sees later file");
 }
@@ -897,29 +849,26 @@ async fn checkpoint_read_views_answer_the_state_the_checkpoint_captured() {
         .read_view_at_checkpoint(&checkpoint.checkpoint_id)
         .await
         .expect("view the checkpoint");
-    let pinned = view
-        .get_path_entry("/pinned.txt", Default::default())
-        .await
-        .expect("resolve pinned file");
+    let pinned = view.stat("/pinned.txt").await.expect("resolve pinned file");
     assert_eq!(
-        view.read_content_ref(pinned.content_ref().expect("file content reference"), 64)
+        view.read_content(pinned.content_ref().expect("file content reference"), 64)
             .await
             .expect("read pinned content"),
         b"pinned"
     );
     let later_error = view
-        .get_path_entry("/later.txt", Default::default())
+        .stat("/later.txt")
         .await
         .expect_err("later file is absent from the checkpointed view");
     assert_eq!(later_error.code(), ErrorCode::PathNotFound);
 
     let latest = namespace
-        .get_file_bytes("/pinned.txt")
+        .read_file("/pinned.txt")
         .await
         .expect("read latest replacement");
     assert_eq!(latest.bytes, b"replaced");
     namespace
-        .get_path_entry("/later.txt", Default::default())
+        .stat("/later.txt")
         .await
         .expect("latest view sees later file");
 }
@@ -992,7 +941,7 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .await
         .expect("create captured file");
     let captured = namespace
-        .get_path_entry("/pinned.txt", Default::default())
+        .stat("/pinned.txt")
         .await
         .expect("resolve captured file");
     let now_ms = loonfs::current_time_ms().expect("current time");
@@ -1006,13 +955,13 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         )
         .await
         .expect("create snapshot");
-    let snapshot_options = loonfs::StatPathOptions {
+    let snapshot_options = loonfs::StatOptions {
         snapshot_id: Some(snapshot.checkpoint_id.clone()),
         ..Default::default()
     };
     assert_eq!(
         namespace
-            .get_path_entry("/pinned.txt", snapshot_options.clone())
+            .stat_with_options("/pinned.txt", &snapshot_options)
             .await
             .expect("read with snapshot options"),
         captured,
@@ -1035,14 +984,14 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .await
         .expect("view live snapshot");
     assert_eq!(
-        view.get_path_entry("/pinned.txt", snapshot_options)
+        view.stat_with_options("/pinned.txt", &snapshot_options)
             .await
             .expect("read view entry with snapshot options"),
         captured,
     );
     assert_eq!(view.head_seq(), snapshot.captured_seq);
     assert_eq!(
-        view.get_file_bytes("/pinned.txt")
+        view.read_file("/pinned.txt")
             .await
             .expect("read captured bytes")
             .bytes,
@@ -1186,11 +1135,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
     let limit = PaginationPolicy::default()
         .resolve_limit(None)
         .expect("limit");
-    let root = view
-        .get_path_entry("/", Default::default())
-        .await
-        .expect("root entry")
-        .inode_id;
+    let root = view.stat("/").await.expect("root entry").inode_id;
 
     let assert_rejected = |result: loonfs::Result<()>| {
         let error = result
@@ -1200,9 +1145,9 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         assert_eq!(error.param.as_deref(), Some("snapshot_id"));
     };
     assert_rejected(
-        view.get_path_entry(
+        view.stat_with_options(
             "/pinned.txt",
-            loonfs::StatPathOptions {
+            &loonfs::StatOptions {
                 snapshot_id: Some(other.clone()),
                 ..Default::default()
             },
@@ -1211,9 +1156,9 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         .map(drop),
     );
     assert_rejected(
-        view.get_inode(
+        view.stat_by_inode_with_options(
             root,
-            loonfs::StatPathOptions {
+            &loonfs::StatOptions {
                 snapshot_id: Some(other.clone()),
                 ..Default::default()
             },
@@ -1222,32 +1167,32 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         .map(drop),
     );
     assert_rejected(
-        view.list_path_entries_page(
+        view.list_with_options(
             "/",
-            PageRequest {
-                limit,
-                cursor: None,
-            },
-            loonfs::ListPathEntriesOptions {
+            &loonfs::ListOptions {
                 snapshot_id: Some(other.clone()),
                 ..Default::default()
             },
         )
+        .page(PageRequest {
+            limit,
+            cursor: None,
+        })
         .await
         .map(drop),
     );
     assert_rejected(
-        view.list_inode_children_page(
+        view.list_by_inode_with_options(
             root,
-            PageRequest {
-                limit,
-                cursor: None,
-            },
-            loonfs::ListInodeChildrenOptions {
+            &loonfs::ListOptions {
                 snapshot_id: Some(other),
                 ..Default::default()
             },
         )
+        .page(PageRequest {
+            limit,
+            cursor: None,
+        })
         .await
         .map(drop),
     );
@@ -1307,10 +1252,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         store.delete(&key).await.expect("delete segment");
     }
     store.reset();
-    assert_core_error_kind(
-        namespace.get_path_entry("/file", Default::default()).await,
-        ErrorCode::NamespaceCorrupt,
-    );
+    assert_core_error_kind(namespace.stat("/file").await, ErrorCode::NamespaceCorrupt);
     assert_eq!(
         store
             .snapshot()
@@ -1324,10 +1266,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
 
     failures.fail_all();
     store.reset();
-    assert_core_error_kind(
-        view.get_path_entry("/file", Default::default()).await,
-        ErrorCode::ServerError,
-    );
+    assert_core_error_kind(view.stat("/file").await, ErrorCode::ServerError);
     assert_eq!(failures.attempts(), 1);
     assert_eq!(store.count(OperationClass::Put), 0);
     assert_eq!(store.count(OperationClass::Delete), 0);

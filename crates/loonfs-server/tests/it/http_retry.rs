@@ -15,7 +15,7 @@ use loonfs_client::{
     ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath,
     PutFileOptions,
 };
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -193,17 +193,9 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         Some(loonfs_api::ErrorCode::CommitIdReuseConflict)
     );
 
-    let entry = harness
-        .client
-        .get_path_entry(&target, &Default::default())
-        .await
-        .expect("stat path");
+    let entry = harness.client.stat(&target).await.expect("stat path");
     assert_eq!(entry.head_seq, first.committed_seq);
-    let bytes = harness
-        .client
-        .get_file_bytes(&target, &Default::default())
-        .await
-        .expect("read file");
+    let bytes = harness.client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"stable bytes\n");
 
     // A different actor must still conflict.
@@ -341,7 +333,8 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
 
     let changes = harness
         .client
-        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes(&namespace, ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("list changes");
     let committed = changes
@@ -354,11 +347,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
         Some("import batch"),
         "the refused rerun did not rewrite the annotation that landed"
     );
-    let entry = harness
-        .client
-        .get_path_entry(&target, &Default::default())
-        .await
-        .expect("stat path");
+    let entry = harness.client.stat(&target).await.expect("stat path");
     assert_eq!(
         entry.head_seq, first.committed_seq,
         "the refused rerun published no revision"
@@ -427,19 +416,11 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
-    match harness
-        .client
-        .get_path_entry(&second_target, &Default::default())
-        .await
-    {
+    match harness.client.stat(&second_target).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
         other => panic!("the refused rerun wrote nothing, got {other:?}"),
     }
-    let entry = harness
-        .client
-        .get_path_entry(&first_target, &Default::default())
-        .await
-        .expect("stat path");
+    let entry = harness.client.stat(&first_target).await.expect("stat path");
     assert_eq!(
         entry.head_seq, first.committed_seq,
         "the refused rerun published no revision"
@@ -487,11 +468,7 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
         .put_file_bytes(&target, b"stable bytes\n", &replacing)
         .await
         .expect("first put");
-    let observed = harness
-        .client
-        .get_path_entry(&target, &Default::default())
-        .await
-        .expect("stat path");
+    let observed = harness.client.stat(&target).await.expect("stat path");
 
     match harness
         .client
@@ -526,11 +503,7 @@ async fn http_put_conflict_stands_when_only_a_precondition_changed() {
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
-    let entry = harness
-        .client
-        .get_path_entry(&target, &Default::default())
-        .await
-        .expect("stat path");
+    let entry = harness.client.stat(&target).await.expect("stat path");
     assert_eq!(
         entry.head_seq, first.committed_seq,
         "neither refused rerun published a revision"
@@ -615,11 +588,7 @@ async fn http_single_put_does_not_replay_a_multi_operation_commit() {
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
-    let entry = harness
-        .client
-        .get_path_entry(&target, &Default::default())
-        .await
-        .expect("stat path");
+    let entry = harness.client.stat(&target).await.expect("stat path");
     assert_eq!(
         entry.head_seq, first.committed_seq,
         "the refused rerun published no revision"
@@ -815,11 +784,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 
-    let bytes = harness
-        .client
-        .get_file_bytes(&target, &Default::default())
-        .await
-        .expect("read file");
+    let bytes = harness.client.read_file(&target).await.expect("read file");
     assert_eq!(
         bytes, b"stable bytes\n",
         "the refused rerun changed nothing"
@@ -894,16 +859,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .await
         .expect("copy repeat");
     assert_eq!(copy_repeated, copy_first);
-    let source_entry = harness
-        .client
-        .get_path_entry(&source, &Default::default())
-        .await
-        .expect("source stat");
-    let copied_entry = harness
-        .client
-        .get_path_entry(&copied, &Default::default())
-        .await
-        .expect("copied stat");
+    let source_entry = harness.client.stat(&source).await.expect("source stat");
+    let copied_entry = harness.client.stat(&copied).await.expect("copied stat");
     assert_ne!(source_entry.inode_id, copied_entry.inode_id);
     assert_eq!(source_entry.content_ref(), copied_entry.content_ref());
 
@@ -947,19 +904,11 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .await
         .expect("move repeat");
     assert_eq!(move_repeated, move_first);
-    match harness
-        .client
-        .get_path_entry(&copied, &Default::default())
-        .await
-    {
+    match harness.client.stat(&copied).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
         other => panic!("expected path_not_found for moved-from path, got {other:?}"),
     }
-    let moved_entry = harness
-        .client
-        .get_path_entry(&moved, &Default::default())
-        .await
-        .expect("moved stat");
+    let moved_entry = harness.client.stat(&moved).await.expect("moved stat");
     assert_eq!(moved_entry.inode_id, copied_entry.inode_id);
 
     let delete_first = harness
@@ -995,11 +944,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .await
         .expect("delete repeat");
     assert_eq!(delete_repeated, delete_first);
-    match harness
-        .client
-        .get_path_entry(&moved, &Default::default())
-        .await
-    {
+    match harness.client.stat(&moved).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
         other => panic!("expected path_not_found for deleted path, got {other:?}"),
     }
@@ -1111,12 +1056,12 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
 
     // Fencing gates writes only; server A still reads the moved file.
     let host_b_entry = client_a
-        .get_path_entry(&host_b_target, &Default::default())
+        .stat(&host_b_target)
         .await
         .expect("stat host b file");
     assert_eq!(host_b_entry.head_seq.0, moved.committed_seq.0);
     let host_b_bytes = client_a
-        .get_file_bytes(&host_b_target, &Default::default())
+        .read_file(&host_b_target)
         .await
         .expect("read host b file");
     assert_eq!(host_b_bytes, b"host a\n");
@@ -1200,7 +1145,7 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
         assert_eq!(
             harness
                 .client
-                .get_file_bytes(&target, &Default::default())
+                .read_file(&target)
                 .await
                 .expect("read published bytes"),
             bytes

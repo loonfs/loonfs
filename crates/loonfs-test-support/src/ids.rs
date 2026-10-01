@@ -2,7 +2,7 @@
 
 use loonfs_api::{
     ActorId, AttributeKey, AttributeValue, ContentId, ContentRef, EffectiveLimit, NamespaceId,
-    WriterId,
+    PageRequest, WriterId, DEFAULT_PAGE_LIMIT,
 };
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -67,4 +67,12 @@ pub fn page_limit(value: impl TryInto<u32>) -> EffectiveLimit {
         .ok()
         .expect("test page limit should fit in u32");
     EffectiveLimit::new(nonzero_u32(value))
+}
+
+/// Names the first page of a listing at the default page size.
+pub fn first_page<C>() -> PageRequest<C> {
+    PageRequest {
+        limit: page_limit(DEFAULT_PAGE_LIMIT),
+        cursor: None,
+    }
 }

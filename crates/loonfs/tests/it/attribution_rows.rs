@@ -80,13 +80,14 @@ fn embedded_reads_project_commit_attribution_without_rewriting_inode_creation() 
         RestoreRevisionOptions::new(restorer.clone()),
     ))
     .expect("restore first revision");
-    let revisions = block_on(namespace.list_file_revisions_page(
-        "/implicit/parent/report.txt",
-        PageRequest {
-            limit: page_limit(10),
-            cursor: None,
-        },
-    ))
+    let revisions = block_on(
+        namespace
+            .list_file_revisions("/implicit/parent/report.txt")
+            .page(PageRequest {
+                limit: page_limit(10),
+                cursor: None,
+            }),
+    )
     .expect("list revisions");
     assert_eq!(revisions.revisions[0].committed_by, restorer);
     assert_eq!(revisions.revisions[2].committed_by, creator);
@@ -250,7 +251,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
             },
         )
         .expect("delete subtree");
-    let trash = block_on(source_namespace.list_trash_page(PageRequest {
+    let trash = block_on(source_namespace.list_trash().page(PageRequest {
         limit: page_limit(10),
         cursor: None,
     }))
@@ -266,7 +267,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
 
     let reopened = open_runtime(object_store, "attribution-projections-reopened");
     let reopened_namespace = reopened.reader.namespace(&source_id);
-    let trash = block_on(reopened_namespace.list_trash_page(PageRequest {
+    let trash = block_on(reopened_namespace.list_trash().page(PageRequest {
         limit: page_limit(10),
         cursor: None,
     }))

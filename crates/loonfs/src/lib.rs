@@ -28,7 +28,7 @@
 //! namespace
 //!     .put_file_bytes("/hello.txt", b"hello", PutFileOptions::new(actor_id))
 //!     .await?;
-//! let file = namespace.get_file_bytes("/hello.txt").await?;
+//! let file = namespace.read_file("/hello.txt").await?;
 //! assert_eq!(file.bytes, b"hello");
 //!
 //! runtime.shutdown().await?;
@@ -183,8 +183,8 @@ pub use config::{
     DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_MAINTENANCE,
 };
 pub use fs::{
-    ChangesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
-    ReadView, SnapshotPolicy, SnapshotsPager, TrashPager,
+    ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
+    PathEntriesPager, ReadView, SnapshotPolicy, SnapshotsPager, TrashPager,
 };
 pub use handle::{LoonFs, LoonFsBuilder, Maintenance, Namespace, ReadOnly, Writable};
 pub use maintenance::{
@@ -201,9 +201,8 @@ pub use metadata_cache::{
 pub use options::{
     CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateSnapshotOptions, DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions,
-    ListChangesOptions, ListInodeChildrenOptions, ListPathEntriesOptions,
-    MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
-    RestoreRevisionOptions, StatPathOptions, UndeleteOptions, UpdateAccessOptions,
+    ListOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
+    RestoreRevisionOptions, StatOptions, UndeleteOptions, UpdateAccessOptions,
     UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState};

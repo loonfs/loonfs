@@ -5,7 +5,7 @@ use crate::resolve::ResolvedTarget;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_api::NamespaceAccess;
-use loonfs_client::{NamespacePath, PayloadSource, PutFileOptions, ReadFileOptions};
+use loonfs_client::{NamespacePath, PayloadSource, PutFileOptions};
 
 #[test]
 fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_limit() {
@@ -43,7 +43,7 @@ fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_lim
             .expect("upload past 256 MiB");
         let mut stream = target
             .client
-            .read_file_stream(&path, &ReadFileOptions::default())
+            .read_file_stream(&path)
             .await
             .expect("download past 256 MiB");
         let mut size_bytes = 0;

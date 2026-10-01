@@ -1054,18 +1054,10 @@ async fn runtime_created_state_is_readable_through_http() {
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("target");
-    let stat = harness
-        .client
-        .get_path_entry(&target, &Default::default())
-        .await
-        .expect("stat file");
+    let stat = harness.client.stat(&target).await.expect("stat file");
     assert_eq!(stat.path, "/notes/hello.txt");
     assert_eq!(stat.size_bytes(), Some(18));
-    let bytes = harness
-        .client
-        .get_file_bytes(&target, &Default::default())
-        .await
-        .expect("read file");
+    let bytes = harness.client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello from runtime");
 
     harness.server.abort();
@@ -1096,7 +1088,7 @@ async fn http_created_state_is_readable_through_runtime() {
         .expect("write file through http");
 
     let file = namespace
-        .get_file_bytes("/notes/from-http.txt")
+        .read_file("/notes/from-http.txt")
         .await
         .expect("read file through runtime");
     assert_eq!(file.bytes, b"hello from http");
@@ -1167,10 +1159,7 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
     let target = NamespacePath::parse("missing", "/").expect("target");
-    let mut pager =
-        harness
-            .client
-            .list_path_entries_pager(&target, None, None, &Default::default());
+    let mut pager = harness.client.list(&target);
     assert_api_error(
         pager.next().await.expect("a fresh pager has one page"),
         404,
@@ -1292,11 +1281,7 @@ async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let target = NamespacePath::parse("demo", "/docs/guarded.txt").expect("target");
-    let observed = harness
-        .client
-        .get_path_entry(&target, &Default::default())
-        .await
-        .expect("observe file");
+    let observed = harness.client.stat(&target).await.expect("observe file");
     harness
         .client
         .delete_path(
@@ -1316,7 +1301,7 @@ async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
         .expect("recreate path");
     let recreated = harness
         .client
-        .get_path_entry(&target, &Default::default())
+        .stat(&target)
         .await
         .expect("observe recreated file");
 
@@ -1371,11 +1356,7 @@ async fn http_move_with_preconditions_rejects_a_bumped_destination_revision() {
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let from = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
     let to = NamespacePath::parse("demo", "/docs/destination.txt").expect("destination");
-    let observed = harness
-        .client
-        .get_path_entry(&to, &Default::default())
-        .await
-        .expect("observe destination");
+    let observed = harness.client.stat(&to).await.expect("observe destination");
     harness
         .client
         .put_file_bytes(&to, b"destination v2", &replace_file_options())
@@ -1440,10 +1421,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         .expect("put recreates the subtree");
     let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
     assert_api_error(
-        harness
-            .client
-            .get_path_entry(&old_child, &Default::default())
-            .await,
+        harness.client.stat(&old_child).await,
         404,
         "path_not_found",
         None,
@@ -1569,7 +1547,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
         );
         // The checkpoint inventory names this deployment's garbage-collection
         // roots, so it answers behind the same token as everything else.
-        let mut pager = client.list_checkpoints_pager(&namespace_id("demo"), None, None);
+        let mut pager = client.list_checkpoints(&namespace_id("demo"));
         assert_api_error(
             pager.next().await.expect("a fresh pager has one page"),
             401,
@@ -2027,7 +2005,7 @@ async fn the_proxied_upload_route_never_holds_the_whole_payload() {
     // And the bytes are the bytes.
     let read_back = harness
         .client
-        .get_file_bytes(&target, &Default::default())
+        .read_file(&target)
         .await
         .expect("read the streamed object back");
     assert_eq!(read_back, payload);
@@ -2330,7 +2308,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     )
     .await;
     let inode_id = namespace
-        .get_path_entry("/note.txt", Default::default())
+        .stat("/note.txt")
         .await
         .expect("stat seeded file")
         .inode_id;
@@ -2366,18 +2344,14 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let client = Client::new(config_for_busy).expect("valid client config");
     let target = NamespacePath::parse("demo", "/note.txt").expect("target");
     assert_api_error(
-        client.get_file_bytes(&target, &Default::default()).await,
+        client.read_file(&target).await,
         503,
         "server_busy",
         Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
     );
     assert_api_error(
         client
-            .get_file_revision_bytes_by_inode(
-                &namespace_id("demo"),
-                inode_id,
-                loonfs_api::RevisionNo(1),
-            )
+            .read_file_revision_by_inode(&namespace_id("demo"), inode_id, loonfs_api::RevisionNo(1))
             .await,
         503,
         "server_busy",
@@ -2420,13 +2394,13 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let client = Client::new(client_config).expect("valid client config");
     let target = NamespacePath::parse("demo", "/note.txt").expect("target");
     let bytes = client
-        .get_file_bytes(&target, &Default::default())
+        .read_file(&target)
         .await
         .expect("a freed slot admits the read");
     assert_eq!(bytes, b"bounded");
     assert_eq!(
         client
-            .get_file_revision_bytes_by_inode(
+            .read_file_revision_by_inode(
                 &namespace_id("demo"),
                 inode_id,
                 loonfs_api::RevisionNo(1),
@@ -2521,12 +2495,12 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     )
     .await;
     let big_inode_id = namespace
-        .get_path_entry("/big.bin", Default::default())
+        .stat("/big.bin")
         .await
         .expect("stat big file")
         .inode_id;
     let small_inode_id = namespace
-        .get_path_entry("/small.bin", Default::default())
+        .stat("/small.bin")
         .await
         .expect("stat small file")
         .inode_id;
@@ -2554,10 +2528,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     .expect("valid client config");
     assert_api_error(
         client
-            .get_file_bytes(
-                &NamespacePath::parse("demo", "/big.bin").expect("target"),
-                &Default::default(),
-            )
+            .read_file(&NamespacePath::parse("demo", "/big.bin").expect("target"))
             .await,
         413,
         "content_too_large",
@@ -2565,7 +2536,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     );
     assert_api_error(
         client
-            .get_file_revision_bytes_by_inode(
+            .read_file_revision_by_inode(
                 &namespace_id("demo"),
                 big_inode_id,
                 loonfs_api::RevisionNo(1),
@@ -2577,16 +2548,13 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     );
     // Content inside the limit still reads through the same route.
     let bytes = client
-        .get_file_bytes(
-            &NamespacePath::parse("demo", "/small.bin").expect("target"),
-            &Default::default(),
-        )
+        .read_file(&NamespacePath::parse("demo", "/small.bin").expect("target"))
         .await
         .expect("small content fits under the limit");
     assert_eq!(bytes.len(), 8);
     assert_eq!(
         client
-            .get_file_revision_bytes_by_inode(
+            .read_file_revision_by_inode(
                 &namespace_id("demo"),
                 small_inode_id,
                 loonfs_api::RevisionNo(1),
@@ -2743,7 +2711,7 @@ async fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
 
     let target = NamespacePath::parse(namespace_id.as_str(), "/core.txt").expect("core target");
     let bytes = client
-        .get_file_bytes(&target, &Default::default())
+        .read_file(&target)
         .await
         .expect("grep failure must not affect core reads");
     assert_eq!(bytes, b"core remains readable");
@@ -2967,10 +2935,7 @@ mod direct_download {
         .expect("app");
         let namespace_reader = state.runtime.namespace(&namespace);
         for (index, (path, value)) in values.iter().enumerate() {
-            let entry = namespace_reader
-                .get_path_entry(path, Default::default())
-                .await
-                .expect("entry");
+            let entry = namespace_reader.stat(path).await.expect("entry");
             let (uri, body) = if index == 0 {
                 (
                     format!("/v0/namespaces/{namespace}/filesystem/downloads"),
@@ -3027,7 +2992,7 @@ mod direct_download {
                     assert_eq!(recording.count(OperationClass::Put), 0);
                     assert_eq!(
                         namespace_reader
-                            .get_file_bytes(path)
+                            .read_file(path)
                             .await
                             .expect("proxied read")
                             .bytes,
@@ -3405,15 +3370,12 @@ mod direct_download {
             .put_file_bytes(&target, &payload, &replace_file_options())
             .await
             .expect("seed the oversized file");
-        let entry = client
-            .get_path_entry(&target, &Default::default())
-            .await
-            .expect("stat seeded file");
+        let entry = client.stat(&target).await.expect("stat seeded file");
 
         // The wall the audit found: this deployment let the file exist and
         // will not proxy it back.
         assert_api_error(
-            client.get_file_bytes(&target, &Default::default()).await,
+            client.read_file(&target).await,
             413,
             ErrorCode::ContentTooLarge.as_str(),
             None,
@@ -3559,7 +3521,7 @@ mod direct_download {
             other => panic!("expected a typed not_supported, got {other:?}"),
         }
         let inode_id = client
-            .get_path_entry(&target, &Default::default())
+            .stat(&target)
             .await
             .expect("stat proxied file")
             .inode_id;
@@ -3584,7 +3546,7 @@ mod direct_download {
         // The proxied read it does serve is untouched.
         assert_eq!(
             client
-                .get_file_bytes(&target, &Default::default())
+                .read_file(&target)
                 .await
                 .expect("proxied read of a file under the cap"),
             b"small enough to proxy"
@@ -3940,10 +3902,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
                 .await
                 .expect("reader");
             let namespace = reader.namespace(&ns);
-            let entry = namespace
-                .get_path_entry("/large.bin", Default::default())
-                .await
-                .expect("entry");
+            let entry = namespace.stat("/large.bin").await.expect("entry");
 
             let key = loonfs_objectstore::keys::content_blob(
                 &entry.content_ref().expect("file").owner_namespace_id,

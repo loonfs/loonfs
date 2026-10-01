@@ -7,11 +7,12 @@ use futures::StreamExt;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ByteStream, ChangeSeq, CommitId, CompactionStepOutcome, CreateDirectoryOptions,
-    CreateNamespaceOptions, DestinationBehavior, ListChangesOptions, MetadataMaintenanceOptions,
-    NamespaceId, PutFileOptions, RevisionNo,
+    CreateNamespaceOptions, DestinationBehavior, MetadataMaintenanceOptions, NamespaceId,
+    PutFileOptions, RevisionNo,
 };
 use loonfs_api::ActorId;
 use loonfs_api::ErrorCode;
+use loonfs_test_support::ids::first_page;
 use tempfile::tempdir;
 
 const PATH: &str = "/docs/retry.txt";
@@ -54,7 +55,8 @@ async fn feed_message(
 ) -> Option<String> {
     let namespace = runtime.reader.namespace(namespace_id);
     let page = namespace
-        .list_changes_page(ChangeSeq(0), ListChangesOptions::default())
+        .list_changes(ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("list changes");
     page.changes
@@ -155,7 +157,8 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
     let reopened = open_runtime_async(store(temp_dir.path()), "writer-b").await;
     let namespace = reopened.reader.namespace(&namespace_id);
     let page = namespace
-        .list_changes_page(ChangeSeq(0), ListChangesOptions::default())
+        .list_changes(ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("replay change feed after restart");
     let change = page
@@ -185,11 +188,7 @@ async fn repeating_identical_inline_bytes_under_the_same_commit_id_replays() {
 
     assert_eq!(rerun, first);
     assert_eq!(
-        namespace
-            .get_file_bytes(PATH)
-            .await
-            .expect("read file")
-            .bytes,
+        namespace.read_file(PATH).await.expect("read file").bytes,
         b"stable bytes\n"
     );
 }
@@ -218,11 +217,7 @@ async fn reuploading_identical_bytes_above_the_inline_threshold_conflicts() {
         Some(first.committed_seq)
     );
     assert_eq!(
-        namespace
-            .get_file_bytes(PATH)
-            .await
-            .expect("read file")
-            .bytes,
+        namespace.read_file(PATH).await.expect("read file").bytes,
         payload
     );
 }
@@ -251,11 +246,7 @@ async fn different_bytes_under_a_used_commit_id_still_conflict() {
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        namespace
-            .get_file_bytes(PATH)
-            .await
-            .expect("read file")
-            .bytes,
+        namespace.read_file(PATH).await.expect("read file").bytes,
         b"stable bytes\n",
         "the refused rerun changed nothing"
     );
@@ -290,14 +281,14 @@ async fn the_same_bytes_at_a_different_path_still_conflict() {
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
         runtime
-            .get_path_entry(&namespace_id, "/b.txt")
+            .stat(&namespace_id, "/b.txt")
             .await
             .expect_err("the refused rerun wrote nothing")
             .code(),
         ErrorCode::PathNotFound
     );
     let entry = runtime
-        .get_path_entry(&namespace_id, "/a.txt")
+        .stat(&namespace_id, "/a.txt")
         .await
         .expect("stat path");
     assert_eq!(
@@ -331,10 +322,7 @@ async fn a_changed_behavior_under_a_used_commit_id_still_conflicts() {
         .expect_err("a changed behavior is a different commit");
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    let entry = runtime
-        .get_path_entry(&namespace_id, PATH)
-        .await
-        .expect("stat path");
+    let entry = runtime.stat(&namespace_id, PATH).await.expect("stat path");
     assert_eq!(
         entry.head_seq, first.committed_seq,
         "the refused rerun published no revision"
@@ -352,10 +340,7 @@ async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
         .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
         .await
         .expect("first put without preconditions");
-    let observed = runtime
-        .get_path_entry(&namespace_id, PATH)
-        .await
-        .expect("stat path");
+    let observed = runtime.stat(&namespace_id, PATH).await.expect("stat path");
     let error = runtime
         .put_file_bytes(
             &namespace_id,
@@ -371,10 +356,7 @@ async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
         .expect_err("a precondition the original never carried is a different commit");
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    let entry = runtime
-        .get_path_entry(&namespace_id, PATH)
-        .await
-        .expect("stat path");
+    let entry = runtime.stat(&namespace_id, PATH).await.expect("stat path");
     assert_eq!(
         entry.head_seq, first.committed_seq,
         "the refused rerun published no revision"
@@ -431,10 +413,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
         .expect_err("one put is not the two-operation commit that landed");
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    let entry = runtime
-        .get_path_entry(&namespace_id, PATH)
-        .await
-        .expect("stat path");
+    let entry = runtime.stat(&namespace_id, PATH).await.expect("stat path");
     assert_eq!(
         entry.head_seq, first.committed_seq,
         "the refused rerun published no revision"
@@ -530,10 +509,7 @@ async fn a_changed_message_under_a_used_commit_id_still_conflicts() {
         Some("import batch".to_owned()),
         "the refused rerun did not rewrite the annotation that landed"
     );
-    let entry = runtime
-        .get_path_entry(&namespace_id, PATH)
-        .await
-        .expect("stat path");
+    let entry = runtime.stat(&namespace_id, PATH).await.expect("stat path");
     assert_eq!(
         entry.head_seq, first.committed_seq,
         "the refused rerun published no revision"
@@ -695,11 +671,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        namespace
-            .get_file_bytes(PATH)
-            .await
-            .expect("read file")
-            .bytes,
+        namespace.read_file(PATH).await.expect("read file").bytes,
         b"stable bytes\n",
         "the refused rerun changed nothing"
     );
@@ -745,11 +717,7 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     // The blast radius the spec documents: a duplicate revision of
     // identical content. The file still reads back the same bytes.
     assert_eq!(
-        namespace
-            .get_file_bytes(PATH)
-            .await
-            .expect("read file")
-            .bytes,
+        namespace.read_file(PATH).await.expect("read file").bytes,
         b"stable bytes\n",
     );
 }
@@ -861,11 +829,7 @@ async fn reuploading_an_identical_stream_under_the_same_commit_id_conflicts() {
         Some(first.committed_seq)
     );
     assert_eq!(
-        namespace
-            .get_file_bytes(PATH)
-            .await
-            .expect("read file")
-            .bytes,
+        namespace.read_file(PATH).await.expect("read file").bytes,
         payload
     );
 }
@@ -901,11 +865,7 @@ async fn different_streamed_bytes_under_a_used_commit_id_still_conflict() {
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
     assert_eq!(
-        namespace
-            .get_file_bytes(PATH)
-            .await
-            .expect("read file")
-            .bytes,
+        namespace.read_file(PATH).await.expect("read file").bytes,
         vec![7u8; 300_000],
         "the refused rerun changed nothing"
     );

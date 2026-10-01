@@ -315,11 +315,11 @@ async fn a_read_only_handle_does_no_io_and_does_not_keep_the_session_open() {
     );
     for path in ["/first", "/reopened"] {
         read_only
-            .get_path_entry(path, Default::default())
+            .stat(path)
             .await
             .expect("the derived handle reads both sessions' commits");
         namespace
-            .get_path_entry(path, Default::default())
+            .stat(path)
             .await
             .expect("the reader's handle reads both sessions' commits");
     }

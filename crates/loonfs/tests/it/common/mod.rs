@@ -9,13 +9,14 @@ use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, Commit, ContentRef,
     CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes, FoldWalResponse,
-    ListChangesOptions, ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance,
+    DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes, FileRevisionsPager,
+    FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance,
     MetadataMaintenanceOptions, MetadataMaintenanceResponse, MoveOptions, Namespace,
-    NamespaceDiagnostics, NamespaceId, PageRequest, PaginationPolicy, PathEntry, PutFileOptions,
-    ReadOnly, SharedObjectStore, UploadId, UploadSession, Writable,
+    NamespaceDiagnostics, NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly,
+    SharedObjectStore, UploadId, UploadSession, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
 };
@@ -136,13 +137,7 @@ pub(crate) async fn collect_path_entries(
     absolute_path: &str,
 ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
     let namespace = reader.namespace(namespace_id);
-    let request = PageRequest {
-        limit: PaginationPolicy::default()
-            .resolve_limit(None)
-            .expect("default page limit"),
-        cursor: None,
-    };
-    let mut pager = namespace.list_path_entries_pager(absolute_path, request, Default::default());
+    let mut pager = namespace.list(absolute_path);
     let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
@@ -157,13 +152,7 @@ pub(crate) async fn collect_checkpoints(
     maintenance: &Maintenance,
     namespace_id: &NamespaceId,
 ) -> loonfs::Result<loonfs::ListCheckpointsResponse> {
-    let request = PageRequest {
-        limit: PaginationPolicy::default()
-            .resolve_limit(None)
-            .expect("default page limit"),
-        cursor: None,
-    };
-    let mut pager = maintenance.list_checkpoints_pager(namespace_id, request);
+    let mut pager = maintenance.list_checkpoints(namespace_id);
     let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
@@ -291,15 +280,13 @@ impl TestRuntime {
             .await
     }
 
-    pub(crate) async fn get_path_entry(
+    pub(crate) async fn stat(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<PathEntry> {
         let namespace = self.reader.namespace(namespace_id);
-        namespace
-            .get_path_entry(absolute_path, Default::default())
-            .await
+        namespace.stat(absolute_path).await
     }
 
     pub(crate) async fn list_path(
@@ -322,40 +309,26 @@ impl TestRuntime {
         collect_path_entries(&self.reader, namespace_id, absolute_path).await
     }
 
-    pub(crate) async fn list_path_entries_page(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        request: PageRequest<DirectoryPageCursor>,
-    ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
-        let namespace = self.reader.namespace(namespace_id);
-        namespace
-            .list_path_entries_page(absolute_path, request, Default::default())
-            .await
+    pub(crate) fn list(&self, namespace_id: &NamespaceId, absolute_path: &str) -> PathEntriesPager {
+        self.reader.namespace(namespace_id).list(absolute_path)
     }
 
-    pub(crate) async fn list_inode_children_page(
+    pub(crate) fn list_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: loonfs::InodeId,
-        request: PageRequest<DirectoryPageCursor>,
-    ) -> loonfs::Result<loonfs::ListInodeChildrenResponse> {
-        let namespace = self.reader.namespace(namespace_id);
-        namespace
-            .list_inode_children_page(inode_id, request, Default::default())
-            .await
+    ) -> InodeChildrenPager {
+        self.reader.namespace(namespace_id).list_by_inode(inode_id)
     }
 
-    pub(crate) async fn list_file_revisions_page(
+    pub(crate) fn list_file_revisions(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
-        request: PageRequest<loonfs::FileRevisionsPageCursor>,
-    ) -> loonfs::Result<loonfs::ListFileRevisionsResponse> {
-        let namespace = self.reader.namespace(namespace_id);
-        namespace
-            .list_file_revisions_page(absolute_path, request)
-            .await
+    ) -> FileRevisionsPager {
+        self.reader
+            .namespace(namespace_id)
+            .list_file_revisions(absolute_path)
     }
 
     pub(crate) async fn create_checkpoint(
@@ -443,7 +416,7 @@ pub(crate) trait RuntimeTestExt {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<Vec<PathEntry>>;
-    fn get_file_bytes_blocking(
+    fn read_file_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -561,7 +534,7 @@ impl RuntimeTestExt for TestRuntime {
         absolute_path: &str,
     ) -> loonfs::Result<PathEntry> {
         let namespace = self.reader.namespace(namespace_id);
-        block_on(namespace.get_path_entry(absolute_path, Default::default()))
+        block_on(namespace.stat(absolute_path))
     }
 
     fn list_path_blocking(
@@ -577,13 +550,13 @@ impl RuntimeTestExt for TestRuntime {
         .map(|response| response.entries)
     }
 
-    fn get_file_bytes_blocking(
+    fn read_file_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<FileBytes> {
         let namespace = self.reader.namespace(namespace_id);
-        block_on(namespace.get_file_bytes(absolute_path))
+        block_on(namespace.read_file(absolute_path))
     }
 
     fn put_file_bytes_blocking(
@@ -698,7 +671,7 @@ impl RuntimeTestExt for TestRuntime {
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ListChangesResponse> {
         let namespace = self.reader.namespace(namespace_id);
-        block_on(namespace.list_changes_page(after_seq, ListChangesOptions::default()))
+        block_on(namespace.list_changes(after_seq).page(first_page()))
     }
 
     fn create_checkpoint_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<Checkpoint> {

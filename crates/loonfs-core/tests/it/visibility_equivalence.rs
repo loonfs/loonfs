@@ -5,7 +5,7 @@
 //! with one hand-written expectation.
 
 use crate::common::read_context;
-use loonfs_api::options::StatPathOptions;
+use loonfs_api::options::StatOptions;
 use loonfs_api::v0::Commit;
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -233,7 +233,7 @@ impl VisibilityHarness {
     async fn inode_id(&self, path: &str) -> InodeId {
         let context = self.read_context().await;
         self.engine
-            .resolve_path(path, StatPathOptions::default(), &context)
+            .resolve_path(path, StatOptions::default(), &context)
             .await
             .expect("resolve tracked path")
             .inode_id
@@ -243,7 +243,7 @@ impl VisibilityHarness {
         let context = self.read_context().await;
         let error = self
             .engine
-            .resolve_path(path, StatPathOptions::default(), &context)
+            .resolve_path(path, StatOptions::default(), &context)
             .await
             .expect_err("path should be hidden");
         assert_eq!(error.code(), ErrorCode::PathNotFound);
@@ -296,7 +296,7 @@ impl VisibilityHarness {
             if let Some(path) = state.current_path {
                 let resolved = self
                     .engine
-                    .resolve_path(&path, StatPathOptions::default(), context)
+                    .resolve_path(&path, StatOptions::default(), context)
                     .await
                     .expect("forward path resolution must confirm a root-reaching chain");
                 assert_eq!(

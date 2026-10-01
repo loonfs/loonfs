@@ -7,7 +7,7 @@ use super::MetadataCache;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder, MetricsSnapshot};
 use crate::{
     CreateNamespaceOptions, LoonFs, NamespaceId, PutFileOptions, ReadOnly, SharedObjectStore,
-    StatPathOptions, Writable,
+    Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
@@ -75,7 +75,7 @@ async fn reader(root: &Path, cache: &MetadataCache) -> LoonFs<ReadOnly> {
 async fn assert_reads(runtime: &LoonFs<ReadOnly>, bytes: &[u8]) {
     let namespace = runtime.namespace(&demo());
     for path in [FOLDED, TAIL] {
-        let file = namespace.get_file_bytes(path).await.expect("read file");
+        let file = namespace.read_file(path).await.expect("read file");
         assert_eq!(file.bytes, bytes, "{path} returned another store's bytes");
     }
 }
@@ -182,7 +182,7 @@ async fn closing_one_runtime_leaves_the_cache_and_the_other_usable() {
         .expect("write through the new runtime");
     let file = reopened
         .namespace(&demo())
-        .get_file_bytes("/after.txt")
+        .read_file("/after.txt")
         .await
         .expect("read the new file");
     assert_eq!(file.bytes, b"after");
@@ -234,7 +234,7 @@ async fn read_policy_stays_with_each_binding() {
         store.reset();
         runtime
             .namespace(&demo())
-            .get_path_entry(FOLDED, StatPathOptions::default())
+            .stat(FOLDED)
             .await
             .expect("stat the folded file");
     }

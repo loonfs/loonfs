@@ -5,8 +5,7 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use http_body_util::BodyExt as _;
 use loonfs_client::{
-    Body, Client, ClientConfig, NamespacePath, PayloadSource, PutFileOptions, ReadFileOptions,
-    TransportError,
+    Body, Client, ClientConfig, NamespacePath, PayloadSource, PutFileOptions, TransportError,
 };
 use tower::ServiceExt as _;
 
@@ -61,10 +60,7 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
         .put_file_stream(&target, source, &PutFileOptions::new(actor))
         .await
         .expect("upload");
-    let mut stream = client
-        .read_file_stream(&target, &ReadFileOptions::default())
-        .await
-        .expect("download");
+    let mut stream = client.read_file_stream(&target).await.expect("download");
     let mut received = Vec::new();
     while let Some(chunk) = stream.next().await {
         received.extend_from_slice(&chunk.expect("chunk"));

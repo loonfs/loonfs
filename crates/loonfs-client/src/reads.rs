@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
+use loonfs_api::PageRequest;
 
 /// Selects a retained revision or snapshot for a file read. Set at most one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -12,11 +13,9 @@ pub struct ReadFileOptions {
     pub snapshot_id: Option<PinId>,
 }
 
-/// Optional selectors for one change-feed page.
+/// Optional selectors for the change feed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListChangesOptions {
-    /// Maximum number of changes in the page.
-    pub limit: Option<u32>,
     /// End the feed at this snapshot's captured sequence.
     pub snapshot_id: Option<PinId>,
 }
@@ -55,38 +54,27 @@ impl Client {
         .await
     }
 
-    /// Creates a snapshot pager beginning at `cursor`.
-    pub fn list_snapshots_pager(
-        &self,
-        namespace_id: &NamespaceId,
-        page_size: Option<u32>,
-        cursor: Option<String>,
-    ) -> SnapshotsPager {
+    /// Lists available snapshots.
+    pub fn list_snapshots(&self, namespace_id: &NamespaceId) -> SnapshotsPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        loonfs_api::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
-            async move {
-                client
-                    .list_snapshots_page(&namespace_id, page_size, cursor.as_deref())
-                    .await
-            }
+            async move { client.snapshots_page(&namespace_id, request).await }
         })
     }
 
-    /// Lists one bounded page of available snapshots.
-    pub async fn list_snapshots_page(
+    async fn snapshots_page(
         &self,
         namespace_id: &NamespaceId,
-        limit: Option<u32>,
-        cursor: Option<&str>,
+        request: PageRequest<String>,
     ) -> Result<ListSnapshotsResponse> {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{namespace_id}/snapshots",
             self.base_url
         ));
-        query.pagination(limit, cursor);
+        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         let url = query.finish();
         self.request_json::<(), ListSnapshotsResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
@@ -199,36 +187,33 @@ impl Client {
         .await
     }
 
-    /// Creates a directory pager beginning at `cursor`.
-    pub fn list_path_entries_pager(
+    /// Lists a directory.
+    pub fn list(&self, spec: &NamespacePath) -> PathEntriesPager {
+        self.list_with_options(spec, &ListOptions::default())
+    }
+
+    /// Lists a directory using the requested projection.
+    pub fn list_with_options(
         &self,
         spec: &NamespacePath,
-        page_size: Option<u32>,
-        cursor: Option<String>,
-        options: &ListPathEntriesOptions,
+        options: &ListOptions,
     ) -> PathEntriesPager {
         let client = self.clone();
         let spec = spec.clone();
         let options = options.clone();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        loonfs_api::Pager::new(move |request| {
             let client = client.clone();
             let spec = spec.clone();
             let options = options.clone();
-            async move {
-                client
-                    .list_path_entries_page(&spec, page_size, cursor.as_deref(), &options)
-                    .await
-            }
+            async move { client.path_entries_page(&spec, request, &options).await }
         })
     }
 
-    /// Lists one directory page using the requested projection.
-    pub async fn list_path_entries_page(
+    async fn path_entries_page(
         &self,
         spec: &NamespacePath,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-        options: &ListPathEntriesOptions,
+        request: PageRequest<String>,
+        options: &ListOptions,
     ) -> Result<ListPathEntriesResponse> {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{}/filesystem/entries",
@@ -236,7 +221,7 @@ impl Client {
             spec.namespace().as_str()
         ));
         query.push("path", spec.absolute_path().as_str());
-        query.pagination(limit, cursor);
+        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         query.push("include_attributes", options.include_attributes);
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
@@ -246,11 +231,16 @@ impl Client {
             .await
     }
 
+    /// Returns path metadata.
+    pub async fn stat(&self, spec: &NamespacePath) -> Result<PathEntry> {
+        self.stat_with_options(spec, &StatOptions::default()).await
+    }
+
     /// Returns path metadata using the requested projection.
-    pub async fn get_path_entry(
+    pub async fn stat_with_options(
         &self,
         spec: &NamespacePath,
-        options: &StatPathOptions,
+        options: &StatOptions,
     ) -> Result<PathEntry> {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{}/filesystem/entry",
@@ -268,11 +258,22 @@ impl Client {
     }
 
     /// Returns the current entry for a visible inode.
-    pub async fn get_inode(
+    pub async fn stat_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        options: &StatPathOptions,
+    ) -> Result<PathEntry> {
+        self.stat_by_inode_with_options(namespace_id, inode_id, &StatOptions::default())
+            .await
+    }
+
+    /// Returns the current entry for a visible inode using the requested
+    /// projection.
+    pub async fn stat_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &StatOptions,
     ) -> Result<PathEntry> {
         let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         let mut query = QueryBuilder::new(format!(
@@ -288,172 +289,50 @@ impl Client {
             .await
     }
 
-    /// Creates a children pager for one directory inode beginning at `cursor`.
-    pub fn list_inode_children_pager(
+    /// Lists a directory's children by inode.
+    pub fn list_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        page_size: Option<u32>,
-        cursor: Option<String>,
-        options: &ListInodeChildrenOptions,
+    ) -> InodeChildrenPager {
+        self.list_by_inode_with_options(namespace_id, inode_id, &ListOptions::default())
+    }
+
+    /// Lists a directory's children by inode, using the requested projection.
+    pub fn list_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &ListOptions,
     ) -> InodeChildrenPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
         let options = options.clone();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        loonfs_api::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
             let options = options.clone();
             async move {
                 client
-                    .list_inode_children_page(
-                        &namespace_id,
-                        inode_id,
-                        page_size,
-                        cursor.as_deref(),
-                        &options,
-                    )
+                    .inode_children_page(&namespace_id, inode_id, request, &options)
                     .await
             }
         })
     }
 
-    /// Creates a path-based revision pager beginning at `cursor`.
-    pub fn list_file_revisions_pager(
-        &self,
-        spec: &NamespacePath,
-        page_size: Option<u32>,
-        cursor: Option<String>,
-    ) -> FileRevisionsPager {
-        let client = self.clone();
-        let spec = spec.clone();
-        loonfs_api::Pager::new(cursor, move |cursor| {
-            let client = client.clone();
-            let spec = spec.clone();
-            async move {
-                client
-                    .list_file_revisions_page(&spec, page_size, cursor.as_deref())
-                    .await
-            }
-        })
-    }
-
-    /// Creates an inode-based revision pager beginning at `cursor`.
-    pub fn list_file_revisions_by_inode_pager(
+    async fn inode_children_page(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        page_size: Option<u32>,
-        cursor: Option<String>,
-    ) -> FileRevisionsPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(cursor, move |cursor| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            async move {
-                client
-                    .list_file_revisions_by_inode_page(
-                        &namespace_id,
-                        inode_id,
-                        page_size,
-                        cursor.as_deref(),
-                    )
-                    .await
-            }
-        })
-    }
-
-    /// Creates a trash pager beginning at `cursor`.
-    pub fn list_trash_pager(
-        &self,
-        namespace_id: &NamespaceId,
-        page_size: Option<u32>,
-        cursor: Option<String>,
-    ) -> TrashPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(cursor, move |cursor| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            async move {
-                client
-                    .list_trash_page(&namespace_id, page_size, cursor.as_deref())
-                    .await
-            }
-        })
-    }
-
-    /// Creates a change-feed pager beginning after `after_seq`.
-    pub fn list_changes_pager(
-        &self,
-        namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
-        page_size: Option<u32>,
-    ) -> ChangesPager {
-        self.changes_pager(namespace_id, after_seq, page_size, None)
-    }
-
-    /// Creates a snapshot-bounded change-feed pager beginning after `after_seq`.
-    pub fn list_changes_pager_at_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
-        page_size: Option<u32>,
-        snapshot_id: &PinId,
-    ) -> ChangesPager {
-        self.changes_pager(
-            namespace_id,
-            after_seq,
-            page_size,
-            Some(snapshot_id.clone()),
-        )
-    }
-
-    fn changes_pager(
-        &self,
-        namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
-        page_size: Option<u32>,
-        snapshot_id: Option<PinId>,
-    ) -> ChangesPager {
-        let client = self.clone();
-        let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(Some(after_seq), move |after_seq| {
-            let client = client.clone();
-            let namespace_id = namespace_id.clone();
-            let options = ListChangesOptions {
-                limit: page_size,
-                snapshot_id: snapshot_id.clone(),
-            };
-            async move {
-                client
-                    .list_changes_page(
-                        &namespace_id,
-                        after_seq.expect("change pager should carry a sequence"),
-                        &options,
-                    )
-                    .await
-            }
-        })
-    }
-
-    /// Lists one page of a directory's children by inode, using the requested
-    /// projection.
-    pub async fn list_inode_children_page(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-        options: &ListInodeChildrenOptions,
+        request: PageRequest<String>,
+        options: &ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
         let inode_id = loonfs_api::public_inode_id::encode(inode_id);
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
             self.base_url
         ));
-        query.pagination(limit, cursor);
+        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         query.push("include_attributes", options.include_attributes);
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
@@ -463,9 +342,160 @@ impl Client {
             .await
     }
 
+    /// Lists a file's revisions by path.
+    pub fn list_file_revisions(&self, spec: &NamespacePath) -> FileRevisionsPager {
+        let client = self.clone();
+        let spec = spec.clone();
+        loonfs_api::Pager::new(move |request| {
+            let client = client.clone();
+            let spec = spec.clone();
+            async move { client.file_revisions_page(&spec, request).await }
+        })
+    }
+
+    async fn file_revisions_page(
+        &self,
+        spec: &NamespacePath,
+        request: PageRequest<String>,
+    ) -> Result<ListFileRevisionsResponse> {
+        let mut query = QueryBuilder::new(format!(
+            "{}/v0/namespaces/{}/filesystem/revisions",
+            self.base_url,
+            spec.namespace().as_str()
+        ));
+        query.push("path", spec.absolute_path().as_str());
+        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        let url = query.finish();
+        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None, SendPolicy::Retry)
+            .await
+    }
+
+    /// Lists the retained revisions of a file inode.
+    pub fn list_file_revisions_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> FileRevisionsPager {
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(move |request| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                client
+                    .file_revisions_by_inode_page(&namespace_id, inode_id, request)
+                    .await
+            }
+        })
+    }
+
+    async fn file_revisions_by_inode_page(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: PageRequest<String>,
+    ) -> Result<ListFileRevisionsResponse> {
+        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
+        let mut query = QueryBuilder::new(format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
+            self.base_url
+        ));
+        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        let url = query.finish();
+        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None, SendPolicy::Retry)
+            .await
+    }
+
+    /// Lists the namespace's recoverable deletions.
+    pub fn list_trash(&self, namespace_id: &NamespaceId) -> TrashPager {
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        loonfs_api::Pager::new(move |request| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            async move { client.trash_page(&namespace_id, request).await }
+        })
+    }
+
+    async fn trash_page(
+        &self,
+        namespace_id: &NamespaceId,
+        request: PageRequest<String>,
+    ) -> Result<ListTrashResponse> {
+        let mut query = QueryBuilder::new(format!(
+            "{}/v0/namespaces/{}/filesystem/trash",
+            self.base_url,
+            namespace_id.as_str()
+        ));
+        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        let url = query.finish();
+        self.request_json::<(), ListTrashResponse>(self.get(&url), None, SendPolicy::Retry)
+            .await
+    }
+
+    /// Lists committed changes after `after_seq`.
+    pub fn list_changes(&self, namespace_id: &NamespaceId, after_seq: ChangeSeq) -> ChangesPager {
+        self.list_changes_with_options(namespace_id, after_seq, &ListChangesOptions::default())
+    }
+
+    /// Lists committed changes after `after_seq`, bounded by the requested
+    /// snapshot.
+    pub fn list_changes_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        options: &ListChangesOptions,
+    ) -> ChangesPager {
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        let options = options.clone();
+        loonfs_api::Pager::new(move |request: PageRequest<ChangeSeq>| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            let options = options.clone();
+            async move {
+                client
+                    .changes_page(
+                        &namespace_id,
+                        request.cursor.unwrap_or(after_seq),
+                        request.limit,
+                        &options,
+                    )
+                    .await
+            }
+        })
+    }
+
+    async fn changes_page(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        limit: loonfs_api::EffectiveLimit,
+        options: &ListChangesOptions,
+    ) -> Result<ListChangesResponse> {
+        let mut query = QueryBuilder::new(format!(
+            "{}/v0/namespaces/{namespace_id}/changes",
+            self.base_url
+        ));
+        query.push("after_seq", after_seq.0);
+        query.push("limit", limit.get());
+        if let Some(snapshot_id) = &options.snapshot_id {
+            query.push("snapshot_id", snapshot_id.as_str());
+        }
+        let url = query.finish();
+        self.request_json::<(), ListChangesResponse>(self.get(&url), None, SendPolicy::Retry)
+            .await
+    }
+
+    /// Returns a file's current bytes.
+    pub async fn read_file(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
+        self.read_file_with_options(spec, &ReadFileOptions::default())
+            .await
+    }
+
     /// Returns a file's bytes: the current revision by default, or a retained
     /// revision or snapshot when the options name one.
-    pub async fn get_file_bytes(
+    pub async fn read_file_with_options(
         &self,
         spec: &NamespacePath,
         options: &ReadFileOptions,
@@ -474,10 +504,17 @@ impl Client {
             .await
     }
 
+    /// Streams a file's current content through the server. See
+    /// [`Self::read_file_stream_with_options`].
+    pub async fn read_file_stream(&self, spec: &NamespacePath) -> Result<PayloadStream> {
+        self.read_file_stream_with_options(spec, &ReadFileOptions::default())
+            .await
+    }
+
     /// Streams content through the server. Successful completion means the server
     /// verified the whole object; a late verification failure aborts the body.
     /// Bytes already consumed remain provisional until the stream ends cleanly.
-    pub async fn read_file_stream(
+    pub async fn read_file_stream_with_options(
         &self,
         spec: &NamespacePath,
         options: &ReadFileOptions,
@@ -503,7 +540,7 @@ impl Client {
     }
 
     /// Reads and verifies one retained file revision by inode identity.
-    pub async fn get_file_revision_bytes_by_inode(
+    pub async fn read_file_revision_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -515,85 +552,5 @@ impl Client {
             self.base_url
         );
         self.request_bytes(&url).await
-    }
-
-    /// Returns one page of revisions for a file.
-    pub async fn list_file_revisions_page(
-        &self,
-        spec: &NamespacePath,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-    ) -> Result<ListFileRevisionsResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{}/filesystem/revisions",
-            self.base_url,
-            spec.namespace().as_str()
-        ));
-        query.push("path", spec.absolute_path().as_str());
-        query.pagination(limit, cursor);
-        let url = query.finish();
-        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None, SendPolicy::Retry)
-            .await
-    }
-
-    /// Returns one page of retained revisions for a file inode.
-    pub async fn list_file_revisions_by_inode_page(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-    ) -> Result<ListFileRevisionsResponse> {
-        let inode_id = loonfs_api::public_inode_id::encode(inode_id);
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
-            self.base_url
-        ));
-        query.pagination(limit, cursor);
-        let url = query.finish();
-        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None, SendPolicy::Retry)
-            .await
-    }
-
-    /// Returns one page of recoverable deletions in a namespace.
-    pub async fn list_trash_page(
-        &self,
-        namespace_id: &NamespaceId,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-    ) -> Result<ListTrashResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{}/filesystem/trash",
-            self.base_url,
-            namespace_id.as_str()
-        ));
-        query.pagination(limit, cursor);
-        let url = query.finish();
-        self.request_json::<(), ListTrashResponse>(self.get(&url), None, SendPolicy::Retry)
-            .await
-    }
-
-    /// Returns one page of committed changes after `after_seq`, bounded by the
-    /// requested limit and snapshot.
-    pub async fn list_changes_page(
-        &self,
-        namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
-        options: &ListChangesOptions,
-    ) -> Result<ListChangesResponse> {
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/changes",
-            self.base_url
-        ));
-        query.push("after_seq", after_seq.0);
-        if let Some(limit) = options.limit {
-            query.push("limit", limit);
-        }
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        let url = query.finish();
-        self.request_json::<(), ListChangesResponse>(self.get(&url), None, SendPolicy::Retry)
-            .await
     }
 }

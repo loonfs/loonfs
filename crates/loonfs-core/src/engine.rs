@@ -29,9 +29,7 @@ use crate::storage::content::{
     StreamedPayloadKind,
 };
 use crate::storage::content_admission::PreparedContent;
-use loonfs_api::options::{
-    DirectMultipartUploadOptions, ListInodeChildrenOptions, ListPathEntriesOptions, StatPathOptions,
-};
+use loonfs_api::options::{DirectMultipartUploadOptions, ListOptions, StatOptions};
 use loonfs_api::v0::{
     Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
@@ -282,7 +280,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub async fn resolve_path(
         &self,
         path: impl AsRef<str>,
-        options: StatPathOptions,
+        options: StatOptions,
         context: &RuntimeReadContext,
     ) -> Result<PathEntry> {
         let head_view = self.authorization_head_view().await?;
@@ -297,7 +295,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         path: impl AsRef<str>,
         request: PageRequest<DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
+        options: ListOptions,
         context: &RuntimeReadContext,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let head_view = self
@@ -323,7 +321,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
-        options: ListInodeChildrenOptions,
+        options: ListOptions,
         context: &RuntimeReadContext,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let head_view = self
@@ -662,7 +660,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub async fn stat_inode(
         &self,
         inode_id: InodeId,
-        options: StatPathOptions,
+        options: StatOptions,
         context: &RuntimeReadContext,
     ) -> Result<PathEntry> {
         let head_view = self.authorization_head_view().await?;

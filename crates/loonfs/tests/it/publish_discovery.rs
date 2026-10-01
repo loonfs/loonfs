@@ -245,7 +245,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         .expect("fresh reader");
     let namespace = reader.namespace(&namespace_id);
     namespace
-        .get_path_entry("/during/child", Default::default())
+        .stat("/during/child")
         .await
         .expect("durable child");
     writer.shutdown().await.expect("shutdown");

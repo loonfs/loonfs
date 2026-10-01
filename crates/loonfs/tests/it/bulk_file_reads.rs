@@ -91,14 +91,11 @@ async fn checkpoint_files(
     let mut seen: BTreeSet<InodeId> = BTreeSet::new();
     loop {
         let page = namespace
-            .list_checkpoint_files_page(
-                checkpoint_id,
-                PageRequest {
-                    limit: page_limit(limit),
-                    cursor,
-                },
-                ListCheckpointFilesOptions::default(),
-            )
+            .list_checkpoint_files(checkpoint_id)
+            .page(PageRequest {
+                limit: page_limit(limit),
+                cursor,
+            })
             .await
             .expect("read a checkpoint files page");
         assert!(
@@ -197,7 +194,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
 
     // An undeleted file: visible again, at a new path.
     let recovered_inode_id = fs
-        .get_path_entry(namespace_id, "/notes/recovered.txt")
+        .stat(namespace_id, "/notes/recovered.txt")
         .await
         .expect("stat before delete")
         .inode_id;
@@ -318,16 +315,16 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
     );
 
     let retained = namespace
-        .list_checkpoint_files_page(
+        .list_checkpoint_files_with_options(
             &checkpoint.checkpoint_id,
-            PageRequest {
-                limit: page_limit(100),
-                cursor: None,
-            },
-            ListCheckpointFilesOptions {
+            &ListCheckpointFilesOptions {
                 include_deleted: true,
             },
         )
+        .page(PageRequest {
+            limit: page_limit(100),
+            cursor: None,
+        })
         .await
         .expect("list the files the checkpoint retains");
     let (visible, deleted): (Vec<_>, Vec<_>) = retained
@@ -415,16 +412,13 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
     // tail: no row is re-read, and none is skipped.
     for (index, file) in whole.iter().enumerate() {
         let resumed = namespace
-            .list_checkpoint_files_page(
-                &checkpoint.checkpoint_id,
-                PageRequest {
-                    limit: page_limit(100),
-                    cursor: Some(CheckpointFilesPageCursor {
-                        after_inode_id: file.inode_id,
-                    }),
-                },
-                ListCheckpointFilesOptions::default(),
-            )
+            .list_checkpoint_files(&checkpoint.checkpoint_id)
+            .page(PageRequest {
+                limit: page_limit(100),
+                cursor: Some(CheckpointFilesPageCursor {
+                    after_inode_id: file.inode_id,
+                }),
+            })
             .await
             .expect("resume from a cursor");
         assert_eq!(resumed.files, whole[index + 1..]);
@@ -451,14 +445,11 @@ async fn an_empty_namespace_answers_one_empty_page() {
         .expect("create checkpoint");
 
     let page = namespace
-        .list_checkpoint_files_page(
-            &checkpoint.checkpoint_id,
-            PageRequest {
-                limit: page_limit(10),
-                cursor: None,
-            },
-            ListCheckpointFilesOptions::default(),
-        )
+        .list_checkpoint_files(&checkpoint.checkpoint_id)
+        .page(PageRequest {
+            limit: page_limit(10),
+            cursor: None,
+        })
         .await
         .expect("enumerate an empty namespace");
     assert!(page.files.is_empty());
@@ -597,14 +588,11 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
         .expect("release checkpoint");
 
     let error = namespace
-        .list_checkpoint_files_page(
-            &checkpoint.checkpoint_id,
-            PageRequest {
-                limit: page_limit(10),
-                cursor: None,
-            },
-            ListCheckpointFilesOptions::default(),
-        )
+        .list_checkpoint_files(&checkpoint.checkpoint_id)
+        .page(PageRequest {
+            limit: page_limit(10),
+            cursor: None,
+        })
         .await
         .expect_err("a deleted checkpoint pins nothing to enumerate");
     assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
@@ -612,14 +600,11 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
     let missing = loonfs::PinId::parse("pin_00000000000000000001-0123456789abcdef")
         .expect("valid checkpoint id");
     let error = namespace
-        .list_checkpoint_files_page(
-            &missing,
-            PageRequest {
-                limit: page_limit(10),
-                cursor: None,
-            },
-            ListCheckpointFilesOptions::default(),
-        )
+        .list_checkpoint_files(&missing)
+        .page(PageRequest {
+            limit: page_limit(10),
+            cursor: None,
+        })
         .await
         .expect_err("a checkpoint that never existed pins nothing either");
     assert_eq!(error.code(), ErrorCode::CheckpointNotFound);
@@ -663,7 +648,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         let fs = &fs;
         let namespace_id = &namespace_id;
         async move {
-            fs.get_path_entry(namespace_id, path)
+            fs.stat(namespace_id, path)
                 .await
                 .expect("stat path")
                 .inode_id
@@ -830,7 +815,7 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
     .await
     .expect("put file");
     let alpha = fs
-        .get_path_entry(&namespace_id, "/docs/alpha.txt")
+        .stat(&namespace_id, "/docs/alpha.txt")
         .await
         .expect("stat file")
         .inode_id;
@@ -890,7 +875,7 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
     .await
     .expect("put file");
     let content_ref = fs
-        .get_path_entry(&namespace_id, "/docs/alpha.txt")
+        .stat(&namespace_id, "/docs/alpha.txt")
         .await
         .expect("stat file")
         .content_ref()
@@ -899,7 +884,7 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
 
     counting.reset();
     let bytes = namespace
-        .read_content_ref(&content_ref, content_ref.size_bytes)
+        .read_content(&content_ref, content_ref.size_bytes)
         .await
         .expect("read content by reference");
     assert_eq!(bytes, b"alpha bytes");
@@ -911,7 +896,7 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
 
     counting.reset();
     let error = namespace
-        .read_content_ref(&content_ref, content_ref.size_bytes - 1)
+        .read_content(&content_ref, content_ref.size_bytes - 1)
         .await
         .expect_err("a reference larger than the budget is refused");
     assert_eq!(error.code(), ErrorCode::ContentTooLarge);
@@ -950,7 +935,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
     .await
     .expect("put file");
     let content_ref = fs
-        .get_path_entry(&namespace_id, "/docs/alpha.txt")
+        .stat(&namespace_id, "/docs/alpha.txt")
         .await
         .expect("stat file")
         .content_ref()
@@ -969,7 +954,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
         .expect("corrupt the stored content object");
 
     let error = namespace
-        .read_content_ref(&content_ref, content_ref.size_bytes)
+        .read_content(&content_ref, content_ref.size_bytes)
         .await
         .expect_err("bytes that do not hash to the reference are refused");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
@@ -1029,7 +1014,7 @@ async fn a_standalone_reader_serves_every_operation() {
 
     for file in &files {
         let bytes = namespace
-            .read_content_ref(&file.content_ref, file.size_bytes)
+            .read_content(&file.content_ref, file.size_bytes)
             .await
             .expect("read content through a standalone reader");
         assert_eq!(bytes.len() as u64, file.size_bytes);

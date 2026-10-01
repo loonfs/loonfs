@@ -145,7 +145,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
         let derived = writer.read_only();
         let derived_namespace = derived.namespace(&namespace_id);
         let read = derived_namespace
-            .get_file_bytes("/docs/hello.txt")
+            .read_file("/docs/hello.txt")
             .await
             .expect("read through derived reader");
         assert_eq!(read.bytes, b"hello");
@@ -159,7 +159,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
             .expect("build standalone reader");
         let standalone_namespace = standalone.namespace(&namespace_id);
         let read = standalone_namespace
-            .get_file_bytes("/docs/hello.txt")
+            .read_file("/docs/hello.txt")
             .await
             .expect("read through standalone reader");
         assert_eq!(read.bytes, b"hello");
@@ -222,7 +222,7 @@ fn standalone_reader_builds_without_writer_identity() {
         let namespace = reader.namespace(&namespace_id);
         // The reader serves the full read surface without an identity.
         let stat = namespace
-            .get_path_entry("/docs/hello.txt", Default::default())
+            .stat("/docs/hello.txt")
             .await
             .expect("stat through standalone reader");
         assert_eq!(stat.size_bytes(), Some(5));
@@ -297,7 +297,7 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
         // Reads and writes on the writer's own runtime see the state the
         // step left behind, with no stale-cache error in between.
         namespace
-            .get_path_entry("/docs/file-0.txt", Default::default())
+            .stat("/docs/file-0.txt")
             .await
             .expect("read after maintenance is served from revalidated caches");
         namespace_writer
@@ -309,7 +309,7 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
             .await
             .expect("writes continue against the post-maintenance head");
         namespace
-            .get_path_entry("/docs/after-maintenance.txt", Default::default())
+            .stat("/docs/after-maintenance.txt")
             .await
             .expect("read after write on the shared core");
 
@@ -374,11 +374,11 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
         let simple_namespace_reader = reader.namespace(&simple_namespace);
         let prepared_namespace_reader = reader.namespace(&prepared_namespace);
         let simple_stat = simple_namespace_reader
-            .get_path_entry("/file.txt", Default::default())
+            .stat("/file.txt")
             .await
             .expect("stat simple put");
         let prepared_stat = prepared_namespace_reader
-            .get_path_entry("/file.txt", Default::default())
+            .stat("/file.txt")
             .await
             .expect("stat prepared put");
         assert_eq!(simple_stat.revision_no(), prepared_stat.revision_no());
@@ -394,11 +394,11 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
         assert_eq!(simple_ref.checksum, prepared_ref.checksum);
 
         let simple_read = simple_namespace_reader
-            .get_file_bytes("/file.txt")
+            .read_file("/file.txt")
             .await
             .expect("read simple put");
         let prepared_read = prepared_namespace_reader
-            .get_file_bytes("/file.txt")
+            .read_file("/file.txt")
             .await
             .expect("read prepared put");
         assert_eq!(simple_read.bytes, bytes);
@@ -968,7 +968,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .expect_err("a mutation after shutdown must be refused");
         assert_eq!(refused.code(), ErrorCode::ShuttingDown);
         let read = namespace
-            .get_file_bytes("/docs/hello.txt")
+            .read_file("/docs/hello.txt")
             .await
             .expect("reads survive the writer's shutdown");
         assert_eq!(read.bytes, b"hello");
@@ -1135,10 +1135,7 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
             .expect("fold the tail so the tombstone is the only manifest put");
         let reader = writer.read_only();
         let namespace = reader.namespace(&namespace_id);
-        namespace
-            .get_path_entry("/file", Default::default())
-            .await
-            .expect("warm read");
+        namespace.stat("/file").await.expect("warm read");
         hints.lock().expect("hints").clear();
         if lost_answer {
             store.fail_next(1);
@@ -1164,7 +1161,7 @@ async fn namespace_deletion_drops_cached_reads_and_schedules_gc_even_when_its_an
         );
         assert_eq!(
             namespace
-                .get_path_entry("/file", Default::default())
+                .stat("/file")
                 .await
                 .expect_err("the cached view is dropped")
                 .code(),

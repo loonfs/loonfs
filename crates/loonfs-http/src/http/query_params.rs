@@ -110,14 +110,15 @@ fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
     })
 }
 
-pub(super) fn decode_optional_cursor<C: loonfs_api::PageCursor>(
+/// Checks that a cursor was minted by this endpoint before any read, and
+/// returns it unchanged for the pager, which decodes it again.
+pub(super) fn checked_cursor<C: loonfs_api::PageCursor>(
     cursor: Option<String>,
-) -> Result<Option<C>, ApiResponseError> {
-    cursor
-        .as_deref()
-        .map(decode_cursor)
-        .transpose()
-        .map_err(page_cursor_response_error)
+) -> Result<Option<String>, ApiResponseError> {
+    if let Some(cursor) = cursor.as_deref() {
+        decode_cursor::<C>(cursor).map_err(page_cursor_response_error)?;
+    }
+    Ok(cursor)
 }
 
 fn limit_response_error(error: LimitError) -> ApiResponseError {

@@ -1,21 +1,21 @@
 //! Namespace and filesystem reads on a [`Namespace`] handle in any mode.
 
-use super::core::{encode_next_cursor, file_revisions_page_response};
+use super::core::{decode_page_request, encode_next_cursor, file_revisions_page_response};
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, ContentRef, CoreError,
-    CurrentFileState, Error, FileBytes, FileContentStream, InodeId, ListChangesOptions,
-    ListChangesResponse, ListCheckpointFilesOptions, ListFileRevisionsResponse,
-    ListInodeChildrenOptions, ListInodeChildrenResponse, ListPathEntriesOptions,
+    CurrentFileState, Error, FileBytes, FileContentStream, InodeId, ListChangesResponse,
+    ListCheckpointFilesOptions, ListFileRevisionsResponse, ListInodeChildrenResponse, ListOptions,
     ListPathEntriesResponse, Namespace, NamespaceId, PathEntry, PinId, ReadFileStreamOptions,
-    RevisionNo, SharedObjectStore, StatPathOptions,
+    RevisionNo, SharedObjectStore, StatOptions,
 };
 use loonfs_api::{
-    AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, PageCursor,
-    PageRequest, PaginationPolicy, TrashPageCursor,
+    AbsolutePath, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor, PageRequest,
+    TrashPageCursor,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests;
@@ -58,14 +58,13 @@ fn validate_view_directory_cursor(
 
 /// Reads one page of the change feed at the head `context` serves. The
 /// feed's position is `after_seq`; it has no cursor parameter.
-async fn list_changes(
+async fn change_feed_page(
     engine: &NamespaceReaderEngine<SharedObjectStore>,
     context: &RuntimeReadContext,
     after_seq: ChangeSeq,
-    options: ListChangesOptions,
+    limit: EffectiveLimit,
 ) -> Result<ListChangesResponse> {
     engine.require_administrator(context).await?;
-    let limit = changes_page_limit(options.limit)?;
     engine
         .list_changes_after(after_seq, limit, context)
         .await
@@ -96,13 +95,15 @@ fn reject_pinned_directory_cursor(cursor: Option<&DirectoryPageCursor>) -> Resul
 /// nothing in the store and is meant to live for one request or unit of
 /// work. It can capture the current state, a checkpoint, or a live snapshot.
 #[must_use]
+#[derive(Clone)]
 pub struct ReadView {
-    engine: NamespaceReaderEngine<SharedObjectStore>,
+    engine: Arc<NamespaceReaderEngine<SharedObjectStore>>,
     core: super::RuntimeCore,
     context: RuntimeReadContext,
     source: ReadSource,
 }
 
+#[derive(Clone)]
 pub(super) enum ReadSource {
     Head,
     Checkpoint(PinId),
@@ -161,43 +162,78 @@ impl ReadView {
         Ok(())
     }
 
-    /// Reads one page of the change feed through this view's captured head.
-    pub async fn list_changes_page(
-        &self,
-        after_seq: ChangeSeq,
-        options: ListChangesOptions,
-    ) -> Result<ListChangesResponse> {
-        self.read(list_changes(
-            &self.engine,
-            &self.context,
-            after_seq,
-            options,
-        ))
-        .await
+    /// Lists the change feed after `after_seq` through this view's captured
+    /// head.
+    pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
+        let view = self.clone();
+        loonfs_api::Pager::new(move |request: PageRequest<ChangeSeq>| {
+            let view = view.clone();
+            async move {
+                view.read(change_feed_page(
+                    &view.engine,
+                    &view.context,
+                    request.cursor.unwrap_or(after_seq),
+                    request.limit,
+                ))
+                .await
+            }
+        })
     }
 
     /// Resolves an absolute path against this view.
-    pub async fn get_path_entry(
+    pub async fn stat(&self, absolute_path: &str) -> Result<PathEntry> {
+        self.stat_with_options(absolute_path, &StatOptions::default())
+            .await
+    }
+
+    /// Resolves an absolute path against this view, projecting what
+    /// `options` asks for.
+    pub async fn stat_with_options(
         &self,
         absolute_path: &str,
-        options: StatPathOptions,
+        options: &StatOptions,
     ) -> Result<PathEntry> {
         self.read(async {
             self.require_same_snapshot(options.snapshot_id.as_ref())?;
             Ok(self
                 .engine
-                .resolve_path(absolute_path, options, &self.context)
+                .resolve_path(absolute_path, options.clone(), &self.context)
                 .await?)
         })
         .await
     }
 
-    /// Lists one directory page against this view.
-    pub async fn list_path_entries_page(
+    /// Lists a directory against this view.
+    pub fn list(&self, absolute_path: &str) -> PathEntriesPager {
+        self.list_with_options(absolute_path, &ListOptions::default())
+    }
+
+    /// Lists a directory against this view, projecting what `options` asks
+    /// for.
+    pub fn list_with_options(
+        &self,
+        absolute_path: &str,
+        options: &ListOptions,
+    ) -> PathEntriesPager {
+        let view = self.clone();
+        let absolute_path = absolute_path.to_owned();
+        let options = options.clone();
+        loonfs_api::Pager::new(move |request| {
+            let view = view.clone();
+            let absolute_path = absolute_path.clone();
+            let options = options.clone();
+            async move {
+                view.path_entries_page(&absolute_path, decode_page_request(request)?, options)
+                    .await
+            }
+        })
+    }
+
+    async fn path_entries_page(
         &self,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
+        options: ListOptions,
     ) -> Result<ListPathEntriesResponse> {
         self.read(async {
             self.require_same_snapshot(options.snapshot_id.as_ref())?;
@@ -227,27 +263,57 @@ impl ReadView {
     }
 
     /// Reads a visible inode against this view.
-    pub async fn get_inode(
+    pub async fn stat_by_inode(&self, inode_id: InodeId) -> Result<PathEntry> {
+        self.stat_by_inode_with_options(inode_id, &StatOptions::default())
+            .await
+    }
+
+    /// Reads a visible inode against this view, projecting what `options`
+    /// asks for.
+    pub async fn stat_by_inode_with_options(
         &self,
         inode_id: InodeId,
-        options: StatPathOptions,
+        options: &StatOptions,
     ) -> Result<PathEntry> {
         self.read(async {
             self.require_same_snapshot(options.snapshot_id.as_ref())?;
             Ok(self
                 .engine
-                .stat_inode(inode_id, options, &self.context)
+                .stat_inode(inode_id, options.clone(), &self.context)
                 .await?)
         })
         .await
     }
 
-    /// Lists one directory inode page against this view.
-    pub async fn list_inode_children_page(
+    /// Lists a directory inode's children against this view.
+    pub fn list_by_inode(&self, inode_id: InodeId) -> InodeChildrenPager {
+        self.list_by_inode_with_options(inode_id, &ListOptions::default())
+    }
+
+    /// Lists a directory inode's children against this view, projecting what
+    /// `options` asks for.
+    pub fn list_by_inode_with_options(
+        &self,
+        inode_id: InodeId,
+        options: &ListOptions,
+    ) -> InodeChildrenPager {
+        let view = self.clone();
+        let options = options.clone();
+        loonfs_api::Pager::new(move |request| {
+            let view = view.clone();
+            let options = options.clone();
+            async move {
+                view.inode_children_page(inode_id, decode_page_request(request)?, options)
+                    .await
+            }
+        })
+    }
+
+    async fn inode_children_page(
         &self,
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
-        options: ListInodeChildrenOptions,
+        options: ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
         self.read(async {
             self.require_same_snapshot(options.snapshot_id.as_ref())?;
@@ -295,11 +361,7 @@ impl ReadView {
     /// Requires namespace administrator access. Content must be published in
     /// this view, including through a fork. Otherwise returns
     /// `path_not_found` without reading content bytes.
-    pub async fn read_content_ref(
-        &self,
-        content_ref: &ContentRef,
-        max_bytes: u64,
-    ) -> Result<Vec<u8>> {
+    pub async fn read_content(&self, content_ref: &ContentRef, max_bytes: u64) -> Result<Vec<u8>> {
         self.read(async {
             Ok(self
                 .engine
@@ -316,7 +378,7 @@ impl ReadView {
     }
 
     /// Reads one inode revision through this view's authorization.
-    pub async fn get_file_revision_bytes_by_inode(
+    pub async fn read_file_revision_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -332,7 +394,7 @@ impl ReadView {
     }
 
     /// Reads the file selected by this view.
-    pub async fn get_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
+    pub async fn read_file(&self, absolute_path: &str) -> Result<FileBytes> {
         self.read(async {
             Ok(self
                 .engine
@@ -351,7 +413,18 @@ impl ReadView {
     pub async fn read_file_stream(
         &self,
         absolute_path: &str,
-        options: ReadFileStreamOptions,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.read_file_stream_with_options(absolute_path, &ReadFileStreamOptions::default())
+            .await
+    }
+
+    /// Streams the file selected by this view in bounded chunks, as
+    /// `options` asks. A view reads one state, so `options` may not name a
+    /// revision.
+    pub async fn read_file_stream_with_options(
+        &self,
+        absolute_path: &str,
+        options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         self.read(async {
             if options.revision_no.is_some() {
@@ -396,22 +469,8 @@ pub type FileRevisionsPager = loonfs_api::Pager<ListFileRevisionsResponse, Error
 pub type TrashPager = loonfs_api::Pager<loonfs_api::ListTrashResponse, Error>;
 /// A pager over committed changes.
 pub type ChangesPager = loonfs_api::Pager<ListChangesResponse, Error>;
-
-fn encoded_pager_cursor<C: PageCursor>(cursor: Option<&C>) -> Option<String> {
-    cursor.map(|cursor| loonfs_api::encode_cursor(cursor).expect("typed page cursor should encode"))
-}
-
-fn pager_request<C: PageCursor>(
-    limit: loonfs_api::EffectiveLimit,
-    cursor: Option<String>,
-) -> Result<PageRequest<C>> {
-    let cursor = cursor
-        .as_deref()
-        .map(loonfs_api::decode_cursor)
-        .transpose()
-        .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
-    Ok(PageRequest { limit, cursor })
-}
+/// A pager over the files a checkpoint pins.
+pub type CheckpointFilesPager = loonfs_api::Pager<CheckpointFilesPage, Error>;
 
 impl<M> Namespace<M> {
     fn read_view_from(
@@ -421,7 +480,7 @@ impl<M> Namespace<M> {
         source: ReadSource,
     ) -> ReadView {
         ReadView {
-            engine,
+            engine: Arc::new(engine),
             core: self.core.clone(),
             context,
             source,
@@ -528,6 +587,13 @@ impl<M> Namespace<M> {
     }
 
     /// Resolves an absolute path to its authoritative entry at the current
+    /// head.
+    pub async fn stat(&self, absolute_path: &str) -> Result<PathEntry> {
+        self.stat_with_options(absolute_path, &StatOptions::default())
+            .await
+    }
+
+    /// Resolves an absolute path to its authoritative entry at the current
     /// head, projecting what `options` asks for.
     #[tracing::instrument(
         level = "debug",
@@ -541,16 +607,16 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_path_entry(
+    pub async fn stat_with_options(
         &self,
         absolute_path: &str,
-        options: StatPathOptions,
+        options: &StatOptions,
     ) -> Result<PathEntry> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
                 .read_view_at_snapshot(snapshot_id)
                 .await?
-                .get_path_entry(absolute_path, options)
+                .stat_with_options(absolute_path, options)
                 .await;
         }
         let span = tracing::Span::current();
@@ -569,6 +635,13 @@ impl<M> Namespace<M> {
     }
 
     /// Returns the current entry for a visible inode.
+    pub async fn stat_by_inode(&self, inode_id: InodeId) -> Result<PathEntry> {
+        self.stat_by_inode_with_options(inode_id, &StatOptions::default())
+            .await
+    }
+
+    /// Returns the current entry for a visible inode, projecting what
+    /// `options` asks for.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.stat_inode",
@@ -581,16 +654,16 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_inode(
+    pub async fn stat_by_inode_with_options(
         &self,
         inode_id: InodeId,
-        options: StatPathOptions,
+        options: &StatOptions,
     ) -> Result<PathEntry> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
                 .read_view_at_snapshot(snapshot_id)
                 .await?
-                .get_inode(inode_id, options)
+                .stat_by_inode_with_options(inode_id, options)
                 .await;
         }
         let span = tracing::Span::current();
@@ -606,34 +679,37 @@ impl<M> Namespace<M> {
             .await
     }
 
-    /// Creates a directory pager beginning at `request.cursor`.
-    pub fn list_path_entries_pager(
+    /// Lists a directory. Each page reads the head that is current when the
+    /// page is fetched.
+    pub fn list(&self, absolute_path: &str) -> PathEntriesPager {
+        self.list_with_options(absolute_path, &ListOptions::default())
+    }
+
+    /// Lists a directory, projecting what `options` asks for.
+    ///
+    /// Asking for attributes costs one lookup per entry and adds an unbounded
+    /// number of bytes to each page, so a caller that turns the projection on
+    /// should also size its pages for the maps it expects back.
+    pub fn list_with_options(
         &self,
         absolute_path: &str,
-        request: PageRequest<DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
+        options: &ListOptions,
     ) -> PathEntriesPager {
-        let cursor = encoded_pager_cursor(request.cursor.as_ref());
-        let limit = request.limit;
         let reader = self.read_only();
         let absolute_path = absolute_path.to_owned();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        let options = options.clone();
+        loonfs_api::Pager::new(move |request| {
             let reader = reader.clone();
             let absolute_path = absolute_path.clone();
             let options = options.clone();
             async move {
                 reader
-                    .list_path_entries_page(&absolute_path, pager_request(limit, cursor)?, options)
+                    .path_entries_page(&absolute_path, decode_page_request(request)?, options)
                     .await
             }
         })
     }
 
-    /// Lists one page of a directory, projecting what `options` asks for.
-    ///
-    /// Asking for attributes costs one lookup per entry and adds an unbounded
-    /// number of bytes to the page, so a caller that turns the projection on
-    /// should also size its page for the maps it expects back.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_path_entries",
@@ -647,34 +723,21 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_path_entries_page(
+    async fn path_entries_page(
         &self,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
+        options: ListOptions,
     ) -> Result<ListPathEntriesResponse> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
                 .read_view_at_snapshot(snapshot_id)
                 .await?
-                .list_path_entries_page(absolute_path, request, options)
+                .path_entries_page(absolute_path, request, options)
                 .await;
         }
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
         self.core.record_trace_context(&tracing::Span::current());
-        let (mut response, next_cursor) = self
-            .list_path_entries_page_typed(absolute_path, request, options)
-            .await?;
-        response.next_cursor = encode_next_cursor(next_cursor.as_ref())?;
-        Ok(response)
-    }
-
-    async fn list_path_entries_page_typed(
-        &self,
-        absolute_path: &str,
-        request: PageRequest<DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
-    ) -> Result<(ListPathEntriesResponse, Option<DirectoryPageCursor>)> {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
         self.core
@@ -689,49 +752,48 @@ impl<M> Namespace<M> {
                     let page = engine
                         .list_path_page(listed_path.as_str(), request, options, &read_context)
                         .await?;
-                    let head_seq = read_context.head.seq;
-                    let next_cursor = page.next_cursor;
-                    let response = ListPathEntriesResponse {
+                    Ok(ListPathEntriesResponse {
                         namespace_id: self.namespace_id.clone(),
                         path: listed_path,
-                        head_seq,
+                        head_seq: read_context.head.seq,
                         entries: page.items,
-                        next_cursor: None,
-                    };
-                    Ok((response, next_cursor))
+                        next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
+                    })
                 }
             })
             .await
     }
 
-    /// Creates a children pager for one directory inode beginning at
-    /// `request.cursor`.
-    pub fn list_inode_children_pager(
+    /// Lists a directory's children by inode. Each page reads the head that
+    /// is current when the page is fetched.
+    ///
+    /// The parent is addressed by its stable inode identity, so a page and
+    /// its resumption always describe the same directory even when the
+    /// parent is concurrently renamed or moved.
+    pub fn list_by_inode(&self, inode_id: InodeId) -> InodeChildrenPager {
+        self.list_by_inode_with_options(inode_id, &ListOptions::default())
+    }
+
+    /// Lists a directory's children by inode, projecting what `options` asks
+    /// for.
+    pub fn list_by_inode_with_options(
         &self,
         inode_id: InodeId,
-        request: PageRequest<DirectoryPageCursor>,
-        options: ListInodeChildrenOptions,
+        options: &ListOptions,
     ) -> InodeChildrenPager {
-        let cursor = encoded_pager_cursor(request.cursor.as_ref());
-        let limit = request.limit;
         let reader = self.read_only();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        let options = options.clone();
+        loonfs_api::Pager::new(move |request| {
             let reader = reader.clone();
             let options = options.clone();
             async move {
                 reader
-                    .list_inode_children_page(inode_id, pager_request(limit, cursor)?, options)
+                    .inode_children_page(inode_id, decode_page_request(request)?, options)
                     .await
             }
         })
     }
 
-    /// Lists one page of a directory's children by inode, projecting what
-    /// `options` asks for.
-    ///
-    /// The parent is addressed by its stable inode identity, so a page and
-    /// its resumption always describe the same directory even when the
-    /// parent is concurrently renamed or moved.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_inode_children",
@@ -745,17 +807,17 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_inode_children_page(
+    async fn inode_children_page(
         &self,
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
-        options: ListInodeChildrenOptions,
+        options: ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
                 .read_view_at_snapshot(snapshot_id)
                 .await?
-                .list_inode_children_page(inode_id, request, options)
+                .inode_children_page(inode_id, request, options)
                 .await;
         }
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
@@ -799,12 +861,24 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
+    pub async fn read_file(&self, absolute_path: &str) -> Result<FileBytes> {
         self.core.record_trace_context(&tracing::Span::current());
         self.get_current_file_bytes(absolute_path).await
     }
 
     /// Reads a file's current content as bounded chunks instead of one buffer.
+    ///
+    /// See [`Self::read_file_stream_with_options`] for how the stream is
+    /// verified.
+    pub async fn read_file_stream(
+        &self,
+        absolute_path: &str,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.read_file_stream_with_options(absolute_path, &ReadFileStreamOptions::default())
+            .await
+    }
+
+    /// Reads a file as bounded chunks, as `options` asks.
     ///
     /// Each ranged read uses bounded memory. Size and checksum verification
     /// complete when [`FileContentStream::next_chunk`] returns `None`; stopping
@@ -827,12 +901,13 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn read_file_stream(
+    pub async fn read_file_stream_with_options(
         &self,
         absolute_path: &str,
-        options: ReadFileStreamOptions,
+        options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         self.core.record_trace_context(&tracing::Span::current());
+        let options = *options;
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
                 let stream = engine
@@ -914,11 +989,37 @@ impl<M> Namespace<M> {
     /// Lists files visible at a checkpoint in ascending inode-ID order.
     ///
     /// The pinned manifest is read without replaying later WAL entries.
-    /// Directories are omitted. With
-    /// [`ListCheckpointFilesOptions::include_deleted`], the page also lists
-    /// deleted files and files under a deleted directory. An id that names no
-    /// user checkpoint returns `checkpoint_not_found` rather than falling back
-    /// to current state.
+    /// Directories are omitted. An id that names no user checkpoint returns
+    /// `checkpoint_not_found` rather than falling back to current state.
+    pub fn list_checkpoint_files(&self, checkpoint_id: &PinId) -> CheckpointFilesPager {
+        self.list_checkpoint_files_with_options(
+            checkpoint_id,
+            &ListCheckpointFilesOptions::default(),
+        )
+    }
+
+    /// Lists files at a checkpoint as `options` asks. With
+    /// [`ListCheckpointFilesOptions::include_deleted`], the pages also list
+    /// deleted files and files under a deleted directory.
+    pub fn list_checkpoint_files_with_options(
+        &self,
+        checkpoint_id: &PinId,
+        options: &ListCheckpointFilesOptions,
+    ) -> CheckpointFilesPager {
+        let reader = self.read_only();
+        let checkpoint_id = checkpoint_id.clone();
+        let options = *options;
+        loonfs_api::Pager::new(move |request| {
+            let reader = reader.clone();
+            let checkpoint_id = checkpoint_id.clone();
+            async move {
+                reader
+                    .checkpoint_files_page(&checkpoint_id, request, options)
+                    .await
+            }
+        })
+    }
+
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_checkpoint_files_page",
@@ -931,7 +1032,7 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_checkpoint_files_page(
+    async fn checkpoint_files_page(
         &self,
         checkpoint_id: &PinId,
         request: PageRequest<CheckpointFilesPageCursor>,
@@ -1002,11 +1103,7 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn read_content_ref(
-        &self,
-        content_ref: &ContentRef,
-        max_bytes: u64,
-    ) -> Result<Vec<u8>> {
+    pub async fn read_content(&self, content_ref: &ContentRef, max_bytes: u64) -> Result<Vec<u8>> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
@@ -1017,10 +1114,18 @@ impl<M> Namespace<M> {
             .await
     }
 
-    /// Lists one page of the namespace's recoverable deletions, ascending
-    /// by deleted root inode. Tombstone rows are immortal, so this answers
-    /// however far the replay floor has advanced; entries carry the deleted
-    /// name when the delete recorded one.
+    /// Lists the namespace's recoverable deletions, ascending by deleted root
+    /// inode. Tombstone rows are immortal, so this answers however far the
+    /// replay floor has advanced; entries carry the deleted name when the
+    /// delete recorded one.
+    pub fn list_trash(&self) -> TrashPager {
+        let reader = self.read_only();
+        loonfs_api::Pager::new(move |request| {
+            let reader = reader.clone();
+            async move { reader.trash_page(decode_page_request(request)?).await }
+        })
+    }
+
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_trash",
@@ -1033,9 +1138,9 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_trash_page(
+    async fn trash_page(
         &self,
-        request: PageRequest<loonfs_api::TrashPageCursor>,
+        request: PageRequest<TrashPageCursor>,
     ) -> Result<loonfs_api::ListTrashResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
@@ -1055,18 +1160,21 @@ impl<M> Namespace<M> {
             .await
     }
 
-    /// Creates a trash pager beginning at `request.cursor`.
-    pub fn list_trash_pager(&self, request: PageRequest<TrashPageCursor>) -> TrashPager {
-        let cursor = encoded_pager_cursor(request.cursor.as_ref());
-        let limit = request.limit;
+    /// Lists a file path's revision history, newest first.
+    pub fn list_file_revisions(&self, absolute_path: &str) -> FileRevisionsPager {
         let reader = self.read_only();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        let absolute_path = absolute_path.to_owned();
+        loonfs_api::Pager::new(move |request| {
             let reader = reader.clone();
-            async move { reader.list_trash_page(pager_request(limit, cursor)?).await }
+            let absolute_path = absolute_path.clone();
+            async move {
+                reader
+                    .file_revisions_page(&absolute_path, decode_page_request(request)?)
+                    .await
+            }
         })
     }
 
-    /// Lists one page of a file path's revision history.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_file_revisions",
@@ -1079,7 +1187,7 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_file_revisions_page(
+    async fn file_revisions_page(
         &self,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
@@ -1106,28 +1214,19 @@ impl<M> Namespace<M> {
             .await
     }
 
-    /// Creates a path-based revision pager beginning at `request.cursor`.
-    pub fn list_file_revisions_pager(
-        &self,
-        absolute_path: &str,
-        request: PageRequest<FileRevisionsPageCursor>,
-    ) -> FileRevisionsPager {
-        let cursor = encoded_pager_cursor(request.cursor.as_ref());
-        let limit = request.limit;
+    /// Lists the retained revisions of a file inode, newest first.
+    pub fn list_file_revisions_by_inode(&self, inode_id: InodeId) -> FileRevisionsPager {
         let reader = self.read_only();
-        let absolute_path = absolute_path.to_owned();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        loonfs_api::Pager::new(move |request| {
             let reader = reader.clone();
-            let absolute_path = absolute_path.clone();
             async move {
                 reader
-                    .list_file_revisions_page(&absolute_path, pager_request(limit, cursor)?)
+                    .file_revisions_by_inode_page(inode_id, decode_page_request(request)?)
                     .await
             }
         })
     }
 
-    /// Lists one page of retained revisions for a file inode.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_file_revisions_by_inode",
@@ -1140,7 +1239,7 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_file_revisions_by_inode_page(
+    async fn file_revisions_by_inode_page(
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
@@ -1164,25 +1263,6 @@ impl<M> Namespace<M> {
             .await
     }
 
-    /// Creates an inode-based revision pager beginning at `request.cursor`.
-    pub fn list_file_revisions_by_inode_pager(
-        &self,
-        inode_id: InodeId,
-        request: PageRequest<FileRevisionsPageCursor>,
-    ) -> FileRevisionsPager {
-        let cursor = encoded_pager_cursor(request.cursor.as_ref());
-        let limit = request.limit;
-        let reader = self.read_only();
-        loonfs_api::Pager::new(cursor, move |cursor| {
-            let reader = reader.clone();
-            async move {
-                reader
-                    .list_file_revisions_by_inode_page(inode_id, pager_request(limit, cursor)?)
-                    .await
-            }
-        })
-    }
-
     /// Reads the content of one historical file revision by path.
     #[tracing::instrument(
         level = "debug",
@@ -1197,7 +1277,7 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_file_revision_bytes(
+    pub async fn read_file_revision(
         &self,
         absolute_path: &str,
         revision_no: RevisionNo,
@@ -1262,7 +1342,7 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn get_file_revision_bytes_by_inode(
+    pub async fn read_file_revision_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -1283,7 +1363,19 @@ impl<M> Namespace<M> {
             .await
     }
 
-    /// Reads one page of the ordered change feed after the `after_seq` cursor.
+    /// Lists the ordered change feed after `after_seq`.
+    pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
+        let reader = self.read_only();
+        loonfs_api::Pager::new(move |request: PageRequest<ChangeSeq>| {
+            let reader = reader.clone();
+            async move {
+                reader
+                    .changes_page(request.cursor.unwrap_or(after_seq), request.limit)
+                    .await
+            }
+        })
+    }
+
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.list_changes",
@@ -1297,47 +1389,16 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn list_changes_page(
+    async fn changes_page(
         &self,
         after_seq: ChangeSeq,
-        options: ListChangesOptions,
+        limit: EffectiveLimit,
     ) -> Result<ListChangesResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         self.core
-            .read(&self.namespace_id, |engine, context| {
-                let options = options.clone();
-                async move { list_changes(&engine, &context, after_seq, options).await }
+            .read(&self.namespace_id, |engine, context| async move {
+                change_feed_page(&engine, &context, after_seq, limit).await
             })
             .await
-    }
-
-    /// Creates a change-feed pager beginning after `after_seq`.
-    pub fn list_changes_pager(
-        &self,
-        after_seq: ChangeSeq,
-        options: ListChangesOptions,
-    ) -> ChangesPager {
-        let reader = self.read_only();
-        loonfs_api::Pager::new(Some(after_seq), move |after_seq| {
-            let reader = reader.clone();
-            let options = options.clone();
-            async move {
-                reader
-                    .list_changes_page(
-                        after_seq.expect("change pager should carry a sequence"),
-                        options,
-                    )
-                    .await
-            }
-        })
-    }
-}
-
-fn changes_page_limit(limit: Option<EffectiveLimit>) -> Result<EffectiveLimit> {
-    match limit {
-        Some(limit) => Ok(limit),
-        None => PaginationPolicy::default()
-            .resolve_limit(None)
-            .map_err(|error| Error::Config(error.to_string())),
     }
 }

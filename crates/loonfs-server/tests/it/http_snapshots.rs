@@ -8,10 +8,10 @@ use loonfs_api::{
     ApiError, ChangeSeq, CreateCheckpointRequest, DeleteSnapshotResponse, DestinationBehavior,
     ListSnapshotsResponse, NamespaceId, SnapshotSummary,
 };
-use loonfs_client::{NamespacePath, PutFileOptions, ReadFileOptions, StatPathOptions};
+use loonfs_client::{NamespacePath, PutFileOptions, ReadFileOptions, StatOptions};
 use loonfs_server::MaintenanceMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{first_page, namespace_id};
 use serde::de::DeserializeOwned;
 use tempfile::tempdir;
 
@@ -437,9 +437,7 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
     assert_eq!(created.name, "first");
     assert_eq!(created.captured_seq, ChangeSeq(0));
 
-    let mut pager = harness
-        .client
-        .list_snapshots_pager(&namespace, Some(1), None);
+    let mut pager = harness.client.list_snapshots(&namespace);
     assert_eq!(
         pager.collect_up_to(10).await.expect("list snapshots"),
         vec![created.clone()]
@@ -459,7 +457,8 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
         .expect("delete snapshot");
     assert!(harness
         .client
-        .list_snapshots_page(&namespace, None, None)
+        .list_snapshots(&namespace)
+        .page(first_page())
         .await
         .expect("list deleted snapshots")
         .snapshots
@@ -512,11 +511,11 @@ async fn snapshot_file_read_returns_the_captured_state() {
 
     let entry = harness
         .client
-        .get_path_entry(
+        .stat_with_options(
             &path,
-            &StatPathOptions {
+            &StatOptions {
                 snapshot_id: Some(snapshot.snapshot_id.clone()),
-                ..StatPathOptions::default()
+                ..StatOptions::default()
             },
         )
         .await
@@ -524,7 +523,7 @@ async fn snapshot_file_read_returns_the_captured_state() {
     assert_eq!(entry.head_seq, snapshot.captured_seq);
     let bytes = harness
         .client
-        .get_file_bytes(
+        .read_file_with_options(
             &path,
             &ReadFileOptions {
                 revision_no: None,
@@ -537,7 +536,7 @@ async fn snapshot_file_read_returns_the_captured_state() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&path, &Default::default())
+            .read_file(&path)
             .await
             .expect("current content"),
         b"current"

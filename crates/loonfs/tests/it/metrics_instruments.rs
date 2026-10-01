@@ -336,10 +336,7 @@ fn reads_report_head_cache_lookups_and_retained_bytes() {
             .expect("build reader");
         for namespace_id in [&first, &first, &second] {
             let namespace = reader.namespace(namespace_id);
-            namespace
-                .get_path_entry("/", Default::default())
-                .await
-                .expect("stat the root");
+            namespace.stat("/").await.expect("stat the root");
         }
         recorder.snapshot()
     });

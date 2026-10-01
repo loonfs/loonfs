@@ -15,7 +15,7 @@ use crate::manifest::{
     load_current_grep_manifest, publish_grep_manifest, ChangeFeedResume, GrepIndexState,
     GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef, LoadedGrepManifest,
 };
-use crate::reads::{published_revision, NamespaceReads};
+use crate::reads::{page_request, published_revision, NamespaceReads};
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
 use futures::future::try_join_all;
@@ -726,7 +726,8 @@ async fn collect_backfill_unit(
     let mut cursor = cursor.map(|after_inode_id| CheckpointFilesPageCursor { after_inode_id });
     loop {
         let page = reads
-            .list_checkpoint_files_page(checkpoint_id, cursor, files_remaining)
+            .list_checkpoint_files(checkpoint_id)
+            .page(page_request(cursor, files_remaining)?)
             .await?;
         if page.captured_seq != captured_seq {
             return Err(GrepError::CorruptIndex {
@@ -881,7 +882,7 @@ async fn load_and_fold_revision_contents(
         let contents = try_join_all(chunk.iter().map(|revision| {
             // Index eligibility is the worker's own read budget: content
             // past the cap was skipped before it was ever planned.
-            reads.read_content_ref(&revision.content_ref, INDEX_GRAMS_MAX_FILE_BYTES)
+            reads.read_content(&revision.content_ref, INDEX_GRAMS_MAX_FILE_BYTES)
         }))
         .await?;
         for (revision, content) in chunk.iter().zip(contents) {

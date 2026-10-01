@@ -158,7 +158,7 @@ async fn an_observer_panic_leaves_the_commit_the_publisher_and_maintenance_intac
     assert_eq!(first.committed_seq, ChangeSeq(1));
     assert_eq!(
         namespace
-            .get_file_bytes("/note.txt")
+            .read_file("/note.txt")
             .await
             .expect("read file")
             .bytes,

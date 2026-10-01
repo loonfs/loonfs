@@ -2,7 +2,7 @@
 
 use loonfs::{
     CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, LoonFs, PageRequest,
-    PutFileOptions, SharedObjectStore, StatPathOptions,
+    PutFileOptions, SharedObjectStore, StatOptions,
 };
 use loonfs_api::wire::manifest::MetadataRowFamily;
 use loonfs_core::test_support::STORE_READ_WAVE;
@@ -124,14 +124,11 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         .expect("fresh reader");
     let namespace = reader.namespace(&namespace_id);
     let page = namespace
-        .list_path_entries_page(
-            "/files",
-            PageRequest {
-                limit: page_limit(300),
-                cursor: None,
-            },
-            Default::default(),
-        )
+        .list("/files")
+        .page(PageRequest {
+            limit: page_limit(300),
+            cursor: None,
+        })
         .await
         .expect("directory page");
     assert_eq!(page.entries.len(), 300);
@@ -150,7 +147,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     );
     for entry in page.entries {
         let stat = namespace
-            .get_path_entry(entry.path.as_str(), StatPathOptions::default())
+            .stat_with_options(entry.path.as_str(), &StatOptions::default())
             .await
             .expect("stat listed file");
         assert_eq!(entry.created_by, actor);
