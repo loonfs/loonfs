@@ -186,8 +186,8 @@ pub use config::{
     DEFAULT_MAX_CONCURRENT_MAINTENANCE,
 };
 pub use fs::{
-    ChangesPager, CheckpointsPager, FileRevisionsPager, FsReadSnapshot, InodeChildrenPager,
-    PathEntriesPager, SnapshotPolicy, SnapshotsPager, TrashPager,
+    ChangesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
+    ReadView, SnapshotPolicy, SnapshotsPager, TrashPager,
 };
 pub use handle::{LoonFs, LoonFsBuilder, Maintenance, Namespace, ReadOnly, Writable};
 pub use maintenance::{

@@ -34,7 +34,7 @@ mod namespace_advance_observer;
 mod pagination;
 mod publication;
 mod publish_discovery;
-mod read_snapshot;
+mod read_view;
 mod request_accounting;
 mod retained_views;
 mod runtime_config;

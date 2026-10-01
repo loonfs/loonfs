@@ -1,6 +1,6 @@
 //! Read failure classification and one refresh of an ordinary read.
 
-use super::reads::ReadPin;
+use super::reads::ReadSource;
 use super::RuntimeCore;
 use crate::{CoreError, NamespaceId, Result, RuntimeError, SharedObjectStore};
 use loonfs_core::control::{
@@ -11,13 +11,13 @@ use loonfs_core::{
 };
 use tracing::Instrument;
 
-/// A read that finds a segment missing answers what a new read of `pin`
+/// A read that finds a segment missing answers what a new read of `source`
 /// would. A checkpoint or snapshot that still admits roots the segment, so
 /// the original error stands as corruption.
 pub(super) async fn classify_read_result<T>(
     core: &RuntimeCore,
     context: &RuntimeReadContext,
-    pin: &ReadPin,
+    source: &ReadSource,
     result: Result<T>,
 ) -> Result<T> {
     if !matches!(
@@ -29,8 +29,8 @@ pub(super) async fn classify_read_result<T>(
         return result;
     }
     let store = core.store();
-    match pin {
-        ReadPin::Head => {
+    match source {
+        ReadSource::Head => {
             let current = load_namespace_current_manifest(store, &context.head.namespace_id)
                 .await
                 .map_err(CoreError::from)?;
@@ -43,10 +43,10 @@ pub(super) async fn classify_read_result<T>(
                 });
             }
         }
-        ReadPin::Checkpoint(checkpoint_id) => {
+        ReadSource::Checkpoint(checkpoint_id) => {
             load_checkpoint_read_basis(store, None, &context.head, checkpoint_id).await?;
         }
-        ReadPin::Snapshot(snapshot_id) => {
+        ReadSource::Snapshot(snapshot_id) => {
             let now_ms = core.now_ms()?;
             load_snapshot_read_basis(store, None, &context.head, snapshot_id, now_ms).await?;
         }
@@ -69,7 +69,7 @@ impl RuntimeCore {
         let result = classify_read_result(
             self,
             &context,
-            &ReadPin::Head,
+            &ReadSource::Head,
             read(engine, context.clone()).await,
         )
         .await;
@@ -86,7 +86,7 @@ impl RuntimeCore {
         classify_read_result(
             self,
             &context,
-            &ReadPin::Head,
+            &ReadSource::Head,
             read(engine, context.clone()).await,
         )
         .await

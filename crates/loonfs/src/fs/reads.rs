@@ -20,9 +20,10 @@ use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 #[cfg(test)]
 mod tests;
 
-/// Rejects a directory cursor that another read minted. A pin implies its
-/// head, so the head test does work only for a read pinned at the live head.
-fn validate_pinned_directory_cursor(
+/// Rejects a directory cursor that another read minted. A checkpoint or
+/// snapshot implies its head, so the head test does work only for a view of
+/// the live head.
+fn validate_view_directory_cursor(
     cursor: Option<&DirectoryPageCursor>,
     captured_seq: ChangeSeq,
     pin_id: Option<&PinId>,
@@ -32,7 +33,7 @@ fn validate_pinned_directory_cursor(
     };
     if cursor.head_seq != captured_seq {
         return Err(CoreError::InvalidCursor(format!(
-            "directory cursor head `{}` does not match pinned head `{captured_seq}`",
+            "directory cursor head `{}` does not match the read view head `{captured_seq}`",
             cursor.head_seq
         ))
         .into());
@@ -87,64 +88,72 @@ fn reject_pinned_directory_cursor(cursor: Option<&DirectoryPageCursor>) -> Resul
     .into())
 }
 
-/// A namespace metadata view pinned to one head sequence.
+/// A captured namespace state that related reads share.
 ///
-/// Create one from the current state, a checkpoint, or a live snapshot. All
-/// reads through the value use the same state even if new commits arrive.
+/// A [`Namespace`] handle reads the current state on every call. A read view
+/// keeps related reads on one captured state, even when new commits publish.
+/// A durable snapshot preserves a state for later use. A read view retains
+/// nothing in the store and is meant to live for one request or unit of
+/// work. It can capture the current state, a checkpoint, or a live snapshot.
 #[must_use]
-pub struct FsReadSnapshot {
+pub struct ReadView {
     engine: NamespaceReaderEngine<SharedObjectStore>,
     core: super::RuntimeCore,
     context: RuntimeReadContext,
-    pin: ReadPin,
+    source: ReadSource,
 }
 
-pub(super) enum ReadPin {
+pub(super) enum ReadSource {
     Head,
     Checkpoint(PinId),
     Snapshot(PinId),
 }
 
-impl FsReadSnapshot {
+impl ReadView {
     async fn read<T>(&self, read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-        super::read_result::classify_read_result(&self.core, &self.context, &self.pin, read.await)
-            .await
+        super::read_result::classify_read_result(
+            &self.core,
+            &self.context,
+            &self.source,
+            read.await,
+        )
+        .await
     }
 
     fn snapshot_id(&self) -> Option<&PinId> {
-        match &self.pin {
-            ReadPin::Snapshot(snapshot_id) => Some(snapshot_id),
-            ReadPin::Head | ReadPin::Checkpoint(_) => None,
+        match &self.source {
+            ReadSource::Snapshot(snapshot_id) => Some(snapshot_id),
+            ReadSource::Head | ReadSource::Checkpoint(_) => None,
         }
     }
 
     fn pin_id(&self) -> Option<&PinId> {
-        match &self.pin {
-            ReadPin::Checkpoint(pin_id) | ReadPin::Snapshot(pin_id) => Some(pin_id),
-            ReadPin::Head => None,
+        match &self.source {
+            ReadSource::Checkpoint(pin_id) | ReadSource::Snapshot(pin_id) => Some(pin_id),
+            ReadSource::Head => None,
         }
     }
 
-    /// Returns the namespace this snapshot reads.
+    /// Returns the namespace this view reads.
     pub fn namespace_id(&self) -> &NamespaceId {
         self.engine.namespace_id()
     }
 
-    /// Returns the head sequence this snapshot is pinned to.
+    /// Returns the head sequence this view captured.
     pub fn head_seq(&self) -> ChangeSeq {
         self.context.head.seq
     }
 
-    /// Shared read options may name the snapshot this reader pinned; naming
-    /// any other snapshot would silently read the wrong one.
-    fn require_pinned_snapshot(&self, requested: Option<&PinId>) -> Result<()> {
+    /// Shared read options may name the snapshot this view reads; naming any
+    /// other snapshot would silently read the wrong one.
+    fn require_same_snapshot(&self, requested: Option<&PinId>) -> Result<()> {
         let Some(requested) = requested else {
             return Ok(());
         };
         if Some(requested) != self.snapshot_id() {
             return Err(RuntimeError::InvalidRequest {
                 message: format!(
-                    "snapshot_id `{requested}` names a different snapshot than this pinned reader"
+                    "snapshot_id `{requested}` names a different snapshot than this read view"
                 ),
                 param: "snapshot_id",
             });
@@ -152,7 +161,7 @@ impl FsReadSnapshot {
         Ok(())
     }
 
-    /// Reads one page of the change feed through this snapshot's captured head.
+    /// Reads one page of the change feed through this view's captured head.
     pub async fn list_changes_page(
         &self,
         after_seq: ChangeSeq,
@@ -167,14 +176,14 @@ impl FsReadSnapshot {
         .await
     }
 
-    /// Resolves an absolute path against this snapshot.
+    /// Resolves an absolute path against this view.
     pub async fn get_path_entry(
         &self,
         absolute_path: &str,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
         self.read(async {
-            self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
+            self.require_same_snapshot(options.snapshot_id.as_ref())?;
             Ok(self
                 .engine
                 .resolve_path(absolute_path, options, &self.context)
@@ -183,7 +192,7 @@ impl FsReadSnapshot {
         .await
     }
 
-    /// Lists one directory page against this snapshot.
+    /// Lists one directory page against this view.
     pub async fn list_path_entries_page(
         &self,
         absolute_path: &str,
@@ -191,8 +200,8 @@ impl FsReadSnapshot {
         options: ListPathEntriesOptions,
     ) -> Result<ListPathEntriesResponse> {
         self.read(async {
-            self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
-            validate_pinned_directory_cursor(
+            self.require_same_snapshot(options.snapshot_id.as_ref())?;
+            validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
                 self.pin_id(),
@@ -217,14 +226,14 @@ impl FsReadSnapshot {
         .await
     }
 
-    /// Reads a visible inode against this snapshot.
+    /// Reads a visible inode against this view.
     pub async fn get_inode(
         &self,
         inode_id: InodeId,
         options: StatPathOptions,
     ) -> Result<PathEntry> {
         self.read(async {
-            self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
+            self.require_same_snapshot(options.snapshot_id.as_ref())?;
             Ok(self
                 .engine
                 .stat_inode(inode_id, options, &self.context)
@@ -233,7 +242,7 @@ impl FsReadSnapshot {
         .await
     }
 
-    /// Lists one directory inode page against this snapshot.
+    /// Lists one directory inode page against this view.
     pub async fn list_inode_children_page(
         &self,
         inode_id: InodeId,
@@ -241,8 +250,8 @@ impl FsReadSnapshot {
         options: ListInodeChildrenOptions,
     ) -> Result<ListInodeChildrenResponse> {
         self.read(async {
-            self.require_pinned_snapshot(options.snapshot_id.as_ref())?;
-            validate_pinned_directory_cursor(
+            self.require_same_snapshot(options.snapshot_id.as_ref())?;
+            validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
                 self.pin_id(),
@@ -265,7 +274,7 @@ impl FsReadSnapshot {
         .await
     }
 
-    /// Resolves current visibility, revision, and path against this snapshot.
+    /// Resolves current visibility, revision, and path against this view.
     ///
     /// Unreadable inodes return `visible: false` with no path or revision.
     pub async fn resolve_current_files(
@@ -281,10 +290,10 @@ impl FsReadSnapshot {
         .await
     }
 
-    /// Reads and verifies immutable content selected from this snapshot.
+    /// Reads and verifies immutable content selected from this view.
     ///
     /// Requires namespace administrator access. Content must be published in
-    /// this pinned view, including through a fork. Otherwise returns
+    /// this view, including through a fork. Otherwise returns
     /// `path_not_found` without reading content bytes.
     pub async fn read_content_ref(
         &self,
@@ -306,7 +315,7 @@ impl FsReadSnapshot {
         Ok(self.engine.require_subject(&self.context)?)
     }
 
-    /// Reads one inode revision through this snapshot's authorization.
+    /// Reads one inode revision through this view's authorization.
     pub async fn get_file_revision_bytes_by_inode(
         &self,
         inode_id: InodeId,
@@ -322,7 +331,7 @@ impl FsReadSnapshot {
         .await
     }
 
-    /// Reads the file selected by this snapshot.
+    /// Reads the file selected by this view.
     pub async fn get_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
         self.read(async {
             Ok(self
@@ -337,7 +346,7 @@ impl FsReadSnapshot {
         .await
     }
 
-    /// Streams the file selected by this snapshot in bounded chunks.
+    /// Streams the file selected by this view in bounded chunks.
     /// Complete verification requires consuming the stream to its end.
     pub async fn read_file_stream(
         &self,
@@ -365,7 +374,7 @@ impl FsReadSnapshot {
         .await
     }
 
-    /// Resolves the file selected by this snapshot for a direct download.
+    /// Resolves the file selected by this view for a direct download.
     pub async fn create_download(&self, absolute_path: &str) -> Result<DirectDownloadTarget> {
         self.read(async {
             Ok(self
@@ -405,97 +414,98 @@ fn pager_request<C: PageCursor>(
 }
 
 impl<M> Namespace<M> {
-    fn read_snapshot(
+    fn read_view_from(
         &self,
         engine: NamespaceReaderEngine<SharedObjectStore>,
         context: RuntimeReadContext,
-        pin: ReadPin,
-    ) -> FsReadSnapshot {
-        FsReadSnapshot {
+        source: ReadSource,
+    ) -> ReadView {
+        ReadView {
             engine,
             core: self.core.clone(),
             context,
-            pin,
+            source,
         }
     }
 
-    /// Pins one namespace metadata view for a sequence of related reads.
+    /// Captures the current namespace state for a group of related reads.
     ///
-    /// The returned snapshot keeps path lookup, directory listing, inode
+    /// The returned view keeps path lookup, directory listing, inode
     /// resolution, and content selection on the same head even if commits
-    /// publish concurrently. It is intended to be short-lived for one
-    /// request or unit of work.
+    /// publish concurrently. It retains nothing in the store and is meant to
+    /// live for one request or unit of work.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.pin_namespace",
+        name = "loonfs.read_view",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "pin_namespace",
-            method = "pin_namespace",
+            operation = "read_view",
+            method = "read_view",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn pin_namespace(&self) -> Result<FsReadSnapshot> {
+    pub async fn read_view(&self) -> Result<ReadView> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
-        Ok(self.read_snapshot(engine, context, ReadPin::Head))
+        Ok(self.read_view_from(engine, context, ReadSource::Head))
     }
 
-    /// Pins the namespace state captured by a checkpoint.
+    /// Captures the namespace state a checkpoint preserves.
     ///
     /// An id that names no user checkpoint returns `checkpoint_not_found`.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.pin_namespace",
+        name = "loonfs.read_view",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "pin_namespace",
-            method = "pin_namespace_at_checkpoint",
+            operation = "read_view",
+            method = "read_view_at_checkpoint",
             namespace_id = %self.namespace_id,
             checkpoint_id = %checkpoint_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn pin_namespace_at_checkpoint(
-        &self,
-        checkpoint_id: &PinId,
-    ) -> Result<FsReadSnapshot> {
+    pub async fn read_view_at_checkpoint(&self, checkpoint_id: &PinId) -> Result<ReadView> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
             .core
             .pinned_read_at_checkpoint(&self.namespace_id, checkpoint_id)
             .await?;
-        Ok(self.read_snapshot(engine, context, ReadPin::Checkpoint(checkpoint_id.clone())))
+        Ok(self.read_view_from(
+            engine,
+            context,
+            ReadSource::Checkpoint(checkpoint_id.clone()),
+        ))
     }
 
-    /// Pins the namespace state captured by a live snapshot.
+    /// Captures the namespace state a live snapshot preserves.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.pin_namespace",
+        name = "loonfs.read_view",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "pin_namespace",
-            method = "pin_namespace_at_snapshot",
+            operation = "read_view",
+            method = "read_view_at_snapshot",
             namespace_id = %self.namespace_id,
             snapshot_id = %snapshot_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn pin_namespace_at_snapshot(&self, snapshot_id: &PinId) -> Result<FsReadSnapshot> {
+    pub async fn read_view_at_snapshot(&self, snapshot_id: &PinId) -> Result<ReadView> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
             .core
             .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
             .await?;
         self.core.inner.cache_stats.record_snapshot_view_read();
-        Ok(self.read_snapshot(engine, context, ReadPin::Snapshot(snapshot_id.clone())))
+        Ok(self.read_view_from(engine, context, ReadSource::Snapshot(snapshot_id.clone())))
     }
 
     /// Returns this namespace's metadata: its access mode, creation, fork
@@ -538,7 +548,7 @@ impl<M> Namespace<M> {
     ) -> Result<PathEntry> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .pin_namespace_at_snapshot(snapshot_id)
+                .read_view_at_snapshot(snapshot_id)
                 .await?
                 .get_path_entry(absolute_path, options)
                 .await;
@@ -578,7 +588,7 @@ impl<M> Namespace<M> {
     ) -> Result<PathEntry> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .pin_namespace_at_snapshot(snapshot_id)
+                .read_view_at_snapshot(snapshot_id)
                 .await?
                 .get_inode(inode_id, options)
                 .await;
@@ -645,7 +655,7 @@ impl<M> Namespace<M> {
     ) -> Result<ListPathEntriesResponse> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .pin_namespace_at_snapshot(snapshot_id)
+                .read_view_at_snapshot(snapshot_id)
                 .await?
                 .list_path_entries_page(absolute_path, request, options)
                 .await;
@@ -674,7 +684,7 @@ impl<M> Namespace<M> {
                 let listed_path = listed_path.clone();
                 async move {
                     // Give awakened validation waiters a turn before synchronous page work.
-                    // The read is already pinned and the validation guard has been released.
+                    // The head is already captured and the validation guard has been released.
                     tokio::task::yield_now().await;
                     let page = engine
                         .list_path_page(listed_path.as_str(), request, options, &read_context)
@@ -743,7 +753,7 @@ impl<M> Namespace<M> {
     ) -> Result<ListInodeChildrenResponse> {
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .pin_namespace_at_snapshot(snapshot_id)
+                .read_view_at_snapshot(snapshot_id)
                 .await?
                 .list_inode_children_page(inode_id, request, options)
                 .await;
@@ -756,7 +766,7 @@ impl<M> Namespace<M> {
                 let options = options.clone();
                 async move {
                     // Give awakened validation waiters a turn before synchronous page work.
-                    // The read is already pinned and the validation guard has been released.
+                    // The head is already captured and the validation guard has been released.
                     tokio::task::yield_now().await;
                     let page = engine
                         .list_inode_children_page(inode_id, request, options, &read_context)
@@ -937,7 +947,7 @@ impl<M> Namespace<M> {
 
     /// Resolves the current state of each inode ID.
     ///
-    /// Results use one pinned read and preserve input order. Missing or unreadable
+    /// Results use one read view and preserve input order. Missing or unreadable
     /// inodes return `visible: false` with no path or revision. Readable directories
     /// have a path but no revision.
     ///
@@ -973,7 +983,7 @@ impl<M> Namespace<M> {
     /// Reads one immutable content object by reference.
     ///
     /// Requires namespace administrator access. Content must be published in
-    /// the namespace's pinned view, including through a fork. Otherwise returns
+    /// the namespace's read view, including through a fork. Otherwise returns
     /// `path_not_found` without reading content bytes.
     ///
     /// `max_bytes` is checked against the declared size before fetching. It is

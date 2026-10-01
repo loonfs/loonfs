@@ -152,10 +152,10 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
             .code(),
         ErrorCode::PathNotFound
     );
-    let pinned = destination_namespace
-        .pin_namespace()
+    let view = destination_namespace
+        .read_view()
         .await
-        .expect("pin before publication");
+        .expect("view before publication");
     let own_ref = publish_inline(&writer, &destination).await;
     assert_eq!(
         destination_namespace
@@ -175,10 +175,9 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
         ErrorCode::PathNotFound
     );
     assert_eq!(
-        pinned
-            .read_content_ref(&own_ref, u64::MAX)
+        view.read_content_ref(&own_ref, u64::MAX)
             .await
-            .expect_err("pinned view predates its own content publication")
+            .expect_err("read view predates its own content publication")
             .code(),
         ErrorCode::PathNotFound
     );
@@ -388,9 +387,9 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
         .expect("delete source");
     assert_eq!(
         namespace
-            .pin_namespace()
+            .read_view()
             .await
-            .expect("pin fork")
+            .expect("view fork")
             .read_content_ref(&content_ref, u64::MAX)
             .await
             .expect("fork published the inherited reference"),

@@ -136,7 +136,7 @@ fn normalize_namespace(mut response: GrepResponse, namespace_id: &NamespaceId) -
 }
 
 #[tokio::test]
-async fn an_index_built_past_a_stale_pin_stays_enabled_and_refreshes_queries() {
+async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queries() {
     let directory = tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = NamespaceId::parse("index-ahead").expect("namespace id");
@@ -173,7 +173,7 @@ async fn an_index_built_past_a_stale_pin_stays_enabled_and_refreshes_queries() {
                 let response = query_host
                     .grep(&namespace_id, &request("needle"), default_page_limit())
                     .await
-                    .expect("query refreshes its pin");
+                    .expect("query takes a new read view");
                 assert_eq!(response.head_seq, response.built_through_seq);
                 assert_eq!(response.matches.len(), 2);
             } else {
@@ -195,10 +195,10 @@ async fn an_index_built_past_a_stale_pin_stays_enabled_and_refreshes_queries() {
                     PutFileOptions::new(loonfs_test_support::test_actor()),
                 )
                 .await
-                .expect("commit after the read pins its head");
+                .expect("commit after the read captures its head");
             host.catch_up_grep_index(&namespace_id, committed.committed_seq)
                 .await
-                .expect("build past the pin");
+                .expect("build past the captured head");
             blocking.release();
         };
         tokio::join!(read, build);
@@ -206,7 +206,7 @@ async fn an_index_built_past_a_stale_pin_stays_enabled_and_refreshes_queries() {
 }
 
 #[tokio::test]
-async fn grep_query_keeps_its_pinned_head_when_a_matching_file_commits_mid_query() {
+async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query() {
     let temp_dir = tempdir().expect("tempdir");
     let base = Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let base_store: SharedObjectStore = base.clone();
@@ -254,12 +254,12 @@ async fn grep_query_keeps_its_pinned_head_when_a_matching_file_commits_mid_query
         blocking.release();
         committed
     };
-    let (pinned_response, committed) = tokio::join!(query, publish);
+    let (paused_response, committed) = tokio::join!(query, publish);
     let committed = committed.expect("publish matching file while query is paused");
-    let pinned_response = pinned_response.expect("pinned query completes");
+    let paused_response = paused_response.expect("paused query completes");
 
-    assert!(pinned_response.matches.is_empty());
-    assert!(pinned_response.head_seq < committed.committed_seq);
+    assert!(paused_response.matches.is_empty());
+    assert!(paused_response.head_seq < committed.committed_seq);
 
     let latest = new_query(&query_store, &namespace_id, &grep_request)
         .await

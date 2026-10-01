@@ -245,7 +245,7 @@ fn a_collection_step_reports_what_the_pass_retained() {
 }
 
 #[test]
-fn snapshot_pins_report_the_snapshot_view_counter() {
+fn snapshot_read_views_report_the_snapshot_view_counter() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let namespace_id = namespace_id("snapshot-metrics");
@@ -278,10 +278,10 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             .await
             .expect("create checkpoint");
         let _checkpoint_view = namespace
-            .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
+            .read_view_at_checkpoint(&checkpoint.checkpoint_id)
             .await
-            .expect("pin checkpoint");
-        let read_snapshot = namespace_writer
+            .expect("view checkpoint");
+        let reader_snapshot = namespace_writer
             .create_snapshot(
                 CreateSnapshotOptions {
                     name: "reader".to_owned(),
@@ -292,9 +292,9 @@ fn snapshot_pins_report_the_snapshot_view_counter() {
             .await
             .expect("create snapshot");
         let _snapshot_view = namespace
-            .pin_namespace_at_snapshot(&read_snapshot.checkpoint_id)
+            .read_view_at_snapshot(&reader_snapshot.checkpoint_id)
             .await
-            .expect("pin snapshot");
+            .expect("view snapshot");
         (fs.reader.runtime_cache_stats(), recorder.snapshot())
     });
 

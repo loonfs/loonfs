@@ -1,4 +1,4 @@
-//! Multi-call namespace read snapshots.
+//! Read views that keep related reads on one captured namespace state.
 
 use crate::common::{assert_core_error_kind, open_runtime_async, store, SettableWallClock};
 use loonfs::{
@@ -9,7 +9,7 @@ use tempfile::tempdir;
 
 async fn read_during_compaction_and_collection(
     durable: bool,
-    pin_in_memory: bool,
+    head_view: bool,
 ) -> loonfs::Result<loonfs::PathEntry> {
     use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
     use loonfs_test_support::stores::{
@@ -99,15 +99,15 @@ async fn read_during_compaction_and_collection(
         .await
         .expect("cold reader");
     let cold_namespace = reader.namespace(&namespace);
-    let pinned = if let Some(snapshot) = &snapshot {
+    let view = if let Some(snapshot) = &snapshot {
         Some(
             cold_namespace
-                .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
+                .read_view_at_snapshot(&snapshot.checkpoint_id)
                 .await
-                .expect("durable view"),
+                .expect("snapshot view"),
         )
-    } else if pin_in_memory {
-        Some(cold_namespace.pin_namespace().await.expect("memory view"))
+    } else if head_view {
+        Some(cold_namespace.read_view().await.expect("head view"))
     } else {
         None
     };
@@ -117,8 +117,8 @@ async fn read_during_compaction_and_collection(
         .expect("captured entry");
     store.block_next();
     let read = async {
-        match &pinned {
-            Some(pinned) => pinned.get_path_entry("/a", Default::default()).await,
+        match &view {
+            Some(view) => view.get_path_entry("/a", Default::default()).await,
             None => {
                 cold_namespace
                     .get_path_entry("/a", Default::default())
@@ -211,7 +211,7 @@ async fn read_during_compaction_and_collection(
 }
 
 #[tokio::test]
-async fn memory_pinned_read_returns_stale_head_after_compaction_and_collection() {
+async fn head_read_view_returns_stale_head_after_compaction_and_collection() {
     let error = read_during_compaction_and_collection(false, true)
         .await
         .expect_err("captured segments were collected");
@@ -219,7 +219,7 @@ async fn memory_pinned_read_returns_stale_head_after_compaction_and_collection()
 }
 
 #[tokio::test]
-async fn durable_pinned_read_survives_compaction_and_collection() {
+async fn snapshot_read_view_survives_compaction_and_collection() {
     read_during_compaction_and_collection(true, true)
         .await
         .expect("durable snapshot remains readable");
@@ -233,7 +233,7 @@ async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
 }
 
 #[tokio::test]
-async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advance() {
+async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manifest_advance() {
     use loonfs_api::wire::manifest::MetadataRowFamily;
     use loonfs_core::control::load_namespace_current_manifest;
     use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
@@ -286,12 +286,12 @@ async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advan
         .await
         .expect("cold reader");
     let namespace = reader.namespace(&namespace_id);
-    let pinned_snapshot = namespace
-        .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
+    let snapshot_view = namespace
+        .read_view_at_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("snapshot view");
-    let pinned_checkpoint = namespace
-        .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
+    let checkpoint_view = namespace
+        .read_view_at_checkpoint(&checkpoint.checkpoint_id)
         .await
         .expect("checkpoint view");
     let captured = load_namespace_current_manifest(store.as_ref(), &namespace_id)
@@ -323,10 +323,10 @@ async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advan
         .expect("current manifest");
     assert!(current.state.manifest().manifest_no > captured.state.manifest().manifest_no);
 
-    for pinned in [pinned_snapshot, pinned_checkpoint] {
+    for view in [snapshot_view, checkpoint_view] {
         store.reset();
         assert_core_error_kind(
-            pinned.get_path_entry("/file", Default::default()).await,
+            view.get_path_entry("/file", Default::default()).await,
             ErrorCode::NamespaceCorrupt,
         );
         assert_eq!(store.count(OperationClass::Put), 0);
@@ -336,7 +336,7 @@ async fn durable_pinned_reads_keep_missing_segments_corrupt_after_manifest_advan
 }
 
 #[tokio::test]
-async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
+async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_is_missing() {
     use loonfs_api::wire::manifest::MetadataRowFamily;
     use loonfs_core::control::load_namespace_current_manifest;
     use loonfs_objectstore::{keys, ObjectStore};
@@ -384,12 +384,12 @@ async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
         .await
         .expect("cold reader");
     let namespace = reader.namespace(&namespace_id);
-    let pinned_snapshot = namespace
-        .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
+    let snapshot_view = namespace
+        .read_view_at_snapshot(&snapshot.checkpoint_id)
         .await
         .expect("snapshot view");
-    let pinned_checkpoint = namespace
-        .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
+    let checkpoint_view = namespace
+        .read_view_at_checkpoint(&checkpoint.checkpoint_id)
         .await
         .expect("checkpoint view");
     namespace_writer
@@ -419,13 +419,13 @@ async fn pinned_reads_report_their_deleted_pin_when_a_segment_is_missing() {
         .expect("delete pinned segment");
 
     assert_core_error_kind(
-        pinned_snapshot
+        snapshot_view
             .get_path_entry("/file", Default::default())
             .await,
         ErrorCode::SnapshotNotFound,
     );
     assert_core_error_kind(
-        pinned_checkpoint
+        checkpoint_view
             .get_path_entry("/file", Default::default())
             .await,
         ErrorCode::CheckpointNotFound,
@@ -474,9 +474,9 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .await
         .expect("create first snapshot");
     let first_view = namespace
-        .pin_namespace_at_snapshot(&first_snapshot.checkpoint_id)
+        .read_view_at_snapshot(&first_snapshot.checkpoint_id)
         .await
-        .expect("pin first snapshot");
+        .expect("view first snapshot");
     let limit = PaginationPolicy::default()
         .resolve_limit(Some(2))
         .expect("page limit");
@@ -517,9 +517,9 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .await
         .expect("create second snapshot");
     let second_view = namespace
-        .pin_namespace_at_snapshot(&second_snapshot.checkpoint_id)
+        .read_view_at_snapshot(&second_snapshot.checkpoint_id)
         .await
-        .expect("pin second snapshot");
+        .expect("view second snapshot");
 
     assert_core_error_kind(
         second_view
@@ -648,9 +648,9 @@ async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
             .expect("create checkpoint");
         views.push(
             namespace
-                .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
+                .read_view_at_checkpoint(&checkpoint.checkpoint_id)
                 .await
-                .expect("pin checkpoint"),
+                .expect("view checkpoint"),
         );
     }
     let limit = PaginationPolicy::default()
@@ -703,7 +703,7 @@ async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
 }
 
 #[tokio::test]
-async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
+async fn a_read_view_keeps_one_head_across_later_commits() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-reader-test").await;
     let namespace_id = NamespaceId::parse("snapshot-reads").expect("namespace id");
@@ -725,9 +725,9 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
         .await
         .expect("create initial file");
 
-    let snapshot = namespace.pin_namespace().await.expect("pin namespace");
-    assert_eq!(snapshot.head_seq(), created.committed_seq);
-    let before = snapshot
+    let view = namespace.read_view().await.expect("read view");
+    assert_eq!(view.head_seq(), created.committed_seq);
+    let before = view
         .get_path_entry("/before.txt", Default::default())
         .await
         .expect("resolve initial file");
@@ -743,7 +743,7 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
             },
         )
         .await
-        .expect("replace file after pin");
+        .expect("replace file after the view");
     runtime
         .put_file_bytes(
             &namespace_id,
@@ -752,30 +752,29 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
             PutFileOptions::new(loonfs_test_support::test_actor()),
         )
         .await
-        .expect("create file after pin");
+        .expect("create file after the view");
 
-    let pinned_before = snapshot
+    let after_commits = view
         .get_path_entry("/before.txt", Default::default())
         .await
-        .expect("resolve pinned file");
-    assert_eq!(pinned_before.revision_no(), before.revision_no());
+        .expect("resolve file through the view");
+    assert_eq!(after_commits.revision_no(), before.revision_no());
     assert_eq!(
-        snapshot
-            .read_content_ref(
-                pinned_before.content_ref().expect("file content reference"),
-                64,
-            )
-            .await
-            .expect("read pinned content"),
+        view.read_content_ref(
+            after_commits.content_ref().expect("file content reference"),
+            64,
+        )
+        .await
+        .expect("read content through the view"),
         b"before"
     );
-    let later_error = snapshot
+    let later_error = view
         .get_path_entry("/later.txt", Default::default())
         .await
-        .expect_err("later file is absent from the pinned view");
+        .expect_err("later file is absent from the view");
     assert_eq!(later_error.code(), ErrorCode::PathNotFound);
 
-    let page = snapshot
+    let page = view
         .list_path_entries_page(
             "/",
             PageRequest {
@@ -787,8 +786,8 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
             Default::default(),
         )
         .await
-        .expect("list pinned root");
-    assert_eq!(page.head_seq, snapshot.head_seq());
+        .expect("list root through the view");
+    assert_eq!(page.head_seq, view.head_seq());
     assert_eq!(
         page.entries
             .iter()
@@ -796,10 +795,10 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
             .collect::<Vec<_>>(),
         ["/before.txt"]
     );
-    let states = snapshot
+    let states = view
         .resolve_current_files(&[before.inode_id])
         .await
-        .expect("resolve pinned inode");
+        .expect("resolve inode through the view");
     assert_eq!(states[0].current_revision_no, before.revision_no());
 
     let latest = namespace
@@ -814,7 +813,7 @@ async fn pinned_namespace_reads_keep_one_head_across_later_commits() {
 }
 
 #[tokio::test]
-async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
+async fn checkpoint_read_views_answer_the_state_the_checkpoint_captured() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-checkpoint-test").await;
     let namespace_id = NamespaceId::parse("snapshot-checkpoint-reads").expect("namespace id");
@@ -861,22 +860,21 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
         .await
         .expect("create file after the checkpoint");
 
-    let snapshot = namespace
-        .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
+    let view = namespace
+        .read_view_at_checkpoint(&checkpoint.checkpoint_id)
         .await
-        .expect("pin namespace at checkpoint");
-    let pinned = snapshot
+        .expect("view the checkpoint");
+    let pinned = view
         .get_path_entry("/pinned.txt", Default::default())
         .await
         .expect("resolve pinned file");
     assert_eq!(
-        snapshot
-            .read_content_ref(pinned.content_ref().expect("file content reference"), 64)
+        view.read_content_ref(pinned.content_ref().expect("file content reference"), 64)
             .await
             .expect("read pinned content"),
         b"pinned"
     );
-    let later_error = snapshot
+    let later_error = view
         .get_path_entry("/later.txt", Default::default())
         .await
         .expect_err("later file is absent from the checkpointed view");
@@ -894,7 +892,7 @@ async fn pinned_checkpoint_reads_answer_the_state_the_checkpoint_captured() {
 }
 
 #[tokio::test]
-async fn a_deleted_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
+async fn a_deleted_checkpoint_refuses_a_read_view_instead_of_reading_current_state() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime =
         open_runtime_async(store(temp_dir.path()), "snapshot-checkpoint-release-test").await;
@@ -928,14 +926,14 @@ async fn a_deleted_checkpoint_refuses_a_pin_instead_of_reading_current_state() {
 
     assert_core_error_kind(
         namespace
-            .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
+            .read_view_at_checkpoint(&checkpoint.checkpoint_id)
             .await,
         ErrorCode::CheckpointNotFound,
     );
 }
 
 #[tokio::test]
-async fn snapshot_pins_serve_captured_state_and_enforce_release() {
+async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-lease-read-test").await;
     let namespace_id = NamespaceId::parse("snapshot-lease-reads").expect("namespace id");
@@ -999,27 +997,25 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         )
         .await
         .expect("replace captured file");
-    let pinned = namespace
-        .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
+    let view = namespace
+        .read_view_at_snapshot(&snapshot.checkpoint_id)
         .await
-        .expect("pin live snapshot");
+        .expect("view live snapshot");
     assert_eq!(
-        pinned
-            .get_path_entry("/pinned.txt", snapshot_options)
+        view.get_path_entry("/pinned.txt", snapshot_options)
             .await
-            .expect("read pinned entry with snapshot options"),
+            .expect("read view entry with snapshot options"),
         captured,
     );
-    assert_eq!(pinned.head_seq(), snapshot.captured_seq);
+    assert_eq!(view.head_seq(), snapshot.captured_seq);
     assert_eq!(
-        pinned
-            .get_file_bytes("/pinned.txt")
+        view.get_file_bytes("/pinned.txt")
             .await
             .expect("read captured bytes")
             .bytes,
         b"captured"
     );
-    let download = pinned
+    let download = view
         .create_download("/pinned.txt")
         .await
         .expect("resolve captured download");
@@ -1038,7 +1034,7 @@ async fn snapshot_pins_serve_captured_state_and_enforce_release() {
         .expect("release snapshot");
     assert_core_error_kind(
         namespace
-            .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
+            .read_view_at_snapshot(&snapshot.checkpoint_id)
             .await,
         ErrorCode::SnapshotNotFound,
     );
@@ -1088,18 +1084,18 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
     clock.0.store(EXPIRES_AT_MS - 1, Ordering::SeqCst);
     for reader in [&reader, &writer.read_only()] {
         let namespace = reader.namespace(&namespace_id);
-        let pinned = namespace
-            .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
+        let view = namespace
+            .read_view_at_snapshot(&snapshot.checkpoint_id)
             .await
             .expect("the snapshot is live one millisecond before its expiry");
-        assert_eq!(pinned.head_seq(), snapshot.captured_seq);
+        assert_eq!(view.head_seq(), snapshot.captured_seq);
     }
     clock.0.store(EXPIRES_AT_MS, Ordering::SeqCst);
     for reader in [&reader, &writer.read_only()] {
         let namespace = reader.namespace(&namespace_id);
         assert_core_error_kind(
             namespace
-                .pin_namespace_at_snapshot(&snapshot.checkpoint_id)
+                .read_view_at_snapshot(&snapshot.checkpoint_id)
                 .await,
             ErrorCode::SnapshotGone,
         );
@@ -1107,7 +1103,7 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
 }
 
 #[tokio::test]
-async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
+async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-mismatch-read-test").await;
     let namespace_id = NamespaceId::parse("snapshot-mismatch-reads").expect("namespace id");
@@ -1148,15 +1144,15 @@ async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
                 .expect("create snapshot"),
         );
     }
-    let pinned = namespace
-        .pin_namespace_at_snapshot(&snapshots[0].checkpoint_id)
+    let view = namespace
+        .read_view_at_snapshot(&snapshots[0].checkpoint_id)
         .await
-        .expect("pin the first snapshot");
+        .expect("view the first snapshot");
     let other = snapshots[1].checkpoint_id.clone();
     let limit = PaginationPolicy::default()
         .resolve_limit(None)
         .expect("limit");
-    let root = pinned
+    let root = view
         .get_path_entry("/", Default::default())
         .await
         .expect("root entry")
@@ -1170,60 +1166,56 @@ async fn a_pinned_reader_rejects_options_naming_another_snapshot() {
         assert_eq!(error.param.as_deref(), Some("snapshot_id"));
     };
     assert_rejected(
-        pinned
-            .get_path_entry(
-                "/pinned.txt",
-                loonfs::StatPathOptions {
-                    snapshot_id: Some(other.clone()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map(drop),
+        view.get_path_entry(
+            "/pinned.txt",
+            loonfs::StatPathOptions {
+                snapshot_id: Some(other.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map(drop),
     );
     assert_rejected(
-        pinned
-            .get_inode(
-                root,
-                loonfs::StatPathOptions {
-                    snapshot_id: Some(other.clone()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map(drop),
+        view.get_inode(
+            root,
+            loonfs::StatPathOptions {
+                snapshot_id: Some(other.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map(drop),
     );
     assert_rejected(
-        pinned
-            .list_path_entries_page(
-                "/",
-                PageRequest {
-                    limit,
-                    cursor: None,
-                },
-                loonfs::ListPathEntriesOptions {
-                    snapshot_id: Some(other.clone()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map(drop),
+        view.list_path_entries_page(
+            "/",
+            PageRequest {
+                limit,
+                cursor: None,
+            },
+            loonfs::ListPathEntriesOptions {
+                snapshot_id: Some(other.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map(drop),
     );
     assert_rejected(
-        pinned
-            .list_inode_children_page(
-                root,
-                PageRequest {
-                    limit,
-                    cursor: None,
-                },
-                loonfs::ListInodeChildrenOptions {
-                    snapshot_id: Some(other),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map(drop),
+        view.list_inode_children_page(
+            root,
+            PageRequest {
+                limit,
+                cursor: None,
+            },
+            loonfs::ListInodeChildrenOptions {
+                snapshot_id: Some(other),
+                ..Default::default()
+            },
+        )
+        .await
+        .map(drop),
     );
 }
 
@@ -1271,7 +1263,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .await
         .expect("reader");
     let namespace = reader.namespace(&namespace_id);
-    let pinned = namespace.pin_namespace().await.expect("captured view");
+    let view = namespace.read_view().await.expect("captured view");
     for key in store
         .list_prefix(&keys::metadata_segment_prefix(&namespace_id))
         .await
@@ -1298,7 +1290,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
     failures.fail_all();
     store.reset();
     assert_core_error_kind(
-        pinned.get_path_entry("/file", Default::default()).await,
+        view.get_path_entry("/file", Default::default()).await,
         ErrorCode::ServerError,
     );
     assert_eq!(failures.attempts(), 1);

@@ -5,9 +5,9 @@
 
 use crate::{GrepError, Result};
 use loonfs::{
-    CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState, FsReadSnapshot,
+    CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState,
     ListChangesOptions, ListCheckpointFilesOptions, Namespace, NamespaceMetadata, ReadOnly,
-    StatPathOptions, MAX_RESOLVE_CURRENT_FILES,
+    ReadView, StatPathOptions, MAX_RESOLVE_CURRENT_FILES,
 };
 use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
@@ -18,9 +18,9 @@ use loonfs_api::{
 
 /// Filesystem reads for one namespace.
 ///
-/// Each call uses an internally consistent snapshot, but consecutive calls
-/// may observe different heads. Query execution pins one view so every
-/// metadata phase in one response uses the same head.
+/// Each call reads one consistent state, but consecutive calls may observe
+/// different heads. Query execution takes one read view so every metadata
+/// phase in one response uses the same head.
 pub struct NamespaceReads {
     namespace: Namespace<ReadOnly>,
     subject_namespace: Option<Namespace<ReadOnly>>,
@@ -47,14 +47,14 @@ impl NamespaceReads {
         self.namespace.namespace_id()
     }
 
-    /// Pins one metadata view for a query.
-    pub(crate) async fn pin(&self) -> Result<PinnedNamespaceReads<'_>> {
+    /// Captures one read view for a query.
+    pub(crate) async fn read_view(&self) -> Result<NamespaceReadView<'_>> {
         let namespace = self.subject_namespace.as_ref().unwrap_or(&self.namespace);
-        let snapshot = namespace.pin_namespace().await?;
-        snapshot.require_subject()?;
-        Ok(PinnedNamespaceReads {
+        let view = namespace.read_view().await?;
+        view.require_subject()?;
+        Ok(NamespaceReadView {
             namespace: &self.namespace,
-            snapshot,
+            view,
         })
     }
 
@@ -125,23 +125,23 @@ impl NamespaceReads {
 }
 
 /// Filesystem reads held to one namespace head for a single grep query.
-pub(crate) struct PinnedNamespaceReads<'a> {
+pub(crate) struct NamespaceReadView<'a> {
     namespace: &'a Namespace<ReadOnly>,
-    snapshot: FsReadSnapshot,
+    view: ReadView,
 }
 
-impl PinnedNamespaceReads<'_> {
+impl NamespaceReadView<'_> {
     /// Returns the namespace used by this reader.
     pub(crate) fn namespace_id(&self) -> &NamespaceId {
-        self.snapshot.namespace_id()
+        self.view.namespace_id()
     }
 
     /// Returns the head sequence shared by every metadata read.
     pub(crate) fn head_seq(&self) -> ChangeSeq {
-        self.snapshot.head_seq()
+        self.view.head_seq()
     }
 
-    /// Reads committed changes after `after_seq`, capped at the pinned head.
+    /// Reads committed changes after `after_seq`, capped at the view's head.
     ///
     /// The feed itself may observe a later durable head. Its immutable commit
     /// prefix is truncated here so later commits cannot affect this query.
@@ -153,7 +153,7 @@ impl PinnedNamespaceReads<'_> {
         let head_seq = self.head_seq();
         if after_seq > head_seq {
             return Err(CoreError::InvalidCursor(format!(
-                "change feed sequence `{after_seq}` is ahead of pinned head `{head_seq}`"
+                "change feed sequence `{after_seq}` is ahead of the read view head `{head_seq}`"
             ))
             .into());
         }
@@ -191,13 +191,13 @@ impl PinnedNamespaceReads<'_> {
         &self,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
-        Ok(self.snapshot.resolve_current_files(inode_ids).await?)
+        Ok(self.view.resolve_current_files(inode_ids).await?)
     }
 
-    /// Resolves one path against the pinned metadata view.
+    /// Resolves one path against the read view.
     pub(crate) async fn resolve_path(&self, absolute_path: &AbsolutePath) -> Result<PathEntry> {
         Ok(self
-            .snapshot
+            .view
             .get_path_entry(
                 absolute_path.as_str(),
                 StatPathOptions {
@@ -208,7 +208,7 @@ impl PinnedNamespaceReads<'_> {
             .await?)
     }
 
-    /// Lists one directory page against the pinned metadata view.
+    /// Lists one directory page against the read view.
     pub(crate) async fn list_path_page(
         &self,
         absolute_path: &AbsolutePath,
@@ -216,7 +216,7 @@ impl PinnedNamespaceReads<'_> {
         limit: usize,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let page = self
-            .snapshot
+            .view
             .list_path_entries_page(
                 absolute_path.as_str(),
                 PageRequest {
@@ -242,7 +242,7 @@ impl PinnedNamespaceReads<'_> {
         })
     }
 
-    /// Reads an authorized inode revision from the pinned view.
+    /// Reads an authorized inode revision from the read view.
     pub(crate) async fn get_file_revision_bytes_by_inode(
         &self,
         inode_id: InodeId,
@@ -250,7 +250,7 @@ impl PinnedNamespaceReads<'_> {
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
         Ok(self
-            .snapshot
+            .view
             .get_file_revision_bytes_by_inode(inode_id, revision_no, max_bytes)
             .await?)
     }

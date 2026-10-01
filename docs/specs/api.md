@@ -1142,15 +1142,15 @@ inode children listing, file content, download, and change-feed requests accept 
 with `revision_no`; the snapshot selects the revision. A snapshot change feed
 ends at the captured sequence, and `after_seq` cannot exceed that sequence.
 
-When an embedded read sets `snapshot_id` in its options, the read pins that
-snapshot, as the HTTP request does. A reader that is already pinned at a
+When an embedded read sets `snapshot_id` in its options, the read takes a
+read view of that snapshot, as the HTTP request does. A read view of a
 snapshot accepts options that name that snapshot and rejects any other
 snapshot id as `invalid_request`.
 
-An embedded reader can also pin a checkpoint. A directory cursor from a
-reader pinned at a checkpoint or a snapshot names that pin. Only a reader
-pinned at the same checkpoint or snapshot resumes it; a live listing or a
-reader pinned elsewhere rejects it as `invalid_request`.
+An embedded caller can also take a read view of a checkpoint. A directory
+cursor from a read view of a checkpoint or a snapshot names that pin. Only a
+read view of the same checkpoint or snapshot resumes it; a live listing or any
+other read view rejects it as `invalid_request`.
 
 Snapshot reads require a live snapshot. Missing snapshots return
 `snapshot_not_found`, including after deletion. Expired snapshots return
@@ -1948,7 +1948,7 @@ retained. A directory returns `path_conflict`, an unknown inode returns
 `inode_not_found`, and an unknown revision returns `revision_not_found`.
 
 Embedded by-reference reads require administrator access to the reading
-namespace. The namespace's pinned view must contain a publication for the
+namespace. The namespace's read view must contain a publication for the
 content, including publications inherited through a fork. A reference absent
 from that view returns `path_not_found` without reading content bytes, even
 when the reading namespace owns it. Content published after a snapshot is
@@ -3033,7 +3033,7 @@ resumes strictly after the last candidate the issuing page finished
 scanning and is bound to that request — replaying it with different
 criteria is rejected as `invalid_request`.
 
-An active index remains enabled when its watermark is ahead of the reader's pinned head. The query pins the head again once and continues with the loaded index.
+An active index remains enabled when its watermark is ahead of the head of the query's read view. The query takes a new read view once and continues with the loaded index.
 
 Grep cursors tolerate head drift with the same forward-only rule as every
 other cursor in the API (section 6.5). A grep cursor minted at an older
@@ -3219,7 +3219,7 @@ sessions.
    the following are true:
    - the operation is fully described by one request;
    - the operation completes synchronously;
-   - no pinned read snapshot is required after the request returns;
+   - no retained read view is required after the request returns;
    - no stable destination binding is required after the request returns; and
    - the request can be retried by replaying the full request.
 

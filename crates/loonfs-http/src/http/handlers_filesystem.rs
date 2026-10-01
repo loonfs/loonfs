@@ -22,9 +22,9 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
-    payload_class, ErrorCode, FsReadSnapshot, InodeId, ListChangesOptions,
-    ListInodeChildrenOptions, ListPathEntriesOptions, Namespace, PinId, ReadOnly, StatPathOptions,
-    TraceMode, TraceStoreKind,
+    payload_class, ErrorCode, InodeId, ListChangesOptions, ListInodeChildrenOptions,
+    ListPathEntriesOptions, Namespace, PinId, ReadOnly, ReadView, StatPathOptions, TraceMode,
+    TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -91,7 +91,7 @@ pub(super) struct ChangesQuery {
 }
 
 pub(super) enum ReadTarget {
-    Snapshot(Box<FsReadSnapshot>),
+    Snapshot(Box<ReadView>),
     Live(Namespace<ReadOnly>),
 }
 
@@ -103,11 +103,7 @@ impl ReadTarget {
         options: ListPathEntriesOptions,
     ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
         match self {
-            Self::Snapshot(snapshot) => {
-                snapshot
-                    .list_path_entries_page(path, request, options)
-                    .await
-            }
+            Self::Snapshot(view) => view.list_path_entries_page(path, request, options).await,
             Self::Live(namespace) => {
                 namespace
                     .list_path_entries_page(path, request, options)
@@ -122,7 +118,7 @@ impl ReadTarget {
         options: StatPathOptions,
     ) -> loonfs::Result<loonfs::PathEntry> {
         match self {
-            Self::Snapshot(snapshot) => snapshot.get_path_entry(path, options).await,
+            Self::Snapshot(view) => view.get_path_entry(path, options).await,
             Self::Live(namespace) => namespace.get_path_entry(path, options).await,
         }
     }
@@ -134,9 +130,8 @@ impl ReadTarget {
         options: ListInodeChildrenOptions,
     ) -> loonfs::Result<loonfs::ListInodeChildrenResponse> {
         match self {
-            Self::Snapshot(snapshot) => {
-                snapshot
-                    .list_inode_children_page(inode_id, request, options)
+            Self::Snapshot(view) => {
+                view.list_inode_children_page(inode_id, request, options)
                     .await
             }
             Self::Live(namespace) => {
@@ -153,7 +148,7 @@ impl ReadTarget {
         options: StatPathOptions,
     ) -> loonfs::Result<loonfs::PathEntry> {
         match self {
-            Self::Snapshot(snapshot) => snapshot.get_inode(inode_id, options).await,
+            Self::Snapshot(view) => view.get_inode(inode_id, options).await,
             Self::Live(namespace) => namespace.get_inode(inode_id, options).await,
         }
     }
@@ -168,7 +163,7 @@ impl ReadTarget {
             ..Default::default()
         };
         match self {
-            Self::Snapshot(snapshot) => snapshot.read_file_stream(path, options).await,
+            Self::Snapshot(view) => view.read_file_stream(path, options).await,
             Self::Live(namespace) => namespace.read_file_stream(path, options).await,
         }
     }
@@ -179,7 +174,7 @@ impl ReadTarget {
         revision_no: Option<RevisionNo>,
     ) -> loonfs::Result<loonfs::downloads::DirectDownloadTarget> {
         match self {
-            Self::Snapshot(snapshot) => snapshot.create_download(path).await,
+            Self::Snapshot(view) => view.create_download(path).await,
             Self::Live(namespace) => namespace.create_download(path, revision_no).await,
         }
     }
@@ -240,7 +235,7 @@ pub(super) async fn list_path_entries(
         cursor: decode_optional_cursor(query.cursor)?,
     };
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let listing = target
         .list_path_entries_page(&path, request, options)
         .await
@@ -291,7 +286,7 @@ pub(super) async fn get_path_entry(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let entry = target
         .get_path_entry(&path, options)
         .await
@@ -345,7 +340,7 @@ pub(super) async fn get_file_bytes(
         .transpose()?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no)?;
-    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
         .read_file_stream(&path, revision_no)
@@ -641,10 +636,10 @@ pub(super) async fn list_changes(
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = resolve_page_limit(query.limit)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = pin_requested_snapshot(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let options = ListChangesOptions { limit: Some(limit) };
     let response = match target {
-        ReadTarget::Snapshot(snapshot) => snapshot
+        ReadTarget::Snapshot(view) => view
             .list_changes_page(after_seq, options)
             .await
             .map_err(ApiResponseError::for_namespace(&namespace_id))?,
@@ -656,7 +651,7 @@ pub(super) async fn list_changes(
     Ok(Json(response))
 }
 
-pub(super) async fn pin_requested_snapshot(
+pub(super) async fn read_target(
     namespace: Namespace<ReadOnly>,
     snapshot_id: Option<PinId>,
 ) -> Result<ReadTarget, ApiResponseError> {
@@ -664,9 +659,9 @@ pub(super) async fn pin_requested_snapshot(
         return Ok(ReadTarget::Live(namespace));
     };
     namespace
-        .pin_namespace_at_snapshot(&snapshot_id)
+        .read_view_at_snapshot(&snapshot_id)
         .await
-        .map(|snapshot| ReadTarget::Snapshot(Box::new(snapshot)))
+        .map(|view| ReadTarget::Snapshot(Box::new(view)))
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(namespace.namespace_id(), error)
                 .with_invalid_request_param("snapshot_id")

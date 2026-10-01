@@ -168,9 +168,9 @@ A valid pattern with no useful required grams, such as `.*` or a single characte
 
 ### Candidate selection and verification
 
-Within a page, execution uses one pinned metadata view. For each required gram, it excludes disjoint segment ranges, checks bloom filters, and reads posting batches. Sorted intersections and unions produce candidate inode/revision pairs.
+Within a page, execution uses one read view. For each required gram, it excludes disjoint segment ranges, checks bloom filters, and reads posting batches. Sorted intersections and unions produce candidate inode/revision pairs.
 
-Candidates are then resolved in batches against the pinned metadata: visibility, current revision, and current path. A posting for an older revision is not a match against a file's current revision. Path-prefix filtering applies to the resolved path, not a path cached when the posting was created.
+Candidates are then resolved in batches against that read view: visibility, current revision, and current path. A posting for an older revision is not a match against a file's current revision. Path-prefix filtering applies to the resolved path, not a path cached when the posting was created.
 
 For each remaining candidate, the server reads the referenced content, verifies it, and runs the original pattern. Content reads use limited concurrency. The response contains line-oriented matches rather than a streaming file response.
 
@@ -186,9 +186,9 @@ Each page reports the namespace `head_seq` used for that page. All metadata phas
 
 ## Freshness and the unindexed tail
 
-At a completed watermark, the index contains the postings needed for eligible revisions through that boundary. Revisions after it, up to the query's pinned head, are enumerated from the change feed and checked exhaustively with the same eligibility rule and verifier. A partly indexed commit must be treated according to its event cursor rather than assumed complete from its sequence alone.
+At a completed watermark, the index contains the postings needed for eligible revisions through that boundary. Revisions after it, up to the head of the query's read view, are enumerated from the change feed and checked exhaustively with the same eligibility rule and verifier. A partly indexed commit must be treated according to its event cursor rather than assumed complete from its sequence alone.
 
-For example, an index completed through sequence 100 can still return a current result at head 103 by considering the new revisions from commits 101 through 103. A metadata-only rename in that interval changes a result's path through the pinned metadata view without requiring a new content posting.
+For example, an index completed through sequence 100 can still return a current result at head 103 by considering the new revisions from commits 101 through 103. A metadata-only rename in that interval changes a result's path through the read view without requiring a new content posting.
 
 If the tail exceeds the query's budget, the default is a typed `index_lagging` error. With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, together with the index and head positions. Stale results remain subject to visibility and content verification; they may omit eligible revisions that are not yet indexed. If the tail's change history is below the retention floor, the query answers `rebootstrap_required`, with or without `allow_stale`. The worker's next step rebuilds from a new checkpoint.
 

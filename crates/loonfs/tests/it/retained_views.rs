@@ -357,11 +357,11 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 fork_listing.insert(path, listed.entries);
             }
             if let Some(checkpoint) = &checkpoint {
-                let pinned = source_namespace
-                    .pin_namespace_at_checkpoint(&checkpoint.checkpoint_id)
+                let view = source_namespace
+                    .read_view_at_checkpoint(&checkpoint.checkpoint_id)
                     .await
                     .expect("checkpoint view");
-                let historical = pinned
+                let historical = view
                     .list_path_entries_page(
                         path,
                         PageRequest {
