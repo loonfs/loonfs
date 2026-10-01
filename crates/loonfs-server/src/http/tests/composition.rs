@@ -24,7 +24,7 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
             loonfs_http::router(state.binding.clone())
         };
         assert_eq!(state.binding.options.serves_maintenance, serves_maintenance);
-        assert!(state.runner.is_some(), "background maintenance survives");
+        assert!(state.sweep.is_some(), "the maintenance sweep survives");
 
         for path in ["/health", "/readiness", "/metrics"] {
             let response = router
@@ -141,9 +141,6 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
                 StatusCode::NOT_FOUND
             }
         );
-        if let Some(runner) = &state.runner {
-            runner.shutdown().await.expect("maintenance shutdown");
-        }
         state.runtime.shutdown().await.expect("writer shutdown");
     }
 }

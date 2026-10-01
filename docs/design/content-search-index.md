@@ -110,13 +110,13 @@ The index does not prevent the namespace's retention floor from advancing. If in
 
 ## Maintenance scheduling
 
-The grep maintenance job wraps `GrepWorker` and runs through the maintenance runner, separately from core metadata maintenance. Each invocation builds one bounded batch, or performs one reorganization step when there is no remaining build work for that invocation. The runner handles duplicate scheduling hints, concurrency, backoff, and periodic checks. A failure for one namespace does not require delaying unrelated namespaces.
+The reference server drives `GrepWorker` from its maintenance sweep, beside core metadata maintenance. Each visit runs build steps while each one publishes, at most 16, then one reorganization step once the index is up to date. A collection pass also runs grep garbage collection. A failure for one namespace is logged and tried again on the next pass, and it does not delay unrelated namespaces.
 
-The periodic probe discovers the current grep manifest. For an active index at a commit boundary, it also checks the namespace head for another commit. Enabling the index schedules initial work; publications and queries that observe index lag can schedule more work.
+A second pass every five seconds builds the index of each writer session the server holds whose last published seq moved since that pass last indexed it, so a commit through that server is indexed within seconds. The sweep and that pass never build one namespace's index at the same time. Enabling the index publishes the backfill, and the next sweep pass starts it. Queries do not schedule work.
 
-A query-only server does not register the maintenance job and rejects index mutations. No grep operation enumerates all namespaces to discover work.
+A query-only server builds no index and rejects index mutations. No grep operation enumerates namespaces; the sweep lists them from the store.
 
-Embedded CLI profiles run a local maintenance scheduler and settle admitted work after mutations. `loonfs maintenance index enable` captures a target sequence and performs bounded passes until the index reaches it. Later namespace writes do not extend that target. `--no-wait` returns after enablement. `--max-steps` and `--deadline-ms` bound the wait; when either runs out, the command prints its progress and exits nonzero. Repeating the command can advance an existing index that has fallen behind.
+Embedded CLI profiles run no index work after a write. `loonfs maintenance index enable` captures a target sequence and performs bounded passes until the index reaches it. Later namespace writes do not extend that target. `--no-wait` returns after enablement. `--max-steps` and `--deadline-ms` bound the wait; when either runs out, the command prints its progress and exits nonzero. Repeating the command brings an index that has fallen behind up to the namespace head.
 
 For namespaces that may remain inactive, an embedded profile can assign maintenance explicitly with `loonfs maintenance loop --namespaces <id>`. `--jobs grep-index` selects index maintenance, and `--drain` processes the current assignment and exits, subject to its step and deadline limits. A namespace without an enabled index returns `not_enabled` after the grep manifest is read.
 

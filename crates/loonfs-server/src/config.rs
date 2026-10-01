@@ -151,9 +151,9 @@ pub struct ServerConfig {
     #[serde(default = "default_max_concurrent_folds")]
     pub max_concurrent_folds: usize,
     /// Maximum metadata merges this server runs at once, bounded compaction
-    /// steps and streaming compactions alike, whether writer sessions,
-    /// scheduled maintenance, or maintenance requests start them. A merge
-    /// never holds a fold permit.
+    /// steps and streaming compactions alike, whether writer sessions, the
+    /// maintenance sweep, or maintenance requests start them. A merge never
+    /// holds a fold permit.
     #[serde(default = "default_max_concurrent_compactions")]
     pub max_concurrent_compactions: usize,
     /// Shared request and concurrency limits for namespace publications.
@@ -176,8 +176,8 @@ pub struct ServerConfig {
     /// composes no grep at all; a present table must name its `mode`.
     #[serde(default)]
     pub grep: GrepConfig,
-    /// Whether this server serves maintenance requests, schedules maintenance,
-    /// both, or neither.
+    /// Whether this server serves maintenance requests, runs the maintenance
+    /// sweep, both, or neither.
     #[serde(default)]
     pub maintenance: MaintenanceMode,
     /// Minimum interval between publication starts per namespace, in
@@ -191,8 +191,11 @@ pub struct ServerConfig {
     /// Streamed content and long-running operator work are exempt.
     #[serde(default = "default_request_deadline_ms")]
     pub request_deadline_ms: u64,
-    /// Maximum time graceful shutdown waits for accepted requests to drain,
-    /// in milliseconds. Writer and cache settlement continue afterward.
+    /// Maximum time graceful shutdown waits for accepted requests to drain
+    /// and then for the maintenance sweep to stop, in milliseconds, counted
+    /// from the shutdown signal. Requests and sweep visits still running at
+    /// the deadline are dropped. Writer and cache settlement continue
+    /// afterward.
     #[serde(default = "default_shutdown_deadline_ms")]
     pub shutdown_deadline_ms: u64,
     /// Largest request body accepted for service-proxied upload content
@@ -237,13 +240,20 @@ pub struct ServerConfig {
     /// finishes or is dropped.
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
-    /// How many runner-scheduled maintenance runs may execute at once across
-    /// every job and namespace. Each job runs at most one run per
-    /// namespace at a time; this bounds the fan-out when a write burst
-    /// crosses thresholds in many namespaces together. A run that waits
-    /// for a permit takes the next one that frees.
+    /// How many namespaces the maintenance sweep visits at once. Folds and
+    /// merges also wait for the fold and compaction permits. Defaults to 8.
     #[serde(default = "default_max_concurrent_maintenance")]
     pub max_concurrent_maintenance: usize,
+    /// Milliseconds from the start of one maintenance sweep pass to the
+    /// start of the next. A pass that runs longer is followed at once.
+    /// Defaults to 300000 (5 minutes).
+    #[serde(default = "default_maintenance_interval_ms")]
+    pub maintenance_interval_ms: u64,
+    /// Least milliseconds between the starts of two sweep passes that
+    /// collect garbage. The first pass after start collects. Defaults to
+    /// 3600000 (1 hour).
+    #[serde(default = "default_gc_interval_ms")]
+    pub gc_interval_ms: u64,
     /// Decoded metadata bytes one maintenance step may merge. A step merges
     /// inline only the runs that fit; a larger window runs as a streaming
     /// compaction that holds at most this much at once. Defaults to 64 MiB.
@@ -258,9 +268,9 @@ pub struct ServerConfig {
     /// runtime default of 64 MiB.
     pub max_block_memo_bytes: Option<usize>,
     /// How old a WAL tail's newest commit must be before maintenance folds
-    /// a tail that is below the fold thresholds, in milliseconds. Scheduled
-    /// maintenance and explicit `metadata` requests use the same period.
-    /// Zero turns the rule off. Defaults to 15 minutes.
+    /// a tail that is below the fold thresholds, in milliseconds. The
+    /// maintenance sweep and explicit `metadata` requests use the same
+    /// period. Zero turns the rule off. Defaults to 15 minutes.
     #[serde(default = "default_idle_fold_after_ms")]
     pub idle_fold_after_ms: u64,
     /// Allows serving on a non-loopback address with `auth_token` unset.
@@ -351,7 +361,15 @@ fn default_max_concurrent_downloads() -> usize {
 }
 
 fn default_max_concurrent_maintenance() -> usize {
-    loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
+    8
+}
+
+fn default_maintenance_interval_ms() -> u64 {
+    300_000
+}
+
+fn default_gc_interval_ms() -> u64 {
+    3_600_000
 }
 
 fn default_max_merge_input_bytes() -> usize {
@@ -418,17 +436,17 @@ impl MetadataCacheOverrides {
 }
 
 /// What this server does about maintenance: serve the API group, run the
-/// scheduler, both, or neither.
+/// maintenance sweep, both, or neither.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceMode {
-    /// Neither serve the maintenance API group nor run the scheduler.
+    /// Neither serve the maintenance API group nor run the sweep.
     Disabled,
-    /// Serve explicit maintenance requests without running the scheduler.
+    /// Serve explicit maintenance requests without running the sweep.
     ServeOnly,
-    /// Run the scheduler without serving the maintenance API group.
+    /// Run the sweep without serving the maintenance API group.
     MaintainOnly,
-    /// Serve explicit maintenance requests and run the scheduler.
+    /// Serve explicit maintenance requests and run the sweep.
     #[default]
     ServeAndMaintain,
 }
@@ -439,7 +457,7 @@ impl MaintenanceMode {
         matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
     }
 
-    /// Whether this server runs the maintenance runner.
+    /// Whether this server runs the maintenance sweep.
     pub fn maintains(self) -> bool {
         matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
     }
@@ -472,8 +490,8 @@ impl GrepMode {
         matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
     }
 
-    /// Whether this server's writer registers the grep index job — which is
-    /// also what the index-maintenance endpoints act through.
+    /// Whether this server serves the index-maintenance endpoints, and
+    /// whether its maintenance sweep builds and collects the index.
     pub fn maintains_index(self) -> bool {
         matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
     }
@@ -645,11 +663,20 @@ impl ServerConfig {
                 reason: "must not exceed `snapshot_max_lifetime_ms`".to_owned(),
             });
         }
-        require_positive(
-            "max_concurrent_maintenance",
-            self.max_concurrent_maintenance as u64,
-            Some("set `maintenance = \"serve_only\"` to disable scheduling"),
-        )?;
+        for (field, value) in [
+            (
+                "max_concurrent_maintenance",
+                self.max_concurrent_maintenance as u64,
+            ),
+            ("maintenance_interval_ms", self.maintenance_interval_ms),
+            ("gc_interval_ms", self.gc_interval_ms),
+        ] {
+            require_positive(
+                field,
+                value,
+                Some("set `maintenance = \"serve_only\"` to turn the maintenance sweep off"),
+            )?;
+        }
         if let Some(local_cache) = &self.local_cache {
             require_non_empty("local_cache.path", &local_cache.path)?;
             require_positive(
@@ -1477,10 +1504,9 @@ root = "/tmp/loonfs-server"
         );
         assert_eq!(config.max_concurrent_uploads, 8);
         assert_eq!(config.max_concurrent_downloads, 16);
-        assert_eq!(
-            config.max_concurrent_maintenance,
-            loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
-        );
+        assert_eq!(config.max_concurrent_maintenance, 8);
+        assert_eq!(config.maintenance_interval_ms, 300_000);
+        assert_eq!(config.gc_interval_ms, 3_600_000);
 
         for field in [
             "max_download_bytes",
@@ -1489,6 +1515,8 @@ root = "/tmp/loonfs-server"
             "max_concurrent_uploads",
             "max_concurrent_downloads",
             "max_concurrent_maintenance",
+            "maintenance_interval_ms",
+            "gc_interval_ms",
             "max_merge_input_bytes",
         ] {
             let path = write_config(&format!(
@@ -2119,8 +2147,8 @@ root = "/tmp/loonfs-server"
 
     #[test]
     fn the_retired_step_concurrency_key_is_no_longer_a_key() {
-        // One permit pool bounds every maintenance family now, and it is
-        // configured by `max_concurrent_maintenance`.
+        // Grep indexing has no concurrency limit of its own. The sweep's
+        // `max_concurrent_maintenance` bounds it with every other visit.
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"

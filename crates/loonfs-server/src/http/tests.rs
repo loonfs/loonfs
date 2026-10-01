@@ -5,32 +5,22 @@
 mod composition;
 
 use super::serve::{build_handles, serve_on};
-use super::{app, AppOptions, AppState};
+use super::{app, AppOptions};
 use crate::config::MetadataCacheOverrides;
 use crate::{ServerConfig, StoreConfig};
-use async_trait::async_trait;
 use axum::http::StatusCode;
+use loonfs::metrics::MetricValue;
 use loonfs::{
-    LoonFs, MaintenanceCancellation, MaintenanceConclusion, MaintenanceJob, MaintenanceJobId,
-    MaintenanceProbe, MaintenanceRunReport, SharedObjectStore, StoredMetadataBlockCache, TraceMode,
-    TraceStoreKind, Writable,
+    LoonFs, SharedObjectStore, StoredMetadataBlockCache, TraceMode, TraceStoreKind, Writable,
 };
 use loonfs_client::{Client, ClientConfig};
-use loonfs_grep::keyspace::hint_key as grep_hint_key;
-use loonfs_grep::manifest::load_current_grep_manifest;
-use loonfs_grep::{GrepWorker, NamespaceReads};
 use loonfs_http::HttpMetrics;
-use loonfs_objectstore::{local_fs_store::LocalFsStore, PutMode};
-use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, OperationClass, OperationContext, OperationKind,
-};
-use loonfs_types::{
-    CapabilityDocument, ChangeSeq, GrepRequest, NamespaceId, PaginationPolicy,
-    API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0,
-};
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::ids::{namespace_id, writer_id};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS;
+use loonfs_types::{CapabilityDocument, API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -48,7 +38,6 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
             store,
             &HttpMetrics::new(),
             Some(metrics_path.clone().into_os_string()),
-            None,
             None,
         )
         .await
@@ -182,7 +171,7 @@ async fn graceful_shutdown_closes_the_local_cache() {
         listener,
         router,
         state.runtime.clone(),
-        state.runner.clone(),
+        state.sweep.clone(),
         state.local_cache.clone(),
         shutdown_deadline_ms,
         async move {
@@ -329,300 +318,163 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn embedded_runner_shutdown_drains_an_active_grep_step() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("grep-shutdown");
-    let blocking_store = Arc::new(BlockingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
-        KeyPredicate::exact(grep_hint_key(&namespace_id)),
-        OperationClass::GetWithMetadata,
-    ));
-    let store = blocking_store.clone() as SharedObjectStore;
-    let writer = test_runtime(store.clone(), "grep-shutdown-seed").await;
+/// Writes one file and folds it, so each call leaves one more delta run.
+async fn write_and_fold(writer: &LoonFs<Writable>, namespace_id: &loonfs::NamespaceId, path: &str) {
     writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .open_namespace(namespace_id)
+        .expect("open the namespace")
+        .put_file(path, b"body", &loonfs_test_support::test_actor())
         .await
-        .expect("create namespace");
-    grep_worker(&store, "grep-shutdown-enable")
+        .expect("write a file");
+    writer
+        .maintenance(writer_id("seed-maintenance"))
+        .fold_wal(namespace_id)
         .await
-        .enable(&namespace_id)
-        .await
-        .expect("enable grep");
-
-    blocking_store.block_next();
-    let config = test_config(temp_dir.path(), "grep-shutdown-server");
-    let (_router, state) = app(config, options_with_store(store))
-        .await
-        .expect("build app");
-    state
-        .binding
-        .grep_maintenance
-        .as_ref()
-        .expect("an index-maintaining app carries a maintenance handle")
-        .nudge(&namespace_id);
-    blocking_store.wait_until_blocked().await;
-
-    let shutdown = tokio::runtime::Handle::current().spawn({
-        let runner = state.runner.clone().expect("automatic runner");
-        async move { runner.shutdown().await }
-    });
-    tokio::task::yield_now().await;
-    assert!(
-        !shutdown.is_finished(),
-        "shutdown must wait for the active bounded grep step"
-    );
-    blocking_store.release();
-    shutdown
-        .await
-        .expect("join shutdown")
-        .expect("drain grep step");
-    state.runtime.shutdown().await.expect("shutdown writer");
-}
-
-/// A job that does nothing but count the steps the runner admitted for it.
-///
-/// It is registered on the server's own writer, so it queues, waits for a
-/// permit, and is shut down through exactly the admission every other job
-/// goes through. Counting is the whole point: an ordinary step's work is
-/// object-store traffic, and the question this test asks is whether any of
-/// it is issued at all once a shutdown has begun.
-struct StepCountingJob {
-    id: MaintenanceJobId,
-    steps: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl MaintenanceJob for StepCountingJob {
-    fn id(&self) -> MaintenanceJobId {
-        self.id
-    }
-
-    async fn run(
-        &self,
-        _namespace_id: &NamespaceId,
-        _cancellation: &MaintenanceCancellation,
-    ) -> loonfs::Result<MaintenanceRunReport> {
-        self.steps.fetch_add(1, Ordering::SeqCst);
-        // Idle rather than progressed: a requeueing step would never let
-        // the control settle below.
-        Ok(MaintenanceRunReport::concluded(MaintenanceConclusion::Idle))
-    }
-
-    async fn probe(&self, _namespace_id: &NamespaceId) -> loonfs::Result<MaintenanceProbe> {
-        Ok(MaintenanceProbe::Idle)
-    }
+        .expect("fold the file");
 }
 
 #[tokio::test]
-async fn shutdown_closes_maintenance_admission_before_draining_publications() {
+async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("shutdown-order");
-    let blocking = Arc::new(BlockingStore::matching(
-        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
-        data_wal_put_for(&namespace_id),
+    let seed = test_runtime(
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")),
+        "sweep-shutdown-seed",
+    )
+    .await;
+    let compacts = namespace_id("a-compacts");
+    seed.create_namespace(&compacts, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    for index in 0..=DEFAULT_MAX_DELTA_RUNS {
+        write_and_fold(&seed, &compacts, &format!("/file-{index}")).await;
+    }
+    let later = ["b-later", "c-later"].map(namespace_id);
+    for namespace_id in &later {
+        seed.create_namespace(namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("create the namespace");
+    }
+    seed.shutdown().await.expect("stop the seed writer");
+
+    let store = Arc::new(RecordingStore::new(
+        BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::metadata_segment(),
+            OperationClass::Put,
+        ),
+        KeyPredicate::any(),
     ));
-    let config = test_config(temp_dir.path(), "shutdown-order-server");
-    let (_router, state) = app(
-        config,
-        options_with_store(blocking.clone() as SharedObjectStore),
+    let mut config = test_config(temp_dir.path(), "sweep-shutdown-server");
+    // No run fits a one-byte merge, so the due compaction streams.
+    config.max_merge_input_bytes = 1;
+    config.max_concurrent_maintenance = 1;
+    let (router, state) = app(config, options_with_store(store.clone()))
+        .await
+        .expect("build app");
+    store.inner().block_next();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(super::serve::serve_and_settle(
+        listener,
+        router,
+        state.runtime.clone(),
+        state.sweep.clone(),
+        None,
+        60_000,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        store.inner().wait_until_blocked(),
     )
     .await
-    .expect("build app");
-    state
-        .runtime
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+    .expect("the sweep's streaming compaction reaches its first segment write");
+
+    shutdown_tx.send(()).expect("trigger shutdown");
+    while !state.runtime.is_shutting_down() {
+        tokio::task::yield_now().await;
+    }
+    store.inner().release();
+    tokio::time::timeout(std::time::Duration::from_secs(10), server)
         .await
-        .expect("create namespace");
-    let namespace = state
-        .runtime
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+        .expect("shutdown waits only for the compaction's next block")
+        .expect("join the server task")
+        .expect("shutdown settles the sweep and the runtime");
 
-    let steps = Arc::new(AtomicUsize::new(0));
-    let job = MaintenanceJobId::new("shutdown-order-probe");
-    state
-        .jobs
-        .register(Arc::new(StepCountingJob {
-            id: job,
-            steps: Arc::clone(&steps),
-        }))
-        .expect("register the counting job");
-
-    // The control. Without it, a later count of zero would prove only that
-    // this job never ran under any conditions.
-    let runner = state.runner.clone().expect("automatic runner");
-    runner.handle().nudge(job, &namespace_id);
-    runner.drain().await.expect("settle the admitted run");
-    let admitted_while_serving = steps.load(Ordering::SeqCst);
-    assert_eq!(
-        admitted_while_serving, 1,
-        "a nudge on a serving deployment admits one step"
-    );
-
-    // Park a publication so the shutdown's publication drain is still
-    // pending when its first poll returns — the window the runner would
-    // otherwise keep admitting into.
-    blocking.block_next();
-    let put = tokio::spawn({
-        let namespace = namespace.clone();
-        async move {
-            namespace
-                .put_file("/parked.txt", b"body", &loonfs_test_support::test_actor())
-                .await
-        }
-    });
-    blocking.wait_until_blocked().await;
-
-    state.runtime.close_admission();
-    runner.close_admission();
-    let mut shutdown = Box::pin(state.runtime.shutdown());
-    assert!(
-        futures::poll!(shutdown.as_mut()).is_pending(),
-        "the parked publication must keep the shutdown pending"
-    );
-    // Everything after this point is the drain window.
-    runner.handle().nudge(job, &namespace_id);
-
-    blocking.release();
-    put.await
-        .expect("join the parked put")
-        .expect("the released put succeeds");
-    // Releasing the put also lets it publish, which fires the publish
-    // observer's own nudge — the production path into this same window.
-    shutdown
-        .await
-        .expect("the shutdown settles with its queue discarded");
-    runner.shutdown().await.expect("runner shutdown");
-
-    assert_eq!(
-        steps.load(Ordering::SeqCst),
-        admitted_while_serving,
-        "no maintenance pass may be admitted once the shutdown has begun"
-    );
-    // And the runner stays shut rather than reopening behind the drain.
-    runner.handle().nudge(job, &namespace_id);
-    runner.drain().await.expect("a shut runner is settled");
-    assert_eq!(
-        steps.load(Ordering::SeqCst),
-        admitted_while_serving,
-        "a nudge after the shutdown must admit nothing either"
-    );
+    let snapshot = state.binding.metrics.snapshot();
+    let cancelled = snapshot
+        .by_name("loonfs.maintenance.compactions")
+        .find(|entry| entry.labels == [("outcome", "cancelled")])
+        .map(|entry| entry.value.clone());
+    assert_eq!(cancelled, Some(MetricValue::Counter(1)));
+    for namespace_id in &later {
+        let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
+        assert!(
+            !store
+                .snapshot()
+                .iter()
+                .any(|operation| operation.key().starts_with(&prefix)),
+            "no visit starts after shutdown, so `{namespace_id}` is never read"
+        );
+    }
 }
 
 #[tokio::test]
-async fn a_namespace_advance_nudges_the_enabled_namespaces_index() {
+async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_runtime() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let config = test_config(temp_dir.path(), "grep-observer-server");
-    let (_router, state) = app(config, options_with_store(store))
+    let namespace_id = namespace_id("parked-collection");
+    // The first pass collects garbage, and collection lists pins first.
+    let store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(loonfs_objectstore::keys::pin_prefix(&namespace_id)),
+        OperationClass::List,
+    ));
+    let shutdown_deadline_ms = 25;
+    let mut config = test_config(temp_dir.path(), "parked-sweep-server");
+    config.shutdown_deadline_ms = shutdown_deadline_ms;
+    let (router, state) = app(config, options_with_store(store.clone()))
         .await
         .expect("build app");
-    let namespace_id = namespace_id("grep-observer");
     state
         .runtime
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
-        .expect("create namespace");
-    let namespace = state
-        .runtime
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    state
-        .binding
-        .grep_worker
-        .as_ref()
-        .expect("grep worker")
-        .enable(&namespace_id)
+        .expect("create the namespace");
+    store.block_next();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("enable grep");
-    state
-        .binding
-        .grep_maintenance
-        .as_ref()
-        .expect("an index-maintaining app carries a maintenance handle")
-        .nudge(&namespace_id);
-    state
-        .runner
-        .as_ref()
-        .expect("automatic runner")
-        .drain()
-        .await
-        .expect("settle the backfill");
-    assert_eq!(
-        built_through_seq(&state, &namespace_id).await,
-        ChangeSeq(0),
-        "an empty namespace's backfill completes at its own head"
-    );
-
-    // The publish is the only trigger from here on: nothing below nudges.
-    namespace
-        .put_file(
-            "/note.txt",
-            b"observer-driven needle\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("publish file");
-    state
-        .runner
-        .as_ref()
-        .expect("automatic runner")
-        .drain()
-        .await
-        .expect("settle the observer-driven step");
-    assert_eq!(
-        built_through_seq(&state, &namespace_id).await,
-        ChangeSeq(1),
-        "the publish observer is what carried the index to the new head"
-    );
-    let request = GrepRequest {
-        pattern: "observer-driven needle".to_owned(),
-        case_insensitive: false,
-        path_prefix: None,
-        cursor: None,
-        allow_stale: false,
-        allow_scan: false,
-    };
-    let service = state
-        .binding
-        .grep_service
-        .as_ref()
-        .expect("a query-serving app carries a grep service");
-    let store = state.runtime.object_store();
-    let reads = NamespaceReads::new(state.binding.runtime.namespace(&namespace_id));
-    let response = service
-        .query(
-            &request,
-            PaginationPolicy::default()
-                .resolve_limit(None)
-                .expect("the pagination policy accepts its own default"),
-            &reads,
-            &store,
-        )
-        .await
-        .expect("grep caught-up index");
-    assert_eq!(response.matches.len(), 1);
-    state.runtime.shutdown().await.expect("drain the writer");
-}
-
-/// What the index's steps published, read where an operator reads it.
-async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> ChangeSeq {
-    load_current_grep_manifest(
-        &*state.runtime.object_store(),
-        namespace_id,
-        loonfs::engine::Observation::now(Arc::new(
-            loonfs_objectstore::timing::StdMonotonicTimer::default(),
-        )),
+        .expect("bind listener");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(super::serve::serve_and_settle(
+        listener,
+        router,
+        state.runtime.clone(),
+        state.sweep.clone(),
+        None,
+        shutdown_deadline_ms,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        store.wait_until_blocked(),
     )
     .await
-    .expect("load grep manifest")
-    .expect("an enabled namespace has a grep manifest")
-    .manifest_state()
-    .status()
-    .active_watermark()
-    .expect("an active grep manifest has a watermark")
-    .built_through_seq()
+    .expect("the sweep's collection reaches the parked pin listing");
+
+    shutdown_tx.send(()).expect("trigger shutdown");
+    tokio::time::timeout(std::time::Duration::from_secs(10), server)
+        .await
+        .expect("shutdown does not wait for a parked visit past its deadline")
+        .expect("join the server task")
+        .expect("an abandoned visit does not fail the shutdown");
+    assert!(state.runtime.is_shutting_down());
+    store.release();
 }
 
 #[tokio::test]
@@ -734,7 +586,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     let (router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
-    assert!(state.runner.is_some());
+    assert!(state.sweep.is_some());
 
     let capabilities_response = router
         .clone()
@@ -876,7 +728,7 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
         listener,
         router,
         state.runtime.clone(),
-        state.runner.clone(),
+        state.sweep.clone(),
         None,
         shutdown_deadline_ms,
         async move {
@@ -956,22 +808,6 @@ fn options_with_store(store: SharedObjectStore) -> AppOptions {
     }
 }
 
-fn data_wal_put_for(
-    namespace_id: &NamespaceId,
-) -> impl Fn(&OperationContext<'_>) -> bool + Send + Sync + 'static {
-    let prefix = loonfs_objectstore::keys::wal_prefix(namespace_id);
-    move |operation| match operation.kind() {
-        OperationKind::Put {
-            bytes,
-            mode: PutMode::CreateIfAbsent,
-        } if operation.key().starts_with(&prefix) => {
-            loonfs_types::format::wal::decode_wal_object_envelope_zstd(bytes)
-                .is_ok_and(|envelope| !envelope.payload().records.is_empty())
-        }
-        _ => false,
-    }
-}
-
 fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
@@ -999,7 +835,9 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         snapshot_max_live_per_namespace: 16,
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
-        max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+        max_concurrent_maintenance: 8,
+        maintenance_interval_ms: 300_000,
+        gc_interval_ms: 3_600_000,
         max_merge_input_bytes: loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
         manifest_revalidation_interval_ms: None,
         max_block_memo_bytes: None,
@@ -1022,22 +860,4 @@ async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writa
         .build()
         .await
         .expect("build writer")
-}
-
-/// A worker composed the way the server composes its own: grep's keyspace
-/// on the given store, its filesystem reads and checkpoints on handles over
-/// the same store.
-async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let reader = LoonFs::builder_with_store(store.clone())
-        .read_only()
-        .build()
-        .await
-        .expect("build reader");
-    let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(actor)
-        .build()
-        .await
-        .expect("build maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(actor));
-    GrepWorker::new(store.clone(), reader, maintenance)
 }

@@ -416,7 +416,7 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
 }
 
 #[test]
-fn index_enable_waits_to_its_target_and_the_runner_tracks_later_writes() {
+fn index_enable_waits_to_its_target_and_catches_up_with_later_writes() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -429,20 +429,20 @@ fn index_enable_waits_to_its_target_and_the_runner_tracks_later_writes() {
     assert_success(&enabled);
     assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
 
-    // A later command's local runner advances the enabled index as it writes.
+    // An embedded write leaves the index where it was, and enabling again
+    // catches it up to the namespace head.
     let more = harness.temp_dir.path().join("two.txt");
     fs::write(&more, b"needle two\n").expect("write payload");
     assert_success(&harness.run(&["put", more.to_str().expect("utf-8 path"), "/two.txt"]));
     let status = harness.run(&["--json", "maintenance", "index", "status"]);
     assert_success(&status);
-    assert_eq!(
-        json_data(&status)["built_through_seq"],
-        2,
-        "the embedded runner maintains an enabled index after each write"
-    );
+    assert_eq!(json_data(&status)["built_through_seq"], 1);
+    let behind = harness.run(&["--json", "maintenance", "index", "enable"]);
+    assert_success(&behind);
+    assert_eq!(json_data(&behind)["waited_for_seq"], 2);
+    assert_eq!(json_data(&behind)["built_through_seq"], 2);
 
     // An index already at the namespace head returns without stepping.
-    assert_success(&harness.run(&["maintenance", "index", "enable"]));
     let caught_up = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&caught_up);
     assert_eq!(json_data(&caught_up)["status"], "active");

@@ -1269,15 +1269,17 @@ not running can all delay complete reclamation. A deleted manifest refuses commi
 It does not revoke capabilities already issued. The retirement grace exceeds
 the presigned URL lifetime.
 
-A successful delete schedules GC in the attached in-process runner for the
-deletion time plus the retirement grace and GC safety margin. The runtime also
-schedules future work from `next_reclamation_at_ms`. Deleted namespaces need
-not stay assigned to an operator loop forever. LoonFS does not enumerate
-namespaces for maintenance, and hints do not survive restart. Use
+The reference server's maintenance sweep lists every namespace in its store,
+deleted ones included, and runs GC for each one on every collection pass, so
+a deleted namespace is reclaimed within one collection interval after it
+becomes eligible, after a restart too. A runtime without the sweep schedules
+GC in an attached in-process runner for the deletion time plus the
+retirement grace and GC safety margin, and schedules future work from
+`next_reclamation_at_ms`. Those hints do not survive restart. Use
 `loonfs maintenance loop --namespaces <id>` for inactive namespaces and as a
-backstop after restart or a missed hint. The command runs until stopped, or
-performs one bounded pass with `--drain`. Retirement also prompts the runner
-to schedule GC for a fork's source. A missed prompt delays reclamation.
+backstop there. The command runs until stopped, or performs one bounded pass
+with `--drain`. Retirement also prompts the runner to schedule GC for a
+fork's source. A missed prompt delays reclamation.
 
 A maintenance job that cannot start because the process is shutting down releases its claim without running. Shutdown waits for every job that did start.
 

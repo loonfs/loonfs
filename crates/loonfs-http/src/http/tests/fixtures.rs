@@ -98,7 +98,6 @@ pub(super) async fn test_app(
         direct_transfers: inputs.direct_transfers,
         grep_worker,
         grep_service,
-        grep_maintenance: None,
         metrics,
     };
     Ok((crate::router(state.clone()), state))

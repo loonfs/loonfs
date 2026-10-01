@@ -7,7 +7,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use loonfs::{LoonFs, Writable};
 use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
-use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GREP_INDEX_JOB};
+use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
@@ -191,7 +191,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
 }
 
 #[tokio::test]
-async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespace() {
+async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "both").await;
     let namespace = writer
@@ -235,7 +235,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         "{:?}",
         enabled.lifecycle
     );
-    settle(&server).await;
+    sweep(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
     let active = index_status(&router, &namespace_id).await;
     assert_eq!(
@@ -259,12 +259,10 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     )
     .await;
     assert_eq!(again.lifecycle, active.lifecycle);
-    // Re-enabling also schedules maintenance; finish it before the external write.
-    settle(&server).await;
 
-    // The file lands through a writer of its own, so nothing in this server
-    // observed the publish: the index stays where it was until a request
-    // touches the namespace again.
+    // The file lands through a writer of its own, so this server holds no
+    // session that saw the publish: the index stays where it was until the
+    // next sweep pass.
     namespace
         .put_file(
             "/note.txt",
@@ -273,7 +271,6 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         )
         .await
         .expect("write file");
-    settle(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
 
     let capabilities = capabilities(&router).await;
@@ -291,18 +288,18 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     }
     assert_served_document_covers_the_spec_example(&capabilities);
 
-    // The first search over a namespace whose index trails answers from the
-    // exhaustive tail and nudges the index at the same time.
+    // A search over a namespace whose index trails answers from the
+    // exhaustive tail, and the next sweep pass catches the index up.
     let response = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].path, "/note.txt");
-    settle(&server).await;
+    sweep(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
     let caught_up = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(caught_up.matches.len(), 1);
     assert_eq!(caught_up.built_through_seq, caught_up.head_seq);
 
-    // Disabling is one durable compare-and-swap; the runner discovers it.
+    // Disabling is one durable compare-and-swap; the sweep reads it.
     let disabled_response = disable_grep(&router, &namespace_id).await;
     assert_eq!(disabled_response.lifecycle, GrepIndexLifecycle::Disabled);
     assert!(!disabled_response.reorganize_pending);
@@ -314,7 +311,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         disabled.manifest_state().status(),
         GrepIndexStatus::Disabled {}
     ));
-    settle(&server).await;
+    sweep(&server).await;
     assert!(
         matches!(
             load_current_grep_manifest(&*store, &namespace_id, observation())
@@ -354,7 +351,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
     assert!(retained_candidates > 0);
 
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
-    settle(&server).await;
+    sweep(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
     let reenabled = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(reenabled.matches.len(), 1);
@@ -366,7 +363,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
 }
 
 #[tokio::test]
-async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
+async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let temp_dir = tempdir().expect("store tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let writer = LoonFs::builder_with_store(store.clone())
@@ -443,8 +440,8 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     drop(worker);
     drop(store);
 
-    // Nothing has nudged either namespace in this process: the first search
-    // is what re-admits the index that trails its head.
+    // Nothing in this process has touched either namespace: one sweep pass
+    // carries both indexes to their heads.
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
         AppOptions::default(),
@@ -453,10 +450,6 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     .expect("reopen app");
     let stale_response = grep(&router, &stale, "stale steady needle").await;
     assert_eq!(stale_response.matches.len(), 1);
-    settle(&server).await;
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    assert_eq!(watermark(&store, &stale).await, ChangeSeq(2));
-
     let not_materialized = send(
         &router,
         Method::GET,
@@ -464,14 +457,11 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         None,
     )
     .await;
-    assert!(
-        matches!(
-            not_materialized.status(),
-            StatusCode::OK | StatusCode::NOT_IMPLEMENTED
-        ),
-        "first touch either observes backfill or its concurrently completed manifest"
-    );
-    settle(&server).await;
+    assert_eq!(not_materialized.status(), StatusCode::NOT_IMPLEMENTED);
+
+    sweep(&server).await;
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    assert_eq!(watermark(&store, &stale).await, ChangeSeq(2));
     assert_eq!(watermark(&store, &backfill).await, ChangeSeq(3));
     let resumed = grep(&router, &backfill, "mid-backfill needle").await;
     assert_eq!(resumed.matches.len(), 3);
@@ -556,7 +546,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
         )
         .await
         .expect("write file");
-    settle(&server).await;
+    sweep(&server).await;
     assert_eq!(
         lifecycle_of(&store, &namespace_id).await.active_watermark(),
         None,
@@ -623,8 +613,9 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         error.message
     );
 
-    // The index itself is this deployment's job: enabling it here admits the
-    // backfill, and the runner carries it to the namespace's head.
+    // The index itself is this deployment's job: enabling it here publishes
+    // the backfill, and the next sweep pass carries it to the namespace's
+    // head.
     namespace
         .put_file(
             "/note.txt",
@@ -634,7 +625,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .await
         .expect("write file");
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
-    settle(&server).await;
+    sweep(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
     let manifest = load_current_grep_manifest(&*store, &namespace_id, observation())
         .await
@@ -656,7 +647,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
 }
 
 #[tokio::test]
-async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() {
+async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "manual-maintenance").await;
     let namespace = writer
@@ -673,9 +664,9 @@ async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() 
     .expect("build app");
     assert!(
         maintains_grep_index(&server),
-        "a serve-only deployment still exposes the configured index job"
+        "a serve-only deployment still serves the index routes"
     );
-    assert!(server.runner.is_none(), "serve-only mode builds no runner");
+    assert!(server.sweep.is_none(), "serve-only mode builds no sweep");
 
     namespace
         .put_file(
@@ -686,7 +677,7 @@ async fn serve_only_maintenance_registers_the_index_job_without_scheduling_it() 
         .await
         .expect("write file");
     // Every index route still answers: serve-only maintenance withdraws the
-    // scheduler, not the operator's reach.
+    // sweep, not the operator's reach.
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     assert!(
         matches!(
@@ -767,6 +758,8 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_concurrent_uploads: 2,
         max_concurrent_downloads: 2,
         max_concurrent_maintenance: 2,
+        maintenance_interval_ms: 300_000,
+        gc_interval_ms: 3_600_000,
         max_merge_input_bytes: loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
         manifest_revalidation_interval_ms: None,
         max_block_memo_bytes: None,
@@ -781,25 +774,21 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
     }
 }
 
-/// Waits for every maintenance pass this deployment admitted to settle, so
-/// the durable state read next is the state those steps left.
-///
-/// A drain, not a per-namespace wait: the runner admits work per
-/// `{job, namespace}` key and reports progress durably, so what this waits
-/// for is quiet and what it then reads is durable state.
-async fn settle(server: &loonfs_server::AppState) {
+/// Runs one maintenance sweep pass, so the durable state read next is the
+/// state that pass left.
+async fn sweep(server: &loonfs_server::AppState) {
     server
-        .runner
+        .sweep
         .as_ref()
-        .expect("automatic maintenance runner")
-        .drain()
+        .expect("a maintaining server has a sweep")
+        .run_pass(false)
         .await
-        .expect("settle maintenance");
+        .expect("list the namespaces");
 }
 
-/// Whether this deployment registered the grep index job.
+/// Whether this deployment serves the index-maintenance routes.
 fn maintains_grep_index(server: &loonfs_server::AppState) -> bool {
-    server.jobs.get(GREP_INDEX_JOB).is_some()
+    server.binding.options.maintains_grep_index
 }
 
 /// The sequence this namespace's index is built through.

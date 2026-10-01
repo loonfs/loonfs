@@ -5,6 +5,7 @@ use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
 use crate::config::{ServerConfig, ServerConfigError};
 use crate::local_cache::FoyerStoredMetadataBlockCache;
+use crate::sweep::Sweep;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
@@ -12,24 +13,18 @@ use axum::response::Response;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
-    maintenance_hint_relay, GarbageCollectionJob, LoonFs, Maintenance, MaintenanceHintObserver,
-    MaintenanceRegistry, MaintenanceRunner, MetadataCompactionJob, MetadataMaintenanceJob,
-    MetadataMaintenanceOptions, SharedObjectStore, StoredMetadataBlockCache,
+    LoonFs, Maintenance, SharedObjectStore, StoredMetadataBlockCache,
     StoredMetadataBlockCacheCloseError, TraceMode, TraceStoreKind, Writable, WriterId,
 };
 use loonfs_grep::{
-    new_grep_block_cache, GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker,
-    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
-use loonfs_http::{
-    AuthPolicy, BindingOptions, BindingState, GrepMaintenance, HttpMetrics, Namespaces,
-};
+use loonfs_http::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
 use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -130,8 +125,9 @@ impl http_body::Body for DrainedBody {
 pub struct AppState {
     pub binding: BindingState,
     pub runtime: LoonFs<Writable>,
-    pub jobs: MaintenanceRegistry,
-    pub runner: Option<MaintenanceRunner>,
+    /// The maintenance sweep of a config that maintains. [`app`] does not
+    /// start it.
+    pub sweep: Option<Sweep>,
     pub local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 }
 
@@ -146,10 +142,11 @@ pub struct AppOptions {
 
 /// Builds the router and returns its state.
 ///
-/// After an embedded listener drains, the host must shut down
-/// [`AppState::runtime`] and [`AppState::runner`], then close
+/// The state holds the maintenance sweep when the config maintains, and
+/// this does not start it. [`serve`] starts it. After an embedded listener
+/// drains, the host must shut down [`AppState::runtime`], then close
 /// [`AppState::local_cache`] so in-memory entries are flushed. [`serve`]
-/// performs these steps automatically. The runner and cache are optional.
+/// performs these steps automatically. The cache is optional.
 pub async fn app(
     config: ServerConfig,
     options: AppOptions,
@@ -171,34 +168,19 @@ pub async fn app(
         }
     };
     let metrics = HttpMetrics::new();
-    // Two switches decide scheduled grep indexing and nothing else does:
-    // whether this server maintains anything, and whether its
-    // grep mode maintains the index.
-    let maintains = config.maintenance.maintains();
     let maintains_grep_index = config.grep.mode.maintains_index();
-    let (maintenance_hint_observer, maintenance_hint_receiver) = if maintains {
-        let (observer, receiver) =
-            maintenance_hint_relay(NonZeroUsize::new(4096).expect("relay capacity is nonzero"));
-        (Some(observer), Some(receiver))
-    } else {
-        (None, None)
-    };
     // Opened before the runtime, because the runtime is what it is
     // installed on: a directory that cannot be owned fails startup here
     // rather than after a runtime is already running on it.
     let local_cache = open_local_cache(&config, &metrics).await?;
     // Grep reads and checkpoints through the same runtime the HTTP API
-    // groups use, so it is composed after it. Nothing has to be wired back
-    // into the runtime for its publications to reach the index: the job says
-    // on the trait that publications concern it, and registering it is what
-    // subscribes it.
+    // groups use, so it is composed after it.
     let (runtime, maintenance) = build_handles(
         &config,
         store,
         &metrics,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
         local_cache.clone(),
-        maintenance_hint_observer,
     )
     .await?;
     let probe_store = runtime.object_store();
@@ -221,58 +203,23 @@ pub async fn app(
         ));
         Arc::new(GrepService::new(grep_block_cache))
     });
-    let jobs = MaintenanceRegistry::new();
-    jobs.register(Arc::new(
-        MetadataMaintenanceJob::new(maintenance.clone()).options(MetadataMaintenanceOptions {
-            idle_fold_after_ms: config.idle_fold_after_ms,
-            ..MetadataMaintenanceOptions::default()
-        }),
-    ))
-    .map_err(maintenance_config_error)?;
-    jobs.register(Arc::new(MetadataCompactionJob::new(maintenance.clone())))
-        .map_err(maintenance_config_error)?;
-    jobs.register(Arc::new(GarbageCollectionJob::new(maintenance.clone())))
-        .map_err(maintenance_config_error)?;
-    let grep_job = if maintains_grep_index {
-        let grep_worker = grep_worker
-            .as_ref()
-            .expect("grep maintenance requires a grep worker");
-        let policy = config
-            .grep
-            .worker_config()
-            .build_policy()
-            .map_err(grep_config_error)?;
-        let job = Arc::new(GrepMaintenanceJob::new(grep_worker.clone(), policy));
-        jobs.register(job.clone()).map_err(grep_config_error)?;
-        jobs.register(Arc::new(GrepGcJob::new(grep_worker.clone())))
-            .map_err(grep_config_error)?;
-        Some(job)
-    } else {
-        None
-    };
-    let runner = if maintains {
-        let runner = MaintenanceRunner::builder(jobs.clone())
-            .max_concurrent(
-                NonZeroUsize::new(config.max_concurrent_maintenance)
-                    .expect("validated maintenance concurrency should be nonzero"),
+    let namespaces = Arc::new(Namespaces::new(runtime.clone()));
+    let sweep = config
+        .maintenance
+        .maintains()
+        .then(|| {
+            Sweep::new(
+                &config,
+                runtime.object_store(),
+                maintenance.clone(),
+                Arc::clone(&namespaces),
+                // A server that only answers grep queries also has a
+                // worker, and its sweep must not build the index.
+                grep_worker.clone().filter(|_| maintains_grep_index),
+                metrics.recorder().as_ref(),
             )
-            .metrics_recorder(metrics.recorder())
-            .build()
-            .map_err(maintenance_config_error)?;
-        runner.attach_hints(
-            maintenance_hint_receiver.expect("maintained mode should have a hint relay"),
-        );
-        Some(runner)
-    } else {
-        None
-    };
-    let grep_maintenance = runner
-        .as_ref()
-        .zip(grep_job)
-        .map(|(runner, job)| GrepMaintenance {
-            handle: runner.handle(),
-            job,
-        });
+        })
+        .transpose()?;
     let options = Arc::new(BindingOptions {
         serves_grep: config.grep.mode.serves_grep(),
         maintains_grep_index,
@@ -305,37 +252,21 @@ pub async fn app(
         )),
         options,
         runtime: runtime.clone(),
-        namespaces: Arc::new(Namespaces::new(runtime.clone())),
+        namespaces,
         maintenance,
         probe_store,
         direct_transfers,
         grep_worker,
         grep_service,
-        grep_maintenance,
         metrics,
     };
     let state = AppState {
         binding,
         runtime,
-        jobs,
-        runner,
+        sweep,
         local_cache,
     };
     Ok((router(state.clone()), state))
-}
-
-fn maintenance_config_error(error: impl std::fmt::Display) -> ServerConfigError {
-    ServerConfigError::InvalidField {
-        field: "maintenance",
-        reason: error.to_string(),
-    }
-}
-
-fn grep_config_error(error: impl std::fmt::Display) -> ServerConfigError {
-    ServerConfigError::InvalidField {
-        field: "grep",
-        reason: error.to_string(),
-    }
 }
 
 async fn open_local_cache(
@@ -364,7 +295,6 @@ pub(super) async fn build_handles(
     metrics: &HttpMetrics,
     metrics_jsonl_path: Option<OsString>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
-    maintenance_hint_observer: Option<MaintenanceHintObserver>,
 ) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
@@ -402,9 +332,6 @@ pub(super) async fn build_handles(
     }
     if let Some(bytes) = config.max_block_memo_bytes {
         builder = builder.max_block_memo_bytes(bytes);
-    }
-    if let Some(observer) = maintenance_hint_observer {
-        builder = builder.maintenance_hint_observer(move |hint| observer(hint));
     }
     if let Some(samples) = &samples {
         builder = builder.object_store_metrics_recorder(Arc::clone(samples));
@@ -542,8 +469,9 @@ pub async fn serve_with_shutdown(
 
 /// The one serving body, over whichever listener the deployment configured.
 /// Plaintext and TLS differ in what `accept` returns and in nothing else.
-/// Both close admission, drain requests, close the listener, and settle the
-/// runtime in the same order.
+/// Both start the maintenance sweep when the config maintains, close
+/// admission, drain requests, close the listener, stop the sweep, and settle
+/// the runtime in the same order.
 pub(super) async fn serve_on<L>(
     listener: L,
     config: ServerConfig,
@@ -558,7 +486,7 @@ where
         listener,
         router,
         state.runtime,
-        state.runner,
+        state.sweep,
         state.local_cache,
         shutdown_deadline_ms,
         shutdown,
@@ -566,8 +494,8 @@ where
     .await
 }
 
-/// Serves until the shutdown trigger fires, then settles what this process
-/// owns, in the order it has to be settled in.
+/// Starts `sweep`, serves until the shutdown trigger fires, then settles
+/// what this process owns, in the order it has to be settled in.
 ///
 /// Kept apart from [`serve_on`] so the settling order is a thing a test can
 /// drive with handles it holds.
@@ -577,7 +505,7 @@ pub(super) async fn serve_and_settle<L>(
     listener: L,
     router: Router,
     runtime: LoonFs<Writable>,
-    runner: Option<MaintenanceRunner>,
+    sweep: Option<Sweep>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
     shutdown_deadline_ms: u64,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -585,6 +513,7 @@ pub(super) async fn serve_and_settle<L>(
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
+    let sweep = sweep.map(|sweep| sweep.start());
     let requests = RequestDrain::default();
     let router = router.layer(axum::middleware::from_fn_with_state(
         requests.clone(),
@@ -599,39 +528,42 @@ where
             .into_future(),
     );
     let mut shutdown = Box::pin(shutdown);
-    let served = tokio::select! {
-        result = server.as_mut() => result,
+    // The budget starts when shutdown fires. It does not limit uptime.
+    let deadline_from_now = || {
+        Box::pin(tokio::time::sleep_until(
+            tokio::time::Instant::now() + Duration::from_millis(shutdown_deadline_ms),
+        ))
+    };
+    let (served, mut deadline) = tokio::select! {
+        result = server.as_mut() => (result, deadline_from_now()),
         () = shutdown.as_mut() => {
             // This is synchronous so readiness changes before the drain waits.
             runtime.close_admission();
-            if let Some(runner) = &runner {
-                runner.close_admission();
+            if let Some(sweep) = &sweep {
+                sweep.cancel();
             }
-            // The budget starts when shutdown fires. It does not limit uptime.
-            let deadline = tokio::time::Instant::now()
-                + Duration::from_millis(shutdown_deadline_ms);
-            let mut deadline = Box::pin(tokio::time::sleep_until(deadline));
-            drain_with_deadline(
+            let mut deadline = deadline_from_now();
+            let drained = drain_with_deadline(
                 server.as_mut(),
                 &requests,
                 listener_close_tx,
                 deadline.as_mut(),
                 shutdown_deadline_ms,
             )
-            .await
+            .await;
+            (drained, deadline)
         }
     };
     // Dropping the server cancels requests left behind by an expired drain.
     drop(server);
-    served.map_err(ServeError::Serve)?;
-    let runtime_settled = runtime.shutdown().await;
-    let runner_settled = match runner {
-        Some(runner) => runner.shutdown().await,
+    // The sweep waits under the same deadline, and is aborted when it passes.
+    let swept = match sweep {
+        Some(sweep) => sweep.stop(deadline.as_mut(), shutdown_deadline_ms).await,
         None => Ok(()),
     };
-    let settled = runtime_settled
-        .and(runner_settled)
-        .map_err(ServeError::Shutdown);
+    served.map_err(ServeError::Serve)?;
+    let runtime_settled = runtime.shutdown().await;
+    let settled = runtime_settled.and(swept).map_err(ServeError::Shutdown);
     // Close the cache after runtime shutdown, even when runtime shutdown
     // fails. Closing flushes retained memory entries to disk. If both steps
     // fail, report the runtime failure.

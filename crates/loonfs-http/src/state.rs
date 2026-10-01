@@ -2,10 +2,10 @@
 
 use crate::HttpMetrics;
 use loonfs::{
-    CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, MaintenanceHandle,
-    MaintenanceJob, MaintenanceProbe, Namespace, SharedObjectStore, SnapshotPolicy, Writable,
+    CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, Namespace, SharedObjectStore,
+    SnapshotPolicy, Writable,
 };
-use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
+use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{ErrorCode, NamespaceId, SecretString};
@@ -52,7 +52,6 @@ pub struct BindingState {
     pub direct_transfers: Option<DirectTransferIssuers>,
     pub grep_worker: Option<GrepWorker<SharedObjectStore>>,
     pub grep_service: Option<Arc<GrepService>>,
-    pub grep_maintenance: Option<GrepMaintenance>,
     pub upload_permits: Arc<Semaphore>,
     pub download_permits: Arc<Semaphore>,
     pub metrics: Arc<HttpMetrics>,
@@ -126,6 +125,11 @@ impl Namespaces {
         handle.close().await.map(Some)
     }
 
+    /// Returns a clone of every handle this host holds.
+    pub fn held(&self) -> Vec<Namespace<Writable>> {
+        self.lock().values().cloned().collect()
+    }
+
     /// Stops holding the handle of a deleted namespace.
     pub(crate) fn forget(&self, namespace_id: &NamespaceId) {
         self.lock().remove(namespace_id);
@@ -145,26 +149,5 @@ impl Namespaces {
 
     fn lock(&self) -> MutexGuard<'_, HashMap<NamespaceId, Namespace<Writable>>> {
         self.handles.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-#[derive(Clone)]
-pub struct GrepMaintenance {
-    pub handle: MaintenanceHandle,
-    pub job: Arc<GrepMaintenanceJob<SharedObjectStore>>,
-}
-
-impl GrepMaintenance {
-    pub fn nudge(&self, namespace_id: &NamespaceId) {
-        self.handle.nudge(GREP_INDEX_JOB, namespace_id);
-    }
-
-    pub(crate) async fn nudge_if_behind(&self, namespace_id: &NamespaceId) {
-        if matches!(
-            self.job.probe(namespace_id).await,
-            Ok(MaintenanceProbe::Due)
-        ) {
-            self.nudge(namespace_id);
-        }
     }
 }
