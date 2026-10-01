@@ -78,7 +78,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "list_snapshots",
-            method = "list_snapshots",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,

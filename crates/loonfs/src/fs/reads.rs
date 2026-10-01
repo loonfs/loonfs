@@ -500,7 +500,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "read_view",
-            method = "read_view",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -522,7 +521,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "read_view_at_checkpoint",
-            method = "read_view_at_checkpoint",
             namespace_id = %self.namespace_id,
             checkpoint_id = %checkpoint_id,
             mode = tracing::field::Empty,
@@ -550,7 +548,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "read_view_at_snapshot",
-            method = "read_view_at_snapshot",
             namespace_id = %self.namespace_id,
             snapshot_id = %snapshot_id,
             mode = tracing::field::Empty,
@@ -717,7 +714,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "list",
-            method = "list",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -801,7 +797,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "list_by_inode",
-            method = "list_by_inode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -855,7 +850,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "read_file",
-            method = "read_file",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -895,7 +889,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "read_file_stream",
-            method = "read_file_stream",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1271,7 +1264,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "read_file_revision",
-            method = "read_file_revision",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1307,7 +1299,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "read_file_revision_stream_by_inode",
-            method = "read_file_revision_stream_by_inode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1383,7 +1374,6 @@ impl<M> Namespace<M> {
         skip_all,
         fields(
             operation = "list_changes",
-            method = "list_changes",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,

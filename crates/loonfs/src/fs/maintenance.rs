@@ -693,7 +693,6 @@ impl Maintenance {
         skip_all,
         fields(
             operation = "maintenance.list_checkpoints",
-            method = "list_checkpoints",
             namespace_id = %namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,

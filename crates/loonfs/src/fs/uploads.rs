@@ -74,7 +74,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "create_upload",
-            method = "create_upload",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -99,7 +98,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "create_direct_put_upload_target",
-            method = "create_direct_put_upload_target",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -139,7 +137,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "create_direct_multipart_upload_target",
-            method = "create_direct_multipart_upload_target",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -191,7 +188,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "put_upload_content",
-            method = "put_upload_content",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -227,7 +223,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "put_upload_content_stream",
-            method = "put_upload_content_stream",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -254,7 +249,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "complete_upload",
-            method = "complete_upload",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -285,7 +279,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "complete_upload_for_mode",
-            method = "complete_upload_for_mode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,

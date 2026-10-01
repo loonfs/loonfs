@@ -109,7 +109,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "put_file",
-            method = "put_file",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -158,7 +157,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "put_file_stream",
-            method = "put_file_stream",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -190,7 +188,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "prepare_content",
-            method = "prepare_content",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -242,7 +239,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "prepare_content_stream",
-            method = "prepare_content_stream",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -327,7 +323,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "put_file_prepared",
-            method = "put_file_prepared",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -411,7 +406,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "put_file_content_ref",
-            method = "put_file_content_ref",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -451,7 +445,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "prepare_content_ref",
-            method = "prepare_content_ref",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -529,7 +522,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "prepare_content_token",
-            method = "prepare_content_token",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -572,7 +564,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "create_directory",
-            method = "create_directory",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -615,7 +606,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "delete_path",
-            method = "delete_path",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -665,7 +655,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "move_path",
-            method = "move_path",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -721,7 +710,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "copy_path",
-            method = "copy_path",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -776,7 +764,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "restore_revision",
-            method = "restore_revision",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -830,7 +817,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "update_attributes",
-            method = "update_attributes",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -882,7 +868,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "update_access",
-            method = "update_access",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -938,7 +923,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "undelete",
-            method = "undelete",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -986,7 +970,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "commit",
-            method = "commit",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1009,7 +992,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "commit_prepared",
-            method = "commit_prepared",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1036,7 +1018,6 @@ impl Namespace<Writable> {
         skip_all,
         fields(
             operation = "commit_candidate",
-            method = "commit_candidate",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,

@@ -159,8 +159,8 @@ fn delegated_writer_calls_close_one_operation_span() {
         "create_directory closed the wrong number of create_directory spans:\n{create_log}"
     );
     assert!(
-        create_directory[0]["span"]["method"] == "create_directory",
-        "create_directory span lacks its method field:\n{}",
+        create_directory[0]["span"]["operation"] == "create_directory",
+        "create_directory span lacks its operation field:\n{}",
         create_directory[0]
     );
     assert_eq!(
