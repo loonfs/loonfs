@@ -10,13 +10,13 @@ use crate::{
 };
 use crate::{Error, Result, SharedObjectStore};
 use loonfs_api::{
-    encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page, PageCursor,
-    PaginationPolicy, Subject, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_SNAPSHOTS, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
-    LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
-    LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
+    decode_cursor, encode_cursor, CapabilityDocument, FileRevision, FileRevisionsPageCursor, Page,
+    PageCursor, PageRequest, PaginationPolicy, Subject, WriterId, API_GROUP_FILESYSTEM_V0,
+    API_GROUP_MAINTENANCE_V0, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST,
+    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
+    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
+    LIMIT_GC_MIN_GRACE_WINDOW_MS, MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache, StoredMetadataBlockCache};
 use loonfs_core::{MutationContext, NamespaceReaderEngine, NamespaceWriterEngine};
@@ -322,6 +322,23 @@ pub(crate) fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Decodes the wire cursor a pager carries into the typed cursor a read
+/// takes.
+pub(super) fn decode_page_request<C: PageCursor>(
+    request: PageRequest<String>,
+) -> std::result::Result<PageRequest<C>, CoreError> {
+    let cursor = request
+        .cursor
+        .as_deref()
+        .map(decode_cursor)
+        .transpose()
+        .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+    Ok(PageRequest {
+        limit: request.limit,
+        cursor,
+    })
 }
 
 pub(super) fn encode_next_cursor<C: PageCursor>(

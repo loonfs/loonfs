@@ -25,6 +25,7 @@ use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
     OperationContext, OperationKind, RecordingStore,
@@ -1855,7 +1856,8 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_object() {
     assert_eq!(batched_actors.get("req-b"), Some(&actor_b));
 
     let changes = namespace
-        .list_changes_page(ChangeSeq(0), crate::ListChangesOptions::default())
+        .list_changes(ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("read change feed");
     let feed_actors = changes
@@ -2295,7 +2297,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
     let namespace = reader.namespace(&namespace_id);
     assert_eq!(
         namespace
-            .get_file_bytes("/inline")
+            .read_file("/inline")
             .await
             .expect("read after fold")
             .bytes,
@@ -2944,7 +2946,7 @@ async fn a_writer_and_its_reader_share_one_counted_tail() {
     writer
         .read_only()
         .namespace(&namespace_id)
-        .get_path_entry("/docs", Default::default())
+        .stat("/docs")
         .await
         .expect("read the published directory");
 

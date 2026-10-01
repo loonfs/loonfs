@@ -156,11 +156,11 @@ async fn cancelled_caller_does_not_cancel_admitted_publication() {
     let reader = parked.writer.read_only();
     let namespace = reader.namespace(&parked.namespace_id);
     namespace
-        .get_file_bytes("/a.txt")
+        .read_file("/a.txt")
         .await
         .expect("the cancelled caller's admitted publication landed");
     namespace
-        .get_file_bytes("/b.txt")
+        .read_file("/b.txt")
         .await
         .expect("the queued publication landed");
 }
@@ -184,11 +184,11 @@ async fn all_callers_cancelled_publication_still_lands() {
     let reader = parked.writer.read_only();
     let namespace = reader.namespace(&parked.namespace_id);
     namespace
-        .get_file_bytes("/a.txt")
+        .read_file("/a.txt")
         .await
         .expect("the first admitted publication landed");
     namespace
-        .get_file_bytes("/b.txt")
+        .read_file("/b.txt")
         .await
         .expect("the second admitted publication landed");
 }

@@ -102,7 +102,7 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         .await
         .expect("publish source");
     let content_ref = source_namespace
-        .get_path_entry("/private", Default::default())
+        .stat("/private")
         .await
         .expect("source entry")
         .content_ref()
@@ -150,7 +150,7 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
     assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
     assert_eq!(
         destination_namespace
-            .get_file_bytes("/imported")
+            .read_file("/imported")
             .await
             .expect_err("foreign reference was not published")
             .code(),

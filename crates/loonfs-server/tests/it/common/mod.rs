@@ -8,7 +8,7 @@
 )]
 
 use loonfs_api::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
-use loonfs_client::{Client, ClientConfig, ListPathEntriesOptions, NamespacePath};
+use loonfs_client::{Client, ClientConfig, ListOptions, NamespacePath};
 use loonfs_server::{
     app, serve_with_shutdown, AppOptions, GrepConfig, GrepMode, MaintenanceMode,
     MetadataCacheOverrides, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
@@ -23,9 +23,9 @@ use std::time::Duration;
 pub(crate) async fn collect_path_entries(
     client: &Client,
     spec: &NamespacePath,
-    options: &ListPathEntriesOptions,
+    options: &ListOptions,
 ) -> loonfs_client::Result<ListPathEntriesResponse> {
-    let mut pager = client.list_path_entries_pager(spec, None, None, options);
+    let mut pager = client.list_with_options(spec, options);
     let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
@@ -40,7 +40,7 @@ pub(crate) async fn collect_checkpoints(
     client: &Client,
     namespace_id: &NamespaceId,
 ) -> loonfs_client::Result<ListCheckpointsResponse> {
-    let mut pager = client.list_checkpoints_pager(namespace_id, None, None);
+    let mut pager = client.list_checkpoints(namespace_id);
     let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;

@@ -13,7 +13,7 @@ use super::output::{
     TrashListing,
 };
 use super::pagination::{
-    collect_or_stream_pages, visit_pages, write_jsonl_page, PagePlan, PagedListing,
+    collect_or_stream_pages, page_request, visit_pages, write_jsonl_page, PagePlan, PagedListing,
 };
 use super::partial::{self, PartialDownload, PartialMeta};
 use super::recursive;
@@ -93,10 +93,11 @@ async fn follow_path_entry_pages(
         PagePlan::new(&pagination.page_limits),
         cursor.map(ToOwned::to_owned),
         async |cursor, limit| {
-            context
+            Ok(context
                 .target
-                .list_path_entries_page(spec, limit, cursor.as_deref(), snapshot_id)
-                .await
+                .list_at_snapshot(spec, snapshot_id)
+                .page(page_request(cursor, limit)?)
+                .await?)
         },
         |page: ListPathEntriesResponse| {
             heads.observe(page.head_seq);
@@ -210,7 +211,7 @@ pub(crate) async fn run_filesystem_stat(
         Some(inode_id) => {
             context
                 .target
-                .get_inode(context.namespace(), inode_id, snapshot_id.as_ref())
+                .stat_by_inode_at_snapshot(context.namespace(), inode_id, snapshot_id.as_ref())
                 .await
         }
         None => {
@@ -223,7 +224,7 @@ pub(crate) async fn run_filesystem_stat(
                 .map_err(|error| context.fail(kind, error))?;
             context
                 .target
-                .get_path_entry_at_snapshot(&spec, snapshot_id.as_ref())
+                .stat_at_snapshot(&spec, snapshot_id.as_ref())
                 .await
         }
     }
@@ -486,7 +487,7 @@ pub(crate) async fn run_filesystem_get(
         .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
-        .get_path_entry_without_attributes_at_snapshot(&spec, snapshot_id.as_ref())
+        .stat_without_attributes_at_snapshot(&spec, snapshot_id.as_ref())
         .await
         .map_err(|error| context.fail(kind, error))?;
     if args.recursive {
@@ -786,12 +787,12 @@ pub(crate) async fn run_filesystem_trash(
         args.pagination.cursor.clone(),
         args.pagination.page_limits.jsonl,
         async |cursor, limit| {
-            context
+            Ok(context
                 .target
                 .client
-                .list_trash_page(context.namespace(), limit, cursor.as_deref())
-                .await
-                .map_err(CliError::from)
+                .list_trash(context.namespace())
+                .page(page_request(cursor, limit)?)
+                .await?)
         },
         |_: &loonfs_api::ListTrashResponse| {},
     )
@@ -829,12 +830,12 @@ pub(crate) async fn run_filesystem_revisions(
         args.pagination.cursor.clone(),
         args.pagination.page_limits.jsonl,
         async |cursor, limit| {
-            context
+            Ok(context
                 .target
                 .client
-                .list_file_revisions_page(&spec, limit, cursor.as_deref())
-                .await
-                .map_err(CliError::from)
+                .list_file_revisions(&spec)
+                .page(page_request(cursor, limit)?)
+                .await?)
         },
         |_: &loonfs_api::ListFileRevisionsResponse| {},
     )
@@ -1183,7 +1184,7 @@ pub(crate) async fn run_filesystem_rm(
     // instead of removing (and mis-reporting) a different inode.
     let deleted_inode = context
         .target
-        .get_path_entry_without_attributes(&spec)
+        .stat_without_attributes(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?
         .inode_id;
@@ -1416,11 +1417,7 @@ async fn resolve_transfer_destination(
     named: NamespacePath,
     source_leaf: &str,
 ) -> Result<NamespacePath, CliError> {
-    let Ok(existing) = context
-        .target
-        .get_path_entry_without_attributes(&named)
-        .await
-    else {
+    let Ok(existing) = context.target.stat_without_attributes(&named).await else {
         // Absent, or unreadable for a reason the transfer itself will
         // report: either way this is not a directory to land inside.
         return Ok(named);
@@ -1510,7 +1507,7 @@ async fn run_filesystem_transfer(
     let result = if transfer_kind == TransferKind::Copy {
         let entry = context
             .target
-            .get_path_entry_without_attributes(&from)
+            .stat_without_attributes(&from)
             .await
             .map_err(|error| context.fail(kind, error))?;
         if args.recursive {

@@ -347,9 +347,9 @@ mod tests {
             .await
             .expect("build reader");
         let namespace = reader.namespace(&namespace_id);
-        namespace.get_file_bytes("/file.txt").await.expect("read");
+        namespace.read_file("/file.txt").await.expect("read");
         recording.reset();
-        namespace.get_file_bytes("/file.txt").await.expect("reread");
+        namespace.read_file("/file.txt").await.expect("reread");
 
         assert_ne!(
             cache.stats(),

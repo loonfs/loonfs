@@ -4,13 +4,16 @@
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
+use loonfs_api::PageRequest;
 use loonfs_api::{ApiError, DeleteDirectoryBehavior, ErrorCode, InodeId, RevisionNo};
 use loonfs_client::{
-    ClientError, CreateDirectoryOptions, DeleteOptions, ListInodeChildrenOptions, MoveOptions,
-    NamespacePath, PutFileOptions, UpdateAttributesOptions,
+    ClientError, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
+    UpdateAttributesOptions,
 };
 use loonfs_test_support::http::raw_agent;
-use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
+use loonfs_test_support::ids::{
+    attribute_key, attribute_text, first_page, namespace_id, page_limit,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
@@ -67,16 +70,12 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         .await
         .expect("put revision two");
 
-    let by_path = harness
-        .client
-        .get_path_entry(&before, &Default::default())
-        .await
-        .expect("stat path");
+    let by_path = harness.client.stat(&before).await.expect("stat path");
     let inode_id = by_path.inode_id;
     assert_eq!(
         harness
             .client
-            .get_inode(&namespace, inode_id, &Default::default())
+            .stat_by_inode(&namespace, inode_id)
             .await
             .expect("stat inode before rename"),
         by_path
@@ -84,7 +83,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
     assert_eq!(
         harness
             .client
-            .get_file_revision_bytes_by_inode(&namespace, inode_id, RevisionNo(1))
+            .read_file_revision_by_inode(&namespace, inode_id, RevisionNo(1))
             .await
             .expect("read inode revision before rename"),
         b"one"
@@ -97,7 +96,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         .expect("rename file");
     let renamed = harness
         .client
-        .get_inode(&namespace, inode_id, &Default::default())
+        .stat_by_inode(&namespace, inode_id)
         .await
         .expect("stat inode after rename");
     assert_eq!(renamed.inode_id, inode_id);
@@ -106,13 +105,17 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         renamed,
         harness
             .client
-            .get_path_entry(&after, &Default::default())
+            .stat(&after)
             .await
             .expect("stat renamed path")
     );
     let revisions = harness
         .client
-        .list_file_revisions_by_inode_page(&namespace, inode_id, Some(1), None)
+        .list_file_revisions_by_inode(&namespace, inode_id)
+        .page(PageRequest {
+            limit: page_limit(1),
+            cursor: None,
+        })
         .await
         .expect("first inode revision page");
     assert_eq!(revisions.inode_id, inode_id);
@@ -140,17 +143,14 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         .await
         .expect("delete file");
     assert_api_code(
-        harness
-            .client
-            .get_inode(&namespace, inode_id, &Default::default())
-            .await,
+        harness.client.stat_by_inode(&namespace, inode_id).await,
         404,
         ErrorCode::InodeNotFound,
     );
     assert_eq!(
         harness
             .client
-            .get_file_revision_bytes_by_inode(&namespace, inode_id, RevisionNo(2))
+            .read_file_revision_by_inode(&namespace, inode_id, RevisionNo(2))
             .await
             .expect("read retained deleted revision"),
         b"two"
@@ -158,7 +158,8 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
     assert_eq!(
         harness
             .client
-            .list_file_revisions_by_inode_page(&namespace, inode_id, None, None)
+            .list_file_revisions_by_inode(&namespace, inode_id)
+            .page(first_page())
             .await
             .expect("list retained deleted revisions")
             .revisions
@@ -191,7 +192,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .expect("create namespace");
     let root = harness
         .client
-        .get_inode(&namespace, InodeId(1), &Default::default())
+        .stat_by_inode(&namespace, InodeId(1))
         .await
         .expect("stat root inode");
     assert_eq!(root.path.as_str(), "/");
@@ -206,14 +207,15 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .expect("create directory");
     let directory_id = harness
         .client
-        .get_path_entry(&directory, &Default::default())
+        .stat(&directory)
         .await
         .expect("stat directory")
         .inode_id;
     assert_api_code(
         harness
             .client
-            .list_file_revisions_by_inode_page(&namespace, directory_id, None, None)
+            .list_file_revisions_by_inode(&namespace, directory_id)
+            .page(first_page())
             .await,
         409,
         ErrorCode::PathConflict,
@@ -221,12 +223,12 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     for result in [
         harness
             .client
-            .get_inode(&namespace, InodeId(u64::MAX), &Default::default())
+            .stat_by_inode(&namespace, InodeId(u64::MAX))
             .await
             .map(|_| ()),
         harness
             .client
-            .get_file_revision_bytes_by_inode(&namespace, InodeId(u64::MAX), RevisionNo(1))
+            .read_file_revision_by_inode(&namespace, InodeId(u64::MAX), RevisionNo(1))
             .await
             .map(|_| ()),
     ] {
@@ -241,14 +243,14 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         .expect("put file");
     let file_id = harness
         .client
-        .get_path_entry(&file, &Default::default())
+        .stat(&file)
         .await
         .expect("stat file")
         .inode_id;
     assert_api_code(
         harness
             .client
-            .get_file_revision_bytes_by_inode(&namespace, file_id, RevisionNo(999))
+            .read_file_revision_by_inode(&namespace, file_id, RevisionNo(999))
             .await,
         404,
         ErrorCode::RevisionNotFound,
@@ -272,7 +274,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     assert_api_code(
         harness
             .client
-            .get_inode(&deleted_namespace, InodeId(1), &Default::default())
+            .stat_by_inode(&deleted_namespace, InodeId(1))
             .await,
         410,
         ErrorCode::NamespaceDeleted,
@@ -331,10 +333,7 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
         .expect("annotate child");
     let parent_inode_id = harness
         .client
-        .get_path_entry(
-            &NamespacePath::parse("demo", "/docs").expect("directory path"),
-            &Default::default(),
-        )
+        .stat(&NamespacePath::parse("demo", "/docs").expect("directory path"))
         .await
         .expect("stat directory")
         .inode_id;
@@ -377,13 +376,11 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
 
     let second = harness
         .client
-        .list_inode_children_page(
-            &namespace,
-            parent_inode_id,
-            Some(2),
-            Some(&cursor),
-            &Default::default(),
-        )
+        .list_by_inode(&namespace, parent_inode_id)
+        .page(PageRequest {
+            limit: page_limit(2),
+            cursor: Some(cursor.clone()),
+        })
         .await
         .expect("second children page");
     assert_eq!(second.namespace_id, namespace);
@@ -462,13 +459,13 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     let directory = NamespacePath::parse("demo", "/docs").expect("directory path");
     let directory_id = harness
         .client
-        .get_path_entry(&directory, &Default::default())
+        .stat(&directory)
         .await
         .expect("stat directory")
         .inode_id;
     let file_id = harness
         .client
-        .get_path_entry(&child, &Default::default())
+        .stat(&child)
         .await
         .expect("stat file")
         .inode_id;
@@ -476,13 +473,11 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     assert_api_code(
         harness
             .client
-            .list_inode_children_page(
-                &namespace,
-                directory_id,
-                None,
-                Some("not-a-cursor"),
-                &Default::default(),
-            )
+            .list_by_inode(&namespace, directory_id)
+            .page(PageRequest {
+                limit: page_limit(loonfs_api::DEFAULT_PAGE_LIMIT),
+                cursor: Some("not-a-cursor".to_owned()),
+            })
             .await,
         400,
         ErrorCode::InvalidRequest,
@@ -490,13 +485,8 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     assert_api_code(
         harness
             .client
-            .list_inode_children_page(
-                &namespace,
-                InodeId(u64::MAX),
-                None,
-                None,
-                &Default::default(),
-            )
+            .list_by_inode(&namespace, InodeId(u64::MAX))
+            .page(first_page())
             .await,
         404,
         ErrorCode::InodeNotFound,
@@ -504,13 +494,8 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     assert_api_code(
         harness
             .client
-            .list_inode_children_page(
-                &namespace,
-                file_id,
-                None,
-                None,
-                &ListInodeChildrenOptions::default(),
-            )
+            .list_by_inode(&namespace, file_id)
+            .page(first_page())
             .await,
         409,
         ErrorCode::PathConflict,
@@ -530,7 +515,8 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     assert_api_code(
         harness
             .client
-            .list_inode_children_page(&namespace, directory_id, None, None, &Default::default())
+            .list_by_inode(&namespace, directory_id)
+            .page(first_page())
             .await,
         404,
         ErrorCode::InodeNotFound,
@@ -574,7 +560,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
     assert_eq!(
         harness
             .client
-            .get_path_entry(&inode_27_path, &Default::default())
+            .stat(&inode_27_path)
             .await
             .expect("stat ino_27")
             .inode_id,

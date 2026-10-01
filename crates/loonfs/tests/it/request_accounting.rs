@@ -239,28 +239,24 @@ async fn warm_phase_request_accounting() {
     let mut cursor = None;
     loop {
         let page = namespace
-            .list_path_entries_page("/hot", PageRequest { limit, cursor }, Default::default())
+            .list("/hot")
+            .page(PageRequest { limit, cursor })
             .await
             .expect("list page");
         listed += page.entries.len();
-        match page.next_cursor.as_deref() {
-            Some(encoded) => {
-                cursor = Some(loonfs_api::decode_cursor(encoded).expect("valid directory cursor"));
-            }
+        match page.next_cursor {
+            Some(next_cursor) => cursor = Some(next_cursor),
             None => break,
         }
     }
     assert_eq!(listed, FILES);
     report("warm full list", &log.take_gets(), &segments);
 
-    namespace
-        .get_path_entry("/hot/file-04999.txt", Default::default())
-        .await
-        .expect("stat");
+    namespace.stat("/hot/file-04999.txt").await.expect("stat");
     report("warm stat", &log.take_gets(), &segments);
 
     namespace
-        .get_file_bytes("/hot/file-05000.txt")
+        .read_file("/hot/file-05000.txt")
         .await
         .expect("read");
     report("warm read", &log.take_gets(), &segments);

@@ -218,11 +218,7 @@ async fn path_put_with_valid_content_token_succeeds() {
 
     let target = NamespacePath::parse("demo", "/valid-token.txt").expect("target");
     assert_eq!(
-        harness
-            .client
-            .get_file_bytes(&target, &Default::default())
-            .await
-            .expect("read file"),
+        harness.client.read_file(&target).await.expect("read file"),
         bytes
     );
 
@@ -424,10 +420,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     assert_eq!(
         harness
             .client
-            .get_path_entry(
-                &NamespacePath::parse("demo", "/first-copy.txt").expect("path"),
-                &Default::default(),
-            )
+            .stat(&NamespacePath::parse("demo", "/first-copy.txt").expect("path"))
             .await
             .expect("repeated ref file")
             .content_ref()
@@ -474,10 +467,7 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
     assert_eq!(response.committed_seq, ChangeSeq(1));
     harness
         .client
-        .get_path_entry(
-            &NamespacePath::parse("demo", "/docs").expect("path"),
-            &Default::default(),
-        )
+        .stat(&NamespacePath::parse("demo", "/docs").expect("path"))
         .await
         .expect("mkdir committed");
 

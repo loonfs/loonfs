@@ -3,12 +3,12 @@
 use crate::common::{open_runtime_async, store};
 use loonfs::{
     CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, InodeId, LoonFs,
-    MoveOptions, PageRequest, PaginationPolicy, PutFileOptions, RevisionNo, StatPathOptions,
+    MoveOptions, PageRequest, PaginationPolicy, PutFileOptions, RevisionNo,
 };
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
-fn page_request() -> PageRequest<loonfs::FileRevisionsPageCursor> {
+fn page_request() -> PageRequest<String> {
     PageRequest {
         limit: PaginationPolicy::default()
             .resolve_limit(None)
@@ -52,18 +52,18 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
         .expect("put second revision");
 
     let path_entry = namespace
-        .get_path_entry("/before.txt", StatPathOptions::default())
+        .stat("/before.txt")
         .await
         .expect("stat path before rename");
     let inode_id = path_entry.inode_id;
     let inode_entry = namespace
-        .get_inode(inode_id, StatPathOptions::default())
+        .stat_by_inode(inode_id)
         .await
         .expect("stat inode before rename");
     assert_eq!(inode_entry, path_entry);
     assert_eq!(
         namespace
-            .get_file_revision_bytes_by_inode(inode_id, RevisionNo(1))
+            .read_file_revision_by_inode(inode_id, RevisionNo(1))
             .await
             .expect("read revision before rename"),
         b"one"
@@ -74,7 +74,7 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
         .await
         .expect("rename file");
     let after = namespace
-        .get_inode(inode_id, StatPathOptions::default())
+        .stat_by_inode(inode_id)
         .await
         .expect("stat inode after rename");
     assert_eq!(after.inode_id, inode_id);
@@ -82,19 +82,20 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
     assert_eq!(
         after,
         namespace
-            .get_path_entry("/after.txt", StatPathOptions::default())
+            .stat("/after.txt")
             .await
             .expect("stat renamed path")
     );
     let revisions = namespace
-        .list_file_revisions_by_inode_page(inode_id, page_request())
+        .list_file_revisions_by_inode(inode_id)
+        .page(page_request())
         .await
         .expect("list revisions after rename");
     assert_eq!(revisions.inode_id, inode_id);
     assert_eq!(revisions.revisions.len(), 2);
     assert_eq!(
         namespace
-            .get_file_revision_bytes_by_inode(inode_id, RevisionNo(1))
+            .read_file_revision_by_inode(inode_id, RevisionNo(1))
             .await
             .expect("read revision after rename"),
         b"one"
@@ -105,20 +106,21 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
         .await
         .expect("delete file");
     let hidden = namespace
-        .get_inode(inode_id, StatPathOptions::default())
+        .stat_by_inode(inode_id)
         .await
         .expect_err("deleted inode is not current");
     assert_eq!(hidden.code(), ErrorCode::InodeNotFound);
     assert_eq!(
         namespace
-            .get_file_revision_bytes_by_inode(inode_id, RevisionNo(2))
+            .read_file_revision_by_inode(inode_id, RevisionNo(2))
             .await
             .expect("read retained deleted revision"),
         b"two"
     );
     assert_eq!(
         namespace
-            .list_file_revisions_by_inode_page(inode_id, page_request())
+            .list_file_revisions_by_inode(inode_id)
+            .page(page_request())
             .await
             .expect("list retained deleted revisions")
             .revisions
@@ -147,41 +149,33 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
         .expect("open namespace");
 
     let root = namespace
-        .get_inode(InodeId(1), StatPathOptions::default())
+        .stat_by_inode(InodeId(1))
         .await
         .expect("stat root inode");
     assert_eq!(root.path.as_str(), "/");
     assert_eq!(root.parent_inode_id, None);
     assert_eq!(root.display_name, None);
-    assert_eq!(
-        root,
-        namespace
-            .get_path_entry("/", StatPathOptions::default())
-            .await
-            .expect("stat root path")
-    );
+    assert_eq!(root, namespace.stat("/").await.expect("stat root path"));
 
     namespace_writer
         .create_directory("/docs", CreateDirectoryOptions::new(actor))
         .await
         .expect("create directory");
-    let directory = namespace
-        .get_path_entry("/docs", StatPathOptions::default())
-        .await
-        .expect("stat directory");
+    let directory = namespace.stat("/docs").await.expect("stat directory");
     let directory_error = namespace
-        .list_file_revisions_by_inode_page(directory.inode_id, page_request())
+        .list_file_revisions_by_inode(directory.inode_id)
+        .page(page_request())
         .await
         .expect_err("directory has no file revisions");
     assert_eq!(directory_error.code(), ErrorCode::PathConflict);
 
     for error in [
         namespace
-            .get_inode(InodeId(u64::MAX), StatPathOptions::default())
+            .stat_by_inode(InodeId(u64::MAX))
             .await
             .expect_err("unknown inode stat"),
         namespace
-            .get_file_revision_bytes_by_inode(InodeId(u64::MAX), RevisionNo(1))
+            .read_file_revision_by_inode(InodeId(u64::MAX), RevisionNo(1))
             .await
             .expect_err("unknown inode content"),
     ] {
@@ -225,7 +219,7 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
         .await
         .expect("put file");
     let inode_id = namespace
-        .get_path_entry("/file.txt", StatPathOptions::default())
+        .stat("/file.txt")
         .await
         .expect("discover inode")
         .inode_id;
@@ -240,7 +234,7 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
         .expect("build path reader");
     let path_namespace = path_reader.namespace(&namespace_id);
     path_namespace
-        .get_path_entry("/file.txt", StatPathOptions::default())
+        .stat("/file.txt")
         .await
         .expect("cold path stat");
     let path_gets = recorded.take_gets();
@@ -253,7 +247,7 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
         .expect("build inode reader");
     let inode_namespace = inode_reader.namespace(&namespace_id);
     inode_namespace
-        .get_inode(inode_id, StatPathOptions::default())
+        .stat_by_inode(inode_id)
         .await
         .expect("cold inode stat");
     let inode_gets = recorded.take_gets();

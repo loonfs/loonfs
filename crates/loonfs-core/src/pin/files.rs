@@ -6,7 +6,9 @@ use crate::manifest::MetadataSegmentCache;
 use crate::metadata::MetadataView;
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
-use loonfs_api::{ChangeSeq, ContentRef, InodeId, InodeKind, PageRequest, PinId, RevisionNo};
+use loonfs_api::{
+    ChangeSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, PinId, RevisionNo,
+};
 use loonfs_objectstore::ObjectStore;
 
 /// Minimum number of inode rows scanned at once.
@@ -50,6 +52,28 @@ pub struct CheckpointFilesPage {
     pub files: Vec<CheckpointFile>,
     /// Resume position when more files remain.
     pub next_cursor: Option<CheckpointFilesPageCursor>,
+}
+
+impl PagedResponse for CheckpointFilesPage {
+    type Item = CheckpointFile;
+    type Cursor = CheckpointFilesPageCursor;
+
+    fn items_mut(&mut self) -> &mut Vec<CheckpointFile> {
+        &mut self.files
+    }
+
+    fn items(&self) -> &[CheckpointFile] {
+        &self.files
+    }
+
+    fn next_cursor(&self) -> Option<CheckpointFilesPageCursor> {
+        self.next_cursor
+    }
+
+    fn absorb(&mut self, mut later: Self) {
+        self.files.append(&mut later.files);
+        self.next_cursor = later.next_cursor;
+    }
 }
 
 /// Lists files visible in the state pinned by `checkpoint_id`, or every file

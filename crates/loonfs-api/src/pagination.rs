@@ -37,7 +37,7 @@ enum PagerState<C> {
 
 type PageFuture<P, E> = Pin<Box<dyn Future<Output = Result<P, E>> + Send>>;
 type PageFetcher<P, E> =
-    Box<dyn FnMut(Option<<P as PagedResponse>::Cursor>) -> PageFuture<P, E> + Send>;
+    Box<dyn FnMut(PageRequest<<P as PagedResponse>::Cursor>) -> PageFuture<P, E> + Send>;
 
 /// Fetches pages and retains unused items between bounded collections.
 #[must_use]
@@ -48,24 +48,22 @@ pub struct Pager<P: PagedResponse, E> {
 }
 
 impl<P: PagedResponse, E> Pager<P, E> {
-    /// Creates a pager beginning at `cursor`.
-    pub fn new<F, Fut>(cursor: Option<P::Cursor>, mut fetch: F) -> Self
+    /// Creates a pager over the pages `fetch` returns. A request without a
+    /// cursor asks `fetch` for the first page.
+    pub fn new<F, Fut>(mut fetch: F) -> Self
     where
-        F: FnMut(Option<P::Cursor>) -> Fut + Send + 'static,
+        F: FnMut(PageRequest<P::Cursor>) -> Fut + Send + 'static,
         Fut: Future<Output = Result<P, E>> + Send + 'static,
     {
-        let state = match cursor {
-            Some(cursor) => PagerState::More(cursor),
-            None => PagerState::NotStarted,
-        };
         Self {
-            fetch: Box::new(move |cursor| Box::pin(fetch(cursor))),
-            state,
+            fetch: Box::new(move |request| Box::pin(fetch(request))),
+            state: PagerState::NotStarted,
             pending: None,
         }
     }
 
-    /// Returns the next page, or `None` after exhaustion.
+    /// Returns the next page at the default page size, or `None` after
+    /// exhaustion.
     pub async fn next(&mut self) -> Option<Result<P, E>> {
         if let Some(page) = self.pending.take() {
             return Some(Ok(page));
@@ -75,7 +73,8 @@ impl<P: PagedResponse, E> Pager<P, E> {
             PagerState::More(cursor) => Some(cursor.clone()),
             PagerState::Done => return None,
         };
-        let page = (self.fetch)(cursor).await;
+        let limit = EffectiveLimit(PaginationPolicy::default().default_limit());
+        let page = (self.fetch)(PageRequest { limit, cursor }).await;
         if let Ok(page) = &page {
             self.state = match page.next_cursor() {
                 Some(cursor) => PagerState::More(cursor),
@@ -83,6 +82,13 @@ impl<P: PagedResponse, E> Pager<P, E> {
             };
         }
         Some(page)
+    }
+
+    /// Returns the page `request` names: the page at its cursor, or the first
+    /// page when it has none, with at most `request.limit` items. The pager's
+    /// own position does not move.
+    pub async fn page(&mut self, request: PageRequest<P::Cursor>) -> Result<P, E> {
+        (self.fetch)(request).await
     }
 
     /// Returns at most `max_items` items.
@@ -318,12 +324,12 @@ pub enum LimitError {
     },
 }
 
-/// A typed page request for internal runtime and core methods.
+/// One page of a listing, named by its size and its position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageRequest<C> {
     /// Enforced page size.
     pub limit: EffectiveLimit,
-    /// Optional decoded endpoint cursor.
+    /// Where the page starts, or `None` for the first page.
     pub cursor: Option<C>,
 }
 
@@ -565,6 +571,101 @@ impl From<OpaqueTokenError> for PageCursorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::Infallible;
+    use std::task::{Context, Poll, Waker};
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct NumberPage {
+        numbers: Vec<u32>,
+        next_cursor: Option<u32>,
+    }
+
+    impl PagedResponse for NumberPage {
+        type Item = u32;
+        type Cursor = u32;
+
+        fn items_mut(&mut self) -> &mut Vec<u32> {
+            &mut self.numbers
+        }
+
+        fn items(&self) -> &[u32] {
+            &self.numbers
+        }
+
+        fn next_cursor(&self) -> Option<u32> {
+            self.next_cursor
+        }
+
+        fn absorb(&mut self, mut later: Self) {
+            self.numbers.append(&mut later.numbers);
+            self.next_cursor = later.next_cursor;
+        }
+    }
+
+    /// Serves the numbers below `count`, at most `max_page_items` to a page.
+    fn numbers(count: u32, max_page_items: usize) -> Pager<NumberPage, Infallible> {
+        Pager::new(move |request: PageRequest<u32>| {
+            let start = request.cursor.map_or(0, |cursor| cursor + 1);
+            let numbers: Vec<u32> = (start..count)
+                .take(request.limit.as_usize().min(max_page_items))
+                .collect();
+            let next_cursor = numbers.last().copied().filter(|last| last + 1 < count);
+            std::future::ready(Ok(NumberPage {
+                numbers,
+                next_cursor,
+            }))
+        })
+    }
+
+    fn poll_once<T>(future: impl Future<Output = T>) -> Poll<T> {
+        std::pin::pin!(future).poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[test]
+    fn page_returns_the_page_at_the_cursor_with_the_requested_limit() {
+        let mut pager = numbers(10, usize::MAX);
+        let request = PageRequest {
+            limit: EffectiveLimit::new(NonZeroU32::new(3).expect("nonzero limit")),
+            cursor: Some(4),
+        };
+
+        assert_eq!(
+            poll_once(pager.page(request)),
+            Poll::Ready(Ok(NumberPage {
+                numbers: vec![5, 6, 7],
+                next_cursor: Some(7),
+            }))
+        );
+        assert_eq!(
+            poll_once(pager.next()),
+            Poll::Ready(Some(Ok(NumberPage {
+                numbers: (0..10).collect(),
+                next_cursor: None,
+            })))
+        );
+    }
+
+    #[test]
+    fn collect_up_to_keeps_unused_entries_for_the_next_call() {
+        let mut pager = numbers(3, 2);
+
+        assert_eq!(poll_once(pager.collect_up_to(1)), Poll::Ready(Ok(vec![0])));
+        assert_eq!(
+            poll_once(pager.next()),
+            Poll::Ready(Some(Ok(NumberPage {
+                numbers: vec![1],
+                next_cursor: Some(1),
+            })))
+        );
+        assert_eq!(
+            poll_once(pager.next()),
+            Poll::Ready(Some(Ok(NumberPage {
+                numbers: vec![2],
+                next_cursor: None,
+            })))
+        );
+        assert_eq!(poll_once(pager.next()), Poll::Ready(None));
+    }
 
     #[test]
     fn default_policy_resolves_omitted_limit_to_default() {

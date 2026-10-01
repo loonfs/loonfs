@@ -8,7 +8,7 @@ use super::context::{
 use super::output::{
     CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport, MaintenanceRan,
 };
-use super::pagination::{collect_or_stream_pages, PagePlan, PagedListing};
+use super::pagination::{collect_or_stream_pages, page_request, PagePlan, PagedListing};
 use crate::args::{
     ChangesArgs, CommandKind, MaintenanceCheckpointArgs, MaintenanceCheckpointCommand,
     MaintenanceCheckpointDeleteArgs, MaintenanceCheckpointListArgs, MaintenanceCommand,
@@ -190,12 +190,12 @@ async fn run_maintenance_checkpoint_list(
         args.pagination.cursor.clone(),
         args.pagination.page_limits.jsonl,
         async |cursor, limit| {
-            context
+            Ok(context
                 .target
                 .client
-                .list_checkpoints_page(context.namespace(), limit, cursor.as_deref())
-                .await
-                .map_err(CliError::from)
+                .list_checkpoints(context.namespace())
+                .page(page_request(cursor, limit)?)
+                .await?)
         },
         |_: &loonfs_api::ListCheckpointsResponse| {},
     )
@@ -479,15 +479,11 @@ pub(crate) async fn run_changes(
         Some(after_seq),
         args.pagination.page_limits.jsonl,
         async |cursor, limit| {
-            context
+            Ok(context
                 .target
-                .list_changes_page(
-                    context.namespace(),
-                    cursor.expect("change page collection should carry a sequence"),
-                    limit,
-                    snapshot_id.as_ref(),
-                )
-                .await
+                .list_changes_at_snapshot(context.namespace(), after_seq, snapshot_id.as_ref())
+                .page(page_request(cursor, limit)?)
+                .await?)
         },
         |_: &loonfs_api::v0::ListChangesResponse| {},
     )

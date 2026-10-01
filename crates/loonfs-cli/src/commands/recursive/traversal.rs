@@ -3,6 +3,7 @@
 //! of every sibling directory or every file in the tree.
 
 use super::{joined_remote, parse_remote, relative_remote, CommandContext, FileJob};
+use crate::commands::pagination::page_request;
 use crate::error::CliError;
 use futures::Stream;
 use loonfs_api::PinId;
@@ -166,7 +167,8 @@ pub(super) async fn remote_tree<'a>(
     let spec = parse_remote(context, root, param)?;
     let page = context
         .target
-        .list_path_entries_page(&spec, Some(TREE_LIST_PAGE_SIZE), None, snapshot_id)
+        .list_at_snapshot(&spec, snapshot_id)
+        .page(page_request(None, Some(TREE_LIST_PAGE_SIZE))?)
         .await?;
     let mut frame = RemoteFrame::new(String::new());
     let first_head = Some(frame.set_page(page));
@@ -218,15 +220,15 @@ impl RemoteTree<'_> {
                 let remote = joined_remote(self.root, &frame.relative);
                 let page = async {
                     let spec = parse_remote(self.context, &remote, self.param)?;
-                    self.context
+                    Ok(self
+                        .context
                         .target
-                        .list_path_entries_page(
-                            &spec,
+                        .list_at_snapshot(&spec, self.snapshot_id)
+                        .page(page_request(
+                            frame.cursor.clone(),
                             Some(TREE_LIST_PAGE_SIZE),
-                            frame.cursor.as_deref(),
-                            self.snapshot_id,
-                        )
-                        .await
+                        )?)
+                        .await?)
                 }
                 .await;
                 match page {

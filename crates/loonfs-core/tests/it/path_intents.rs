@@ -198,7 +198,7 @@ async fn list_path<S: ObjectStore + ?Sized>(
                     limit: page_limit(1_000),
                     cursor,
                 },
-                loonfs_api::options::ListPathEntriesOptions::default(),
+                loonfs_api::options::ListOptions::default(),
                 &context,
             )
             .await?;
@@ -225,7 +225,7 @@ async fn list_path_page<S: ObjectStore + ?Sized>(
                 limit: page_limit(limit),
                 cursor,
             },
-            loonfs_api::options::ListPathEntriesOptions::default(),
+            loonfs_api::options::ListOptions::default(),
             &context,
         )
         .await

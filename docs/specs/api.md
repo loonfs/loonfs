@@ -372,10 +372,13 @@ An inode ID is only unique within its namespace. Use `namespace_id` and
 `inode_id` together when identifying an inode. Clients MUST treat the ID as an
 opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
 
-- The embedded runtime and the remote client (`loonfs_client::Client`)
-  expose the same operations under the same names. `loonfs::LoonFs` is the
-  runtime, in a `ReadOnly` or a `Writable` mode. A `loonfs::Namespace` handle
-  acts on one namespace, and its methods take no namespace ID.
+- The embedded runtime and the remote client (`loonfs_client::Client`) use
+  the same verbs for the same operations, such as `stat` and `list`. The
+  client's receiver is the service, so its methods also take the namespace or
+  path, and a few keep the wire operation's name, such as `get_health`.
+  `loonfs::LoonFs` is the runtime, in a `ReadOnly` or a `Writable` mode. A
+  `loonfs::Namespace` handle acts on one namespace, and its methods take no
+  namespace ID.
   `LoonFs::namespace` returns a `Namespace<ReadOnly>`, which carries that
   namespace's reads. On a writable runtime, `LoonFs::open_namespace` returns a
   `Namespace<Writable>`, which carries the same reads and the namespace's

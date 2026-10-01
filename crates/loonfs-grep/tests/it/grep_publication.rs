@@ -155,13 +155,11 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
     );
     let checkpoints = host
         .maintenance
-        .list_checkpoints_page(
-            &namespace_id,
-            PageRequest {
-                limit: default_page_limit(),
-                cursor: None,
-            },
-        )
+        .list_checkpoints(&namespace_id)
+        .page(PageRequest {
+            limit: default_page_limit(),
+            cursor: None,
+        })
         .await
         .expect("list checkpoints")
         .checkpoints;

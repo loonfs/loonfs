@@ -5,15 +5,13 @@
 
 use crate::{GrepError, Result};
 use loonfs::{
-    CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState,
-    ListChangesOptions, ListCheckpointFilesOptions, Namespace, NamespaceMetadata, ReadOnly,
-    ReadView, StatPathOptions, MAX_RESOLVE_CURRENT_FILES,
+    CheckpointFilesPager, CoreError, CurrentFileState, ListCheckpointFilesOptions, Namespace,
+    NamespaceMetadata, ReadOnly, ReadView, StatOptions, MAX_RESOLVE_CURRENT_FILES,
 };
 use loonfs_api::v0::{FilesystemChange, ListChangesResponse};
 use loonfs_api::{
-    decode_cursor, AbsolutePath, ChangeSeq, ContentRef, DirectoryPageCursor, EffectiveLimit,
-    InodeId, LimitError, NamespaceId, Page, PageRequest, PaginationPolicy, PathEntry, PinId,
-    RevisionNo, Subject,
+    AbsolutePath, ChangeSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
+    PageRequest, PaginationPolicy, PathEntry, PinId, RevisionNo, Subject,
 };
 
 /// Filesystem reads for one namespace.
@@ -62,32 +60,20 @@ impl NamespaceReads {
         Ok(self.namespace.metadata().await?)
     }
 
-    /// Reads one page of the files a checkpoint pins, in ascending inode-id
-    /// order. Deleted files are included so an undelete needs no new
-    /// postings; queries decide visibility.
+    /// Lists the files a checkpoint pins, in ascending inode-id order.
+    /// Deleted files are included so an undelete needs no new postings;
+    /// queries decide visibility.
     ///
-    /// Returns `checkpoint_not_found` if the checkpoint was deleted or
+    /// A page returns `checkpoint_not_found` if the checkpoint was deleted or
     /// collected, and `checkpoint_unavailable` if its manifest is gone. The
     /// caller must then restart the backfill from a new checkpoint.
-    pub async fn list_checkpoint_files_page(
-        &self,
-        checkpoint_id: &PinId,
-        cursor: Option<CheckpointFilesPageCursor>,
-        limit: usize,
-    ) -> Result<CheckpointFilesPage> {
-        Ok(self
-            .namespace
-            .list_checkpoint_files_page(
-                checkpoint_id,
-                PageRequest {
-                    limit: page_limit(limit).map_err(invalid_page_limit)?,
-                    cursor,
-                },
-                ListCheckpointFilesOptions {
-                    include_deleted: true,
-                },
-            )
-            .await?)
+    pub fn list_checkpoint_files(&self, checkpoint_id: &PinId) -> CheckpointFilesPager {
+        self.namespace.list_checkpoint_files_with_options(
+            checkpoint_id,
+            &ListCheckpointFilesOptions {
+                include_deleted: true,
+            },
+        )
     }
 
     /// Reads committed changes after `after_seq` as semantic events.
@@ -101,26 +87,15 @@ impl NamespaceReads {
     ) -> Result<ListChangesResponse> {
         Ok(self
             .namespace
-            .list_changes_page(
-                after_seq,
-                ListChangesOptions {
-                    limit: Some(page_limit(limit).map_err(invalid_page_limit)?),
-                },
-            )
+            .list_changes(after_seq)
+            .page(page_request(None, limit)?)
             .await?)
     }
 
     /// Reads one immutable content object by reference, under grep's own
     /// byte budget rather than any deployment download limit.
-    pub async fn read_content_ref(
-        &self,
-        content_ref: &ContentRef,
-        max_bytes: u64,
-    ) -> Result<Vec<u8>> {
-        Ok(self
-            .namespace
-            .read_content_ref(content_ref, max_bytes)
-            .await?)
+    pub async fn read_content(&self, content_ref: &ContentRef, max_bytes: u64) -> Result<Vec<u8>> {
+        Ok(self.namespace.read_content(content_ref, max_bytes).await?)
     }
 }
 
@@ -168,12 +143,8 @@ impl NamespaceReadView<'_> {
         }
         let mut page = self
             .namespace
-            .list_changes_page(
-                after_seq,
-                ListChangesOptions {
-                    limit: Some(page_limit(limit).map_err(invalid_page_limit)?),
-                },
-            )
+            .list_changes(after_seq)
+            .page(page_request(None, limit)?)
             .await?;
         page.changes
             .retain(|change| change.committed_seq <= head_seq);
@@ -198,9 +169,9 @@ impl NamespaceReadView<'_> {
     pub(crate) async fn resolve_path(&self, absolute_path: &AbsolutePath) -> Result<PathEntry> {
         Ok(self
             .view
-            .get_path_entry(
+            .stat_with_options(
                 absolute_path.as_str(),
-                StatPathOptions {
+                &StatOptions {
                     include_attributes: loonfs_api::AttributeInclusion::Omit,
                     snapshot_id: None,
                 },
@@ -212,38 +183,22 @@ impl NamespaceReadView<'_> {
     pub(crate) async fn list_path_page(
         &self,
         absolute_path: &AbsolutePath,
-        cursor: Option<DirectoryPageCursor>,
+        cursor: Option<String>,
         limit: usize,
-    ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
+    ) -> Result<Page<PathEntry, String>> {
         let page = self
             .view
-            .list_path_entries_page(
-                absolute_path.as_str(),
-                PageRequest {
-                    limit: page_limit(limit).map_err(invalid_page_limit)?,
-                    cursor,
-                },
-                loonfs::ListPathEntriesOptions::default(),
-            )
+            .list(absolute_path.as_str())
+            .page(page_request(cursor, limit)?)
             .await?;
-        let next_cursor = page
-            .next_cursor
-            .as_deref()
-            .map(decode_cursor)
-            .transpose()
-            .map_err(|error| {
-                GrepError::from(CoreError::InvalidCursor(format!(
-                    "the directory listing cursor did not decode: {error}"
-                )))
-            })?;
         Ok(Page {
             items: page.entries,
-            next_cursor,
+            next_cursor: page.next_cursor,
         })
     }
 
     /// Reads an authorized inode revision from the read view.
-    pub(crate) async fn get_file_revision_bytes_by_inode(
+    pub(crate) async fn read_file_revision_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -251,7 +206,7 @@ impl NamespaceReadView<'_> {
     ) -> Result<Vec<u8>> {
         Ok(self
             .view
-            .get_file_revision_bytes_by_inode(inode_id, revision_no, max_bytes)
+            .read_file_revision_by_inode(inode_id, revision_no, max_bytes)
             .await?)
     }
 }
@@ -302,6 +257,15 @@ pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRe
         | FilesystemChange::AttributesChanged { .. }
         | FilesystemChange::AccessChanged { .. } => None,
     }
+}
+
+/// Names one page of `limit` items at `cursor`, under the public pagination
+/// contract.
+pub(crate) fn page_request<C>(cursor: Option<C>, limit: usize) -> Result<PageRequest<C>> {
+    Ok(PageRequest {
+        limit: page_limit(limit).map_err(invalid_page_limit)?,
+        cursor,
+    })
 }
 
 /// Validates an internal page request against the public pagination contract.

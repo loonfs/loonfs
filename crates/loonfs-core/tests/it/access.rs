@@ -2,7 +2,7 @@
 
 use crate::common::commit_split_support::{bootstrap_namespace, submit_commit};
 use crate::common::{namespace_engine, read_context};
-use loonfs_api::options::{ListPathEntriesOptions, StatPathOptions};
+use loonfs_api::options::{ListOptions, StatOptions};
 use loonfs_api::v0::FilesystemChange;
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId,
@@ -903,7 +903,7 @@ async fn resolve_path(
     read_engine(store, namespace_id, "prn_root")
         .resolve_path(
             path,
-            StatPathOptions::default(),
+            StatOptions::default(),
             &read_context(store, namespace_id).await,
         )
         .await
@@ -967,7 +967,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
     let context = read_context(&store, &namespace_id).await;
     let viewer = read_engine(&store, &namespace_id, "viewer");
     let entry = viewer
-        .resolve_path("/team/file", StatPathOptions::default(), &context)
+        .resolve_path("/team/file", StatOptions::default(), &context)
         .await
         .expect("stat");
     assert_eq!(
@@ -982,7 +982,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
         .list_path_page(
             "/team",
             read_page(10),
-            ListPathEntriesOptions {
+            ListOptions {
                 include_attributes: AttributeInclusion::Include,
                 ..Default::default()
             },
@@ -1023,12 +1023,12 @@ async fn reads_require_read_and_absence_hides_the_inode() {
     ] {
         let reader = read_engine(&store, &namespace_id, principal);
         let path_result = reader
-            .resolve_path(path, StatPathOptions::default(), &context)
+            .resolve_path(path, StatOptions::default(), &context)
             .await
             .map(|entry| entry.inode_id)
             .map_err(|error| error.code());
         let inode_result = reader
-            .stat_inode(inode_id, StatPathOptions::default(), &context)
+            .stat_inode(inode_id, StatOptions::default(), &context)
             .await
             .map(|entry| entry.inode_id)
             .map_err(|error| error.code());
@@ -1046,12 +1046,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
     let stranger = read_engine(&store, &namespace_id, "stranger");
     assert_eq!(
         stranger
-            .list_path_page(
-                "/team",
-                read_page(10),
-                ListPathEntriesOptions::default(),
-                &context
-            )
+            .list_path_page("/team", read_page(10), ListOptions::default(), &context)
             .await
             .expect_err("hidden directory")
             .code(),
@@ -1067,7 +1062,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
     );
     assert_eq!(
         read_engine(&store, &namespace_id, "uploader")
-            .resolve_path("/inbox", StatPathOptions::default(), &context)
+            .resolve_path("/inbox", StatOptions::default(), &context)
             .await
             .expect_err("create is not read")
             .code(),
@@ -1203,12 +1198,7 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
     );
     let historian = read_engine(&store, &namespace_id, "historian").with_authorization_head(head);
     let listing = historian
-        .list_path_page(
-            "/team",
-            read_page(10),
-            ListPathEntriesOptions::default(),
-            &snapshot,
-        )
+        .list_path_page("/team", read_page(10), ListOptions::default(), &snapshot)
         .await
         .expect("historical names");
     assert_eq!(listing.items.len(), 3);
@@ -1314,7 +1304,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
     }
     let engine = loonfs_core::NamespaceReaderEngine::reader(&store, namespace_id);
     let error = engine
-        .resolve_path("/team/file", StatPathOptions::default(), &context)
+        .resolve_path("/team/file", StatOptions::default(), &context)
         .await
         .expect_err("subject required");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
@@ -1328,7 +1318,7 @@ async fn a_revocation_is_visible_to_the_next_read() {
     viewer
         .resolve_path(
             "/team/file",
-            StatPathOptions::default(),
+            StatOptions::default(),
             &read_context(&store, &namespace_id).await,
         )
         .await
@@ -1355,7 +1345,7 @@ async fn a_revocation_is_visible_to_the_next_read() {
             viewer
                 .resolve_path(
                     "/team/file",
-                    StatPathOptions::default(),
+                    StatOptions::default(),
                     &read_context(&store, &namespace_id).await
                 )
                 .await

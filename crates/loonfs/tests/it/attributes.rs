@@ -7,8 +7,8 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    AttributesRevisionNo, CommitId, CreateNamespaceOptions, ListPathEntriesOptions, PageRequest,
-    PutFileOptions, StatPathOptions, UpdateAttributesOptions,
+    AttributesRevisionNo, CommitId, CreateNamespaceOptions, ListOptions, PageRequest,
+    PutFileOptions, StatOptions, UpdateAttributesOptions,
 };
 use loonfs_api::semantic_commit_fingerprint;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
@@ -280,6 +280,38 @@ fn a_write_is_visible_to_the_next_stat() {
 }
 
 #[test]
+fn plain_stat_reads_with_the_default_stat_options() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "plain-stat-defaults");
+    let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
+    fs.create_namespace_blocking(
+        &namespace_id,
+        CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"body",
+        PutFileOptions::new(loonfs_test_support::test_actor()),
+    )
+    .expect("put file");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    block_on(namespace_writer.update_attributes("/docs/report.txt", owner_update()))
+        .expect("annotate");
+
+    assert_eq!(
+        block_on(namespace.stat("/docs/report.txt")).expect("plain stat"),
+        block_on(namespace.stat_with_options("/docs/report.txt", &StatOptions::default()))
+            .expect("stat with default options")
+    );
+}
+
+#[test]
 fn read_options_project_grouped_attributes_or_none() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "attributes-projection");
@@ -312,9 +344,9 @@ fn read_options_project_grouped_attributes_or_none() {
         .expect("stat");
     assert!(default_stat.attributes.is_some());
 
-    let opted_out = block_on(namespace.get_path_entry(
+    let opted_out = block_on(namespace.stat_with_options(
         "/docs/report.txt",
-        StatPathOptions {
+        &StatOptions {
             include_attributes: loonfs_api::AttributeInclusion::Omit,
             snapshot_id: None,
         },
@@ -329,17 +361,20 @@ fn read_options_project_grouped_attributes_or_none() {
         assert!(entry.attributes.is_none());
     }
 
-    let projected = block_on(namespace.list_path_entries_page(
-        "/docs",
-        PageRequest {
-            limit: page_limit(16),
-            cursor: None,
-        },
-        ListPathEntriesOptions {
-            include_attributes: loonfs_api::AttributeInclusion::Include,
-            snapshot_id: None,
-        },
-    ))
+    let projected = block_on(
+        namespace
+            .list_with_options(
+                "/docs",
+                &ListOptions {
+                    include_attributes: loonfs_api::AttributeInclusion::Include,
+                    snapshot_id: None,
+                },
+            )
+            .page(PageRequest {
+                limit: page_limit(16),
+                cursor: None,
+            }),
+    )
     .expect("list with attributes");
     assert_eq!(projected.entries.len(), 2);
     for entry in &projected.entries {

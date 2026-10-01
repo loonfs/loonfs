@@ -109,7 +109,7 @@ async fn publish_inline(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) -
         .await
         .expect("publish source");
     namespace
-        .get_path_entry("/source", Default::default())
+        .stat("/source")
         .await
         .expect("source entry")
         .content_ref()
@@ -146,7 +146,7 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
     let source_namespace = reader.namespace(&source);
     assert_eq!(
         source_namespace
-            .get_file_bytes("/source")
+            .read_file("/source")
             .await
             .expect_err("private path is unreadable")
             .code(),
@@ -159,7 +159,7 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
     let own_ref = publish_inline(&writer, &destination).await;
     assert_eq!(
         destination_namespace
-            .read_content_ref(&own_ref, u64::MAX)
+            .read_content(&own_ref, u64::MAX)
             .await
             .expect("current view has published its own reference"),
         b"private inline bytes"
@@ -168,14 +168,14 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
     recording.reset();
     assert_eq!(
         destination_namespace
-            .read_content_ref(&private_ref, u64::MAX)
+            .read_content(&private_ref, u64::MAX)
             .await
             .expect_err("unrelated namespace has not published private content")
             .code(),
         ErrorCode::PathNotFound
     );
     assert_eq!(
-        view.read_content_ref(&own_ref, u64::MAX)
+        view.read_content(&own_ref, u64::MAX)
             .await
             .expect_err("read view predates its own content publication")
             .code(),
@@ -205,7 +205,7 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
 
     assert_eq!(
         source_namespace
-            .get_file_bytes("/source")
+            .read_file("/source")
             .await
             .expect_err("source read")
             .code(),
@@ -231,7 +231,7 @@ async fn subject_without_source_rights_cannot_prepare_or_publish_an_inline_tail_
     assert_forbidden_without_writes(recording.as_ref(), error);
     assert_eq!(
         destination_namespace
-            .get_file_bytes("/imported")
+            .read_file("/imported")
             .await
             .expect_err("refused put publishes nothing")
             .code(),
@@ -393,7 +393,7 @@ async fn deleted_owner_import_uses_updated_access_state_in_the_surviving_head() 
             .read_view()
             .await
             .expect("view fork")
-            .read_content_ref(&content_ref, u64::MAX)
+            .read_content(&content_ref, u64::MAX)
             .await
             .expect("fork published the inherited reference"),
         b"private inline bytes"

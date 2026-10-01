@@ -4,7 +4,9 @@
 use super::error::ApiResponseError;
 use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, SubjectHeaders};
 use super::handlers_query::{grep_index_not_maintained, map_grep_error};
-use super::query_params::{parse_path_id, parse_public_ordinal, resolve_page_limit};
+use super::query_params::{
+    checked_cursor, parse_path_id, parse_public_ordinal, resolve_page_limit,
+};
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
@@ -16,16 +18,15 @@ use loonfs::{
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
-    decode_cursor, AccessRight, CapabilityDocument, Checkpoint, CreateCheckpointRequest,
-    CreateNamespaceRequest, CreateSnapshotRequest, DeleteCheckpointResponse,
-    DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest, ForkNamespaceRequest,
-    ListCheckpointsResponse, ListSnapshotsResponse, NamespaceAccess, PageRequest, PaginationPolicy,
-    PinId, RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_COMMIT_INLINE_CONTENT,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION, LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES,
-    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
+    AccessRight, CapabilityDocument, Checkpoint, CreateCheckpointRequest, CreateNamespaceRequest,
+    CreateSnapshotRequest, DeleteCheckpointResponse, DeleteSnapshotResponse, ErrorCode,
+    ExtendSnapshotRequest, ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse,
+    NamespaceAccess, PageRequest, PaginationPolicy, PinId, RunMaintenanceRequest,
+    RunMaintenanceResponse, SnapshotSummary, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    API_GROUP_QUERY_V0, FEATURE_COMMIT_INLINE_CONTENT, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
+    LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
     LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
     LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
@@ -542,9 +543,10 @@ pub(super) async fn list_snapshots(
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
-    let cursor = decode_checkpoint_cursor(query.cursor.as_deref())?;
+    let cursor = checked_cursor::<CheckpointPageCursor>(query.cursor)?;
     let response = namespace
-        .list_snapshots_page(PageRequest {
+        .list_snapshots()
+        .page(PageRequest {
             limit: resolve_page_limit(query.limit)?,
             cursor,
         })
@@ -758,16 +760,14 @@ pub(super) async fn list_checkpoints(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<CheckpointPageQuery>,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
-    let cursor = decode_checkpoint_cursor(query.cursor.as_deref())?;
+    let cursor = checked_cursor::<CheckpointPageCursor>(query.cursor)?;
     let response = state
         .maintenance
-        .list_checkpoints_page(
-            &namespace_id,
-            PageRequest {
-                limit: resolve_page_limit(query.limit)?,
-                cursor,
-            },
-        )
+        .list_checkpoints(&namespace_id)
+        .page(PageRequest {
+            limit: resolve_page_limit(query.limit)?,
+            cursor,
+        })
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))
         .map_err(|error| error.with_invalid_request_param("cursor"))?;
@@ -818,18 +818,6 @@ pub(super) async fn delete_checkpoint(
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct CheckpointPathParams {
     checkpoint_id: String,
-}
-
-fn decode_checkpoint_cursor(
-    cursor: Option<&str>,
-) -> Result<Option<CheckpointPageCursor>, ApiResponseError> {
-    cursor
-        .map(decode_cursor::<CheckpointPageCursor>)
-        .transpose()
-        .map_err(|error| {
-            ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string())
-                .with_param("cursor")
-        })
 }
 
 #[cfg_attr(

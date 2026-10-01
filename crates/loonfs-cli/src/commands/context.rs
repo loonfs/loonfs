@@ -44,10 +44,7 @@ pub(crate) async fn create_directory_tolerating_existing(
     {
         Ok(result) => Ok(RemoteDirectoryOutcome::Created(result)),
         Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
-            let existing = context
-                .target
-                .get_path_entry_without_attributes(spec)
-                .await?;
+            let existing = context.target.stat_without_attributes(spec).await?;
             if existing.inode_kind() != InodeKind::Directory {
                 return Err(error);
             }

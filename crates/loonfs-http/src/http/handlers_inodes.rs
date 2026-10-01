@@ -5,14 +5,14 @@ use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::{parse_optional_snapshot_id, read_target, PageQuery};
 use super::query_params::{
-    decode_optional_cursor, invalid_path_id_error, parse_include_attributes, parse_revision_no,
+    checked_cursor, invalid_path_id_error, parse_include_attributes, parse_revision_no,
     resolve_page_limit,
 };
 use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
-use loonfs::{ListInodeChildrenOptions, StatPathOptions};
+use loonfs::{ListOptions, StatOptions};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
@@ -80,14 +80,14 @@ pub(super) async fn get_inode(
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let mut options = StatPathOptions::default();
+    let mut options = StatOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let entry = target
-        .get_inode(inode_id, options)
+        .stat_by_inode_with_options(inode_id, &options)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(entry))
@@ -148,21 +148,18 @@ pub(super) async fn list_inode_children(
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let mut options = ListInodeChildrenOptions::default();
+    let mut options = ListOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let listing = target
-        .list_inode_children_page(
-            inode_id,
-            PageRequest::<DirectoryPageCursor> {
-                limit: resolve_page_limit(query.limit)?,
-                cursor: decode_optional_cursor(query.cursor)?,
-            },
-            options,
-        )
+        .list_by_inode_with_options(inode_id, &options)
+        .page(PageRequest {
+            limit: resolve_page_limit(query.limit)?,
+            cursor: checked_cursor::<DirectoryPageCursor>(query.cursor)?,
+        })
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(super::page_response::page_response(listing))
@@ -214,13 +211,11 @@ pub(super) async fn list_file_revisions_by_inode(
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let response = namespace
-        .list_file_revisions_by_inode_page(
-            inode_id,
-            PageRequest::<FileRevisionsPageCursor> {
-                limit: resolve_page_limit(query.limit)?,
-                cursor: decode_optional_cursor(query.cursor)?,
-            },
-        )
+        .list_file_revisions_by_inode(inode_id)
+        .page(PageRequest {
+            limit: resolve_page_limit(query.limit)?,
+            cursor: checked_cursor::<FileRevisionsPageCursor>(query.cursor)?,
+        })
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))

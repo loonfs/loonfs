@@ -22,7 +22,7 @@ use loonfs_api::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
 use loonfs_client::{ClientError, CreateDirectoryOptions, NamespacePath, PutFileOptions};
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -107,7 +107,7 @@ async fn delete_namespace_blocks_operations() {
     }
     let read = harness
         .client
-        .get_file_bytes(&target, &Default::default())
+        .read_file(&target)
         .await
         .expect_err("reads observe the deleted namespace");
     match read {
@@ -290,7 +290,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         .expect("create directory");
     let directory_entry = harness
         .client
-        .get_path_entry(&directory, &Default::default())
+        .stat(&directory)
         .await
         .expect("stat directory");
     assert_eq!(directory_entry.inode_kind(), InodeKind::Directory);
@@ -319,18 +319,10 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     assert_eq!(written.commit_id.as_str(), "smoke-write-1");
     assert_eq!(written.committed_seq, ChangeSeq(2));
 
-    let entry = harness
-        .client
-        .get_path_entry(&target, &Default::default())
-        .await
-        .expect("stat path");
+    let entry = harness.client.stat(&target).await.expect("stat path");
     assert_eq!(entry.size_bytes(), Some(16));
 
-    let bytes = harness
-        .client
-        .get_file_bytes(&target, &Default::default())
-        .await
-        .expect("read file");
+    let bytes = harness.client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello over http\n");
 
     let status = harness
@@ -410,19 +402,15 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     let source_entry = harness
         .client
-        .get_path_entry(&source_path, &Default::default())
+        .stat(&source_path)
         .await
         .expect("source stat");
-    let clone_entry = harness
-        .client
-        .get_path_entry(&clone_path, &Default::default())
-        .await
-        .expect("clone stat");
+    let clone_entry = harness.client.stat(&clone_path).await.expect("clone stat");
     assert_eq!(source_entry.content_ref(), clone_entry.content_ref());
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&clone_path, &Default::default())
+            .read_file(&clone_path)
             .await
             .expect("read clone"),
         b"base\n"
@@ -440,7 +428,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&clone_path, &Default::default())
+            .read_file(&clone_path)
             .await
             .expect("read clone after source write"),
         b"base\n"
@@ -455,7 +443,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&source_path, &Default::default())
+            .read_file(&source_path)
             .await
             .expect("read source"),
         b"source-after-fork\n"
@@ -463,7 +451,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     assert_eq!(
         harness
             .client
-            .get_file_bytes(&clone_path, &Default::default())
+            .read_file(&clone_path)
             .await
             .expect("read clone"),
         b"clone-after-fork\n"
@@ -471,7 +459,8 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     match harness
         .client
-        .list_changes_page(&namespace_id("clone"), ChangeSeq(0), &Default::default())
+        .list_changes(&namespace_id("clone"), ChangeSeq(0))
+        .page(first_page())
         .await
     {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
@@ -479,7 +468,8 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     }
     let clone_changes = harness
         .client
-        .list_changes_page(&namespace_id("clone"), ChangeSeq(1), &Default::default())
+        .list_changes(&namespace_id("clone"), ChangeSeq(1))
+        .page(first_page())
         .await
         .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);

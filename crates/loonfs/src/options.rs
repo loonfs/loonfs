@@ -6,16 +6,16 @@
 //! Results are the `loonfs-api` wire shapes themselves, the same way handles
 //! already return `Commit` and `FoldWalResponse`.
 
-use crate::{EffectiveLimit, Error, MetadataCompactionPolicy, Result};
+use crate::{Error, MetadataCompactionPolicy, Result};
 use loonfs_api::{CreateCheckpointRequest, MetadataMaintenanceRequest};
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub use loonfs_api::options::{
     CommitOptions, CopyOptions, CreateDirectoryOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListInodeChildrenOptions,
-    ListPathEntriesOptions, MoveOptions, PutFileOptions, RestoreRevisionOptions, StatPathOptions,
-    UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
+    RestoreRevisionOptions, StatOptions, UndeleteOptions, UpdateAccessOptions,
+    UpdateAttributesOptions,
 };
 
 /// Overrides for the metadata-upkeep action.
@@ -141,13 +141,6 @@ pub struct CreateSnapshotOptions {
     pub expires_at_ms: u64,
 }
 
-/// Options for reading the change feed.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ListChangesOptions {
-    /// Page limit; `None` resolves the default pagination policy.
-    pub limit: Option<EffectiveLimit>,
-}
-
 /// Options for a streaming file read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadFileStreamOptions {
@@ -157,7 +150,7 @@ pub struct ReadFileStreamOptions {
     /// holds at once. Defaults to
     /// [`CONTENT_READ_CHUNK_BYTES`](loonfs_core::CONTENT_READ_CHUNK_BYTES);
     /// a caller with a tighter memory budget than that says so here, the way
-    /// a caller of [`Namespace::read_content_ref`](crate::Namespace::read_content_ref)
+    /// a caller of [`Namespace::read_content`](crate::Namespace::read_content)
     /// declares its own. Non-zero by type, so there is no chunk size that
     /// makes no progress.
     pub chunk_bytes: NonZeroU64,

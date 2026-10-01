@@ -12,9 +12,9 @@ use loonfs::publish::{
     parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation, InlineContent,
 };
 use loonfs::{
-    ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior,
-    ListPathEntriesOptions, LoonFs, MetadataCache, MetadataMaintenanceOptions, NamespaceId,
-    PageRequest, ReadOnly, SharedObjectStore, StatPathOptions, DEFAULT_MAX_HEAD_STATE_BYTES,
+    ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, ListOptions, LoonFs,
+    MetadataCache, MetadataMaintenanceOptions, NamespaceId, PageRequest, ReadOnly,
+    SharedObjectStore, StatOptions, DEFAULT_MAX_HEAD_STATE_BYTES,
 };
 use loonfs_api::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, NamespaceAccess,
@@ -374,14 +374,11 @@ async fn list_every_directory(shape: &Shape, reader: LoonFs<ReadOnly>) {
         let namespace = reader.namespace(&namespace_id);
         for directory in 0..DIRECTORIES {
             namespace
-                .list_path_entries_page(
-                    &format!("/d-{directory:04}"),
-                    PageRequest {
-                        limit: page_limit(1000),
-                        cursor: None,
-                    },
-                    ListPathEntriesOptions::default(),
-                )
+                .list_with_options(&format!("/d-{directory:04}"), &ListOptions::default())
+                .page(PageRequest {
+                    limit: page_limit(1000),
+                    cursor: None,
+                })
                 .await
                 .expect("list");
         }
@@ -393,9 +390,9 @@ async fn stat_one_path_per_namespace(shape: &Shape, reader: LoonFs<ReadOnly>) {
     for index in 0..shape.namespaces {
         let namespace = reader.namespace(&shape.namespace(index));
         namespace
-            .get_path_entry(
+            .stat_with_options(
                 &shape.entry_path(shape.entries() - 1),
-                StatPathOptions::default(),
+                &StatOptions::default(),
             )
             .await
             .expect("stat");

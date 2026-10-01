@@ -172,7 +172,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
         .await
         .expect("published put");
     let content_ref = namespace
-        .get_path_entry("/docs/kept.txt", Default::default())
+        .stat("/docs/kept.txt")
         .await
         .expect("stat file")
         .content_ref()
@@ -195,7 +195,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     assert!(exists(&store, &published_key).await);
     assert_eq!(
         namespace
-            .get_file_bytes("/docs/kept.txt")
+            .read_file("/docs/kept.txt")
             .await
             .expect("read the file back")
             .bytes,
@@ -266,7 +266,7 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
     assert!(exists(&store, &imported_key).await);
     assert_eq!(
         namespace
-            .get_file_bytes("/imported.txt")
+            .read_file("/imported.txt")
             .await
             .expect("read imported file")
             .bytes,
@@ -297,7 +297,7 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         .await
         .expect("first put");
     let committed_content_ref = namespace
-        .get_path_entry("/docs/retry.txt", Default::default())
+        .stat("/docs/retry.txt")
         .await
         .expect("stat file")
         .content_ref()
@@ -338,7 +338,7 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
     );
     assert_eq!(
         namespace
-            .get_file_bytes("/docs/retry.txt")
+            .read_file("/docs/retry.txt")
             .await
             .expect("read the file back")
             .bytes,

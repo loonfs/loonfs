@@ -89,7 +89,7 @@ async fn an_unchanged_view_resolves_the_path_once() {
     let ordinary_namespace = ordinary.namespace(&namespace_id);
     log.reset();
     ordinary_namespace
-        .get_file_bytes(PATH)
+        .read_file(PATH)
         .await
         .expect("ordinary read");
     let one_resolution = log.count(OperationClass::Get);
@@ -101,12 +101,12 @@ async fn an_unchanged_view_resolves_the_path_once() {
     let speculative = uncached_segment_reader(&store, DEFAULT_MAX_HEAD_STATE_BYTES).await;
     let speculative_namespace = speculative.namespace(&namespace_id);
     speculative_namespace
-        .get_file_bytes(PATH)
+        .read_file(PATH)
         .await
         .expect("read that caches the namespace");
     log.reset();
     let read = speculative_namespace
-        .get_file_bytes(PATH)
+        .read_file(PATH)
         .await
         .expect("speculative read");
     assert_eq!(read.bytes, b"first");
@@ -134,7 +134,7 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
         .expect("build reader");
     let namespace = reader.namespace(&namespace_id);
     let first = namespace
-        .get_file_bytes(PATH)
+        .read_file(PATH)
         .await
         .expect("read that caches the namespace");
     assert_eq!(first.bytes, b"first");
@@ -147,12 +147,12 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
         .expect("replace file");
 
     let replaced = namespace
-        .get_file_bytes(PATH)
+        .read_file(PATH)
         .await
         .expect("read after replacement");
     assert_eq!(replaced.bytes, b"again");
     let settled = namespace
-        .get_file_bytes(PATH)
+        .read_file(PATH)
         .await
         .expect("read from the advanced view");
     assert_eq!(settled.bytes, b"again");
@@ -232,7 +232,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
             for _ in 0..2 {
                 log.reset();
                 let read = namespace
-                    .get_file_bytes(&format!("/file-{index}"))
+                    .read_file(&format!("/file-{index}"))
                     .await
                     .expect("inline read");
                 assert_eq!(read.bytes, value.bytes().as_ref());

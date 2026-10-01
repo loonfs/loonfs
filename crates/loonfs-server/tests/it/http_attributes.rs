@@ -8,7 +8,7 @@ use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, start_server};
 use loonfs_api::AttributesRevisionNo;
 use loonfs_client::{
-    ListPathEntriesOptions, NamespacePath, PutFileOptions, StatPathOptions, UpdateAttributesOptions,
+    ListOptions, NamespacePath, PutFileOptions, StatOptions, UpdateAttributesOptions,
 };
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
@@ -221,7 +221,7 @@ async fn the_client_round_trips_the_read_options() {
     // this checks: each surface, once, against its own default.
     let stat = harness
         .client
-        .get_path_entry(&path("/docs/report.txt"), &Default::default())
+        .stat(&path("/docs/report.txt"))
         .await
         .expect("stat");
     assert_eq!(
@@ -240,9 +240,9 @@ async fn the_client_round_trips_the_read_options() {
 
     let without = harness
         .client
-        .get_path_entry(
+        .stat_with_options(
             &path("/docs/report.txt"),
-            &StatPathOptions {
+            &StatOptions {
                 include_attributes: loonfs_api::AttributeInclusion::Omit,
                 snapshot_id: None,
             },
@@ -262,7 +262,7 @@ async fn the_client_round_trips_the_read_options() {
     let projected = collect_path_entries(
         &harness.client,
         &path("/docs"),
-        &ListPathEntriesOptions {
+        &ListOptions {
             include_attributes: loonfs_api::AttributeInclusion::Include,
             snapshot_id: None,
         },

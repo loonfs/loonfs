@@ -5,13 +5,14 @@
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::{start_server, TestServer};
 use loonfs_api::v0::ListChangesResponse;
+use loonfs_api::PageRequest;
 use loonfs_api::{
     ApiError, ChangeSeq, CreateCheckpointRequest, ListPathEntriesResponse, PathEntry,
     SnapshotSummary,
 };
 use loonfs_client::{DeleteOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{namespace_id, page_limit};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 use std::io::Read as _;
@@ -236,7 +237,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         .expect("create deleted file");
     let captured_entry = harness
         .client
-        .get_path_entry(&keep, &Default::default())
+        .stat(&keep)
         .await
         .expect("stat captured file");
     let snapshot = create_snapshot(
@@ -288,10 +289,10 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     );
     let inode_entry = harness
         .client
-        .get_inode(
+        .stat_by_inode_with_options(
             &namespace,
             captured_entry.inode_id,
-            &loonfs_client::StatPathOptions {
+            &loonfs_client::StatOptions {
                 snapshot_id: Some(snapshot.snapshot_id.clone()),
                 ..Default::default()
             },
@@ -299,13 +300,17 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         .await
         .expect("snapshot inode stat");
     assert_eq!(inode_entry, pinned_entry);
-    let options = loonfs_client::ListInodeChildrenOptions {
+    let options = loonfs_client::ListOptions {
         snapshot_id: Some(snapshot.snapshot_id.clone()),
         ..Default::default()
     };
     let first = harness
         .client
-        .list_inode_children_page(&namespace, loonfs_api::InodeId(1), Some(1), None, &options)
+        .list_by_inode_with_options(&namespace, loonfs_api::InodeId(1), &options)
+        .page(PageRequest {
+            limit: page_limit(1),
+            cursor: None,
+        })
         .await
         .expect("snapshot children first page");
     assert_eq!(first.head_seq, snapshot.captured_seq);
@@ -313,25 +318,21 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     let cursor = first.next_cursor.as_deref().expect("children cursor");
     let error = harness
         .client
-        .list_inode_children_page(
-            &namespace,
-            loonfs_api::InodeId(1),
-            Some(1),
-            Some(cursor),
-            &Default::default(),
-        )
+        .list_by_inode(&namespace, loonfs_api::InodeId(1))
+        .page(PageRequest {
+            limit: page_limit(1),
+            cursor: Some(cursor.to_owned()),
+        })
         .await
         .expect_err("snapshot children cursor cannot resume live");
     assert_eq!(error.code(), Some(loonfs_api::ErrorCode::InvalidRequest));
     let second = harness
         .client
-        .list_inode_children_page(
-            &namespace,
-            loonfs_api::InodeId(1),
-            Some(1),
-            Some(cursor),
-            &options,
-        )
+        .list_by_inode_with_options(&namespace, loonfs_api::InodeId(1), &options)
+        .page(PageRequest {
+            limit: page_limit(1),
+            cursor: Some(cursor.to_owned()),
+        })
         .await
         .expect("snapshot children second page");
     assert_eq!(second.head_seq, snapshot.captured_seq);

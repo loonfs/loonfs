@@ -9,7 +9,7 @@ use super::handlers_uploads::{
     content_preparation_for_puts, ContentTokenVerifier, PutContentPreparation,
 };
 use super::query_params::{
-    decode_optional_cursor, parse_include_attributes, parse_public_ordinal, parse_revision_no,
+    checked_cursor, parse_include_attributes, parse_public_ordinal, parse_revision_no,
     required_query_param, resolve_page_limit,
 };
 #[cfg(feature = "openapi")]
@@ -22,9 +22,8 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
-    payload_class, ErrorCode, InodeId, ListChangesOptions, ListInodeChildrenOptions,
-    ListPathEntriesOptions, Namespace, PinId, ReadOnly, ReadView, StatPathOptions, TraceMode,
-    TraceStoreKind,
+    payload_class, ChangeSeq, ErrorCode, InodeId, ListOptions, Namespace, PinId, ReadOnly,
+    ReadView, StatOptions, TraceMode, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -33,8 +32,9 @@ use loonfs_api::ApiError;
 // are one type. The alias keeps the two request names readable side by side.
 use loonfs_api::{
     v0::{Commit, ListChangesResponse},
-    CommitRequest as ApiCommitRequest, FilesystemOperation, ListFileRevisionsResponse,
-    ListTrashResponse, PageRequest, RevisionNo,
+    CommitRequest as ApiCommitRequest, DirectoryPageCursor, FileRevisionsPageCursor,
+    FilesystemOperation, ListFileRevisionsResponse, ListTrashResponse, PageRequest, RevisionNo,
+    TrashPageCursor,
 };
 use tracing::Instrument;
 
@@ -96,75 +96,62 @@ pub(super) enum ReadTarget {
 }
 
 impl ReadTarget {
-    pub(super) async fn list_path_entries_page(
+    pub(super) fn list_with_options(
         &self,
         path: &str,
-        request: PageRequest<loonfs::DirectoryPageCursor>,
-        options: ListPathEntriesOptions,
-    ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
+        options: &ListOptions,
+    ) -> loonfs::PathEntriesPager {
         match self {
-            Self::Snapshot(view) => view.list_path_entries_page(path, request, options).await,
-            Self::Live(namespace) => {
-                namespace
-                    .list_path_entries_page(path, request, options)
-                    .await
-            }
+            Self::Snapshot(view) => view.list_with_options(path, options),
+            Self::Live(namespace) => namespace.list_with_options(path, options),
         }
     }
 
-    pub(super) async fn get_path_entry(
+    pub(super) async fn stat_with_options(
         &self,
         path: &str,
-        options: StatPathOptions,
+        options: &StatOptions,
     ) -> loonfs::Result<loonfs::PathEntry> {
         match self {
-            Self::Snapshot(view) => view.get_path_entry(path, options).await,
-            Self::Live(namespace) => namespace.get_path_entry(path, options).await,
+            Self::Snapshot(view) => view.stat_with_options(path, options).await,
+            Self::Live(namespace) => namespace.stat_with_options(path, options).await,
         }
     }
 
-    pub(super) async fn list_inode_children_page(
+    pub(super) fn list_by_inode_with_options(
         &self,
         inode_id: InodeId,
-        request: PageRequest<loonfs::DirectoryPageCursor>,
-        options: ListInodeChildrenOptions,
-    ) -> loonfs::Result<loonfs::ListInodeChildrenResponse> {
+        options: &ListOptions,
+    ) -> loonfs::InodeChildrenPager {
         match self {
-            Self::Snapshot(view) => {
-                view.list_inode_children_page(inode_id, request, options)
-                    .await
-            }
-            Self::Live(namespace) => {
-                namespace
-                    .list_inode_children_page(inode_id, request, options)
-                    .await
-            }
+            Self::Snapshot(view) => view.list_by_inode_with_options(inode_id, options),
+            Self::Live(namespace) => namespace.list_by_inode_with_options(inode_id, options),
         }
     }
 
-    pub(super) async fn get_inode(
+    pub(super) async fn stat_by_inode_with_options(
         &self,
         inode_id: InodeId,
-        options: StatPathOptions,
+        options: &StatOptions,
     ) -> loonfs::Result<loonfs::PathEntry> {
         match self {
-            Self::Snapshot(view) => view.get_inode(inode_id, options).await,
-            Self::Live(namespace) => namespace.get_inode(inode_id, options).await,
+            Self::Snapshot(view) => view.stat_by_inode_with_options(inode_id, options).await,
+            Self::Live(namespace) => {
+                namespace
+                    .stat_by_inode_with_options(inode_id, options)
+                    .await
+            }
         }
     }
 
-    pub(super) async fn read_file_stream(
+    pub(super) async fn read_file_stream_with_options(
         &self,
         path: &str,
-        revision_no: Option<RevisionNo>,
+        options: &loonfs::ReadFileStreamOptions,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
-        let options = loonfs::ReadFileStreamOptions {
-            revision_no,
-            ..Default::default()
-        };
         match self {
-            Self::Snapshot(view) => view.read_file_stream(path, options).await,
-            Self::Live(namespace) => namespace.read_file_stream(path, options).await,
+            Self::Snapshot(view) => view.read_file_stream_with_options(path, options).await,
+            Self::Live(namespace) => namespace.read_file_stream_with_options(path, options).await,
         }
     }
 
@@ -176,6 +163,13 @@ impl ReadTarget {
         match self {
             Self::Snapshot(view) => view.create_download(path).await,
             Self::Live(namespace) => namespace.create_download(path, revision_no).await,
+        }
+    }
+
+    fn list_changes(&self, after_seq: ChangeSeq) -> loonfs::ChangesPager {
+        match self {
+            Self::Snapshot(view) => view.list_changes(after_seq),
+            Self::Live(namespace) => namespace.list_changes(after_seq),
         }
     }
 }
@@ -226,18 +220,19 @@ pub(super) async fn list_path_entries(
     let path = required_query_param(query.path, "path")?;
     // An absent parameter leaves the option type's own default in place, so
     // the HTTP surface and the in-process one cannot answer differently.
-    let mut options = ListPathEntriesOptions::default();
+    let mut options = ListOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
     let request = PageRequest {
         limit: resolve_page_limit(query.limit)?,
-        cursor: decode_optional_cursor(query.cursor)?,
+        cursor: checked_cursor::<DirectoryPageCursor>(query.cursor)?,
     };
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let listing = target
-        .list_path_entries_page(&path, request, options)
+        .list_with_options(&path, &options)
+        .page(request)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -281,14 +276,14 @@ pub(super) async fn get_path_entry(
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let path = required_query_param(query.path, "path")?;
-    let mut options = StatPathOptions::default();
+    let mut options = StatOptions::default();
     if let Some(value) = query.include_attributes.as_deref() {
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let entry = target
-        .get_path_entry(&path, options)
+        .stat_with_options(&path, &options)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -342,8 +337,12 @@ pub(super) async fn get_file_bytes(
     reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no)?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let permit = acquire_download_permit(&state)?;
+    let options = loonfs::ReadFileStreamOptions {
+        revision_no,
+        ..Default::default()
+    };
     let stream = target
-        .read_file_stream(&path, revision_no)
+        .read_file_stream_with_options(&path, &options)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -399,9 +398,10 @@ pub(super) async fn list_trash(
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let response = namespace
-        .list_trash_page(PageRequest {
+        .list_trash()
+        .page(PageRequest {
             limit: resolve_page_limit(query.limit)?,
-            cursor: decode_optional_cursor(query.cursor)?,
+            cursor: checked_cursor::<TrashPageCursor>(query.cursor)?,
         })
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -452,13 +452,11 @@ pub(super) async fn list_file_revisions(
     let namespace = runtime.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
     let response = namespace
-        .list_file_revisions_page(
-            &path,
-            PageRequest {
-                limit: resolve_page_limit(query.limit)?,
-                cursor: decode_optional_cursor(query.cursor)?,
-            },
-        )
+        .list_file_revisions(&path)
+        .page(PageRequest {
+            limit: resolve_page_limit(query.limit)?,
+            cursor: checked_cursor::<FileRevisionsPageCursor>(query.cursor)?,
+        })
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)
@@ -637,17 +635,14 @@ pub(super) async fn list_changes(
     let limit = resolve_page_limit(query.limit)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
-    let options = ListChangesOptions { limit: Some(limit) };
-    let response = match target {
-        ReadTarget::Snapshot(view) => view
-            .list_changes_page(after_seq, options)
-            .await
-            .map_err(ApiResponseError::for_namespace(&namespace_id))?,
-        ReadTarget::Live(namespace) => namespace
-            .list_changes_page(after_seq, options)
-            .await
-            .map_err(ApiResponseError::for_namespace(&namespace_id))?,
-    };
+    let response = target
+        .list_changes(after_seq)
+        .page(PageRequest {
+            limit,
+            cursor: None,
+        })
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     Ok(Json(response))
 }
 

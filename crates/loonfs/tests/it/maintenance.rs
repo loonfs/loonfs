@@ -955,7 +955,7 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
         {
             assert_eq!(
                 namespace_reader
-                    .get_file_bytes("/one.txt")
+                    .read_file("/one.txt")
                     .await
                     .expect("first file")
                     .bytes,
@@ -963,7 +963,7 @@ async fn a_cold_metadata_job_probes_with_its_configured_options() {
             );
             assert_eq!(
                 namespace_reader
-                    .get_file_bytes("/two.txt")
+                    .read_file("/two.txt")
                     .await
                     .expect("second file")
                     .bytes,

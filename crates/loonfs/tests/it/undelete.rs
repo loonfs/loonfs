@@ -7,9 +7,9 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
-    DestinationBehavior, Error, ErrorCode, InodeId, ListChangesOptions, PutFileOptions,
+    DestinationBehavior, Error, ErrorCode, InodeId, PutFileOptions,
 };
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
 #[test]
@@ -134,13 +134,13 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
         .expect("stat recovered file");
     assert_eq!(recovered.inode_id, inode_id);
     assert_eq!(
-        fs.get_file_bytes_blocking(&namespace_id, "/docs/recovered.txt")
+        fs.read_file_blocking(&namespace_id, "/docs/recovered.txt")
             .expect("read recovered content")
             .bytes,
         b"draft two"
     );
     assert_eq!(
-        block_on(namespace.get_file_revision_bytes("/docs/recovered.txt", loonfs::RevisionNo(1),))
+        block_on(namespace.read_file_revision("/docs/recovered.txt", loonfs::RevisionNo(1),))
             .expect("read prior revision through the recovered path")
             .bytes,
         b"draft one"
@@ -275,7 +275,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
     ))
     .expect("undelete the subtree root");
     assert_eq!(
-        fs.get_file_bytes_blocking(&namespace_id, "/docs/notes/a.txt")
+        fs.read_file_blocking(&namespace_id, "/docs/notes/a.txt")
             .expect("nested file is visible again")
             .bytes,
         b"alpha"
@@ -350,7 +350,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
     ))
     .expect("undelete the ancestor");
     assert_eq!(
-        fs.get_file_bytes_blocking(&namespace_id, "/docs/notes/kept.txt")
+        fs.read_file_blocking(&namespace_id, "/docs/notes/kept.txt")
             .expect("sibling is visible again")
             .bytes,
         b"kept"
@@ -423,7 +423,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
     {
         let fs = open_runtime(object_store.clone(), "undelete-persist-b");
         assert_eq!(
-            fs.get_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+            fs.read_file_blocking(&namespace_id, "/docs/report.txt")
                 .expect("recovered file survives checkpoint and reopen")
                 .bytes,
             b"persisted"
@@ -476,7 +476,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
     }
     let fs = open_runtime(object_store, "undelete-persist-d");
     assert_eq!(
-        fs.get_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+        fs.read_file_blocking(&namespace_id, "/docs/report.txt")
             .expect("recovered file survives the second cycle")
             .bytes,
         b"persisted"
@@ -526,8 +526,7 @@ fn change_feed_reports_the_deletion_position_an_undelete_takes() {
     .expect("undelete");
 
     let changes =
-        block_on(namespace.list_changes_page(ChangeSeq(0), ListChangesOptions::default()))
-            .expect("list changes");
+        block_on(namespace.list_changes(ChangeSeq(0)).page(first_page())).expect("list changes");
     let mut deleted_seq = None;
     let mut undeleted = None;
     for change in &changes.changes {
@@ -581,8 +580,7 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     .expect("delete");
 
     let changes =
-        block_on(namespace.list_changes_page(ChangeSeq(0), ListChangesOptions::default()))
-            .expect("list changes");
+        block_on(namespace.list_changes(ChangeSeq(0)).page(first_page())).expect("list changes");
 
     // A projection of the feed sees the spelling a person typed — on the
     // deletion as well as the creation — without a second lookup per entry.
@@ -657,7 +655,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
     ));
     // The rejected commit changed nothing.
     assert_eq!(
-        fs.get_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+        fs.read_file_blocking(&namespace_id, "/docs/report.txt")
             .expect("file untouched")
             .bytes,
         b"cycled"
@@ -709,7 +707,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
         Error::Core(error) if error.code() == ErrorCode::PathConflict
     ));
     assert_eq!(
-        fs.get_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+        fs.read_file_blocking(&namespace_id, "/docs/report.txt")
             .expect("file untouched")
             .bytes,
         b"original"

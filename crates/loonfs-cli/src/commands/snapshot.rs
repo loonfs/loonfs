@@ -1,11 +1,10 @@
 use super::context::{parse_snapshot_id_arg, resolve_profile_context, CommandContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
-use super::pagination::{collect_or_stream_pages, PagePlan, PagedListing};
+use super::pagination::{collect_or_stream_pages, page_request, PagePlan, PagedListing};
 use crate::args::{
     CommandKind, SnapshotCommand, SnapshotCreateArgs, SnapshotDeleteArgs, SnapshotExtendArgs,
     SnapshotListArgs, SnapshotTargetArgs,
 };
-use crate::error::CliError;
 use crate::resolve::parse_namespace_id;
 use std::path::Path;
 
@@ -69,12 +68,12 @@ async fn run_snapshot_list(
         args.pagination.cursor,
         args.pagination.page_limits.jsonl,
         async |cursor, limit| {
-            context
+            Ok(context
                 .target
                 .client
-                .list_snapshots_page(context.namespace(), limit, cursor.as_deref())
-                .await
-                .map_err(CliError::from)
+                .list_snapshots(context.namespace())
+                .page(page_request(cursor, limit)?)
+                .await?)
         },
         |_: &loonfs_api::v0::ListSnapshotsResponse| {},
     )

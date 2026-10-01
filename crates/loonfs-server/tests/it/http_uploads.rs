@@ -17,7 +17,7 @@ use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::http::{
     raw_agent, retry_on_macos_teardown_einval, retry_result_on_macos_teardown_einval,
 };
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -369,21 +369,22 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
 
     let stat = harness
         .client
-        .get_path_entry(&target, &Default::default())
+        .stat(&target)
         .await
         .expect("stat committed file");
     assert_eq!(stat.inode_id, InodeId(2));
     assert_eq!(stat.content_ref(), Some(&content_ref));
     let read_back = harness
         .client
-        .get_file_bytes(&target, &Default::default())
+        .read_file(&target)
         .await
         .expect("read committed file");
     assert_eq!(read_back, file_bytes);
 
     let changes = harness
         .client
-        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes(&namespace, ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("list changes");
     assert_eq!(changes.namespace_id, namespace);
@@ -411,7 +412,8 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
 
     let empty = harness
         .client
-        .list_changes_page(&namespace, commit.committed_seq, &Default::default())
+        .list_changes(&namespace, commit.committed_seq)
+        .page(first_page())
         .await
         .expect("list changes after head");
     assert_eq!(empty.changes, Vec::new());

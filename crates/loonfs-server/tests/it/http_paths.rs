@@ -128,21 +128,13 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         .await
         .expect("copy path");
 
-    let source_entry = harness
-        .client
-        .get_path_entry(&source, &Default::default())
-        .await
-        .expect("source stat");
-    let dest_entry = harness
-        .client
-        .get_path_entry(&destination, &Default::default())
-        .await
-        .expect("dest stat");
+    let source_entry = harness.client.stat(&source).await.expect("source stat");
+    let dest_entry = harness.client.stat(&destination).await.expect("dest stat");
     assert_ne!(source_entry.inode_id, dest_entry.inode_id);
     assert_eq!(source_entry.content_ref(), dest_entry.content_ref());
     let dest_bytes = harness
         .client
-        .get_file_bytes(&destination, &Default::default())
+        .read_file(&destination)
         .await
         .expect("read copied file");
     assert_eq!(dest_bytes, b"forced overwrite\n");
@@ -268,11 +260,7 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
         )
         .await
         .expect("recursive delete succeeds");
-    match harness
-        .client
-        .get_path_entry(&child, &Default::default())
-        .await
-    {
+    match harness.client.stat(&child).await {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
         other => panic!("expected path_not_found after recursive delete, got {other:?}"),
     }

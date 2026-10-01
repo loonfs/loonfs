@@ -7,7 +7,7 @@
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::publish::CommitRequest as CoreCommitRequest;
-use loonfs::{CreateNamespaceOptions, ListChangesOptions, LoonFs, StoreConfig};
+use loonfs::{CreateNamespaceOptions, LoonFs, StoreConfig};
 use loonfs_api::v0::{
     AdvanceRetentionRequest, CreateCheckpointRequest, RunMaintenanceRequest, RunMaintenanceResponse,
 };
@@ -18,7 +18,7 @@ use loonfs_api::{
     ROOT_INODE_ID,
 };
 use loonfs_client::{ClientError, NamespacePath};
-use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
 
 const REPORTS_DIR: &str = "/reports";
@@ -134,7 +134,8 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
 
     let remote_changes = harness
         .client
-        .list_changes_page(&remote_ns, ChangeSeq(0), &Default::default())
+        .list_changes(&remote_ns, ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("remote changes");
     assert_eq!(remote_changes.changes.len(), 1, "{remote_changes:?}");
@@ -149,7 +150,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         assert_eq!(
             harness
                 .client
-                .get_file_bytes(&spec, &Default::default())
+                .read_file(&spec)
                 .await
                 .expect("batch file readable"),
             bytes
@@ -200,7 +201,8 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     assert_eq!(embedded_committed.committed_seq, committed.committed_seq);
 
     let embedded_changes = namespace
-        .list_changes_page(ChangeSeq(0), ListChangesOptions::default())
+        .list_changes(ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("embedded changes");
 
@@ -290,17 +292,14 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
 
     // The id the response reported is the file's own.
     let spec = NamespacePath::parse("demo", ROOT_FILE).expect("path");
-    let entry = harness
-        .client
-        .get_path_entry(&spec, &Default::default())
-        .await
-        .expect("stat the new file");
+    let entry = harness.client.stat(&spec).await.expect("stat the new file");
     assert_eq!(entry.inode_id, created_inode_id);
 
     // The response is the feed's row for that commit, field for field.
     let feed = harness
         .client
-        .list_changes_page(&namespace, ChangeSeq(0), &Default::default())
+        .list_changes(&namespace, ChangeSeq(0))
+        .page(first_page())
         .await
         .expect("changes");
     assert_eq!(feed.changes.len(), 1, "{feed:?}");
@@ -509,7 +508,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
         let spec = NamespacePath::parse("demo", path).expect("path");
         let missing = harness
             .client
-            .get_path_entry(&spec, &Default::default())
+            .stat(&spec)
             .await
             .expect_err("the aborted batch wrote nothing");
         match missing {
@@ -680,18 +679,12 @@ async fn a_foreign_binding_precondition_identifies_the_version_field() {
     }
     let current = harness
         .client
-        .get_path_entry(
-            &NamespacePath::parse(namespace.as_str(), REPORTS_DIR).expect("path"),
-            &Default::default(),
-        )
+        .stat(&NamespacePath::parse(namespace.as_str(), REPORTS_DIR).expect("path"))
         .await
         .expect("stat current directory");
     let foreign = harness
         .client
-        .get_path_entry(
-            &NamespacePath::parse(foreign_namespace.as_str(), REPORTS_DIR).expect("path"),
-            &Default::default(),
-        )
+        .stat(&NamespacePath::parse(foreign_namespace.as_str(), REPORTS_DIR).expect("path"))
         .await
         .expect("stat foreign directory");
     let error = harness
@@ -1172,10 +1165,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
         .expect("the file is created at revision 1");
     let observed = harness
         .client
-        .get_path_entry(
-            &NamespacePath::parse("demo", FIRST_FILE).expect("path"),
-            &Default::default(),
-        )
+        .stat(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
         .await
         .expect("observe the file with preconditions");
 
@@ -1214,10 +1204,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
     // create published.
     let unchanged = harness
         .client
-        .get_path_entry(
-            &NamespacePath::parse("demo", FIRST_FILE).expect("path"),
-            &Default::default(),
-        )
+        .stat(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
         .await
         .expect("the file is still there");
     assert_eq!(unchanged.revision_no(), Some(RevisionNo(1)));
@@ -1233,10 +1220,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
     .expect("the precondition spelled correctly commits");
     let replaced = harness
         .client
-        .get_path_entry(
-            &NamespacePath::parse("demo", FIRST_FILE).expect("path"),
-            &Default::default(),
-        )
+        .stat(&NamespacePath::parse("demo", FIRST_FILE).expect("path"))
         .await
         .expect("the replace landed");
     assert_eq!(replaced.revision_no(), Some(RevisionNo(2)));

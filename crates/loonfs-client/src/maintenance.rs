@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
-use loonfs_api::ActorId;
+use loonfs_api::{ActorId, PageRequest};
 
 /// A pager over existing checkpoints.
 pub type CheckpointsPager = loonfs_api::Pager<ListCheckpointsResponse, ClientError>;
@@ -42,40 +42,28 @@ impl Client {
             .await
     }
 
-    /// Creates a checkpoint pager beginning at `cursor` (maintenance API group).
-    pub fn list_checkpoints_pager(
-        &self,
-        namespace_id: &NamespaceId,
-        page_size: Option<u32>,
-        cursor: Option<String>,
-    ) -> CheckpointsPager {
+    /// Lists existing checkpoints, including expired checkpoints that garbage
+    /// collection has not yet deleted (maintenance API group).
+    pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
         let client = self.clone();
         let namespace_id = namespace_id.clone();
-        loonfs_api::Pager::new(cursor, move |cursor| {
+        loonfs_api::Pager::new(move |request| {
             let client = client.clone();
             let namespace_id = namespace_id.clone();
-            async move {
-                client
-                    .list_checkpoints_page(&namespace_id, page_size, cursor.as_deref())
-                    .await
-            }
+            async move { client.checkpoints_page(&namespace_id, request).await }
         })
     }
 
-    /// Lists one bounded page of existing checkpoints, including expired
-    /// checkpoints that garbage collection has not yet deleted (maintenance API
-    /// group).
-    pub async fn list_checkpoints_page(
+    async fn checkpoints_page(
         &self,
         namespace_id: &NamespaceId,
-        limit: Option<u32>,
-        cursor: Option<&str>,
+        request: PageRequest<String>,
     ) -> Result<ListCheckpointsResponse> {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints",
             self.base_url
         ));
-        query.pagination(limit, cursor);
+        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
         let url = query.finish();
         self.request_json::<(), ListCheckpointsResponse>(self.get(&url), None, SendPolicy::Retry)
             .await

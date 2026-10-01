@@ -54,16 +54,16 @@ impl CommitOptions {
     }
 }
 
-/// Options for stating one path.
+/// Options for stating one entry by path or by inode.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatPathOptions {
+pub struct StatOptions {
     /// Whether to include the inode's attribute map and revision, enabled by default.
     pub include_attributes: AttributeInclusion,
     /// Read the entry from this snapshot.
     pub snapshot_id: Option<PinId>,
 }
 
-impl Default for StatPathOptions {
+impl Default for StatOptions {
     fn default() -> Self {
         Self {
             include_attributes: AttributeInclusion::Include,
@@ -72,18 +72,9 @@ impl Default for StatPathOptions {
     }
 }
 
-/// Options for listing a directory.
+/// Options for listing a directory by path or by inode.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ListPathEntriesOptions {
-    /// Whether to include each entry's attribute map and revision, disabled by default.
-    pub include_attributes: AttributeInclusion,
-    /// Read the directory from this snapshot.
-    pub snapshot_id: Option<PinId>,
-}
-
-/// Options for listing a directory's children by parent inode.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ListInodeChildrenOptions {
+pub struct ListOptions {
     /// Whether to include each entry's attribute map and revision, disabled by default.
     pub include_attributes: AttributeInclusion,
     /// Read the directory from this snapshot.

@@ -1,7 +1,7 @@
 //! Subject reads observe access changes through the runtime cache.
 
 use loonfs::publish::{CommitRequest, FilesystemOperation};
-use loonfs::{CreateNamespaceOptions, DestinationBehavior, LoonFs, StatPathOptions};
+use loonfs::{CreateNamespaceOptions, DestinationBehavior, LoonFs};
 use loonfs_api::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ErrorCode, NamespaceAccess,
     PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -97,10 +97,7 @@ async fn check_buffered_read_access(content_size: usize) {
             .await
             .expect("seed");
     }
-    namespace
-        .get_path_entry("/team", StatPathOptions::default())
-        .await
-        .expect("warm read");
+    namespace.stat("/team").await.expect("warm read");
     for byte in *b"ab" {
         let bytes = vec![byte; content_size];
         let prepared = namespace_writer
@@ -129,7 +126,7 @@ async fn check_buffered_read_access(content_size: usize) {
             .expect("publish file");
         for _ in 0..2 {
             let read = namespace
-                .get_file_bytes("/team/file")
+                .read_file("/team/file")
                 .await
                 .expect("read with changed or unchanged metadata");
             assert_eq!(read.bytes, bytes);
@@ -137,7 +134,7 @@ async fn check_buffered_read_access(content_size: usize) {
         assert_eq!(
             namespace
                 .with_subject(subject("stranger"))
-                .get_file_bytes("/team/file")
+                .read_file("/team/file")
                 .await
                 .expect_err("a shared cache does not grant another subject access")
                 .code(),
@@ -145,7 +142,7 @@ async fn check_buffered_read_access(content_size: usize) {
         );
     }
     let inode_id = namespace
-        .get_path_entry("/team/file", StatPathOptions::default())
+        .stat("/team/file")
         .await
         .expect("shared file before revocation")
         .inode_id;
@@ -169,18 +166,14 @@ async fn check_buffered_read_access(content_size: usize) {
         .expect("revoke");
     assert_eq!(
         namespace
-            .get_file_bytes("/team/file")
+            .read_file("/team/file")
             .await
             .expect_err("cached content cannot bypass revocation")
             .code(),
         ErrorCode::PathNotFound
     );
     assert_eq!(
-        namespace
-            .get_path_entry("/team", StatPathOptions::default())
-            .await
-            .expect_err("revoked")
-            .code(),
+        namespace.stat("/team").await.expect_err("revoked").code(),
         ErrorCode::PathNotFound
     );
     let states = namespace
@@ -262,7 +255,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
     if warm_before_handoff {
         assert_eq!(
             namespace
-                .get_file_bytes("/team/file")
+                .read_file("/team/file")
                 .await
                 .expect("warm read")
                 .bytes,
@@ -290,7 +283,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
         .expect("revoke read access");
     assert_eq!(
         namespace
-            .get_file_bytes("/team/file")
+            .read_file("/team/file")
             .await
             .expect_err("first read observes revocation")
             .code(),
