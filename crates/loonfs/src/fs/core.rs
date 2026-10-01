@@ -194,10 +194,10 @@ impl RuntimeCore {
         Arc::clone(&self.inner.metadata_segment_cache)
     }
 
-    /// The head-state limit of this core's cache. The publish side applies it
-    /// to each projection its sessions retain and to their total.
-    pub(crate) fn max_head_state_bytes(&self) -> usize {
-        self.inner.metadata_cache.max_head_state_bytes()
+    /// This core's view of the head-state cache, where publishers keep their
+    /// WAL tails between publication units.
+    pub(crate) fn head_state(&self) -> Arc<HeadStateCache> {
+        Arc::clone(&self.inner.head_state)
     }
 
     pub(crate) fn trace_mode(&self) -> &'static str {

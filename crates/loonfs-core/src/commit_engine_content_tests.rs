@@ -144,7 +144,6 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
             &store,
             vec![candidate],
             &context(clock.now_ms()),
-            &PublishTailOptions::default(),
             &Deadline::start(clock.clone()),
         )
         .await;
@@ -184,13 +183,11 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         .await
         .expect("head");
     store.block_next();
-    let options = PublishTailOptions::default();
     let batch = Deadline::start(timer.clone());
     let publish = engine.publish_batch(
         &store,
         vec![put_candidate(&completed)],
         &publication,
-        &options,
         &batch,
     );
     let collect = async {
@@ -265,14 +262,12 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let timer = Arc::new(PublicationTimer::default());
     let mut engine =
         NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
-    let options = PublishTailOptions::default();
     let replay = CommitCandidate::new(directory_request("original", "original"));
     let original = engine
         .publish_batch(
             &store,
             vec![replay.clone()],
             &setup,
-            &options,
             &Deadline::start(timer.clone()),
         )
         .await
@@ -292,7 +287,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let batch = Deadline::start(timer.clone());
     let publish = async {
         let mut result = engine
-            .publish_batch(&store, &candidates, &publication, &options, &batch)
+            .publish_batch(&store, &candidates, &publication, &batch)
             .await;
         // The first attempt finds the proof expired after loading its view
         // and aborts; the retry owner tries again from the same origin.
@@ -305,7 +300,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
             )
         }) {
             result = engine
-                .publish_batch(&store, &candidates, &publication, &options, &batch)
+                .publish_batch(&store, &candidates, &publication, &batch)
                 .await;
         }
         result
@@ -391,14 +386,12 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let timer = Arc::new(PublicationTimer::default());
     let mut engine =
         NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
-    let options = PublishTailOptions::default();
     let replay = CommitCandidate::new(directory_request("original", "original"));
     let original = engine
         .publish_batch(
             &store,
             vec![replay.clone()],
             &setup,
-            &options,
             &Deadline::start(timer.clone()),
         )
         .await
@@ -418,7 +411,6 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         &store,
         vec![primary, alias, later, replay],
         &publication,
-        &options,
         &batch,
     );
     let advance = async {
@@ -530,14 +522,12 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     let timer = Arc::new(PublicationTimer::default());
     let mut engine =
         NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
-    let options = PublishTailOptions::default();
     store.reset();
     let result = engine
         .publish_batch(
             &store,
             vec![candidate.clone(), metadata],
             &publication,
-            &options,
             &Deadline::start(timer.clone()),
         )
         .await;
@@ -595,7 +585,6 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
             &store,
             vec![candidate, later],
             &expired,
-            &options,
             &Deadline::start(timer.clone()),
         )
         .await;

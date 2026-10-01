@@ -16,7 +16,7 @@ use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
+    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
@@ -1840,7 +1840,6 @@ async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
             &store,
             vec![CommitCandidate::new(scoped_directory("seed", vec![]))],
             &context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -1874,7 +1873,6 @@ async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
                     preconditions,
                 ))],
                 &context,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -1912,7 +1910,6 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
                 ChangeSeq(0),
             ))],
             &context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -1932,7 +1929,6 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
             &store,
             vec![CommitCandidate::new(request)],
             &context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

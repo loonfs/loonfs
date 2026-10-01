@@ -57,9 +57,7 @@ use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
 use crate::pin::record::load_pin;
 use crate::protocol::list_changes_after;
-use crate::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
-};
+use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine};
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use crate::test_support::ops::{
     create, delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
@@ -195,7 +193,6 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
                 vec![prepared],
             )],
             context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

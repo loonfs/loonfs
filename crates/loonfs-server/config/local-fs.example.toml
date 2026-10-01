@@ -92,11 +92,10 @@ writer_id = "loonfs-server-local"
 # Limits of the one metadata cache this server reads through; omitted fields
 # keep the runtime defaults. `max_segment_bytes` holds decoded metadata
 # blocks and manifests. Defaults to 256 MiB. `max_head_state_bytes` holds
-# namespace head anchors and read-side WAL-tail projections, with no limit on
-# how many namespaces stay cached. Defaults to 64 MiB. The WAL-tail
-# projections the writer's namespace publishers retain hold a second total of
-# the same size outside the cache. Neither bounds writer sessions: the server
-# keeps one for each namespace it has written since it started.
+# namespace head anchors and WAL-tail projections, the tails the writer's
+# namespace publishers publish from included, with no limit on how many
+# namespaces stay cached. Defaults to 64 MiB. Neither bounds writer sessions:
+# the server keeps one for each namespace it has written since it started.
 #[metadata_cache]
 #max_segment_bytes = 268435456
 #max_head_state_bytes = 67108864

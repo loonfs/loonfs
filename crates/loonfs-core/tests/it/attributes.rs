@@ -14,7 +14,7 @@ use loonfs_api::{
 };
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
+    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
@@ -127,7 +127,6 @@ async fn publish_request<S: ObjectStore + ?Sized>(
             store,
             vec![CommitCandidate::new(request)],
             context,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

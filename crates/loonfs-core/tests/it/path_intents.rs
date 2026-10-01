@@ -1796,7 +1796,6 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
                     &store,
                     vec![candidate],
                     &context,
-                    &Default::default(),
                     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await

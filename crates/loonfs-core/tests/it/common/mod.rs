@@ -56,7 +56,6 @@ pub(crate) mod commit_split_support {
 
     use loonfs_core::publish::{
         CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
-        PublishTailOptions,
     };
     use loonfs_core::{CreateNamespaceOptions, Error as CoreError, MutationContext};
 
@@ -183,7 +182,6 @@ pub(crate) mod commit_split_support {
                 store,
                 candidates,
                 context,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await

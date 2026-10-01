@@ -57,34 +57,25 @@ async fn writer_with_cache_and_metrics(
         .expect("build writer")
 }
 
-/// What the writer's namespace publishers retain, read off one of the
-/// gauges that report it.
-fn retention_gauge(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
+fn tail_replays(recorder: &DefaultMetricsRecorder) -> u64 {
     let snapshot = recorder.snapshot();
     let entry = snapshot
-        .by_name(name)
+        .by_name("loonfs.publisher.tail_replays")
         .next()
-        .expect("the publisher registers its retention gauges");
+        .expect("the publisher registers its replay counter");
     match entry.value {
-        MetricValue::Gauge(value) => value,
-        ref other => panic!("retention is reported as a gauge, found {other:?}"),
+        MetricValue::Counter(value) => value,
+        ref other => panic!("replays are reported as a counter, found {other:?}"),
     }
 }
 
-/// Decoded bytes the publishers retain once `fence` and `other` each hold
-/// the first file the fencing test publishes, with nothing evicted.
-async fn first_projections_decoded_bytes(ns_fence: &NamespaceId, ns_other: &NamespaceId) -> usize {
+/// Head state the writer holds once `fence` and `other` each hold the first
+/// file the fencing test publishes, with nothing evicted.
+async fn first_head_state_bytes(ns_fence: &NamespaceId, ns_other: &NamespaceId) -> usize {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = writer_with_cache_and_metrics(
-        &store,
-        "writer-a",
-        MetadataCache::default(),
-        recorder.clone(),
-    )
-    .await;
+    let writer = writer(&store, "writer-a").await;
     let mut namespaces = Vec::new();
     for (namespace_id, path) in [(ns_fence, "/a1.txt"), (ns_other, "/spill.txt")] {
         writer
@@ -105,8 +96,7 @@ async fn first_projections_decoded_bytes(ns_fence: &NamespaceId, ns_other: &Name
             .expect("first put");
         namespaces.push(namespace);
     }
-    let bytes = retention_gauge(&recorder, "loonfs.publisher.retained_projection_bytes");
-    usize::try_from(bytes).expect("retained bytes are positive")
+    writer.metadata_cache().stats().head_state_bytes
 }
 
 /// Asserts a terminal fencing refusal and hands back the fence it carries.
@@ -322,19 +312,16 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     ));
     let store: SharedObjectStore = counting.clone();
 
-    // Room for either projection but not both: publishing to either
-    // namespace evicts the other's.
-    let both_projections = first_projections_decoded_bytes(&ns_fence, &ns_other).await;
-    let single_projection_cache = MetadataCache::builder()
-        .max_head_state_bytes(both_projections - 1)
-        .build();
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer_a = writer_with_cache_and_metrics(
-        &store,
-        "writer-a",
-        single_projection_cache,
-        recorder.clone(),
-    )
+    // One byte short of both namespaces' head state: publishing to the
+    // other namespace evicts the oldest entry, the fence namespace's tail.
+    let both_namespaces = first_head_state_bytes(&ns_fence, &ns_other).await;
+    let writer_a = writer_with_cache(&store, "writer-a", |builder| {
+        builder.metadata_cache(
+            MetadataCache::builder()
+                .max_head_state_bytes(both_namespaces - 1)
+                .build(),
+        )
+    })
     .await;
     writer_a
         .create_namespace(
@@ -361,9 +348,9 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
         .await
         .expect("writer a first put");
 
-    // Publishing to the other namespace pushes the first namespace's
-    // projection out of the budget. Its publisher, engine identity, and
-    // writer session stay behind.
+    // Publishing to the other namespace pushes the first namespace's tail
+    // out of the cache. Its publisher, engine position, and writer session
+    // stay behind.
     other_writer_a
         .put_file_bytes(
             "/spill.txt",
@@ -372,11 +359,8 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
         )
         .await
         .expect("writer a publishes to the other namespace");
-    assert_eq!(
-        retention_gauge(&recorder, "loonfs.publisher.retained_projections"),
-        1,
-        "the budget admits one namespace's projection at a time"
-    );
+    assert!(writer_a.metadata_cache().stats().head_state_evictions > 0);
+    let misses_before_fencing = writer_a.metadata_cache().stats().wal_tail_misses;
 
     let writer_b = writer(&store, "writer-b").await;
     let fence_writer_b = writer_b.open_namespace(&ns_fence).expect("open namespace");
@@ -401,6 +385,11 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
             )
             .await,
         "superseded writer surfaces fencing",
+    );
+    assert_eq!(
+        writer_a.metadata_cache().stats().wal_tail_misses,
+        misses_before_fencing + 1,
+        "the evicted tail sends the fenced publish to the store"
     );
     let head_after_fencing = head_state(&store, &ns_fence).await;
     assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
@@ -787,11 +776,6 @@ async fn other_head_state_bytes(other_id: &NamespaceId) -> usize {
 async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("seeded-check").expect("namespace");
-    let other_id = NamespaceId::parse("other").expect("namespace");
-    // The budget holds exactly the other namespace's head state, which
-    // outweighs this namespace's, so reading the other namespace evicts
-    // everything this one has cached.
-    let budget = other_head_state_bytes(&other_id).await;
     let blocking = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
@@ -804,20 +788,13 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     let timer = Arc::new(ManualClock::new(0));
     let interval_ms = 1_000;
     let writer = writer_with_timer(&store, "seeded-check-writer", &timer, |builder| {
-        builder
-            .manifest_revalidation_interval_ms(interval_ms)
-            .metadata_cache(
-                MetadataCache::builder()
-                    .max_head_state_bytes(budget)
-                    .build(),
-            )
+        builder.manifest_revalidation_interval_ms(interval_ms)
     })
     .await;
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let reader = writer.read_only();
-    let other_namespace = reader.namespace(&other_id);
     let namespace = reader.namespace(&namespace_id);
     writer
         .create_namespace(
@@ -826,7 +803,6 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
         )
         .await
         .expect("create namespace");
-    fill_other(&store, &other_id).await;
     let put = |path: &'static str| {
         namespace_writer.put_file_bytes(
             path,
@@ -864,12 +840,14 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
     read().await.expect("read after the second put");
     crate::common::assert_wal_probe(recording.take(), &namespace_id, wal_no);
 
-    // Reading another namespace evicts the cached view. The third put still
-    // plans against the basis confirmed at zero, and seeds a new view.
-    other_namespace
-        .get_path_entry("/", Default::default())
+    // A collection pass drops the cached view but not the writer's tail.
+    // The third put still plans against the basis confirmed at zero, and
+    // seeds a new view.
+    writer
+        .maintenance(loonfs_test_support::ids::writer_id("seeded-check-gc"))
+        .gc_namespace(&namespace_id, &loonfs::GcConfig::default())
         .await
-        .expect("evict the cached view");
+        .expect("drop the cached view");
     timer.advance_ms(interval_ms);
     put("/three.txt").await.expect("third put");
     writer.drain().await.expect("finish hints");
@@ -1150,4 +1128,142 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
     let after_read = reader.metadata_cache().stats();
     assert_eq!(after_read.wal_tail_misses, before_read.wal_tail_misses);
     assert_eq!(after_read.wal_tail_hits, before_read.wal_tail_hits + 1);
+}
+
+#[tokio::test]
+async fn read_pressure_evicts_an_idle_writer_tail_and_its_next_publish_replays_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
+    let namespace_id = NamespaceId::parse("idle-writer").expect("namespace");
+    let other_id = NamespaceId::parse("other").expect("namespace");
+    // The budget holds exactly the other namespace's head state, which
+    // outweighs the writer's, so one read of it evicts the writer's tail.
+    let cache = MetadataCache::builder()
+        .max_head_state_bytes(other_head_state_bytes(&other_id).await)
+        .build();
+    fill_other(&store, &other_id).await;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer =
+        writer_with_cache_and_metrics(&store, "idle-writer", cache.clone(), recorder.clone()).await;
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    for path in ["/first.txt", "/second.txt"] {
+        namespace
+            .put_file_bytes(
+                path,
+                b"warm",
+                PutFileOptions::new(loonfs_test_support::test_actor()),
+            )
+            .await
+            .expect("warm put");
+    }
+    let replays = tail_replays(&recorder);
+
+    let reader = LoonFs::reader_with_store(store.clone())
+        .metadata_cache(cache.clone())
+        .build()
+        .await
+        .expect("reader on the shared cache");
+    reader
+        .namespace(&other_id)
+        .get_path_entry("/", Default::default())
+        .await
+        .expect("read the other namespace");
+    assert!(cache.stats().head_state_evictions > 0);
+
+    let landed = namespace
+        .put_file_bytes(
+            "/after-pressure.txt",
+            b"after",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("the publish lands after its tail was evicted");
+    assert_eq!(
+        tail_replays(&recorder),
+        replays + 1,
+        "the evicted tail is read back from the store exactly once"
+    );
+    let entry = reader
+        .namespace(&namespace_id)
+        .get_path_entry("/after-pressure.txt", Default::default())
+        .await
+        .expect("read the landed file");
+    assert_eq!(entry.head_seq, landed.committed_seq);
+}
+
+#[tokio::test]
+async fn a_tail_evicted_while_its_publish_runs_returns_when_the_publish_lands() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("busy-writer").expect("namespace");
+    let other_id = NamespaceId::parse("other").expect("namespace");
+    let blocking = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id)),
+        OperationClass::PutCreateIfAbsent,
+    ));
+    let store: SharedObjectStore = blocking.clone();
+    let cache = MetadataCache::builder()
+        .max_head_state_bytes(other_head_state_bytes(&other_id).await)
+        .build();
+    fill_other(&store, &other_id).await;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer =
+        writer_with_cache_and_metrics(&store, "busy-writer", cache.clone(), recorder.clone()).await;
+    writer
+        .create_namespace(
+            &namespace_id,
+            CreateNamespaceOptions::new(loonfs_test_support::test_actor()),
+        )
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let put = |path: &'static str| {
+        namespace.put_file_bytes(
+            path,
+            b"busy",
+            PutFileOptions::new(loonfs_test_support::test_actor()),
+        )
+    };
+    put("/first.txt").await.expect("first put");
+    let replays = tail_replays(&recorder);
+    let reader = LoonFs::reader_with_store(store.clone())
+        .metadata_cache(cache.clone())
+        .build()
+        .await
+        .expect("reader on the shared cache");
+
+    // The put holds its tail while its WAL put is parked. Reading the other
+    // namespace evicts that tail from the cache meanwhile.
+    blocking.block_next();
+    let (landed, ()) = futures::join!(put("/second.txt"), async {
+        blocking.wait_until_blocked().await;
+        reader
+            .namespace(&other_id)
+            .get_path_entry("/", Default::default())
+            .await
+            .expect("read the other namespace");
+        assert!(cache.stats().head_state_evictions > 0);
+        blocking.release();
+    });
+    landed.expect("the put lands with the tail it held");
+    put("/third.txt")
+        .await
+        .expect("the next put starts from the landed tail");
+    assert_eq!(
+        tail_replays(&recorder),
+        replays,
+        "the landed put put its tail back, so nothing was read again"
+    );
 }

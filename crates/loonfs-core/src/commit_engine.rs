@@ -6,7 +6,7 @@ use crate::authorize::CommitAuthority;
 use crate::commit::{settle_publish_attempt, CommitFingerprint, WalPublishError};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::MetadataSegmentCache;
+use crate::manifest::{HeadStateCache, MetadataSegmentCache};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -14,7 +14,7 @@ use crate::namespace::writer_epoch::acquire_writer;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitRequest, FilesystemOperation};
 use crate::protocol::{
-    load_publish_metadata_view, PublishTailOptions, PublishTailProjection, PublishViewEffect,
+    load_publish_metadata_view, PublishTailPosition, PublishTailProjection, PublishViewEffect,
 };
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
@@ -472,7 +472,7 @@ pub struct NamespaceCommitEnginePublishResult {
     /// the inline bytes of a put whose outcome is unknown.
     pub wal_tail_observed: bool,
     /// Whether this attempt read the WAL tail from the store instead of
-    /// reusing the retained projection.
+    /// finding it in the head-state cache.
     pub wal_tail_discovered: bool,
     /// Read state produced by a successful, unambiguous WAL put. Callers can
     /// use it to update read caches without reloading from object storage.
@@ -491,14 +491,14 @@ pub struct WalFoldInput {
     pub wal_tail_inline_bytes: usize,
 }
 
-/// A read anchor plus the projected WAL tail as of one landed publish.
+/// The read anchor of one landed publish. The engine has already put the
+/// WAL tail this anchor names in its head-state cache.
 #[derive(Debug, Clone)]
 pub struct ResultingReadState {
     pub head: NamespaceReadState,
     /// Metadata basis used for replay. The published head still references this
     /// basis, so a seeded read cache matches the next store-backed read.
     pub basis: MetadataBasis,
-    pub tail: Arc<ProjectedWalTail>,
     /// When the writer last confirmed `basis` current, which may be well
     /// before the put. A read view seeded from this state takes it as its
     /// last check.
@@ -532,7 +532,7 @@ pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEngine {
     namespace_id: NamespaceId,
-    publish_tail_projection: Option<PublishTailProjection>,
+    publish_tail: Option<PublishTailPosition>,
     projection_observed: Option<Observation>,
     acquired_anchor: Option<NamespaceReadAnchor>,
     fold_observed: Option<Observation>,
@@ -547,13 +547,16 @@ pub struct NamespaceCommitEngine {
     /// Shared cache of decoded blocks used by publish-view reads. Blocks are
     /// keyed by segment digest. Successor probes verify that the view is current.
     segment_cache: Option<Arc<MetadataSegmentCache>>,
+    /// Where the WAL tail lives between publication units. Without it, every
+    /// unit reads the tail from the store.
+    head_state: Option<Arc<HeadStateCache>>,
 }
 
 impl NamespaceCommitEngine {
     pub fn new(namespace_id: NamespaceId) -> Self {
         Self {
             namespace_id,
-            publish_tail_projection: None,
+            publish_tail: None,
             projection_observed: None,
             acquired_anchor: None,
             fold_observed: None,
@@ -561,7 +564,15 @@ impl NamespaceCommitEngine {
             session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
+            head_state: None,
         }
+    }
+
+    /// An engine that keeps its WAL tail between units in a head-state cache
+    /// of its own, as a runtime's engine does in the shared one.
+    #[cfg(test)]
+    pub(crate) fn with_unshared_head_state(namespace_id: NamespaceId) -> Self {
+        Self::new(namespace_id).head_state(Arc::new(HeadStateCache::unshared(usize::MAX)))
     }
 
     /// Uses runtime-managed session state so the writer epoch and fenced status
@@ -590,19 +601,24 @@ impl NamespaceCommitEngine {
         self
     }
 
+    pub fn head_state(mut self, head_state: Arc<HeadStateCache>) -> Self {
+        self.head_state = Some(head_state);
+        self
+    }
+
     /// Clears only the rebuildable tail projection. Writer epoch and fencing
     /// remain in session state and are not reset by cache invalidation.
     pub fn invalidate_projection(&mut self) {
-        self.publish_tail_projection = None;
+        self.publish_tail = None;
         self.acquired_anchor = None;
         self.projection_observed = None;
         self.basis_checked = None;
     }
 
-    /// The basis manifest of a retained projection that no store observation
+    /// The basis manifest of the engine's position that no store observation
     /// has confirmed within the last publication budget.
     fn unconfirmed_basis(&self, attempt: &Observation) -> Option<ManifestNo> {
-        let projection = self.publish_tail_projection.as_ref()?;
+        let projection = self.publish_tail.as_ref()?;
         let confirmed_recently = self
             .basis_checked
             .as_ref()
@@ -610,64 +626,93 @@ impl NamespaceCommitEngine {
         (!confirmed_recently).then(|| projection.basis().manifest_no())
     }
 
+    /// The tail `position` names, if the head-state cache still holds it.
+    fn cached_tail(&self, position: &PublishTailPosition) -> Option<Arc<ProjectedWalTail>> {
+        self.head_state
+            .as_ref()?
+            .get_tail(&position.tail_key(&self.namespace_id))
+    }
+
+    fn insert_tail(&self, position: &PublishTailPosition, tail: Arc<ProjectedWalTail>) {
+        if let Some(head_state) = &self.head_state {
+            head_state.insert_tail(position.tail_key(&self.namespace_id), tail);
+        }
+    }
+
+    /// Takes the engine's position and the tail it names. A tail the cache no
+    /// longer holds drops the position, so the unit reads the tail from the
+    /// store.
+    fn take_cached_projection(&mut self) -> Option<PublishTailProjection> {
+        let position = self.publish_tail.take()?;
+        let tail_state = self.cached_tail(&position)?;
+        Some(PublishTailProjection {
+            position,
+            tail_state,
+        })
+    }
+
     /// Checks the cached WAL tail without store reads or writer acquisition.
     pub fn retains_commit_receipt(&self, commit_id: &CommitId) -> bool {
-        self.publish_tail_projection
+        self.publish_tail
             .as_ref()
-            .is_some_and(|projection| {
-                projection
-                    .tail_state
-                    .rows
-                    .find_commit_receipt(commit_id)
-                    .is_some()
-            })
+            .and_then(|position| self.cached_tail(position))
+            .is_some_and(|tail| tail.rows.find_commit_receipt(commit_id).is_some())
     }
 
-    /// Returns the retained tail projection's decoded bytes, or `None` when no
-    /// projection is cached. Runtimes can sum this value across namespace engines
-    /// to enforce a global cache limit.
-    pub fn retained_tail_decoded_bytes(&self) -> Option<usize> {
-        self.publish_tail_projection
+    /// Unfolded WAL objects as of the last publication unit, or `None` when
+    /// the engine has no position.
+    pub fn wal_tail_objects(&self) -> Option<u64> {
+        self.publish_tail
             .as_ref()
-            .map(|projection| projection.tail_state.decoded_bytes())
+            .map(|position| position.wal_tail_objects)
     }
 
-    /// The retained projection as a fold input, or `None` when the engine
-    /// holds no projection.
-    ///
+    /// Inline content bytes in the unfolded WAL tail as of the last
+    /// publication unit, or `None` when the engine has no position.
+    pub fn wal_tail_inline_bytes(&self) -> Option<usize> {
+        self.publish_tail
+            .as_ref()
+            .map(|position| position.wal_tail_inline_bytes)
+    }
+
+    /// The tail as a fold input, or `None` when the engine has no position or
+    /// the head-state cache no longer holds the tail.
     pub fn wal_fold_input(&self) -> Option<WalFoldInput> {
-        self.publish_tail_projection
-            .as_ref()
-            .map(|projection| WalFoldInput {
-                head: projection.head.clone(),
-                basis: projection.basis().clone(),
-                tail_state: Arc::clone(&projection.tail_state),
-                wal_tail_objects: projection.wal_tail_objects,
-                wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
-            })
+        let position = self.publish_tail.as_ref()?;
+        let tail_state = self.cached_tail(position)?;
+        Some(WalFoldInput {
+            head: position.head.clone(),
+            basis: position.basis().clone(),
+            wal_tail_objects: position.wal_tail_objects,
+            wal_tail_inline_bytes: tail_state.inline_bytes(),
+            tail_state,
+        })
     }
 
     pub fn begin_wal_fold(&mut self) -> Option<WalFoldInput> {
         self.fold_observed = Some(Observation::now(Arc::clone(&self.timer)));
-        self.publish_tail_projection.as_mut()?.begin_fold();
-        self.wal_fold_input()
+        let input = self.wal_fold_input()?;
+        self.publish_tail.as_mut()?.begin_fold();
+        Some(input)
     }
 
     pub fn record_wal_fold(&mut self, folded: Option<&crate::manifest::FoldedWalTail>) {
         let fold_observed = self.fold_observed.take();
-        let reanchored = match (folded, &mut self.publish_tail_projection) {
-            (Some(folded), Some(projection))
+        let since = match (folded, &mut self.publish_tail) {
+            (Some(folded), Some(position))
                 if fold_observed.is_some()
                     && folded.response.outcome == loonfs_api::FoldWalOutcome::Published =>
             {
-                projection.reanchor_after_fold(folded.basis.clone())
+                position.reanchor_after_fold(folded.basis.clone())
             }
-            _ => false,
+            _ => None,
         };
-        if reanchored {
-            self.basis_checked = fold_observed;
-        } else {
-            self.invalidate_projection();
+        match (since, &self.publish_tail) {
+            (Some(since), Some(position)) => {
+                self.insert_tail(position, since);
+                self.basis_checked = fold_observed;
+            }
+            _ => self.invalidate_projection(),
         }
     }
 
@@ -740,7 +785,6 @@ impl NamespaceCommitEngine {
         store: &S,
         candidates: impl AsRef<[CommitCandidate]>,
         context: &MutationContext,
-        tail_options: &PublishTailOptions,
         batch: &Deadline,
     ) -> NamespaceCommitEnginePublishResult {
         let candidates = candidates.as_ref();
@@ -800,13 +844,21 @@ impl NamespaceCommitEngine {
                 self.invalidate_projection();
             }
         }
+        let acquired_anchor = self.acquired_anchor.take();
+        let cached_projection = match acquired_anchor {
+            Some(_) => {
+                self.publish_tail = None;
+                None
+            }
+            None => self.take_cached_projection(),
+        };
         let loaded = load_publish_metadata_view(
             store,
             self.segment_cache.as_deref(),
             &self.namespace_id,
             acquired_writer,
-            self.publish_tail_projection.as_ref(),
-            self.acquired_anchor.take(),
+            cached_projection,
+            acquired_anchor,
         )
         .await;
         let (publish_view, projection) = match loaded {
@@ -865,10 +917,10 @@ impl NamespaceCommitEngine {
             .map(|(candidate, _)| candidate.inline_content_bytes())
             .sum();
         let (wal_tail_objects, wal_tail_inline_bytes, resulting_read_state) =
-            self.update_publish_tail_projection(projection, published.effect, tail_options);
+            self.update_publish_tail_projection(projection, published.effect, wal_tail_discovered);
         // A put that landed is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
-        if resulting_read_state.is_some() && self.publish_tail_projection.is_some() {
+        if resulting_read_state.is_some() && self.publish_tail.is_some() {
             self.projection_observed = Some(attempt);
         }
         NamespaceCommitEnginePublishResult {
@@ -881,20 +933,23 @@ impl NamespaceCommitEngine {
         }
     }
 
-    /// Folds one batch's effect into the retained tail projection, and
-    /// reports the WAL-tail length the caller schedules maintenance on.
+    /// Folds one batch's effect into the unit's tail projection, keeps its
+    /// position, and reports the WAL-tail length the caller schedules
+    /// maintenance on. A tail the cache does not already hold is inserted:
+    /// one a landed put advanced, or one this unit read from the store.
     fn update_publish_tail_projection(
         &mut self,
         mut projection: PublishTailProjection,
         effect: PublishViewEffect,
-        tail_options: &PublishTailOptions,
+        tail_discovered: bool,
     ) -> (u64, usize, Option<ResultingReadState>) {
+        let advanced = matches!(effect, PublishViewEffect::Advanced { .. });
         let state = match effect {
             PublishViewEffect::Unchanged => None,
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
                 return (
-                    projection.wal_tail_objects,
+                    projection.position.wal_tail_objects,
                     projection.tail_state.inline_bytes(),
                     None,
                 );
@@ -904,7 +959,7 @@ impl NamespaceCommitEngine {
                 inline_content,
                 head,
             } => {
-                projection.wal_tail_objects += 1;
+                projection.position.wal_tail_objects += 1;
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
                 for value in &inline_content {
                     tail_state
@@ -916,14 +971,18 @@ impl NamespaceCommitEngine {
                         // and folding will report the accounting error.
                         tracing::error!(%error, "could not update the committed WAL projection");
                         self.invalidate_projection();
-                        return (projection.wal_tail_objects, tail_state.inline_bytes(), None);
+                        return (
+                            projection.position.wal_tail_objects,
+                            tail_state.inline_bytes(),
+                            None,
+                        );
                     }
                 }
                 if let Err(error) = projection.apply_fold_records(&inline_content, &records) {
                     tracing::error!(%error, "could not update the committed WAL projection");
                     self.invalidate_projection();
                     return (
-                        projection.wal_tail_objects,
+                        projection.position.wal_tail_objects,
                         projection.tail_state.inline_bytes(),
                         None,
                     );
@@ -936,20 +995,18 @@ impl NamespaceCommitEngine {
                     .clone()
                     .map(|basis_checked| ResultingReadState {
                         head,
-                        basis: projection.basis().clone(),
-                        tail: Arc::clone(&projection.tail_state),
+                        basis: projection.position.basis().clone(),
                         basis_checked,
                     })
             }
         };
-        let count = projection.wal_tail_objects;
-        let inline_bytes = projection.tail_state.inline_bytes();
-        if projection.within_limits(tail_options) {
-            self.publish_tail_projection = Some(projection);
-        } else {
-            self.invalidate_projection();
+        let (position, tail_state) = projection.into_position();
+        if advanced || tail_discovered {
+            self.insert_tail(&position, tail_state);
         }
-        (count, inline_bytes, state)
+        let reported = (position.wal_tail_objects, position.wal_tail_inline_bytes);
+        self.publish_tail = Some(position);
+        (reported.0, reported.1, state)
     }
 }
 
@@ -966,13 +1023,12 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
 ) -> Vec<Result<Commit>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     let batch = Deadline::start(Arc::clone(&engine.timer));
-    let options = PublishTailOptions::default();
     let mut results = vec![None; candidates.len()];
     let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
     for _ in 0..crate::limits::CONTENTION_RETRY_LIMIT {
         let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
         let observed = engine
-            .publish_batch(store, &attempted, context, &options, &batch)
+            .publish_batch(store, &attempted, context, &batch)
             .await
             .results;
         pending =
@@ -1279,13 +1335,12 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        let mut engine_a = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut engine_a = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
         let first = engine_a
             .publish_batch(
                 &store,
                 vec![create_dir("from-a-first", "alpha")],
                 &writer_a,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
@@ -1300,7 +1355,6 @@ mod tests {
                 &store,
                 vec![create_dir("from-b-first", "beta")],
                 &writer_b,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
@@ -1318,7 +1372,6 @@ mod tests {
                     &store,
                     vec![create_dir("from-a-second", "gamma")],
                     &writer_a,
-                    &PublishTailOptions::default(),
                     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await;
@@ -1370,7 +1423,6 @@ mod tests {
                 store.inner(),
                 vec![create_dir("from-a-first", "alpha")],
                 &writer_a,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -1389,7 +1441,6 @@ mod tests {
                     blocked_store.as_ref(),
                     vec![create_dir("from-a-second", "gamma")],
                     &writer_a,
-                    &PublishTailOptions::default(),
                     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await;
@@ -1407,7 +1458,6 @@ mod tests {
                 store.inner(),
                 vec![create_dir("from-b-first", "beta")],
                 &writer_b,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -1431,14 +1481,13 @@ mod tests {
             .expect("bootstrap");
 
         let session = SharedWriterSessionState::default();
-        let mut engine_a1 =
-            NamespaceCommitEngine::new(namespace_id.clone()).writer_session(Arc::clone(&session));
+        let mut engine_a1 = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+            .writer_session(Arc::clone(&session));
         engine_a1
             .publish_batch(
                 &store,
                 vec![create_dir("from-a-first", "alpha")],
                 &writer_a,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -1453,7 +1502,6 @@ mod tests {
                 &store,
                 vec![create_dir("from-b-first", "beta")],
                 &writer_b,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -1467,7 +1515,6 @@ mod tests {
                     &store,
                     vec![create_dir("from-a-second", "gamma")],
                     &writer_a,
-                    &PublishTailOptions::default(),
                     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 )
                 .await;
@@ -1495,7 +1542,6 @@ mod tests {
                 &store,
                 vec![create_dir("from-a-third", "delta")],
                 &writer_a,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
@@ -1538,8 +1584,8 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine =
-            NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+            .monotonic_timer(timer.clone());
         for (name, advance_ms) in [
             ("alpha", 0),
             ("beta", WAL_PUBLISH_BUDGET_MS - 1),
@@ -1552,7 +1598,6 @@ mod tests {
                     &store,
                     vec![create_dir(name, name)],
                     &writer,
-                    &PublishTailOptions::default(),
                     &Deadline::start(Arc::clone(&engine.timer)),
                 )
                 .await;
@@ -1591,13 +1636,7 @@ mod tests {
     ) -> NamespaceCommitEnginePublishResult {
         let deadline = Deadline::start(Arc::clone(&engine.timer));
         let published = engine
-            .publish_batch(
-                store,
-                vec![create_dir(name, name)],
-                writer,
-                &PublishTailOptions::default(),
-                &deadline,
-            )
+            .publish_batch(store, vec![create_dir(name, name)], writer, &deadline)
             .await;
         published.results[0].as_ref().expect(name);
         published
@@ -1616,8 +1655,8 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine =
-            NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+            .monotonic_timer(timer.clone());
         let first = publish_one(&mut engine, &store, &writer, "alpha").await;
         let basis = first
             .resulting_read_state
@@ -1695,8 +1734,8 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine =
-            NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+            .monotonic_timer(timer.clone());
         publish_one(&mut engine, &store, &writer, "alpha").await;
         timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
         publish_one(&mut engine, &store, &writer, "beta").await;
@@ -1709,13 +1748,11 @@ mod tests {
         store.reset();
         store.inner().block_next();
         let deadline = Deadline::start(Arc::clone(&engine.timer));
-        let tail_options = PublishTailOptions::default();
         let (published, ()) = futures::join!(
             engine.publish_batch(
                 &store,
                 vec![create_dir("gamma", "gamma")],
                 &writer,
-                &tail_options,
                 &deadline,
             ),
             async {
@@ -1773,7 +1810,6 @@ mod tests {
                 &store,
                 vec![create_dir("budgeted", "alpha")],
                 &writer,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::clone(&over_budget.timer)),
             )
             .await;
@@ -1804,7 +1840,6 @@ mod tests {
                 &store,
                 vec![create_dir("budgeted", "alpha")],
                 &writer,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await;
@@ -1835,7 +1870,6 @@ mod tests {
             &store,
             vec![create_dir("seed-commit", "docs")],
             &writer,
-            &PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await
@@ -1864,7 +1898,6 @@ mod tests {
                 &store,
                 vec![create_dir("uncached-a", "alpha")],
                 &writer,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -1881,7 +1914,6 @@ mod tests {
                 &store,
                 vec![create_dir("uncached-b", "beta")],
                 &writer,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -1901,7 +1933,6 @@ mod tests {
                 &store,
                 vec![create_dir("cached-a", "gamma")],
                 &writer,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await
@@ -1918,7 +1949,6 @@ mod tests {
                 &store,
                 vec![create_dir("cached-b", "delta")],
                 &writer,
-                &PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await

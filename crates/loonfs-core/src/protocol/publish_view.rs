@@ -5,7 +5,7 @@ use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::manifest::VerifiedMetadataSegments;
 use crate::manifest::{
     load_basis_metadata_segments, metadata_basis_from_manifest, LoadedMetadataBasis,
-    MetadataSegmentCache,
+    MetadataSegmentCache, WalTailProjectionCacheKey,
 };
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::MetadataBasis;
@@ -52,28 +52,23 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     }
 }
 
-/// The size bound on the publish-time WAL-tail projection a view load will
-/// accept for reuse.
+/// What a commit engine keeps between publication units. The WAL tail
+/// itself lives in the head-state cache, under the key this basis and head
+/// name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishTailOptions {
-    pub max_tail_decoded_bytes: usize,
-}
-
-impl Default for PublishTailOptions {
-    fn default() -> Self {
-        Self {
-            max_tail_decoded_bytes: 64 * 1024 * 1024,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PublishTailProjection {
+pub(crate) struct PublishTailPosition {
     basis: MetadataBasis,
     pub(crate) head: NamespaceReadState,
     pub(crate) wal_tail_objects: u64,
-    pub(crate) tail_state: Arc<ProjectedWalTail>,
+    pub(crate) wal_tail_inline_bytes: usize,
     fold: Option<FoldInProgress>,
+}
+
+/// A position and the tail it names, held for one publication unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishTailProjection {
+    pub(crate) position: PublishTailPosition,
+    pub(crate) tail_state: Arc<ProjectedWalTail>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +81,19 @@ pub(crate) struct FoldInProgress {
     wal_objects_since: u64,
 }
 
-impl PublishTailProjection {
+impl PublishTailPosition {
+    pub(crate) fn tail_key(&self, namespace_id: &NamespaceId) -> WalTailProjectionCacheKey {
+        WalTailProjectionCacheKey {
+            namespace_id: namespace_id.clone(),
+            manifest_no: self.basis.manifest_no(),
+            head_seq: self.head.seq,
+        }
+    }
+
+    pub(crate) fn basis(&self) -> &MetadataBasis {
+        &self.basis
+    }
+
     pub(crate) fn begin_fold(&mut self) {
         self.fold = Some(FoldInProgress {
             from: self.head.clone(),
@@ -95,25 +102,32 @@ impl PublishTailProjection {
         });
     }
 
-    pub(crate) fn reanchor_after_fold(&mut self, basis: MetadataBasis) -> bool {
-        if let Some(fold) = self.fold.take() {
-            if basis.0.head_seq == fold.from.seq {
-                self.basis = basis;
-                self.tail_state = fold.since;
-                self.wal_tail_objects = fold.wal_objects_since;
-                self.head.folded_wal_no = fold.from.wal_no;
-                return true;
-            }
+    /// Moves the position onto the manifest a fold published, and returns
+    /// the commits published since the fold began: the tail that position
+    /// now names.
+    pub(crate) fn reanchor_after_fold(
+        &mut self,
+        basis: MetadataBasis,
+    ) -> Option<Arc<ProjectedWalTail>> {
+        let fold = self.fold.take()?;
+        if basis.0.head_seq != fold.from.seq {
+            return None;
         }
-        false
+        self.basis = basis;
+        self.wal_tail_objects = fold.wal_objects_since;
+        self.wal_tail_inline_bytes = fold.since.inline_bytes();
+        self.head.folded_wal_no = fold.from.wal_no;
+        Some(fold.since)
     }
+}
 
+impl PublishTailProjection {
     pub(crate) fn apply_fold_records(
         &mut self,
         inline_content: &[InlineContent],
         records: &[WalCommitPayload],
     ) -> std::result::Result<(), WalObjectError> {
-        if let Some(fold) = &mut self.fold {
+        if let Some(fold) = &mut self.position.fold {
             let since = Arc::make_mut(&mut fold.since);
             for value in inline_content {
                 since.insert_inline_content(value.content_ref().clone(), value.bytes().clone());
@@ -126,21 +140,20 @@ impl PublishTailProjection {
         Ok(())
     }
 
-    pub(crate) fn within_limits(&self, options: &PublishTailOptions) -> bool {
-        self.tail_state.decoded_bytes() <= options.max_tail_decoded_bytes
-    }
-
-    pub(crate) fn basis(&self) -> &MetadataBasis {
-        &self.basis
-    }
-
     pub(crate) fn reanchor(&mut self, head: NamespaceReadState) {
-        self.head = head;
+        self.position.head = head;
+    }
+
+    /// Splits the projection into the position the engine keeps and the
+    /// tail that position names.
+    pub(crate) fn into_position(mut self) -> (PublishTailPosition, Arc<ProjectedWalTail>) {
+        self.position.wal_tail_inline_bytes = self.tail_state.inline_bytes();
+        (self.position, self.tail_state)
     }
 }
 
-enum ViewSource<'p> {
-    Cached(&'p PublishTailProjection),
+enum ViewSource {
+    Cached(Box<PublishTailProjection>),
     Cold(Box<NamespaceReadAnchor>),
 }
 
@@ -149,21 +162,21 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     acquired_writer: AcquiredWriter,
-    cached_projection: Option<&PublishTailProjection>,
+    cached_projection: Option<PublishTailProjection>,
     acquired_anchor: Option<NamespaceReadAnchor>,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
     let source = if let Some(anchor) = acquired_anchor {
         ViewSource::Cold(Box::new(anchor))
     } else if let Some(cached) = cached_projection {
-        ViewSource::Cached(cached)
+        ViewSource::Cached(Box::new(cached))
     } else {
         ViewSource::Cold(Box::new(load_read_anchor(store, namespace_id).await?))
     };
     let (basis, loaded_basis, head) = match &source {
         ViewSource::Cached(cached) => {
-            let basis = cached.basis().clone();
+            let basis = cached.position.basis().clone();
             let loaded_basis = load_basis_metadata_segments(store, segment_cache, &basis).await?;
-            (basis, loaded_basis, cached.head.clone())
+            (basis, loaded_basis, cached.position.head.clone())
         }
         ViewSource::Cold(anchor) => (
             anchor.basis(),
@@ -181,7 +194,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     }
     let tail_discovered = matches!(source, ViewSource::Cold(_));
     let projection = match source {
-        ViewSource::Cached(cached) => cached.clone(),
+        ViewSource::Cached(cached) => *cached,
         ViewSource::Cold(anchor) => {
             load_publish_tail_projection(&head, basis, &loaded_basis, &anchor.tail)?
         }
@@ -197,8 +210,8 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             tail_discovered,
             manifest_segments,
             tail_state,
-            write_stop: (projection.wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS)
-                .then_some(projection.wal_tail_objects),
+            write_stop: (projection.position.wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS)
+                .then_some(projection.position.wal_tail_objects),
         },
         projection,
     ))
@@ -213,13 +226,15 @@ fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     let manifest_head = loaded_basis.replay_head(head);
     let replayed = replay_discovered_tail(&manifest_head, &loaded_basis.base_state, tail)
         .map_err(CoreError::MetadataProjection)?;
-    let wal_tail_objects = head.unfolded_wal_objects();
-    let projection = PublishTailProjection {
-        basis,
-        head: head.clone(),
-        wal_tail_objects,
-        tail_state: Arc::new(replayed.projected_tail),
-        fold: None,
-    };
-    Ok(projection)
+    let tail_state = Arc::new(replayed.projected_tail);
+    Ok(PublishTailProjection {
+        position: PublishTailPosition {
+            basis,
+            head: head.clone(),
+            wal_tail_objects: head.unfolded_wal_objects(),
+            wal_tail_inline_bytes: tail_state.inline_bytes(),
+            fold: None,
+        },
+        tail_state,
+    })
 }

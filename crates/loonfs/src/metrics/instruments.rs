@@ -465,22 +465,6 @@ impl RuntimeInstruments {
             .set(i64::try_from(open).unwrap_or(i64::MAX));
     }
 
-    /// Reports the WAL-tail projections this writer retains across its
-    /// namespace publishers, after one publish or eviction settled them.
-    pub(crate) fn publisher_retained_projections(&self, projections: usize, decoded_bytes: usize) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed
-            .publisher
-            .retained_projections
-            .set(i64::try_from(projections).unwrap_or(i64::MAX));
-        installed
-            .publisher
-            .retained_projection_bytes
-            .set(i64::try_from(decoded_bytes).unwrap_or(i64::MAX));
-    }
-
     /// Reports one batch taken for publication.
     pub(crate) fn publisher_batch(&self, batch_size: usize) {
         let Some(installed) = &self.installed else {
@@ -523,13 +507,6 @@ impl RuntimeInstruments {
             return;
         };
         installed.publisher.write_stop_refusals.increment(1);
-    }
-
-    pub(crate) fn publisher_projection_evicted(&self) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed.publisher.projection_evictions.increment(1);
     }
 
     pub(crate) fn publisher_tail_replay(&self) {
@@ -1139,13 +1116,10 @@ struct PublisherInstruments {
     wal_folds_waiting: Arc<dyn GaugeHandle>,
     wal_fold_seconds: Arc<dyn HistogramHandle>,
     write_stop_refusals: Arc<dyn CounterHandle>,
-    projection_evictions: Arc<dyn CounterHandle>,
     tail_replays: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
     queue_depth: Arc<dyn GaugeHandle>,
     sessions_open: Arc<dyn GaugeHandle>,
-    retained_projections: Arc<dyn GaugeHandle>,
-    retained_projection_bytes: Arc<dyn GaugeHandle>,
     publishes: LabeledCounters<PublishOutcome>,
 }
 
@@ -1178,14 +1152,9 @@ impl PublisherInstruments {
                 "Mutation batches refused because the WAL tail reached its write-stop bound",
                 &[],
             ),
-            projection_evictions: recorder.register_counter(
-                "loonfs.publisher.projection_evictions",
-                "Retained WAL-tail projections evicted to stay within the writer's budget",
-                &[],
-            ),
             tail_replays: recorder.register_counter(
                 "loonfs.publisher.tail_replays",
-                "Publishes that reread the WAL tail from the store instead of using a retained projection",
+                "Publishes that reread the WAL tail from the store instead of finding it in the head-state cache",
                 &[],
             ),
             batch_size: recorder.register_histogram(
@@ -1205,18 +1174,6 @@ impl PublisherInstruments {
             sessions_open: recorder.register_gauge(
                 "loonfs.publisher.sessions_open",
                 "Namespace writer sessions that a handle holds or whose admitted work is still running",
-                &[],
-            ),
-            // Totals, not samples: these are what the writer holds across
-            // every namespace it has published to.
-            retained_projections: recorder.register_gauge(
-                "loonfs.publisher.retained_projections",
-                "WAL-tail projections this writer's namespace publishers retain",
-                &[],
-            ),
-            retained_projection_bytes: recorder.register_gauge(
-                "loonfs.publisher.retained_projection_bytes",
-                "Decoded bytes held by the retained WAL-tail projections",
                 &[],
             ),
             publishes: LabeledCounters::register(

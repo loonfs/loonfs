@@ -34,7 +34,6 @@ pub struct MetadataCache {
 struct MetadataCacheInner {
     segment_blocks: Arc<SharedSegmentBlocks>,
     head_state: Arc<SharedHeadState>,
-    max_head_state_bytes: usize,
     next_scope: AtomicU64,
     head_anchor_hits: AtomicUsize,
     head_anchor_misses: AtomicUsize,
@@ -110,10 +109,6 @@ impl MetadataCache {
         )
     }
 
-    pub(crate) fn max_head_state_bytes(&self) -> usize {
-        self.inner.max_head_state_bytes
-    }
-
     /// Counts one head anchor lookup that a read used to start from the
     /// cache or that sent it to the store.
     pub(crate) fn record_head_anchor_lookup(&self, hit: bool) {
@@ -145,13 +140,11 @@ impl MetadataCacheBuilder {
     }
 
     /// Sets the decoded bytes of namespace head anchors and WAL-tail
-    /// projections the cache holds. Reads start from this head state.
-    /// Defaults to [`DEFAULT_MAX_HEAD_STATE_BYTES`]; zero keeps none. An entry
-    /// heavier than the whole limit is not kept.
-    ///
-    /// The publishers of each writable runtime keep their WAL-tail
-    /// projections outside the cache, under a separate total of this size
-    /// per runtime.
+    /// projections the cache holds. Reads start from this head state, and
+    /// writers keep their WAL tails here between publishes. Defaults to
+    /// [`DEFAULT_MAX_HEAD_STATE_BYTES`]; zero keeps none, so every publish
+    /// reads its tail from the store. An entry heavier than the whole limit
+    /// is not kept.
     pub fn max_head_state_bytes(mut self, max_head_state_bytes: usize) -> Self {
         self.max_head_state_bytes = max_head_state_bytes;
         self
@@ -180,7 +173,6 @@ impl MetadataCacheBuilder {
                     instruments.head_state_cache_observer(),
                     instruments.wal_tail_projection_cache_observer(),
                 )),
-                max_head_state_bytes: self.max_head_state_bytes,
                 next_scope: AtomicU64::new(0),
                 head_anchor_hits: AtomicUsize::new(0),
                 head_anchor_misses: AtomicUsize::new(0),

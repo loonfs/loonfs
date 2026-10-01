@@ -901,7 +901,6 @@ async fn publish_completed_content<S: ObjectStore>(
                 vec![prepared],
             )],
             context,
-            &crate::protocol::PublishTailOptions::default(),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
         )
         .await

@@ -49,7 +49,6 @@ pub async fn append_wal_objects<S: loonfs_objectstore::ObjectStore + ?Sized>(
                 store,
                 vec![crate::publish::CommitCandidate::new(request)],
                 context,
-                &crate::publish::PublishTailOptions::default(),
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
             )
             .await

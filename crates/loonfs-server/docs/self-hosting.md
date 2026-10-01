@@ -292,11 +292,10 @@ namespace.
 | Metric | Type | What moves it |
 | --- | --- | --- |
 | `loonfs.namespace_head_cache.gets` | Counter, `result` label | A read looks up its namespace head: `hit` or `miss`. |
-| `loonfs.head_state_cache.evictions` | Counter | A head anchor or read-side WAL-tail projection is evicted at the `metadata_cache.max_head_state_bytes` limit. |
-| `loonfs.head_state_cache.retained_decoded_bytes` | Gauge | Decoded bytes of head anchors and read-side WAL-tail projections held now. |
+| `loonfs.head_state_cache.evictions` | Counter | A head anchor or WAL-tail projection is evicted at the `metadata_cache.max_head_state_bytes` limit. The tails writers publish from are evicted the same way. |
+| `loonfs.head_state_cache.retained_decoded_bytes` | Gauge | Decoded bytes of head anchors and WAL-tail projections held now, writers' tails included. |
 | `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `metadata_cache.max_segment_bytes`. |
-| `loonfs.publisher.projection_evictions` | Counter | A publish-side WAL-tail projection is evicted at the projection budget. |
-| `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of using a retained projection. This happens on a session's first publish, after an eviction or a failed publish, when the namespace's last write was more than a minute ago, and when a fold the publisher did not run has published a new manifest. |
+| `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of finding it in the head-state cache. This happens on a session's first publish, after the cache evicted the tail, after a failed publish, when the namespace's last write was more than a minute ago, and when a fold the publisher did not run has published a new manifest. |
 | `loonfs.publisher.sessions_open` | Gauge | Writer sessions the server holds: one for each namespace it has written since it started, plus any whose admitted work is still finishing. |
 | `loonfs.maintenance.keys_admitted` | Gauge | Keys the runner reconciles. |
 | `loonfs.maintenance.keys_queued` | Gauge | Keys waiting for a `max_concurrent_maintenance` permit. |
@@ -342,8 +341,7 @@ counted in any budget and sit on top.
 | Budget | Setting | Default | What it bounds | Kind |
 | --- | --- | --- | --- | --- |
 | Metadata segment cache | `metadata_cache.max_segment_bytes` | 256 MiB | Decoded metadata blocks and manifests | Steady |
-| Head state | `metadata_cache.max_head_state_bytes` | 64 MiB | Cached namespace heads and the WAL tails replayed for reads, for any number of namespaces | Steady |
-| Publish-side WAL-tail projections | The same setting | 64 MiB | WAL tails the namespace publishers keep | Steady |
+| Head state | `metadata_cache.max_head_state_bytes` | 64 MiB | Cached namespace heads and WAL tails, for reads and for writer sessions, for any number of namespaces | Steady |
 | Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
@@ -376,22 +374,22 @@ Maintenance requests sent to the API run outside
 transfer. Both default to 256 MiB. They do not reserve memory.
 
 Without grep and without the local cache, the budgets that have a
-process-wide limit add up to 1,024 MiB by default:
+process-wide limit add up to 960 MiB by default:
 
 | Budget | Ceiling |
 | --- | --- |
 | Metadata segment cache | 256 MiB |
-| Head state and publish-side projections | 128 MiB |
+| Head state | 64 MiB |
 | Publication queue | 64 MiB |
 | 8 uploads at 8 MiB | 64 MiB |
 | 16 downloads at 8 MiB | 128 MiB |
 | 2 folds at 96 MiB | 192 MiB |
 | 2 maintenance runs at 96 MiB | 192 MiB |
-| Total | 1,024 MiB |
+| Total | 960 MiB |
 
 The total leaves out writer sessions, the block memos of reads
-and publications, WAL tails that an operation replays because no projection
-holds them, and maintenance requests sent to the API. Eight running
+and publications, the WAL tails that running reads, publications, and folds
+hold outside the head-state cache, and maintenance requests sent to the API. Eight running
 publications can hold up to 512 MiB of block memos at the default budget.
 Reads have no concurrency limit, so their block memos have no total.
 
@@ -406,8 +404,8 @@ tier, and up to 256 MiB of inserts waiting for the disk tier. The last two
 have no setting.
 
 This config for a 256 MiB container uses a 64 MiB segment cache, a 16 MiB
-head-state budget that also bounds the publish-side projections, 8 MiB block memos, an 8 MiB merge input, two
-running publications, one fold, and one maintenance run:
+head-state budget, 8 MiB block memos, an 8 MiB merge input, two running
+publications, one fold, and one maintenance run:
 
 ```toml
 max_concurrent_folds = 1
@@ -429,16 +427,16 @@ max_head_state_bytes = 16777216
 | Budget | Ceiling |
 | --- | --- |
 | Metadata segment cache | 64 MiB |
-| Head state and publish-side projections | 32 MiB |
+| Head state | 16 MiB |
 | Publication queue | 8 MiB |
 | 2 uploads at 8 MiB | 16 MiB |
 | 2 downloads at 8 MiB | 16 MiB |
 | 2 publications at an 8 MiB block memo | 16 MiB |
 | 1 fold: 8 MiB block memo and 32 MiB segment output | 40 MiB |
 | 1 maintenance run: 8 MiB block memo or merge input, and 32 MiB segment output | 40 MiB |
-| Total | 232 MiB |
+| Total | 216 MiB |
 
-64 + 32 + 8 + 16 + 16 + 16 + 40 + 40 = 232 MiB, which leaves 24 MiB of the
+64 + 16 + 8 + 16 + 16 + 16 + 40 + 40 = 216 MiB, which leaves 40 MiB of the
 256 MiB for allocator overhead, HTTP buffers, and the block memos of reads.
 Each read keeps at most 8 MiB. Three cases can still pass the limit:
 
@@ -450,9 +448,9 @@ Each read keeps at most 8 MiB. Three cases can still pass the limit:
 
 The server keeps one writer session for each namespace it has written since
 it started. There is no cap and no eviction. One idle session holds about
-3 KiB of heap, so 10,000 written namespaces hold about 30 MiB. The
-WAL-tail projection a session retains is counted under the publish-side
-projection budget, not here. The server stops holding a session when its
+3 KiB of heap, so 10,000 written namespaces hold about 30 MiB. A session's
+WAL tail lives in the head-state cache between publishes, so it is counted
+there, not here. The server stops holding a session when its
 namespace is deleted, or when a request finds that the namespace does not
 exist. After a restart, the first write to each namespace acquires a new
 writer epoch.
@@ -502,9 +500,10 @@ and `InlineContentOptions`. These settings do not change reader format limits.
 | `inline_content_fold_at_bytes` | 2 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
 | `inline_content_tail_limit_bytes` | 32 MiB | Stages new content when unfolded and admitted inline bytes would exceed this size. |
 
-The tail limit uses the loaded projection, or the last tail size this session
-observed after that projection is invalidated. That size counts a WAL put whose
-outcome is unknown as landed. A session that has not observed the tail admits
+The tail limit uses the tail size the session recorded at its last publish.
+Evicting the tail from the head-state cache does not drop that size. After the
+session's tail position is invalidated, the limit uses the last tail size this
+session observed. That size counts a WAL put whose outcome is unknown as landed. A session that has not observed the tail admits
 at most the WAL object budget, and its first publish observes the tail. The tail
 can exceed the limit by at most the WAL object budget: for a new session's first
 inline commit, and after a put whose outcome is unknown. Another writer can make
