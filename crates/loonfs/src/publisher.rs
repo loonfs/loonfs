@@ -982,7 +982,7 @@ impl NamespacePublisher {
             self.await_publish_slot().await;
             // Queue ownership and admission remain intact while another
             // namespace uses the shared publication slots. No engine is held.
-            let _publication = self
+            let publication = self
                 .admission
                 .publications
                 .acquire()
@@ -1011,6 +1011,10 @@ impl NamespacePublisher {
                     self.publish_batch(batch.candidates).await;
                 }
                 WorkItem::Delete(pending) => {
+                    // A delete is bounded by its fold permit alone. Holding a
+                    // publication permit while it waits for one would stall
+                    // other namespaces' publications behind folds.
+                    drop(publication);
                     if self.execute_delete(pending).await {
                         return;
                     }

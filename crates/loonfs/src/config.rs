@@ -36,7 +36,8 @@ pub struct PublicationLimits {
     pub max_estimated_bytes: std::num::NonZeroUsize,
     /// Approximate retained request bytes for one namespace. Defaults to 8 MiB.
     pub max_estimated_bytes_per_namespace: std::num::NonZeroUsize,
-    /// Maximum publication batches or deletes running at once. Defaults to 8.
+    /// Maximum publication batches running at once. Defaults to 8. Namespace
+    /// deletes do not count here; a fold permit bounds them.
     pub max_concurrent_publications: std::num::NonZeroUsize,
 }
 
