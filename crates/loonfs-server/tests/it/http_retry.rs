@@ -1011,6 +1011,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
     harness.server.abort();
 }
 
+// Both listeners and their clients run while writer ownership changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1076,14 +1077,19 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         moved.committed_seq.0
     );
 
-    // Server A's session is fenced terminally: its writes fail with
-    // `writer_fenced` and keep failing, with no silent reacquisition.
     let host_c_target = NamespacePath::parse("demo", "/docs/host-c.txt").expect("host c target");
-    for attempt in 0..2 {
-        match client_a
+    for (loser, winner, winning_writer_id, expected_drops) in [
+        (&server_a, &server_b, "loonfs-server-b", 1),
+        (&server_b, &server_a, "loonfs-server-a", 1),
+        (&server_a, &server_b, "loonfs-server-b", 2),
+        (&server_b, &server_a, "loonfs-server-a", 2),
+    ] {
+        let winner_drops = winner.namespaces.fenced_sessions_dropped();
+        match loser
+            .client
             .put_file_with_options(
                 &host_c_target,
-                b"host a again\n",
+                b"another write\n",
                 &loonfs_test_support::test_actor(),
                 &replace_file_options(),
             )
@@ -1095,32 +1101,35 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
                 details,
                 ..
             }) => {
-                assert_eq!(code, "writer_fenced", "attempt {attempt}");
-                // The details name the winner and when it acquired. Writer
-                // ids are process labels, so two runs on one machine can
-                // share one; the stamp is what separates them, and carrying
-                // it structurally means a caller never parses the message.
-                let details = details.expect("a fenced error carries structured details");
+                assert_eq!(code, loonfs_types::ErrorCode::WriterFenced.as_str());
+                let details = details.expect("fenced details");
                 assert_eq!(
                     details
                         .active_writer_id
                         .as_ref()
                         .map(|writer| writer.as_str()),
-                    Some("loonfs-server-b"),
-                    "attempt {attempt}"
+                    Some(winning_writer_id)
                 );
-                let acquired_at_ms = details
-                    .active_acquired_at_ms
-                    .expect("fenced details carry the winner's acquisition stamp");
-                assert!(
-                    message.contains(&format!(
-                        "(writer `loonfs-server-b`, acquired at {acquired_at_ms} ms)"
-                    )),
-                    "the structured stamp should be the one the message renders: {message}"
-                );
+                let acquired_at_ms = details.active_acquired_at_ms.expect("acquisition stamp");
+                assert!(message.contains(&format!(
+                    "(writer `{winning_writer_id}`, acquired at {acquired_at_ms} ms)"
+                )));
             }
-            other => panic!("expected writer_fenced on attempt {attempt}, got {other:?}"),
+            other => panic!("expected writer_fenced, got {other:?}"),
         }
+        assert_eq!(loser.namespaces.fenced_sessions_dropped(), expected_drops);
+        assert_eq!(winner.namespaces.fenced_sessions_dropped(), winner_drops);
+        loser
+            .client
+            .put_file_with_options(
+                &host_c_target,
+                b"another write\n",
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
+            .await
+            .expect("next request takes the namespace back");
+        assert_eq!(loser.namespaces.fenced_sessions_dropped(), expected_drops);
     }
 
     // Fencing gates writes only; server A still reads the moved file.
@@ -1128,7 +1137,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         .stat(&host_b_target)
         .await
         .expect("stat host b file");
-    assert_eq!(host_b_entry.head_seq.0, moved.committed_seq.0);
+    assert!(host_b_entry.head_seq.0 > moved.committed_seq.0);
     let host_b_bytes = client_a
         .read_file(&host_b_target)
         .await

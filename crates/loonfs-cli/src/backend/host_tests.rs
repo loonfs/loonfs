@@ -135,3 +135,48 @@ fn run_command<T>(command: impl std::future::Future<Output = T>) -> T {
         .expect("command runtime")
         .block_on(command)
 }
+
+#[tokio::test]
+async fn an_embedded_fence_fails_the_request_and_a_later_request_starts_a_new_session() {
+    let directory = tempfile::tempdir().expect("store directory");
+    let config = StoreConfig::LocalFs {
+        root: directory.path().display().to_string(),
+        key_prefix: None,
+    };
+    let first = ResolvedTarget::embedded(&config, None, false)
+        .await
+        .expect("first embedded host");
+    let second = ResolvedTarget::embedded(&config, None, false)
+        .await
+        .expect("second embedded host");
+    let actor = loonfs_test_support::test_actor();
+    let path = NamespacePath::parse("demo", "/first").expect("path");
+    first
+        .client
+        .create_namespace(path.namespace(), &actor, NamespaceAccess::unrestricted())
+        .await
+        .expect("create namespace");
+    first
+        .client
+        .create_directory(&path, &actor)
+        .await
+        .expect("first write");
+    let path = NamespacePath::parse("demo", "/second").expect("path");
+    second
+        .client
+        .create_directory(&path, &actor)
+        .await
+        .expect("take over");
+    let path = NamespacePath::parse("demo", "/after").expect("path");
+    let error = first
+        .client
+        .create_directory(&path, &actor)
+        .await
+        .expect_err("fenced request");
+    assert_eq!(error.code(), Some(loonfs_types::ErrorCode::WriterFenced));
+    first
+        .client
+        .create_directory(&path, &actor)
+        .await
+        .expect("later request");
+}

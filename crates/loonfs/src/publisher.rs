@@ -82,7 +82,8 @@ pub enum NamespaceSessionState {
 ///
 /// Clones share the same sessions and worker tasks. The table holds a
 /// session while a writable [`Namespace`](crate::Namespace) holds it or
-/// while work it admitted is still running. Nothing here decides how many
+/// while work it admitted is still running. A fenced session leaves once
+/// its work ends, even while handles still hold it. Nothing here decides how many
 /// sessions exist or how long they live.
 #[derive(Clone)]
 pub(crate) struct PublisherRegistry {
@@ -258,7 +259,9 @@ impl PublisherRegistry {
     ///
     /// A session whose last handle dropped stays in the table until its
     /// admitted work finishes, and an open before then continues it: a
-    /// second session would acquire a new epoch and fence that work.
+    /// second session would acquire a new epoch and fence that work. A fenced
+    /// session cannot continue: an open fails while its work ends, then starts
+    /// a new session even while old handles are held.
     pub(crate) fn open_session(
         &self,
         namespace_id: &NamespaceId,
@@ -266,6 +269,16 @@ impl PublisherRegistry {
         let mut state = self.shared.lock_state();
         if state.closed {
             return Err(CoreError::ShuttingDown);
+        }
+        if let Some(live) = state.sessions.get(namespace_id) {
+            if live.publisher.session_is_fenced() {
+                if !live.publisher.lock_state().has_ended(false) {
+                    return Err(CoreError::WriterSessionClosed {
+                        namespace_id: namespace_id.clone(),
+                    });
+                }
+                state.sessions.remove(namespace_id);
+            }
         }
         if let Some(live) = state.sessions.get_mut(namespace_id) {
             if live.publisher.session_closed() {
@@ -725,7 +738,8 @@ impl NamespacePublisher {
     /// Removes this session from the table once it has ended and nothing it
     /// admitted is still running. Dropping the last handle, the worker's
     /// exit, the fold's exit, a close, and a landed delete each call this,
-    /// so whichever of them comes last removes the session.
+    /// so whichever of them comes last removes the session. Fenced sessions
+    /// end even while handles are held.
     fn forget_if_ended(&self) {
         let Some(shared) = self.shared.upgrade() else {
             return;
@@ -737,6 +751,7 @@ impl NamespacePublisher {
             }
             _ => return,
         };
+        let held = held && !self.session_is_fenced();
         if !self.lock_state().has_ended(held) {
             return;
         }

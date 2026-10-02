@@ -25,6 +25,14 @@ request. A rerun after a process restart submits that request again and renews
 its content token through the upload session, so the file is not uploaded
 again.
 
+If another writer fences an embedded session, that session is dead. The
+request fails with `writer_fenced` and is not resubmitted. The embedded host
+drops its handle. A later request starts a new session, whose first publish
+takes the namespace back. An open while the old session's work ends can
+return `writer_session_closed`; a later request can open after it ends.
+Sustained fencing of one namespace means two writers are being sent its
+traffic. Send that namespace's traffic to one writer.
+
 ## Shell completion
 
 Generate completion scripts for Bash, Zsh, Fish, PowerShell, or Elvish with:
