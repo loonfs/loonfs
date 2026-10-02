@@ -1,9 +1,6 @@
-//! Grep worker step budgets.
-//!
-//! How many steps run at once is not here: the host that runs grep steps
-//! decides that.
+//! Grep worker step budgets, and how many steps hold file content at once.
 
-use crate::GramIndexBuildPolicy;
+use crate::{GramIndexBuildPolicy, DEFAULT_MAX_CONCURRENT_GREP_STEPS};
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
@@ -20,6 +17,9 @@ pub struct GrepWorkerConfig {
     pub max_files_per_step: usize,
     /// Content bytes read per build step.
     pub max_content_bytes_per_step: u64,
+    /// Build and reorganize steps that hold file content or index segments
+    /// at once, across every namespace one worker indexes.
+    pub max_concurrent_steps: usize,
 }
 
 impl GrepWorkerConfig {
@@ -35,9 +35,10 @@ impl GrepWorkerConfig {
         })
     }
 
-    /// Rejects zero step budgets.
+    /// Rejects zero step budgets and a zero step limit.
     pub fn validate(self) -> Result<(), GrepWorkerConfigError> {
         self.build_policy()?;
+        nonzero_usize("max_concurrent_steps", self.max_concurrent_steps)?;
         Ok(())
     }
 }
@@ -48,6 +49,7 @@ impl Default for GrepWorkerConfig {
         Self {
             max_files_per_step: policy.max_files_per_step.get(),
             max_content_bytes_per_step: policy.max_content_bytes_per_step.get(),
+            max_concurrent_steps: DEFAULT_MAX_CONCURRENT_GREP_STEPS.get(),
         }
     }
 }

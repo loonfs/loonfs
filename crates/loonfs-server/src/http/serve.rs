@@ -194,6 +194,8 @@ pub async fn app(
                 runtime.object_store(),
                 runtime.read_only(),
                 maintenance.clone(),
+                std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
+                    .expect("validated grep step limit should be nonzero"),
             )
         });
     let grep_service = config.grep.mode.serves_grep().then(|| {

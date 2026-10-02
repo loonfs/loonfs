@@ -37,16 +37,24 @@ and may lag. Queries validate a cached manifest with one HEAD of its
 successor. The durable layout and collection rules are in
 [grep format](../../docs/specs/format.md#appendix-d-grep-extension-format).
 
-`GrepWorkerConfig` controls how much work one step may perform. A server reads
-these values from its `[grep]` table:
+`GrepWorkerConfig` controls how much work one step may perform, and how many
+steps hold content at once. A server reads these values from its `[grep]`
+table:
 
 ```toml
 [grep]
 mode = "serve_and_maintain"
 max_files_per_step = 256
 max_content_bytes_per_step = 67108864
+max_concurrent_steps = 2
 ```
 
-Both input limits must be greater than zero. These values do not control
-concurrency. The server's `max_concurrent_maintenance` bounds how many
-namespaces its sweep visits at once, grep indexing included.
+Every value must be greater than zero. The host passes
+`max_concurrent_steps` to `GrepWorker::new`. A build or reorganize step that
+finds work waits for one of the worker's permits before it reads file
+content or index segments, and holds it until it publishes. Every clone of a
+worker shares its permits. A step that finds the index up to date, or
+nothing to merge, takes no permit.
+The server's `max_concurrent_maintenance` bounds how many namespaces its
+sweep visits at once. `max_concurrent_steps` bounds how many steps hold
+content at once, however many visits run.

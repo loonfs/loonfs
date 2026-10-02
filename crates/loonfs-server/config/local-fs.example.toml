@@ -144,10 +144,14 @@ writer_id = "loonfs-server-local"
 # turns both off again.
 #[grep]
 #mode = "serve_and_maintain"
-# Bounded indexing input budgets; every value must be greater than zero. How many
-# namespaces the sweep indexes at once is `max_concurrent_maintenance`.
+# Bounded indexing input budgets; every value must be greater than zero.
 #max_files_per_step = 256
 #max_content_bytes_per_step = 67108864
+# How many index build and reorganize steps hold file content or index
+# segments at once, across every namespace. Indexing memory peaks at this
+# many steps of `max_content_bytes_per_step`, whatever
+# `max_concurrent_maintenance` is. Must be greater than zero. Defaults to 2.
+#max_concurrent_steps = 2
 # Segment layout and merge policy use engine defaults.
 
 # The server's TLS identity, read once at startup: a file that is missing or

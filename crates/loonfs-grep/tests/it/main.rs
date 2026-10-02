@@ -8,6 +8,7 @@ mod grams_index;
 mod grep_publication;
 mod grep_reorganize;
 mod grep_service_differential;
+mod grep_step_permits;
 mod grep_worker;
 mod manifest_format;
 mod manifest_store;

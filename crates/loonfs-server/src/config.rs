@@ -2146,30 +2146,36 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn the_retired_step_concurrency_key_is_no_longer_a_key() {
-        // Grep indexing has no concurrency limit of its own. The sweep's
-        // `max_concurrent_maintenance` bounds it with every other visit.
-        let path = write_config(
-            r#"
+    fn the_grep_step_limit_defaults_to_two_and_refuses_zero() {
+        let load = |setting: &str| {
+            load_server_config(write_config(&format!(
+                r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [grep]
 mode = "serve_and_maintain"
-max_concurrent_steps = 7
+{setting}
 
 [store]
 kind = "local-fs"
 root = "/tmp/loonfs-server"
-"#,
-        );
+"#
+            )))
+        };
 
-        let error = load_server_config(&path).expect_err("retired key must not load");
-        assert!(
-            error.to_string().contains("max_concurrent_steps"),
-            "{error}"
-        );
+        let default = load("").expect("load the default step limit");
+        assert_eq!(default.grep.worker.max_concurrent_steps, 2);
+        let configured = load("max_concurrent_steps = 5").expect("load a step limit");
+        assert_eq!(configured.grep.worker.max_concurrent_steps, 5);
+        match load("max_concurrent_steps = 0") {
+            Err(ServerConfigError::InvalidField {
+                field: "grep",
+                reason,
+            }) => assert!(reason.contains("max_concurrent_steps"), "{reason}"),
+            other => panic!("expected a zero step limit to be refused, got {other:?}"),
+        }
     }
 
     #[test]

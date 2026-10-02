@@ -78,6 +78,7 @@ pub(super) async fn test_app(
             runtime.object_store(),
             runtime.read_only(),
             maintenance.clone(),
+            loonfs_grep::DEFAULT_MAX_CONCURRENT_GREP_STEPS,
         )
     });
     let grep_service = options.serves_grep.then(|| {

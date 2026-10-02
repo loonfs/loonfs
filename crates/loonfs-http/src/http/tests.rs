@@ -2661,7 +2661,12 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .await
         .expect("build maintenance")
         .maintenance(loonfs_test_support::ids::writer_id(actor));
-    GrepWorker::new(store.clone(), reader, maintenance)
+    GrepWorker::new(
+        store.clone(),
+        reader,
+        maintenance,
+        loonfs_grep::DEFAULT_MAX_CONCURRENT_GREP_STEPS,
+    )
 }
 
 fn grep_error_request() -> GrepRequest {
