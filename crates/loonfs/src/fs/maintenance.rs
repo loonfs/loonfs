@@ -693,9 +693,10 @@ impl Maintenance {
     /// A checkpoint pins a manifest for retention and provenance. Every call
     /// creates its own pin under a fresh id; the name is a label, not a key.
     /// When WAL objects follow the current manifest, they are first folded
-    /// into a new manifest; this is not a request to compact metadata. The pin
-    /// lasts until it is deleted, either explicitly or by garbage collection
-    /// after its expiry plus grace
+    /// into a new manifest; this is not a request to compact metadata. The
+    /// call waits for one of the runtime's fold permits, even when the tail
+    /// turns out to be folded already. The pin lasts until it is deleted,
+    /// either explicitly or by garbage collection after its expiry plus grace
     /// ([format section 8](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#8-pins)).
     #[tracing::instrument(
         level = "debug",
@@ -717,11 +718,13 @@ impl Maintenance {
     ) -> Result<Checkpoint> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        let result = self
-            .engine(namespace_id)
-            .create_checkpoint(name.to_owned(), options.ttl_ms)
-            .await
-            .map_err(Error::from);
+        let result = {
+            let _permit = self.writer.fold_permit(self.core.instruments()).await;
+            self.engine(namespace_id)
+                .create_checkpoint(name.to_owned(), options.ttl_ms)
+                .await
+        }
+        .map_err(Error::from);
         self.finish_namespace_mutation(namespace_id, result)
     }
 

@@ -7,7 +7,6 @@ use crate::{InlineContentPolicy, MetadataCompactionOutcome};
 use loonfs_core::control::CurrentManifest;
 use loonfs_types::format::manifest::RunTier;
 use loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS;
-use std::collections::BTreeMap;
 
 /// Each write leaves one inline byte in the tail, so each write is folded.
 fn fold_every_write() -> InlineContentPolicy {
@@ -371,74 +370,10 @@ async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
     writer.shutdown().await.expect("shut down writer");
 }
 
-/// Holds every metadata segment write for a moment, and records the most
-/// namespaces that had one in flight at the same time.
-#[derive(Debug)]
-struct SegmentWriteWatch {
-    inner: LocalFsStore,
-    writing: Mutex<BTreeMap<String, usize>>,
-    peak_namespaces: AtomicUsize,
-}
-
-impl SegmentWriteWatch {
-    fn enter(&self, namespace: &str) {
-        let mut writing = self.writing.lock().expect("segment write lock");
-        *writing.entry(namespace.to_owned()).or_default() += 1;
-        self.peak_namespaces
-            .fetch_max(writing.len(), AtomicOrdering::SeqCst);
-    }
-
-    fn exit(&self, namespace: &str) {
-        let mut writing = self.writing.lock().expect("segment write lock");
-        let count = writing.get_mut(namespace).expect("an entered namespace");
-        *count -= 1;
-        if *count == 0 {
-            writing.remove(namespace);
-        }
-    }
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "a test-side pause on segment writes leaves other merges time to start theirs"
-)]
-async fn hold_segment_write() {
-    tokio::time::sleep(Duration::from_millis(5)).await;
-}
-
-#[async_trait]
-impl ObjectStore for SegmentWriteWatch {
-    delegate_object_store!(self => self.inner; except put);
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let namespace = key
-            .contains("/segments/")
-            .then(|| key.split('/').nth(1))
-            .flatten();
-        let Some(namespace) = namespace else {
-            return self.inner.put(key, bytes, mode).await;
-        };
-        self.enter(namespace);
-        hold_segment_write().await;
-        let put = self.inner.put(key, bytes, mode).await;
-        self.exit(namespace);
-        put
-    }
-}
-
 #[tokio::test]
 async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(SegmentWriteWatch {
-        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-        writing: Mutex::default(),
-        peak_namespaces: AtomicUsize::new(0),
-    });
+    let store = Arc::new(SegmentWriteWatch::new(temp_dir.path()));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("writer-a")
         .inline_content(fold_every_write())
