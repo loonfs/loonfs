@@ -32,6 +32,11 @@ mod tests;
 /// losing to folds or another compactor cannot spin.
 const MAX_LOST_COMPACTION_RACES: u32 = 3;
 
+/// Compaction units, bounded or streaming, that one call of
+/// [`Maintenance::maintain_metadata_while_due`] publishes before it returns,
+/// so a namespace with a backlog cannot hold its caller for long.
+const MAX_COMPACTION_UNITS_PER_CALL: u32 = 16;
+
 /// What one compaction unit left for its caller.
 enum CompactionStep {
     Fenced,
@@ -259,13 +264,14 @@ impl Maintenance {
     /// required, runs [`Self::compact_metadata_with_cancellation`].
     ///
     /// Stops when nothing is due, when another process holds the compactor
-    /// epoch, when `cancellation` is set, or after three lost races in a row.
-    /// Setting `cancellation` ends a wait for a permit and drops a bounded
-    /// call in progress at once; a streaming compaction stops at its next
-    /// block. A dropped call leaves what a crash would: unreferenced
-    /// segments, or a manifest the runtime learns of the way it learns of
-    /// another process's. Fails with the first error. Keeps no state between
-    /// calls.
+    /// epoch, when `cancellation` is set, after three lost races in a row, or
+    /// after it publishes 16 compaction units, bounded or streaming. Work
+    /// still due after the 16th unit waits for the next call. Setting
+    /// `cancellation` ends a wait for a permit and drops a bounded call in
+    /// progress at once; a streaming compaction stops at its next block. A
+    /// dropped call leaves what a crash would: unreferenced segments, or a
+    /// manifest the runtime learns of the way it learns of another
+    /// process's. Fails with the first error. Keeps no state between calls.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.maintain_metadata_while_due",
@@ -286,7 +292,11 @@ impl Maintenance {
     ) -> Result<()> {
         self.core.record_trace_context(&tracing::Span::current());
         let mut lost_races = 0;
-        while lost_races < MAX_LOST_COMPACTION_RACES && !cancellation.is_cancelled() {
+        let mut published_units = 0;
+        while lost_races < MAX_LOST_COMPACTION_RACES
+            && published_units < MAX_COMPACTION_UNITS_PER_CALL
+            && !cancellation.is_cancelled()
+        {
             let step = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Ok(()),
@@ -313,7 +323,12 @@ impl Maintenance {
                     return Ok(())
                 }
             };
-            lost_races = if won { 0 } else { lost_races + 1 };
+            if won {
+                published_units += 1;
+                lost_races = 0;
+            } else {
+                lost_races += 1;
+            }
         }
         Ok(())
     }

@@ -607,19 +607,25 @@ required unless failures repeat.
 
 Background work has two parts. A writer session folds its own WAL tail at
 the fold thresholds, and it compacts its namespace's metadata after each fold
-it publishes. The sweep does everything else on a cadence. Nothing is
-scheduled by hints, and the sweep keeps no state about a namespace between
-passes, so a restart loses no work: the first pass after a start visits
-every namespace.
+it publishes, at most 16 compaction units each time. Its next fold continues
+the work. When a session stops folding with compaction still due, the next
+sweep pass continues it. The sweep does everything else on a cadence.
+Nothing is scheduled by hints, and the sweep keeps no state about a
+namespace between passes, so a restart loses no work: the first pass after
+a start visits every namespace.
 
 A sweep pass lists every namespace in the store, deleted ones included. It
 reads one page of up to 1,000 namespace ids per list request and visits up
-to `max_concurrent_maintenance` namespaces at once, 8 by default. A visit
-does this, in order:
+to `max_concurrent_maintenance` namespaces at once, 8 by default. The
+namespaces of every page share those visits: the sweep lists the next page
+when a visit slot is free and no listed namespace is waiting, so one slow
+visit does not delay the namespaces on later pages. A visit does this, in
+order:
 
 1. Folds a WAL tail whose newest commit is `idle_fold_after_ms` old, then
-   compacts the namespace's metadata while compaction is due. A large
-   compaction runs as a streaming compaction.
+   compacts the namespace's metadata while compaction is due, at most 16
+   compaction units per visit. A large compaction runs as a streaming
+   compaction.
 2. When `[grep].mode` maintains the index, runs grep build steps while each
    one publishes, at most 16, then one reorganize step once the index is up
    to date. A step that finds work first waits for a grep step permit. See
@@ -631,6 +637,11 @@ default. When a pass takes longer, the next one starts as soon as it ends.
 A pass collects garbage when `gc_interval_ms`, 3600000 ms (1 hour) by
 default, has passed since the start of the last collection pass that listed
 every namespace. The first pass after a start collects.
+
+A streaming compaction counts as one unit, and on a very large namespace it
+can run for a long time. It holds one visit slot while it runs, the pass
+waits for it before it ends, and the next pass starts late. The other
+namespaces in that pass are not held up.
 
 When `[grep].mode` maintains the index, a second, shorter pass runs every 5
 seconds over the writer sessions this server holds, one at a time. It runs
@@ -647,15 +658,16 @@ index, and fails with `index_lagging` past its scan budget unless
 A failed call on one namespace is logged with the namespace id and the call
 name, counted in `loonfs.maintenance.sweep_visit_failures`, and tried again
 on the next pass. It does not stop the visits to other namespaces. A failed
-namespace listing ends the pass with a warning, and the next pass lists
-again. On shutdown, the server stops the sweep at the same moment it stops
-admitting requests. No new visit starts, and a running streaming compaction
-stops at its next block. After the request drain, the server waits for the
-visits that are still running, until the same `shutdown_deadline_ms` that
-bounds the drain. At that deadline it drops the visits still running, logs
-a warning, and shuts the runtime down. A dropped visit leaves what a crash
-leaves, and a later pass does the work again. Like an abandoned request, it
-does not make the shutdown fail.
+namespace listing starts no new visit. The visits already running finish,
+the pass ends with a warning, and the next pass lists again. On shutdown,
+the server stops the sweep at the same moment it stops admitting requests.
+No new visit starts, and a running streaming compaction stops at its next
+block. After the request drain, the server waits for the visits that are
+still running, until the same `shutdown_deadline_ms` that bounds the drain.
+At that deadline it drops the visits still running, logs a warning, and
+shuts the runtime down. A dropped visit leaves what a crash leaves, and a
+later pass does the work again. Like an abandoned request, it does not make
+the shutdown fail.
 
 One pass costs one list request per page of namespaces, plus a fixed number
 of requests for each namespace. An idle namespace, one with nothing to fold,

@@ -6,15 +6,19 @@ Background work has two actors, and both read durable state to decide what is du
 
 A writable session folds its WAL tail when the tail reaches the fold thresholds, or when a publish is refused at the write stop. After each fold it publishes, it runs `Maintenance::maintain_metadata_while_due` over its namespace: bounded compaction steps while compaction is due, and a streaming compaction when a step requires one. Its folds take the runtime's fold permits and its merges take the runtime's compaction permits. Closing the session or shutting the runtime down cancels the compaction, which stops at its next block.
 
+One call of `maintain_metadata_while_due` publishes at most 16 compaction units, bounded or streaming, and then returns. The session's next fold starts it again. A session that stops folding while compaction is still due leaves the rest to the sweep: its next pass visits the namespace and runs the same call.
+
 ## The sweep
 
-The reference server runs the sweep when its `maintenance` mode maintains. A pass lists the namespace ids in the store with `loonfs_objectstore::layout::list_namespace_ids`, one page of up to 1,000 ids per list request, and visits a bounded number of namespaces at once. A visit:
+The reference server runs the sweep when its `maintenance` mode maintains. A pass lists the namespace ids in the store with `loonfs_objectstore::layout::list_namespace_ids`, one page of up to 1,000 ids per list request, and visits a bounded number of namespaces at once. The ids of every page share one set of visit slots. The sweep lists the next page when a slot is free and no listed id is waiting, so a slow visit holds one slot and does not delay the namespaces on later pages. A visit:
 
-1. calls `maintain_metadata_while_due`, which folds a tail whose newest commit is past the idle fold age and compacts while compaction is due;
+1. calls `maintain_metadata_while_due`, which folds a tail whose newest commit is past the idle fold age and compacts while compaction is due, at most 16 units;
 2. runs grep build steps while each one publishes, at most 16, and then one reorganize step once the index is up to date, when the server maintains the grep index;
 3. on a collection pass, calls `gc` and then grep garbage collection.
 
-A pass starts on a fixed interval, and a pass collects garbage when the collection interval has passed since the last collection pass that listed every namespace. A failed call is logged with the namespace id and the call name, counted, and left for the next pass. A failed listing ends the pass. The sweep keeps no state about a namespace between passes and has no backoff.
+A pass starts on a fixed interval, and a pass collects garbage when the collection interval has passed since the last collection pass that listed every namespace. A failed call is logged with the namespace id and the call name, counted, and left for the next pass. A failed listing starts no new visit. The visits already running finish, and then the pass ends with the listing error. The sweep keeps no state about a namespace between passes and has no backoff.
+
+A streaming compaction of a very large namespace is a single unit and can run for a long time. It holds one visit slot while it runs, the pass waits for it before it ends, and the next pass starts late. Other namespaces in the same pass are not held up.
 
 Every value from one runtime shares one compactor claim, so the writer's sessions, the sweep, and explicit maintenance requests never fence one another. The sweep's own limit bounds only how many namespaces it visits at once.
 
