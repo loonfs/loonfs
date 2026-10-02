@@ -17,7 +17,7 @@ use crate::manifest::{
 };
 use crate::reads::{page_request, published_revision, NamespaceReads};
 use crate::service::is_indexable_text_content;
-use crate::{GrepError, Result};
+use crate::{GrepError, GrepStepBudget, Result};
 use futures::future::try_join_all;
 use loonfs::engine::{
     next_run_no_after, refill_iterators, select_next_iterator, write_segments_in_waves, Deadline,
@@ -42,7 +42,6 @@ use loonfs_types::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
-use tokio::sync::{Semaphore, SemaphorePermit};
 
 /// Lifetime of the checkpoint used by one grep backfill attempt.
 ///
@@ -67,10 +66,6 @@ const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
 // Keep grep's fold threshold independent of metadata reorganization limits.
 const GREP_MAX_MID_RUNS: usize = 8;
-
-/// Default for how many build and reorganize steps of one worker hold file
-/// content or index segments in memory at once.
-pub const DEFAULT_MAX_CONCURRENT_GREP_STEPS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 /// Writer-side budgets for one grep build or reorganize step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,14 +163,14 @@ pub enum GrepReorganizeOutcome {
 /// read-only `LoonFs` and creates or deletes backfill checkpoints through
 /// `Maintenance`, preserving the writer id maintenance acts as. Scheduling is
 /// external to this type. A build or reorganize step that finds work waits
-/// for one of the worker's step permits before it reads file content or
-/// index segments. Every clone of a worker shares its permits.
+/// for a permit of the worker's [`GrepStepBudget`] before it reads file
+/// content or index segments.
 #[derive(Clone)]
 pub struct GrepWorker<S> {
     store: S,
     reader: LoonFs<ReadOnly>,
     pub(crate) maintenance: Maintenance,
-    step_permits: Arc<Semaphore>,
+    step_budget: GrepStepBudget,
 }
 
 /// The runtime and its maintenance carry no debug representation — they are
@@ -192,32 +187,25 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Creates a worker over one grep-keyspace store handle and the runtime
-    /// handles it reads and checkpoints through. At most
-    /// `max_concurrent_steps` steps of this worker and its clones hold file
-    /// content or index segments at once.
+    /// handles it reads and checkpoints through. Its steps share
+    /// `step_budget` with every other worker given a clone of it.
     pub fn new(
         store: S,
         reader: LoonFs<ReadOnly>,
         maintenance: Maintenance,
-        max_concurrent_steps: NonZeroUsize,
+        step_budget: GrepStepBudget,
     ) -> Self {
         Self {
             store,
             reader,
             maintenance,
-            step_permits: Arc::new(Semaphore::new(
-                max_concurrent_steps.get().min(Semaphore::MAX_PERMITS),
-            )),
+            step_budget,
         }
     }
 
-    /// Waits for a permit to hold file content or index segments. Dropping
-    /// the wait or the permit returns it.
-    async fn step_permit(&self) -> SemaphorePermit<'_> {
-        self.step_permits
-            .acquire()
-            .await
-            .expect("grep step permit semaphore should remain open")
+    /// The budget this worker's build and reorganize steps draw from.
+    pub fn step_budget(&self) -> &GrepStepBudget {
+        &self.step_budget
     }
 
     /// This worker's filesystem reads for one namespace.
@@ -397,7 +385,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }
             GrepIndexStatus::Disabled {} => return Ok(GrepBuildOutcome::NotEnabled),
         };
-        let _permit = self.step_permit().await;
+        let _permit = self.step_budget.permit().await;
         let unit = index_planned_unit(&reads, planned).await?;
         self.publish_build_unit(namespace_id, current, unit, policy, &deadline)
             .await
@@ -1124,7 +1112,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        let _permit = self.step_permit().await;
+        let _permit = self.step_budget.permit().await;
         let merged = merge_snapshot_range(
             &self.store,
             namespace_id,

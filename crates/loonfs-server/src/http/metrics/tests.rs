@@ -134,8 +134,19 @@ fn rendering_the_same_readings_twice_produces_the_same_bytes() {
 #[test]
 fn scrape_time_gauges_carry_permit_levels() {
     let mut rendered = String::new();
-    render_scrape_gauges(&mut rendered, None, 4, 2);
+    render_scrape_gauges(
+        &mut rendered,
+        None,
+        Some(GrepStepBudgetStats {
+            running: 1,
+            waiting: 3,
+        }),
+        4,
+        2,
+    );
 
+    assert!(rendered.contains("loonfs_grep_steps_running 1\n"));
+    assert!(rendered.contains("loonfs_grep_steps_waiting 3\n"));
     assert!(rendered.contains("loonfs_server_upload_permits_available 4\n"));
     assert!(rendered.contains("loonfs_server_download_permits_available 2\n"));
     assert_eq!(
@@ -143,8 +154,8 @@ fn scrape_time_gauges_carry_permit_levels() {
             .lines()
             .filter(|line| line.starts_with("# TYPE"))
             .count(),
-        if cfg!(target_os = "linux") { 3 } else { 2 },
-        "the two permit pools and Linux RSS where available"
+        if cfg!(target_os = "linux") { 5 } else { 4 },
+        "the grep steps, the two permit pools, and Linux RSS where available"
     );
 }
 
@@ -152,7 +163,7 @@ fn scrape_time_gauges_carry_permit_levels() {
 #[test]
 fn a_scrape_reports_positive_process_resident_bytes() {
     let mut rendered = String::new();
-    render_scrape_gauges(&mut rendered, None, 0, 0);
+    render_scrape_gauges(&mut rendered, None, None, 0, 0);
 
     let resident_bytes = rendered
         .lines()

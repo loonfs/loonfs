@@ -413,6 +413,15 @@ until it publishes. Indexing therefore holds at most two steps of content at
 once by default, up to 128 MiB, whatever `max_concurrent_maintenance` is. A
 step that finds the index up to date takes no permit, so idle visits still
 run in parallel. Lower `[grep].max_concurrent_steps` to lower that ceiling.
+The `loonfs_grep_steps_running` and `loonfs_grep_steps_waiting` gauges
+report the steps that hold a permit and the steps that wait for one. A
+sustained `loonfs_grep_steps_waiting` means indexing steps wait at the cap.
+
+The server builds one `GrepStepBudget` from `[grep].max_concurrent_steps`
+for its grep worker. A host that embeds grep and runs more than one worker,
+for example one for each runtime, passes a clone of one budget to every
+worker. The limit is then one ceiling for the process. A worker given its
+own budget adds its own steps on top.
 
 The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk
 tier, and up to 256 MiB of inserts waiting for the disk tier. The last two

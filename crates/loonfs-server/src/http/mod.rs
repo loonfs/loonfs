@@ -59,6 +59,11 @@ async fn get_metrics(State(state): State<AppState>) -> Response {
     let rendered = metrics::render(
         &state.binding.metrics,
         state.local_cache.as_ref().map(|cache| cache.foyer_stats()),
+        state
+            .binding
+            .grep_worker
+            .as_ref()
+            .map(|worker| worker.step_budget().stats()),
         state.binding.upload_permits.available_permits(),
         state.binding.download_permits.available_permits(),
     );

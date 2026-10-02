@@ -23,6 +23,7 @@ pub mod manifest;
 mod query;
 mod reads;
 mod service;
+mod step_budget;
 mod worker;
 
 pub use cache::{
@@ -34,9 +35,10 @@ pub use error::GrepError as Error;
 pub use error::{GrepError, Result};
 pub use reads::NamespaceReads;
 pub use service::{GrepService, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES};
+pub use step_budget::{GrepStepBudget, GrepStepBudgetStats, DEFAULT_MAX_CONCURRENT_GREP_STEPS};
 pub use worker::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
-    GrepReorganizeOutcome, GrepWorker, DEFAULT_MAX_CONCURRENT_GREP_STEPS,
+    GrepReorganizeOutcome, GrepWorker,
 };
 
 pub use gc::{run_grep_gc, GrepGcReport, GREP_GC_GRACE_WINDOW_MS};
