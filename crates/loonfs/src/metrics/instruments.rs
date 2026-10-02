@@ -1,7 +1,9 @@
-//! Runtime, metadata cache, and object-store metric reporting.
+//! Runtime, metadata cache, execution budget, and object-store metric
+//! reporting.
 //!
-//! Each runtime has one [`RuntimeInstruments`] instance, and each metadata
-//! cache one [`MetadataCacheInstruments`]. Instruments with dynamic labels
+//! Each runtime has one [`RuntimeInstruments`] instance, each metadata cache
+//! one [`MetadataCacheInstruments`], and each execution budget one
+//! [`ExecutionBudgetInstruments`]. Instruments with dynamic labels
 //! are cached so each label set is registered once. Reporting returns
 //! immediately when no recorder is configured.
 
@@ -282,16 +284,6 @@ impl RuntimeInstruments {
         installed.publisher.wal_folds.increment(1);
     }
 
-    pub(crate) fn publisher_wal_folds_waiting(&self, waiting: usize) {
-        let Some(installed) = &self.installed else {
-            return;
-        };
-        installed
-            .publisher
-            .wal_folds_waiting
-            .set(i64::try_from(waiting).unwrap_or(i64::MAX));
-    }
-
     pub(crate) fn publisher_wal_fold_duration(&self, elapsed_ms: u64) {
         let Some(installed) = &self.installed else {
             return;
@@ -569,6 +561,72 @@ impl MetadataCacheInstruments {
     pub(crate) fn head_state_cache_observer(&self) -> Option<Arc<dyn DecodedBlockCacheObserver>> {
         let observer = Arc::clone(&self.installed.as_ref()?.head_state);
         Some(observer)
+    }
+}
+
+/// The gauges of one execution budget, registered when the budget is built.
+pub(crate) struct ExecutionBudgetInstruments {
+    pub(crate) folds: PermitPoolGauges,
+    pub(crate) compactions: PermitPoolGauges,
+}
+
+impl ExecutionBudgetInstruments {
+    /// Registers every budget gauge now, or nothing without a recorder.
+    pub(crate) fn new(recorder: Option<&dyn MetricsRecorder>) -> Self {
+        Self {
+            folds: PermitPoolGauges {
+                installed: recorder.map(|recorder| InstalledPoolGauges {
+                    running: recorder.register_gauge(
+                        "loonfs.execution_budget.folds_running",
+                        "Folds, and operations that may fold first, holding a fold permit",
+                        &[],
+                    ),
+                    waiting: recorder.register_gauge(
+                        "loonfs.execution_budget.folds_waiting",
+                        "Folds, and operations that may fold first, waiting for a fold permit",
+                        &[],
+                    ),
+                }),
+            },
+            compactions: PermitPoolGauges {
+                installed: recorder.map(|recorder| InstalledPoolGauges {
+                    running: recorder.register_gauge(
+                        "loonfs.execution_budget.compactions_running",
+                        "Metadata merges holding a compaction permit",
+                        &[],
+                    ),
+                    waiting: recorder.register_gauge(
+                        "loonfs.execution_budget.compactions_waiting",
+                        "Metadata merges waiting for a compaction permit",
+                        &[],
+                    ),
+                }),
+            },
+        }
+    }
+}
+
+/// The running and waiting gauges of one kind of budget permit.
+pub(crate) struct PermitPoolGauges {
+    installed: Option<InstalledPoolGauges>,
+}
+
+struct InstalledPoolGauges {
+    running: Arc<dyn GaugeHandle>,
+    waiting: Arc<dyn GaugeHandle>,
+}
+
+impl PermitPoolGauges {
+    pub(crate) fn report(&self, running: usize, waiting: usize) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed
+            .running
+            .set(i64::try_from(running).unwrap_or(i64::MAX));
+        installed
+            .waiting
+            .set(i64::try_from(waiting).unwrap_or(i64::MAX));
     }
 }
 
@@ -860,7 +918,6 @@ impl CompactionInstruments {
 struct PublisherInstruments {
     batches: Arc<dyn CounterHandle>,
     wal_folds: Arc<dyn CounterHandle>,
-    wal_folds_waiting: Arc<dyn GaugeHandle>,
     wal_fold_seconds: Arc<dyn HistogramHandle>,
     write_stop_refusals: Arc<dyn CounterHandle>,
     tail_replays: Arc<dyn CounterHandle>,
@@ -881,11 +938,6 @@ impl PublisherInstruments {
             wal_folds: recorder.register_counter(
                 "loonfs.publisher.wal_folds",
                 "WAL tails folded by namespace publishers",
-                &[],
-            ),
-            wal_folds_waiting: recorder.register_gauge(
-                "loonfs.publisher.wal_folds_waiting",
-                "WAL-tail folds waiting for a writer permit",
                 &[],
             ),
             wal_fold_seconds: recorder.register_histogram(
@@ -1285,7 +1337,6 @@ mod tests {
 
         instruments.publisher_batch(4);
         instruments.publisher_wal_fold();
-        instruments.publisher_wal_folds_waiting(1);
         instruments.publisher_wal_fold_duration(5);
         instruments.publisher_write_stop_refusal();
         instruments.publisher_publish(PublishOutcome::Ok);

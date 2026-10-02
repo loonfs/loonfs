@@ -89,6 +89,13 @@ async fn session_one_fold_short<S: ObjectStore + ?Sized>(
     panic!("every write should leave one delta run");
 }
 
+/// A budget whose merges run one at a time.
+fn one_merge_at_a_time() -> ExecutionBudget {
+    ExecutionBudget::builder()
+        .max_concurrent_compactions(NonZeroUsize::MIN)
+        .build()
+}
+
 fn delta_runs(manifest: &CurrentManifest) -> usize {
     manifest
         .envelope
@@ -170,7 +177,11 @@ async fn park_a_session_compaction() -> ParkedCompaction {
         .writer_id("writer-a")
         .inline_content(fold_every_write())
         // No run fits a one-byte step, so every compaction streams.
-        .max_merge_input_bytes(NonZeroUsize::MIN)
+        .execution_budget(
+            ExecutionBudget::builder()
+                .max_merge_input_bytes(NonZeroUsize::MIN)
+                .build(),
+        )
         .metrics_recorder(recorder.clone())
         .build()
         .await
@@ -180,13 +191,10 @@ async fn park_a_session_compaction() -> ParkedCompaction {
 
     // The job waits for a permit until the gate is armed, so the first
     // segment write it parks at is its own.
-    let permits = writer
-        .mode
-        .bits
-        .compaction_permits
-        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS as u32)
-        .await
-        .expect("hold every compaction permit");
+    let mut permits = Vec::new();
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS {
+        permits.push(writer.execution_budget().compaction_permit().await);
+    }
     namespace
         .put_file("/file-due", b"body", &loonfs_test_support::test_actor())
         .await
@@ -377,7 +385,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("writer-a")
         .inline_content(fold_every_write())
-        .max_concurrent_compactions(NonZeroUsize::MIN)
+        .execution_budget(one_merge_at_a_time())
         .build()
         .await
         .expect("build writer");
@@ -390,13 +398,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
 
     // Every session's next fold makes compaction due while the one permit is
     // held, so all of them are ready to merge when it is released.
-    let permit = writer
-        .mode
-        .bits
-        .compaction_permits
-        .acquire()
-        .await
-        .expect("hold the compaction permit");
+    let permit = writer.execution_budget().compaction_permit().await;
     let actor = loonfs_test_support::test_actor();
     futures::future::try_join_all(
         sessions
@@ -443,7 +445,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("writer-a")
         .inline_content(fold_every_write())
-        .max_concurrent_compactions(NonZeroUsize::MIN)
+        .execution_budget(one_merge_at_a_time())
         .build()
         .await
         .expect("build writer");
@@ -453,13 +455,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
 
     // The other session's merge takes the only permit and parks at its first
     // segment write.
-    let permit = writer
-        .mode
-        .bits
-        .compaction_permits
-        .acquire()
-        .await
-        .expect("hold the compaction permit");
+    let permit = writer.execution_budget().compaction_permit().await;
     merging
         .put_file("/file-due", b"body", &actor)
         .await
@@ -501,8 +497,8 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
         delta_runs(&current_manifest(store.inner(), merging.id()).await) < DEFAULT_MAX_DELTA_RUNS
     );
     assert_eq!(
-        writer.mode.bits.compaction_permits.available_permits(),
-        1,
+        writer.execution_budget().stats(),
+        crate::ExecutionBudgetStats::default(),
         "the cancelled wait took no permit with it"
     );
 

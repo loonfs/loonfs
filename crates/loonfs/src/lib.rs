@@ -6,12 +6,14 @@
 //!
 //! The crate has two nouns. A [`LoonFs`] is the runtime: it owns the store
 //! client and the read budgets, and reads through a [`MetadataCache`] that
-//! several runtimes may share. A [`Namespace`] handle acts on
-//! one namespace, and its methods take no namespace id. Both have one of two
-//! modes, [`ReadOnly`] or [`Writable`]. A writable runtime also creates and
-//! forks namespaces, opens the writable handle that is a namespace's writer
-//! session, and shuts down. Explicit maintenance is a capability of a
-//! writable runtime: [`LoonFs::maintenance`] returns a [`Maintenance`].
+//! several runtimes may share. A writable runtime runs its folds and merges
+//! under an [`ExecutionBudget`] that several runtimes may share too. A
+//! [`Namespace`] handle acts on one namespace, and its methods take no
+//! namespace id. Both have one of two modes, [`ReadOnly`] or [`Writable`]. A
+//! writable runtime also creates and forks namespaces, opens the writable
+//! handle that is a namespace's writer session, and shuts down. Explicit
+//! maintenance is a capability of a writable runtime: [`LoonFs::maintenance`]
+//! returns a [`Maintenance`].
 //!
 //! ```no_run
 //! # async fn run(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
@@ -54,6 +56,7 @@ compile_error!("the loonfs runtime needs a monotonic clock that counts host slee
 
 mod cache;
 mod config;
+mod execution_budget;
 mod fs;
 mod handle;
 mod metadata_cache;
@@ -197,9 +200,10 @@ pub use loonfs_objectstore::{
     ByteStream, ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig,
 };
 
-pub use config::{
-    InlineContentPolicy, PublicationLimits, DEFAULT_MAX_CONCURRENT_COMPACTIONS,
-    DEFAULT_MAX_CONCURRENT_FOLDS,
+pub use config::{InlineContentPolicy, PublicationLimits};
+pub use execution_budget::{
+    ExecutionBudget, ExecutionBudgetBuilder, ExecutionBudgetStats,
+    DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS,
 };
 pub use fs::{
     ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,

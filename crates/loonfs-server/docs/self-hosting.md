@@ -481,9 +481,10 @@ exist. After a restart, the first write to each namespace acquires a new
 writer epoch.
 
 `max_concurrent_folds` defaults to 2. A sustained
-`loonfs.publisher.wal_folds_waiting` gauge means WAL folds are waiting at the
-cap; raise it only after accounting for the additional object-store and CPU
-work.
+`loonfs.execution_budget.folds_waiting` gauge means WAL folds are waiting at
+the cap; raise it only after accounting for the additional object-store and
+CPU work. `loonfs.execution_budget.compactions_waiting` says the same about
+`max_concurrent_compactions`.
 
 `min_publish_interval_ms` defaults to 1000 ms between publication starts per namespace; cold namespaces publish immediately.
 

@@ -4,8 +4,8 @@
 use crate::config::ReadConfig;
 use crate::metrics::RuntimeInstruments;
 use crate::{
-    ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, MetadataCache,
-    NamespaceId, ObjectStore,
+    ChangeSeq, CoreError, ErrorCode, ExecutionBudget, InodeId, ListFileRevisionsResponse,
+    MetadataCache, NamespaceId, ObjectStore,
 };
 use crate::{Error, Result, SharedObjectStore};
 use loonfs_core::cache::{HeadStateCache, MetadataSegmentCache, StoredMetadataBlockCache};
@@ -21,9 +21,7 @@ use loonfs_types::{
     MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Semaphore, SemaphorePermit};
 
 /// The object-store client, configuration, caches, and metrics that
 /// read-only and writable runtimes share.
@@ -58,63 +56,12 @@ pub(crate) struct WriterIdentity {
 pub(crate) struct WriterBits {
     pub(crate) inline_content: crate::InlineContentPolicy,
     pub(crate) identity: WriterIdentity,
-    pub(crate) wal_fold_permits: Semaphore,
-    pub(crate) wal_folds_waiting: AtomicUsize,
-    /// Held by every metadata merge the runtime runs: one bounded
-    /// compaction step, or one streaming compaction.
-    pub(crate) compaction_permits: Semaphore,
+    /// Where every fold and merge this runtime runs takes its permit.
+    pub(crate) execution_budget: ExecutionBudget,
     /// The compactor epoch this runtime holds for each namespace. Its
     /// sessions and every `Maintenance` value share it, so they never fence
     /// each other.
     pub(crate) compactor_epochs: tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
-}
-
-/// A fold counted as waiting for a writer permit.
-struct WaitingFold<'a> {
-    counter: &'a AtomicUsize,
-    instruments: &'a RuntimeInstruments,
-}
-
-impl<'a> WaitingFold<'a> {
-    fn new(counter: &'a AtomicUsize, instruments: &'a RuntimeInstruments) -> Self {
-        let waiting_fold = Self {
-            counter,
-            instruments,
-        };
-        let waiting = counter.fetch_add(1, Ordering::SeqCst).saturating_add(1);
-        instruments.publisher_wal_folds_waiting(waiting);
-        waiting_fold
-    }
-}
-
-impl Drop for WaitingFold<'_> {
-    fn drop(&mut self) {
-        let waiting = self
-            .counter
-            .fetch_sub(1, Ordering::SeqCst)
-            .saturating_sub(1);
-        self.instruments.publisher_wal_folds_waiting(waiting);
-    }
-}
-
-impl WriterBits {
-    /// Waits for one of the writer's fold permits. Every fold the runtime
-    /// starts holds one, and so does every operation that may fold first: a
-    /// namespace deletion, and the creation of a checkpoint, a snapshot, or a
-    /// fork of the current head.
-    pub(crate) async fn fold_permit(
-        &self,
-        instruments: &RuntimeInstruments,
-    ) -> SemaphorePermit<'_> {
-        let waiting = WaitingFold::new(&self.wal_folds_waiting, instruments);
-        let permit = self
-            .wal_fold_permits
-            .acquire()
-            .await
-            .expect("fold permit semaphore should remain open");
-        drop(waiting);
-        permit
-    }
 }
 
 impl WriterIdentity {

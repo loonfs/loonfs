@@ -9,11 +9,13 @@ mod publication_clock;
 use super::*;
 use crate::config::ReadConfig;
 use crate::content_tokens::ContentTokenError;
+use crate::execution_budget::BudgetPermit;
 use crate::fs::WriterIdentity;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
 use crate::publish::{CommitRequest, ContentPreparationError, FilesystemOperation};
 use crate::{
-    ErrorCode, MetadataCache, SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
+    ErrorCode, ExecutionBudget, MetadataCache, SharedObjectStore as SharedStore, TraceMode,
+    TraceStoreKind,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -220,11 +222,7 @@ fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
         inline_content: crate::InlineContentPolicy::default(),
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
-        wal_fold_permits: tokio::sync::Semaphore::new(crate::config::DEFAULT_MAX_CONCURRENT_FOLDS),
-        wal_folds_waiting: AtomicUsize::new(0),
-        compaction_permits: tokio::sync::Semaphore::new(
-            crate::config::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
-        ),
+        execution_budget: ExecutionBudget::default(),
         compactor_epochs: tokio::sync::Mutex::default(),
     })
 }
@@ -385,12 +383,29 @@ async fn wait_for_queued_candidates(publisher: &NamespacePublisher, expected: us
 
 async fn wait_for_fold_waiters(writer: &crate::LoonFs<crate::Writable>, expected: usize) {
     timeout(Duration::from_secs(10), async {
-        while writer.mode.bits.wal_folds_waiting.load(Ordering::SeqCst) != expected {
+        while writer.execution_budget().stats().folds_waiting != expected {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("fold waiters should reach the expected count");
+}
+
+/// Takes every fold permit of a runtime with the default fold limit, so no
+/// fold starts until they drop.
+async fn hold_every_fold_permit(writer: &crate::LoonFs<crate::Writable>) -> Vec<BudgetPermit<'_>> {
+    let mut permits = Vec::new();
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS {
+        permits.push(writer.execution_budget().fold_permit().await);
+    }
+    permits
+}
+
+/// A budget whose folds run one at a time.
+fn one_fold_at_a_time() -> ExecutionBudget {
+    ExecutionBudget::builder()
+        .max_concurrent_folds(NonZeroUsize::MIN)
+        .build()
 }
 
 /// Yields until all expected callers are waiting on one in-flight commit ID.
@@ -2394,7 +2409,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
     ));
     let writer = crate::LoonFs::builder_with_store(blocking.clone())
         .writer_id("writer-a")
-        .max_concurrent_folds(NonZeroUsize::new(1).expect("nonzero fold limit"))
+        .execution_budget(one_fold_at_a_time())
         .build()
         .await
         .expect("build writer");
@@ -2437,7 +2452,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
             wait_for_fold_waiters(&writer, index).await;
         }
     }
-    assert_eq!(writer.mode.bits.wal_fold_permits.available_permits(), 0);
+    assert_eq!(writer.execution_budget().stats().folds_running, 1);
     let closing = tokio::spawn(namespace_writers[2].clone().close());
     while namespace_writers[2].session_state() != NamespaceSessionState::Closed {
         tokio::task::yield_now().await;
@@ -2459,8 +2474,10 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
         .expect("namespace close should settle")
         .expect("join namespace close")
         .expect("close namespace with a waiting fold");
-    assert_eq!(writer.mode.bits.wal_folds_waiting.load(Ordering::SeqCst), 0);
-    assert_eq!(writer.mode.bits.wal_fold_permits.available_permits(), 1);
+    assert_eq!(
+        writer.execution_budget().stats(),
+        crate::ExecutionBudgetStats::default()
+    );
     writer.shutdown().await.expect("shut down writer");
 }
 
@@ -2479,7 +2496,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
     ));
     let writer = crate::LoonFs::builder_with_store(recording.clone())
         .writer_id("writer-a")
-        .max_concurrent_folds(NonZeroUsize::new(1).expect("nonzero fold limit"))
+        .execution_budget(one_fold_at_a_time())
         .build()
         .await
         .expect("build writer");
@@ -2661,7 +2678,7 @@ async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
     ));
     let writer = crate::LoonFs::builder_with_store(blocking.clone())
         .writer_id("writer-a")
-        .max_concurrent_folds(NonZeroUsize::new(1).expect("one fold"))
+        .execution_budget(one_fold_at_a_time())
         .publication_limits(crate::PublicationLimits {
             max_concurrent_publications: NonZeroUsize::new(1).expect("one publication"),
             ..crate::PublicationLimits::default()

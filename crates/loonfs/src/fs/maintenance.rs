@@ -211,9 +211,9 @@ impl Maintenance {
     /// Folds the WAL tail at the WAL object threshold, at the inline byte
     /// threshold when the writer knows the count, or once the tail's newest
     /// commit is `idle_fold_after_ms` old on this handle's wall clock. Then
-    /// runs one bounded compaction step. A fold waits for one of the
-    /// runtime's fold permits, and a step that finds work waits for one of
-    /// its compaction permits.
+    /// runs one bounded compaction step. A fold waits for a fold permit from
+    /// the runtime's execution budget, and a step that finds work waits for
+    /// a compaction permit from it.
     pub async fn maintain_metadata_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -461,12 +461,7 @@ impl Maintenance {
                 CompactionStepOutcome::NotNeeded {},
             ));
         }
-        let _permit = self
-            .writer
-            .compaction_permits
-            .acquire()
-            .await
-            .expect("compaction permit semaphore should remain open");
+        let _permit = self.writer.execution_budget.compaction_permit().await;
         let compactor_epoch = self.compactor_epoch(namespace_id).await?;
         let outcome = self
             .engine(namespace_id)
@@ -521,8 +516,9 @@ impl Maintenance {
     /// and otherwise one streaming compaction of a family group. Use this
     /// when [`CompactionStepOutcome::MetadataCompactionRequired`] is reported, and
     /// repeat it while it publishes to compact every eligible group. Each
-    /// merge waits for one of the runtime's compaction permits, the step
-    /// that plans the unit first and then the streaming compaction.
+    /// merge waits for a compaction permit from the runtime's execution
+    /// budget, the step that plans the unit first and then the streaming
+    /// compaction.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.compact_metadata",
@@ -592,9 +588,7 @@ impl Maintenance {
         let _permit = tokio::select! {
             biased;
             () = cancellation.cancelled() => return cancelled(),
-            permit = self.writer.compaction_permits.acquire() => {
-                permit.expect("compaction permit semaphore should remain open")
-            }
+            permit = self.writer.execution_budget.compaction_permit() => permit,
         };
         let outcome = self
             .run_streaming_compaction(namespace_id, &spec, cancellation.metadata_compaction())
@@ -709,9 +703,10 @@ impl Maintenance {
     /// creates its own pin under a fresh id; the name is a label, not a key.
     /// When WAL objects follow the current manifest, they are first folded
     /// into a new manifest; this is not a request to compact metadata. The
-    /// call waits for one of the runtime's fold permits, even when the tail
-    /// turns out to be folded already. The pin lasts until it is deleted,
-    /// either explicitly or by garbage collection after its expiry plus grace
+    /// call waits for a fold permit from the runtime's execution budget, even
+    /// when the tail turns out to be folded already. The pin lasts until it
+    /// is deleted, either explicitly or by garbage collection after its
+    /// expiry plus grace
     /// ([format section 8](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#8-pins)).
     #[tracing::instrument(
         level = "debug",
@@ -734,7 +729,7 @@ impl Maintenance {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let result = {
-            let _permit = self.writer.fold_permit(self.core.instruments()).await;
+            let _permit = self.writer.execution_budget.fold_permit().await;
             self.engine(namespace_id)
                 .create_checkpoint(name.to_owned(), options.ttl_ms)
                 .await
@@ -821,8 +816,9 @@ impl Maintenance {
     ///
     /// A namespace with no unfolded tail reports
     /// [`FoldWalOutcome::AlreadyCurrent`] and publishes nothing. The fold
-    /// waits for one of the runtime's fold permits. This runs no compaction;
-    /// [`Self::maintain_metadata`] folds and then runs one compaction step.
+    /// waits for a fold permit from the runtime's execution budget. This runs
+    /// no compaction; [`Self::maintain_metadata`] folds and then runs one
+    /// compaction step.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.fold_wal",
@@ -874,7 +870,7 @@ impl Maintenance {
     /// Shared implementation for metadata maintenance and [`Self::fold_wal`].
     async fn run_wal_fold(&self, namespace_id: &NamespaceId) -> Result<FoldWalResponse> {
         async {
-            let _permit = self.writer.fold_permit(self.core.instruments()).await;
+            let _permit = self.writer.execution_budget.fold_permit().await;
             let result = self
                 .engine(namespace_id)
                 .fold_wal()

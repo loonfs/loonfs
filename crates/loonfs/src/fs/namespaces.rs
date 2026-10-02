@@ -80,8 +80,9 @@ impl LoonFs<Writable> {
     /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or live snapshot.
     ///
     /// A fork of the current head folds the source's WAL tail first when it
-    /// is not folded, and waits for one of the runtime's fold permits either
-    /// way. A fork of a snapshot never folds and takes no fold permit.
+    /// is not folded, and waits for a fold permit from the runtime's
+    /// execution budget either way. A fork of a snapshot never folds and
+    /// takes no fold permit.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.fork_namespace",
@@ -106,7 +107,7 @@ impl LoonFs<Writable> {
         let result = {
             let _permit = match options.snapshot_id {
                 Some(_) => None,
-                None => Some(self.mode.bits.fold_permit(self.core.instruments()).await),
+                None => Some(self.mode.bits.execution_budget.fold_permit().await),
             };
             self.engine(source_namespace_id)
                 .fork_namespace(new_namespace_id, actor, options.snapshot_id.as_ref())

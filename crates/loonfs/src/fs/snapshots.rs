@@ -138,8 +138,8 @@ impl Namespace<Writable> {
     /// label that does not need to be unique; `expires_at_ms` is in Unix
     /// milliseconds.
     ///
-    /// Folds the WAL tail first when it is not folded, and waits for one of
-    /// the runtime's fold permits either way.
+    /// Folds the WAL tail first when it is not folded, and waits for a fold
+    /// permit from the runtime's execution budget either way.
     ///
     /// Returns `snapshot_quota_exceeded` and writes nothing when the namespace
     /// already holds `policy.max_live_per_namespace` live snapshots. It counts
@@ -173,7 +173,7 @@ impl Namespace<Writable> {
             .core
             .writer_engine(&self.mode.bits.identity, &self.namespace_id);
         let result = {
-            let _permit = self.mode.bits.fold_permit(self.core.instruments()).await;
+            let _permit = self.mode.bits.execution_budget.fold_permit().await;
             engine.create_snapshot(name.to_owned(), expires_at_ms).await
         }
         .map_err(Error::from);

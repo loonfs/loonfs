@@ -4,7 +4,7 @@ Background work has two actors, and both read durable state to decide what is du
 
 ## The writer
 
-A writable session folds its WAL tail when the tail reaches the fold thresholds, or when a publish is refused at the write stop. After each fold it publishes, it runs `Maintenance::maintain_metadata_while_due` over its namespace: bounded compaction steps while compaction is due, and a streaming compaction when a step requires one. Its folds take the runtime's fold permits and its merges take the runtime's compaction permits. Closing the session or shutting the runtime down cancels the compaction, which stops at its next block.
+A writable session folds its WAL tail when the tail reaches the fold thresholds, or when a publish is refused at the write stop. After each fold it publishes, it runs `Maintenance::maintain_metadata_while_due` over its namespace: bounded compaction steps while compaction is due, and a streaming compaction when a step requires one. Its folds take fold permits and its merges take compaction permits from the runtime's execution budget. Closing the session or shutting the runtime down cancels the compaction, which stops at its next block.
 
 One call of `maintain_metadata_while_due` publishes at most 16 compaction units, bounded or streaming, and then returns. The session's next fold starts it again. A session that stops folding while compaction is still due leaves the rest to the sweep: its next pass visits the namespace and runs the same call.
 
