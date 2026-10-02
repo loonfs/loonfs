@@ -888,6 +888,58 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
     );
 }
 
+#[tokio::test]
+async fn a_metadata_loop_call_stops_after_its_unit_cap() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id("writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let namespace = namespace_id("backlog");
+    writer
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    // One unit merges at most eight runs of one family group, and each
+    // folded write adds a run to several groups.
+    for index in 0..3 * loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS {
+        write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
+    }
+    maintenance
+        .compactor_epoch(&namespace)
+        .await
+        .expect("claim the namespace first, so each later manifest is one unit");
+
+    let mut published = Vec::new();
+    for _ in 0..2 {
+        let before = current_manifest_payload(store.as_ref(), &namespace)
+            .await
+            .manifest_no;
+        maintenance
+            .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
+            .await
+            .expect("run the metadata loop");
+        let after = current_manifest_payload(store.as_ref(), &namespace)
+            .await
+            .manifest_no;
+        published.push(after.0 - before.0);
+    }
+    assert_eq!(
+        published[0],
+        u64::from(super::MAX_COMPACTION_UNITS_PER_CALL),
+        "one call publishes exactly the cap"
+    );
+    assert!(
+        published[1] > 0,
+        "a second call continues where the first stopped"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
 /// A wall clock a week ahead, so a collection pass finds everything the test
 /// wrote past every grace window.
 #[derive(Debug)]

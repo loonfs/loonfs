@@ -34,13 +34,16 @@ const SWEEP_PASS_SECONDS_BOUNDARIES: &[f64] =
 /// Visits every namespace in the store on a cadence.
 ///
 /// A pass lists the namespace ids in the store one page at a time and
-/// visits up to `max_concurrent_maintenance` of them at once. A visit folds
-/// an idle WAL tail and compacts metadata while compaction is due, and runs
-/// grep build steps when this server maintains the grep index. Every
-/// `gc_interval_ms`, a pass also collects garbage, grep's included. A failed
-/// call is logged and counted, and the next pass tries it again. A failed
-/// listing ends the pass, and the next pass lists again. The sweep keeps no
-/// state about a namespace between passes.
+/// visits up to `max_concurrent_maintenance` of them at once. Every page's
+/// ids share those visit slots, and the next page is listed when a slot is
+/// free and no listed id is waiting, so a slow visit holds only its own slot.
+/// A visit folds an idle WAL tail, compacts metadata while compaction is due
+/// for at most 16 units, and runs grep build steps when this server
+/// maintains the grep index. Every `gc_interval_ms`, a pass also collects
+/// garbage, grep's included. A failed call is logged and counted, and the
+/// next pass tries it again. A failed listing starts no new visit and ends
+/// the pass once the running visits return, and the next pass lists again.
+/// The sweep keeps no state about a namespace between passes.
 ///
 /// When this server maintains the grep index, a second pass runs every five
 /// seconds over the writer sessions this process holds. It indexes a
@@ -171,7 +174,8 @@ impl Sweep {
     /// garbage.
     ///
     /// Returns how many namespaces the pass listed, or the listing failure
-    /// that ended it. A failed call on one namespace does not fail the pass.
+    /// that ended it once the visits it had started returned. A failed call
+    /// on one namespace does not fail the pass.
     /// After [`Sweep`] is stopped, no new visit starts and a running
     /// streaming compaction stops at its next block.
     pub async fn run_pass(&self, collect_garbage: bool) -> Result<usize, ObjectStoreError> {
@@ -324,26 +328,42 @@ impl Sweep {
         collect_garbage: bool,
     ) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
-        let mut start_after = None;
-        let mut listed = 0;
-        while !inner.stop.is_cancelled() {
+        // Boxed for the same reason as a visit: the spawned sweep's `Send`
+        // check fails on the unboxed listing future.
+        let pages = futures::stream::try_unfold(Some(None), move |start_after| async move {
+            let Some(start_after) = start_after else {
+                return Ok(None);
+            };
             let page =
                 list_namespace_ids(&*inner.store, start_after.as_ref(), inner.page_limit).await?;
-            listed += page.namespace_ids.len();
-            futures::stream::iter(page.namespace_ids)
-                .take_until(inner.stop.cancelled())
-                .for_each_concurrent(inner.max_concurrent_visits, |namespace_id| {
-                    // Boxed so the spawned sweep's `Send` check does not
-                    // recurse through every engine future a visit awaits.
-                    self.visit(namespace_id, collect_garbage).boxed()
-                })
-                .await;
-            match page.next_cursor {
-                Some(next) => start_after = Some(next),
-                None => break,
-            }
-        }
-        Ok(listed)
+            Ok(Some((page.namespace_ids, page.next_cursor.map(Some))))
+        })
+        .boxed();
+        let mut listed = 0;
+        let mut listing = Ok(());
+        pages
+            .filter_map(|page| {
+                let namespace_ids = match page {
+                    Ok(namespace_ids) => {
+                        listed += namespace_ids.len();
+                        Some(futures::stream::iter(namespace_ids))
+                    }
+                    Err(error) => {
+                        listing = Err(error);
+                        None
+                    }
+                };
+                futures::future::ready(namespace_ids)
+            })
+            .flatten()
+            .take_until(inner.stop.cancelled())
+            .for_each_concurrent(inner.max_concurrent_visits, |namespace_id| {
+                // Boxed so the spawned sweep's `Send` check does not recurse
+                // through every engine future a visit awaits.
+                self.visit(namespace_id, collect_garbage).boxed()
+            })
+            .await;
+        listing.map(|()| listed)
     }
 
     async fn visit(&self, namespace_id: NamespaceId, collect_garbage: bool) {

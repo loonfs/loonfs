@@ -11,14 +11,17 @@ use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
 use loonfs_http::Namespaces;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, RecordedOperation, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, OperationKind,
+    RecordedOperation, RecordingStore,
 };
 use loonfs_test_support::test_actor;
-use std::sync::atomic::{AtomicU64, Ordering};
+use loonfs_types::EffectiveLimit;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 const MINUTE_MS: u64 = 60 * 1_000;
@@ -86,6 +89,11 @@ impl SweepServer {
             grep_worker,
             sweep,
         }
+    }
+
+    fn page_limit(mut self, page_limit: EffectiveLimit) -> Self {
+        self.sweep = self.sweep.page_limit(page_limit);
+        self
     }
 
     async fn wal_tail_objects(&self, namespace_id: &NamespaceId) -> u64 {
@@ -425,6 +433,128 @@ async fn a_sweep_survives_a_failing_namespace() {
         server.wal_tail_objects(&names[1]).await,
         0,
         "the next pass tries the failed namespace again"
+    );
+}
+
+#[tokio::test]
+async fn a_parked_visit_does_not_hold_up_later_pages() {
+    let directory = tempdir().expect("tempdir");
+    let base: SharedObjectStore = local_store(directory.path());
+    let parked = namespace_id("a-parked");
+    let later = ["b-later", "c-later", "d-later", "e-later", "f-later"].map(namespace_id);
+    let (writer, now_ms) = seed_writer(&base).await;
+    for namespace_id in std::iter::once(&parked).chain(&later) {
+        seed_unfolded_tail(&writer, namespace_id).await;
+    }
+    writer.shutdown().await.expect("stop the writer");
+    let store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
+        OperationClass::Any,
+    ));
+    let mut config = sweep_config(None);
+    config.max_concurrent_maintenance = 2;
+    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
+        .await
+        .page_limit(page_limit(2));
+
+    store.block_next();
+    let pass = tokio::spawn({
+        let sweep = server.sweep.clone();
+        async move { sweep.run_pass(false).await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        store.wait_until_blocked().await;
+        for namespace_id in &later {
+            while server.wal_tail_objects(namespace_id).await > 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+    })
+    .await
+    .expect("every namespace on the later pages is visited while the first visit is parked");
+    assert!(!pass.is_finished(), "the pass waits for the parked visit");
+
+    store.release();
+    assert_eq!(
+        pass.await.expect("join the pass").expect("list namespaces"),
+        1 + later.len()
+    );
+    assert_eq!(server.wal_tail_objects(&parked).await, 0);
+}
+
+#[tokio::test]
+async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_the_pass() {
+    let directory = tempdir().expect("tempdir");
+    let base: SharedObjectStore = local_store(directory.path());
+    let [parked, started, unlisted] = ["a-parked", "b-started", "c-unlisted"].map(namespace_id);
+    let (writer, now_ms) = seed_writer(&base).await;
+    for namespace_id in [&parked, &started, &unlisted] {
+        seed_unfolded_tail(&writer, namespace_id).await;
+    }
+    writer.shutdown().await.expect("stop the writer");
+    let listings = AtomicUsize::new(0);
+    let failing = FailStore::matching(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        move |operation| {
+            matches!(operation.kind(), OperationKind::List)
+                && operation.key() == "namespaces/"
+                && listings.fetch_add(1, Ordering::SeqCst) == 2
+        },
+        InjectedError::Transport("injected for the third page".to_owned()),
+    );
+    failing.fail_all();
+    let store = Arc::new(BlockingStore::new(
+        failing,
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
+        OperationClass::Any,
+    ));
+    let mut config = sweep_config(None);
+    config.max_concurrent_maintenance = 2;
+    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
+        .await
+        .page_limit(page_limit(1));
+
+    store.block_next();
+    let pass = tokio::spawn({
+        let sweep = server.sweep.clone();
+        async move { sweep.run_pass(false).await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        store.wait_until_blocked().await;
+        while store.inner().attempts() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the third listing fails while the first visit is parked");
+    assert!(
+        !pass.is_finished(),
+        "the pass waits for the visit it started"
+    );
+
+    store.release();
+    let error = pass
+        .await
+        .expect("join the pass")
+        .expect_err("a failed listing fails the pass");
+    assert!(
+        matches!(error, ObjectStoreError::Transport { .. }),
+        "expected the injected listing failure, got {error:?}"
+    );
+    assert_eq!(
+        server.wal_tail_objects(&parked).await,
+        0,
+        "the parked visit finishes before the pass returns"
+    );
+    assert_eq!(server.wal_tail_objects(&started).await, 0);
+    assert!(
+        server.wal_tail_objects(&unlisted).await > 0,
+        "no visit starts after the failed listing"
+    );
+    assert_eq!(
+        server.counter("loonfs.maintenance.sweep_passes", &[("result", "error")]),
+        1
     );
 }
 

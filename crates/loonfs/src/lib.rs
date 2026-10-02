@@ -43,7 +43,8 @@
 //! its WAL tail at a threshold, and after each fold it publishes, it runs
 //! [`Maintenance::maintain_metadata_while_due`] over its namespace. A runtime
 //! starts no other maintenance by itself. A host that wants more, such as
-//! folding idle tails or collecting garbage, calls the operations on
+//! folding idle tails, finishing compaction a session left due after its
+//! last fold, or collecting garbage, calls the operations on
 //! [`LoonFs::maintenance`] on a schedule of its own.
 
 #![warn(missing_docs)]
