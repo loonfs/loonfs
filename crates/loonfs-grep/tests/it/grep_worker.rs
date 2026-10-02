@@ -19,7 +19,7 @@ use loonfs_grep::manifest::{
 use loonfs_grep::NamespaceReads;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
-    GrepWorker, DEFAULT_MAX_CONCURRENT_GREP_STEPS, GREP_GC_GRACE_WINDOW_MS,
+    GrepStepBudget, GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -568,7 +568,7 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         failing_store.clone(),
         host.reader.clone(),
         host.maintenance.clone(),
-        DEFAULT_MAX_CONCURRENT_GREP_STEPS,
+        GrepStepBudget::default(),
     );
 
     let error = worker
@@ -631,7 +631,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         failing_store.clone(),
         host.reader.clone(),
         host.maintenance.clone(),
-        DEFAULT_MAX_CONCURRENT_GREP_STEPS,
+        GrepStepBudget::default(),
     );
 
     let outcome = worker
@@ -698,7 +698,7 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         failing_store.clone(),
         host.reader.clone(),
         host.maintenance.clone(),
-        DEFAULT_MAX_CONCURRENT_GREP_STEPS,
+        GrepStepBudget::default(),
     );
 
     let outcome = worker

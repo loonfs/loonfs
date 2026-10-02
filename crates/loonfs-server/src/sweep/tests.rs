@@ -69,7 +69,7 @@ impl SweepServer {
                 runtime.object_store(),
                 runtime.read_only(),
                 maintenance.clone(),
-                loonfs_grep::DEFAULT_MAX_CONCURRENT_GREP_STEPS,
+                loonfs_grep::GrepStepBudget::default(),
             )
         });
         let sweep = Sweep::new(

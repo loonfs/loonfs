@@ -2,17 +2,25 @@
 
 use crate::local_cache::FoyerCacheStats;
 use loonfs::metrics::{MetricEntry, MetricValue, MetricsSnapshot};
+use loonfs_grep::GrepStepBudgetStats;
 use loonfs_http::HttpMetrics;
 use std::fmt::Write as _;
 
 pub(super) fn render(
     metrics: &HttpMetrics,
     local_cache: Option<FoyerCacheStats>,
+    grep_steps: Option<GrepStepBudgetStats>,
     upload_permits: usize,
     download_permits: usize,
 ) -> String {
     let mut rendered = render_snapshot(&metrics.snapshot());
-    render_scrape_gauges(&mut rendered, local_cache, upload_permits, download_permits);
+    render_scrape_gauges(
+        &mut rendered,
+        local_cache,
+        grep_steps,
+        upload_permits,
+        download_permits,
+    );
     rendered
 }
 
@@ -91,10 +99,11 @@ fn write_entry(rendered: &mut String, name: &str, entry: &MetricEntry) {
 }
 
 /// Appends current gauge values sampled during a scrape: local cache state,
-/// Linux process RSS, and available transfer slots.
+/// grep steps, Linux process RSS, and available transfer slots.
 fn render_scrape_gauges(
     rendered: &mut String,
     local_cache: Option<FoyerCacheStats>,
+    grep_steps: Option<GrepStepBudgetStats>,
     upload_permits: usize,
     download_permits: usize,
 ) {
@@ -102,6 +111,22 @@ fn render_scrape_gauges(
     // zeros would incorrectly suggest that an enabled cache is idle.
     if let Some(local_cache) = local_cache {
         for (name, description, value) in local_cache_gauges(&local_cache) {
+            write_gauge(rendered, name, description, value);
+        }
+    }
+    if let Some(GrepStepBudgetStats { running, waiting }) = grep_steps {
+        for (name, description, value) in [
+            (
+                "loonfs_grep_steps_running",
+                "Grep build and reorganize steps holding a step permit right now",
+                running,
+            ),
+            (
+                "loonfs_grep_steps_waiting",
+                "Grep build and reorganize steps waiting for a step permit right now",
+                waiting,
+            ),
+        ] {
             write_gauge(rendered, name, description, value);
         }
     }

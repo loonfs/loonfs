@@ -18,7 +18,8 @@ pub struct GrepWorkerConfig {
     /// Content bytes read per build step.
     pub max_content_bytes_per_step: u64,
     /// Build and reorganize steps that hold file content or index segments
-    /// at once, across every namespace one worker indexes.
+    /// at once. A host builds one `GrepStepBudget` from it and passes that
+    /// budget to every worker it runs.
     pub max_concurrent_steps: usize,
 }
 

@@ -124,6 +124,9 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
         8.0,
         "no transfer is in flight, so every configured slot is free"
     );
+    for grep_steps in ["loonfs_grep_steps_running", "loonfs_grep_steps_waiting"] {
+        assert_eq!(series(&first, grep_steps), 0.0, "no grep step is in flight");
+    }
 
     // Counters are counters: a second status read moves that series and
     // only that series.

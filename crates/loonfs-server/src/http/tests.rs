@@ -77,7 +77,7 @@ async fn a_server_without_the_table_builds_no_local_cache() {
         .await
         .expect("build app");
     assert!(state.local_cache.is_none());
-    let rendered = super::metrics::render(&state.binding.metrics, None, 0, 0);
+    let rendered = super::metrics::render(&state.binding.metrics, None, None, 0, 0);
     assert!(!rendered.contains("loonfs_local_cache_"));
 }
 
@@ -90,7 +90,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
     let (_router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
-    let rendered = super::metrics::render(&state.binding.metrics, None, 0, 0);
+    let rendered = super::metrics::render(&state.binding.metrics, None, None, 0, 0);
 
     for name in [
         "loonfs_runtime_cache_latest_metadata_view_reads_total",
@@ -137,6 +137,7 @@ async fn a_configured_local_cache_is_built_and_scraped() {
     let rendered = super::metrics::render(
         &state.binding.metrics,
         Some(local_cache.foyer_stats()),
+        None,
         0,
         0,
     );

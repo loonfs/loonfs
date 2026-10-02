@@ -11,8 +11,8 @@ use loonfs::{LoonFs, Maintenance, ReadOnly, SharedObjectStore};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
-    GrepError, GrepService, GrepWorker, NamespaceReads, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-    DEFAULT_MAX_CONCURRENT_GREP_STEPS,
+    GrepError, GrepService, GrepStepBudget, GrepWorker, NamespaceReads,
+    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_types::{
@@ -64,7 +64,7 @@ impl GrepHost {
                 store.clone(),
                 reader,
                 maintenance,
-                DEFAULT_MAX_CONCURRENT_GREP_STEPS,
+                GrepStepBudget::default(),
             ),
             block_cache,
         }
