@@ -97,6 +97,8 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
             expires_at_ms: u64::MAX,
         },
         &context,
+        Default::default(),
+        None,
     )
     .await
     .expect("pin the original history");

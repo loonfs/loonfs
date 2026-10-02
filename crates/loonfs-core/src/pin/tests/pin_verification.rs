@@ -326,9 +326,16 @@ async fn a_pin_id_answers_only_operations_of_its_owner_kind() {
             target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
         },
     ] {
-        let pin = crate::pin::create_pin(&store, &namespace_id, owner, &setup)
-            .await
-            .expect("pin");
+        let pin = crate::pin::create_pin(
+            &store,
+            &namespace_id,
+            owner,
+            &setup,
+            Default::default(),
+            None,
+        )
+        .await
+        .expect("pin");
         pins.push(pin.pin_id);
     }
     let [user, snapshot, fork] = &pins[..] else {

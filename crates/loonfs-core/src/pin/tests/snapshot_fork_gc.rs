@@ -46,6 +46,8 @@ impl Fixture {
                 expires_at_ms: u64::MAX,
             },
             &setup,
+            Default::default(),
+            None,
         )
         .await
         .expect("snapshot");
@@ -159,6 +161,8 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
             Some(&fixture.snapshot.pin_id),
             &fixture.context,
             Arc::new(StdMonotonicTimer::default()),
+            Default::default(),
+            None,
         )
         .await
         .expect("install historical fork")
@@ -217,6 +221,8 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             Some(&fixture.snapshot.pin_id),
             &fixture.context,
             Arc::new(StdMonotonicTimer::default()),
+            Default::default(),
+            None
         ),
         async {
             gate.wait_until_blocked().await;
@@ -288,6 +294,8 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
             Some(&fixture.snapshot.pin_id),
             &fixture.context,
             Arc::new(StdMonotonicTimer::default()),
+            Default::default(),
+            None
         ),
         async {
             gate.wait_until_blocked().await;
@@ -343,6 +351,8 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
             expires_at_ms: context.now_ms + 10,
         },
         &context,
+        Default::default(),
+        None,
     )
     .await
     .expect("snapshot");
@@ -363,6 +373,8 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
             Some(&snapshot.pin_id),
             &context,
             clock.clone(),
+            Default::default(),
+            None
         ),
         async {
             store.wait_until_blocked().await;

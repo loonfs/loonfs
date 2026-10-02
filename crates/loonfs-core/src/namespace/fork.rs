@@ -3,10 +3,11 @@
 
 use super::control::load_current_manifest_if_present;
 use super::create::publish_namespace;
+use crate::cache::MetadataSegmentCache;
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::manifest::load_namespace_manifest_envelope;
+use crate::manifest::{load_namespace_manifest_envelope, MetadataLsmPolicy};
 use crate::pin::record::{delete_failed_pin, load_owned_pin, write_pin, PinOwnerKind};
 use crate::pin::{classify_live_snapshot, create_pin};
 use crate::time::{Deadline, MonotonicTimer};
@@ -16,6 +17,10 @@ use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{ManifestNo, NamespaceId, NamespaceMetadata, PinId, WriterEpoch};
 use std::sync::Arc;
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "fork inputs include the caller's fold policy and cache"
+)]
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
@@ -24,6 +29,8 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     snapshot_id: Option<&PinId>,
     context: &MutationContext,
     timer: Arc<dyn MonotonicTimer>,
+    fold_policy: MetadataLsmPolicy,
+    segment_cache: Option<&MetadataSegmentCache>,
 ) -> Result<NamespaceMetadata> {
     let deadline = Deadline::start(timer);
     let target = super::control::load_current_manifest_if_present(store, new_namespace_id).await?;
@@ -52,7 +59,15 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         )
         .await?
     } else {
-        create_pin(store, source_namespace_id, owner, context).await?
+        create_pin(
+            store,
+            source_namespace_id,
+            owner,
+            context,
+            fold_policy,
+            segment_cache,
+        )
+        .await?
     };
     let source_manifest = load_namespace_manifest_envelope(
         store,

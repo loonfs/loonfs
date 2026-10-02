@@ -369,7 +369,7 @@ steps to compactions.
 
 The segment output budget has no setting. A segment larger than the budget
 is written alone. A checkpoint, snapshot, or fork that has to fold the WAL
-tail first runs that fold with the default 64 MiB block memo. Creating one
+tail first runs that fold with the configured `max_block_memo_bytes`. Creating one
 waits for a fold permit, even when the tail is already folded. A fork of a
 snapshot never folds and takes no fold permit.
 
@@ -463,16 +463,12 @@ max_head_state_bytes = 16777216
 
 64 + 16 + 8 + 16 + 16 + 16 + 40 + 40 = 216 MiB, which leaves 40 MiB of the
 256 MiB for allocator overhead, HTTP buffers, and the block memos of reads.
-Each read keeps at most 8 MiB. A namespace delete that folds the WAL tail
-holds the one fold permit and no publication slot, and its fold uses the
-configured 8 MiB block memo, so the fold row already counts it. Two cases can
-still pass the limit:
+Each read keeps at most 8 MiB. A namespace delete, and a checkpoint, snapshot,
+or fork that folds the WAL tail, each hold the one fold permit and no
+publication slot. Each of those folds uses the configured 8 MiB block memo, so
+the fold row already counts it. One case can still pass the limit:
 
 - Many large reads at once, because reads have no concurrency limit.
-- A checkpoint, snapshot, or fork that folds the WAL tail. It holds the one
-  fold permit, but its fold keeps the default 64 MiB block memo, not the
-  configured 8 MiB. While it runs, the fold row is 64 + 32 = 96 MiB instead
-  of 40 MiB, and the total is 216 - 40 + 96 = 272 MiB.
 
 The server keeps one writer session for each namespace it has written since
 it started. There is no cap and no eviction. One idle session holds about

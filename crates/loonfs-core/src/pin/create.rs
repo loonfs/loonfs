@@ -1,6 +1,7 @@
 //! Folds the WAL and creates a verified pin for the resulting manifest.
 
 use super::record::{delete_failed_pin, verify_pin_basis, write_pin, PinBasisVerification};
+use crate::cache::MetadataSegmentCache;
 use crate::commit::WalPublishError;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasAttempt};
@@ -22,14 +23,15 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     owner: PinOwner,
     context: &MutationContext,
+    policy: MetadataLsmPolicy,
+    segment_cache: Option<&MetadataSegmentCache>,
 ) -> Result<PinPayload> {
     validate_pin_owner(&owner)?;
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let deadline = &deadline;
     let owner = &owner;
     let created = retry_while_contended(|| async move {
-        let basis = match try_fold_wal(store, namespace_id, deadline, MetadataLsmPolicy::default())
-            .await?
+        let basis = match try_fold_wal(store, namespace_id, deadline, policy, segment_cache).await?
         {
             TryFoldWal::Settled(basis) => basis,
             TryFoldWal::RaceLost(_) => {

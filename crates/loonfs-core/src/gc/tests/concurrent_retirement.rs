@@ -24,6 +24,8 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             None,
             &setup,
             Arc::new(StdMonotonicTimer::default()),
+            Default::default(),
+            None,
         )
         .await
         .expect("fork");

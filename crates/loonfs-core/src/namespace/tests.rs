@@ -128,6 +128,8 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         None,
         &context(),
         Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
     )
     .await
     .expect("fork source pin proves authorship from matching bytes");
@@ -159,6 +161,8 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         None,
         &context(),
         Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
     )
     .await
     .expect("fork");
@@ -188,6 +192,8 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         None,
         &context(),
         Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
     )
     .await
     .expect("nested fork");
@@ -347,6 +353,8 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
         None,
         &context,
         Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
     )
     .await
     .expect_err("deleted target");
@@ -385,6 +393,8 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
             None,
             &setup,
             Arc::new(StdMonotonicTimer::default()),
+            Default::default(),
+            None,
         );
         let competing_create = async {
             store.wait_until_blocked().await;

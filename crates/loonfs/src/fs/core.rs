@@ -252,6 +252,7 @@ impl RuntimeCore {
         )
         .with_wall_clock(self.inner.wall_clock.clone())
         .with_metadata_lsm_policy(self.inner.config.metadata_lsm_policy)
+        .with_metadata_segment_cache(self.metadata_segment_cache())
     }
 }
 
