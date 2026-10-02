@@ -32,7 +32,7 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
             .await?
         {
             TryFoldWal::Settled(basis) => basis,
-            TryFoldWal::RaceLost => {
+            TryFoldWal::RaceLost(_) => {
                 return Ok(CasAttempt::Contended(CoreError::WalPublish(
                     WalPublishError::NumberTaken,
                 )))
