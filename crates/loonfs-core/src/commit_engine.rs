@@ -617,15 +617,39 @@ impl NamespaceCommitEngine {
         self.basis_checked = None;
     }
 
-    /// The basis manifest of the engine's position that no store observation
-    /// has confirmed within the last publication budget.
-    fn unconfirmed_basis(&self, attempt: &Observation) -> Option<ManifestNo> {
+    /// The basis manifest that needs a successor check, either because its
+    /// last confirmation expired or because this attempt probed the tip.
+    fn unconfirmed_basis(&self, attempt: &Observation, tip_probed: bool) -> Option<ManifestNo> {
         let projection = self.publish_tail.as_ref()?;
-        let confirmed_recently = self
-            .basis_checked
-            .as_ref()
-            .is_some_and(|checked| checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS);
+        let confirmed_recently = !tip_probed
+            && self.basis_checked.as_ref().is_some_and(|checked| {
+                checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS
+            });
         (!confirmed_recently).then(|| projection.basis().manifest_no())
+    }
+
+    /// Probes the next WAL number only while the position's last basis
+    /// confirmation is within the revalidation bound. An error reloads.
+    async fn next_wal_absent<S: ObjectStore + ?Sized>(
+        &self,
+        store: &S,
+        attempt: &Observation,
+    ) -> bool {
+        let Some(position) = self.publish_tail.as_ref() else {
+            return false;
+        };
+        if !self.basis_checked.as_ref().is_some_and(|checked| {
+            checked.age_at(attempt) < crate::limits::READ_REVALIDATION_BOUND_MS
+        }) {
+            return false;
+        }
+        let Ok(next) = position.head.wal_no.successor() else {
+            return false;
+        };
+        matches!(
+            crate::wal::wal_object_exists(store, &self.namespace_id, next).await,
+            Ok(false)
+        )
     }
 
     /// The tail `position` names, if the head-state cache still holds it.
@@ -817,18 +841,20 @@ impl NamespaceCommitEngine {
             }
         };
 
-        if self.projection_observed.as_ref().is_some_and(|observed| {
+        let tip_expired = self.projection_observed.as_ref().is_some_and(|observed| {
             observed.age_at(&attempt) > crate::limits::WAL_PUBLISH_BUDGET_MS
-        }) {
+        });
+        if tip_expired && !self.next_wal_absent(store, &attempt).await {
             self.invalidate_projection();
         }
         // A landed put confirms the tip, not the manifest the batch was planned
-        // against: another process may have folded since. A basis unconfirmed
-        // for a budget is checked for a successor. The answer is measured from
-        // the last confirmation, not from this attempt. A successor, an answer
-        // outside the revalidation bound of that confirmation, or a failed
-        // check reloads the view instead.
-        if let Some(manifest_no) = self.unconfirmed_basis(&attempt) {
+        // against: a fold or compaction (including our own) may have succeeded.
+        // Another writer must claim a successor manifest before writing WAL.
+        // The WAL probe also checks for an unobserved put by this session.
+        // Check the successor after that probe, and bound the answer by the
+        // previous basis confirmation so a collected successor cannot look
+        // absent. Either probe finding an object or failing reloads the view.
+        if let Some(manifest_no) = self.unconfirmed_basis(&attempt, tip_expired) {
             let successor = crate::namespace::read_anchor::manifest_has_successor(
                 store,
                 &self.namespace_id,
@@ -842,6 +868,9 @@ impl NamespaceCommitEngine {
                     .is_some_and(Observation::is_within_revalidation_bound)
             {
                 self.basis_checked = Some(attempt.clone());
+                if tip_expired {
+                    self.projection_observed = Some(attempt.clone());
+                }
             } else {
                 self.invalidate_projection();
             }
@@ -1786,6 +1815,399 @@ mod tests {
         );
         // The retry plans against the reloaded view.
         publish_one(&mut engine, &store, &writer, "gamma").await;
+    }
+
+    type GatedStore = RecordingStore<BlockingStore<LocalFsStore>>;
+
+    /// Records every operation and gates HEADs of `gated` keys.
+    fn gated_store(directory: &tempfile::TempDir, gated: KeyPredicate) -> GatedStore {
+        RecordingStore::new(
+            BlockingStore::new(
+                LocalFsStore::new(directory.path()).expect("store"),
+                gated,
+                OperationClass::Head,
+            ),
+            KeyPredicate::any(),
+        )
+    }
+
+    /// A writer on a manual clock, with the segment cache a runtime gives every
+    /// engine, whose first publish loaded its view and landed.
+    async fn writer_after_one_publish(
+        store: &GatedStore,
+        namespace_id: &NamespaceId,
+    ) -> (
+        NamespaceCommitEngine,
+        Arc<loonfs_test_support::clock::ManualClock>,
+        MutationContext,
+    ) {
+        let writer = context("writer-a");
+        create(store, namespace_id, &writer)
+            .await
+            .expect("bootstrap");
+        let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+            .monotonic_timer(timer.clone())
+            .segment_cache(Arc::new(MetadataSegmentCache::unshared(usize::MAX)));
+        publish_one(&mut engine, store, &writer, "alpha").await;
+        (engine, timer, writer)
+    }
+
+    fn is_head_under(operation: &RecordedOperation, prefix: &str) -> bool {
+        matches!(operation, RecordedOperation::Head { key } if key.starts_with(prefix))
+    }
+
+    #[tokio::test]
+    async fn a_quiet_writer_confirms_its_tip_with_two_heads() {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = gated_store(&directory, KeyPredicate::new(|_| false));
+        let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+        for name in ["beta", "gamma", "delta"] {
+            publish_one(&mut engine, &store, &writer, name).await;
+        }
+
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
+        store.reset();
+        publish_one(&mut engine, &store, &writer, "epsilon").await;
+        // The tail holds a fence and four commits, and none of it is read
+        // again: the next WAL number, then the next manifest number, then the put.
+        let operations = store.take();
+        assert!(
+            matches!(
+                operations.as_slice(),
+                [
+                    RecordedOperation::Head { key: probed },
+                    RecordedOperation::Head { key: successor },
+                    RecordedOperation::Put { key: written, mode: loonfs_objectstore::PutMode::CreateIfAbsent, .. },
+                ] if probed == written
+                    && probed.starts_with(&wal_prefix(&namespace_id))
+                    && successor.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id))
+            ),
+            "{operations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quiet_writer_finds_a_takeover_fence_and_is_fenced() {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = gated_store(&directory, KeyPredicate::new(|_| false));
+        let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+        crate::namespace::writer_epoch::acquire_writer_epoch(
+            &store,
+            &namespace_id,
+            &context("writer-b"),
+        )
+        .await
+        .expect("writer b takes over");
+
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
+        store.reset();
+        let published = engine
+            .publish_batch(
+                &store,
+                vec![create_dir("beta", "beta")],
+                &writer,
+                &Deadline::start(Arc::clone(&engine.timer)),
+            )
+            .await;
+        assert_eq!(
+            published.results[0]
+                .as_ref()
+                .expect_err("displaced writer")
+                .code(),
+            ErrorCode::WriterFenced
+        );
+        let operations = store.take();
+        assert!(
+            is_head_under(&operations[0], &wal_prefix(&namespace_id)),
+            "{operations:?}"
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+            "{operations:?}"
+        );
+        assert_eq!(store.count(OperationClass::Put), 0, "{operations:?}");
+    }
+
+    #[tokio::test]
+    async fn a_quiet_writer_finds_a_fold_and_lands_on_the_new_basis() {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = gated_store(&directory, KeyPredicate::new(|_| false));
+        let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+        let basis = engine
+            .wal_fold_input()
+            .expect("retained view")
+            .basis
+            .manifest_no();
+        fold_wal_tail(
+            &store,
+            None,
+            &namespace_id,
+            None,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("another process folds");
+
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
+        store.reset();
+        let published = publish_one(&mut engine, &store, &writer, "beta").await;
+        assert_eq!(
+            published
+                .resulting_read_state
+                .expect("landed")
+                .basis
+                .manifest_no(),
+            basis.successor().expect("next manifest number")
+        );
+        let operations = store.take();
+        assert!(
+            is_head_under(&operations[0], &wal_prefix(&namespace_id))
+                && is_head_under(
+                    &operations[1],
+                    &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
+                )
+                && operations[2..]
+                    .iter()
+                    .any(|operation| operation.key()
+                        == loonfs_objectstore::keys::hint(&namespace_id)),
+            "{operations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quiet_writer_reloads_after_its_own_compaction() {
+        use crate::manifest::{
+            compaction_step, CompactionStepOutcome, MetadataCompactionPolicy, MetadataLsmPolicy,
+        };
+
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace");
+        let store = gated_store(&directory, KeyPredicate::new(|_| false));
+        let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+        // Re-anchor after this session's folds, just as the publisher does.
+        for name in ["beta", "gamma", "delta"] {
+            publish_one(&mut engine, &store, &writer, name).await;
+            let input = engine.begin_wal_fold().expect("retained tail");
+            let folded = fold_wal_tail(
+                &store,
+                None,
+                &namespace_id,
+                Some(input),
+                &Deadline::start(timer.clone()),
+            )
+            .await
+            .expect("own fold");
+            engine.record_wal_fold(Some(&folded));
+        }
+        let before = engine.wal_fold_input().expect("re-anchored tail");
+        let current = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("current manifest");
+        let compacted = compaction_step(
+            &store,
+            &namespace_id,
+            current.state.compactor_epoch(),
+            MetadataLsmPolicy::default(),
+            MetadataCompactionPolicy::CompactImmediately,
+        )
+        .await
+        .expect("own compaction");
+        let manifest_no = match compacted {
+            CompactionStepOutcome::UnitPublished { manifest_no, .. } => Some(manifest_no),
+            _ => None,
+        }
+        .expect("compaction publishes a successor");
+        assert_eq!(
+            manifest_no,
+            before.basis.manifest_no().successor().expect("successor")
+        );
+        let after = load_namespace_read_state(&store, &namespace_id)
+            .await
+            .expect("head");
+        assert_eq!(
+            after.wal_no, before.head.wal_no,
+            "compaction leaves the tip unchanged"
+        );
+        assert_eq!(after.writer_epoch, before.head.writer_epoch);
+
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
+        store.reset();
+        let published = publish_one(&mut engine, &store, &writer, "epsilon").await;
+        assert!(published.wal_tail_discovered);
+        assert_eq!(
+            published
+                .resulting_read_state
+                .expect("landed")
+                .basis
+                .manifest_no(),
+            manifest_no
+        );
+        let operations = store.take();
+        assert!(is_head_under(&operations[0], &wal_prefix(&namespace_id)));
+        assert!(is_head_under(
+            &operations[1],
+            &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
+        ));
+        assert!(operations[2..]
+            .iter()
+            .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)));
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_batch_without_a_put_keeps_the_attempt_observation() {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace");
+        let store = gated_store(&directory, KeyPredicate::manifest(&namespace_id));
+        let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
+        store.reset();
+        store.inner().block_next();
+        // Replaying the first receipt succeeds without a put. The delayed
+        // answer must leave both clocks dated at the start of the attempt.
+        let (replayed, ()) =
+            futures::join!(publish_one(&mut engine, &store, &writer, "alpha"), async {
+                store.inner().wait_until_blocked().await;
+                timer.advance_ms(1_000);
+                store.inner().release();
+            });
+        assert!(replayed.resulting_read_state.is_none());
+        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(
+            engine.projection_observed.as_ref().expect("tip").age_ms(),
+            1_000
+        );
+        assert_eq!(
+            engine.basis_checked.as_ref().expect("basis").age_ms(),
+            1_000
+        );
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1_000);
+        store.reset();
+        publish_one(&mut engine, &store, &writer, "beta").await;
+        assert!(
+            matches!(store.take().as_slice(), [RecordedOperation::Put { .. }]),
+            "the exact budget boundary still trusts the confirmed tip"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_writer_quiet_for_the_revalidation_bound_rediscovers_without_probing() {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = gated_store(&directory, KeyPredicate::new(|_| false));
+        let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+
+        timer.advance_ms(READ_REVALIDATION_BOUND_MS);
+        store.reset();
+        publish_one(&mut engine, &store, &writer, "beta").await;
+        let operations = store.take();
+        assert_eq!(
+            operations.first().map(RecordedOperation::key),
+            Some(loonfs_objectstore::keys::hint(&namespace_id).as_str()),
+            "{operations:?}"
+        );
+        assert!(
+            !operations
+                .iter()
+                .any(|operation| is_head_under(operation, &wal_prefix(&namespace_id))),
+            "{operations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_answered_at_the_bound_after_the_last_confirmation_is_not_trusted() {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = gated_store(&directory, KeyPredicate::manifest(&namespace_id));
+        let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+
+        // The attempt starts inside the bound of the last confirmation, and the
+        // manifest HEAD answers at the bound: the view is reloaded, although
+        // the answer came only a second after the attempt started.
+        timer.advance_ms(READ_REVALIDATION_BOUND_MS - 1_000);
+        store.reset();
+        store.inner().block_next();
+        let (published, ()) =
+            futures::join!(publish_one(&mut engine, &store, &writer, "beta"), async {
+                store.inner().wait_until_blocked().await;
+                timer.advance_ms(1_000);
+                store.inner().release();
+            });
+        assert!(published.resulting_read_state.is_some());
+        let operations = store.take();
+        let successor = operations
+            .iter()
+            .position(|operation| {
+                is_head_under(
+                    operation,
+                    &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id),
+                )
+            })
+            .expect("successor check");
+        assert!(
+            is_head_under(&operations[0], &wal_prefix(&namespace_id))
+                && operations[successor + 1..]
+                    .iter()
+                    .any(|operation| operation.key()
+                        == loonfs_objectstore::keys::hint(&namespace_id)),
+            "the late answer was trusted: {operations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_manifest_head_is_sent_after_the_wal_probe_answers() {
+        let directory = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let store = gated_store(&directory, KeyPredicate::prefix(wal_prefix(&namespace_id)));
+        let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+        let basis = engine
+            .wal_fold_input()
+            .expect("retained view")
+            .basis
+            .manifest_no();
+
+        // Another process folds while the WAL probe is in flight. A manifest
+        // HEAD sent alongside the probe could miss that manifest.
+        timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
+        store.reset();
+        store.inner().block_next();
+        let (published, ()) =
+            futures::join!(publish_one(&mut engine, &store, &writer, "beta"), async {
+                store.inner().wait_until_blocked().await;
+                assert!(store.snapshot().is_empty(), "{:?}", store.snapshot());
+                fold_wal_tail(
+                    store.inner().inner(),
+                    None,
+                    &namespace_id,
+                    None,
+                    &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                )
+                .await
+                .expect("another process folds");
+                store.inner().release();
+            });
+        assert_eq!(
+            published
+                .resulting_read_state
+                .expect("landed")
+                .basis
+                .manifest_no(),
+            basis.successor().expect("next manifest number")
+        );
+        let operations = store.take();
+        assert!(
+            is_head_under(&operations[0], &wal_prefix(&namespace_id))
+                && is_head_under(
+                    &operations[1],
+                    &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
+                ),
+            "{operations:?}"
+        );
     }
 
     #[tokio::test]
