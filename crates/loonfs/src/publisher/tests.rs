@@ -2649,6 +2649,86 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
     writer.shutdown().await.expect("shut down after delete");
 }
 
+#[tokio::test]
+async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
+    let temp_dir = tempdir().expect("tempdir");
+    let folding = NamespaceId::parse("folding").expect("valid namespace id");
+    let a = NamespaceId::parse("a").expect("valid namespace id");
+    let b = NamespaceId::parse("b").expect("valid namespace id");
+    let blocking = Arc::new(blocking_fold_store(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        metadata_manifest_prefix(&folding),
+    ));
+    let writer = crate::LoonFs::builder_with_store(blocking.clone())
+        .writer_id("writer-a")
+        .max_concurrent_folds(NonZeroUsize::new(1).expect("one fold"))
+        .publication_limits(crate::PublicationLimits {
+            max_concurrent_publications: NonZeroUsize::new(1).expect("one publication"),
+            ..crate::PublicationLimits::default()
+        })
+        .build()
+        .await
+        .expect("build writer");
+    for namespace_id in [&folding, &a, &b] {
+        writer
+            .create_namespace(namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("bootstrap");
+    }
+    append_wal_objects(
+        blocking.as_ref(),
+        &folding,
+        FOLD_AT_WAL_OBJECTS - 1,
+        &MutationContext {
+            writer_id: loonfs_types::WriterId::parse("fold-seed").expect("valid writer id"),
+            now_ms: 1_000,
+        },
+    )
+    .await
+    .expect("seed the WAL tail below the fold threshold");
+    let writer_folding = writer.open_namespace(&folding).expect("open namespace");
+    let writer_a = writer.open_namespace(&a).expect("open namespace");
+    let writer_b = writer.open_namespace(&b).expect("open namespace");
+    blocking.block_next();
+    writer_folding
+        .commit_candidate(CommitCandidate::new(create_directory_request(
+            "cross", "docs",
+        )))
+        .await
+        .expect("publish across the fold threshold");
+    blocking.wait_until_blocked().await;
+
+    let delete = {
+        let writer_a = writer_a.clone();
+        tokio::spawn(async move { writer_a.delete().await })
+    };
+    wait_for_fold_waiters(&writer, 1).await;
+    timeout(
+        Duration::from_secs(10),
+        writer_b.commit_candidate(CommitCandidate::new(create_directory_request(
+            "beside-delete",
+            "docs",
+        ))),
+    )
+    .await
+    .expect("a commit on another namespace must not wait behind the delete")
+    .expect("commit beside the waiting delete");
+    assert!(
+        !delete.is_finished(),
+        "the delete waits for the fold permit"
+    );
+
+    blocking.release();
+    settle_delete(delete, "delete waiting for a fold permit")
+        .await
+        .expect("delete namespace");
+    writer_folding
+        .wait_for_fold()
+        .await
+        .expect("released fold settles");
+    writer.shutdown().await.expect("shut down writer");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn close_admission_refuses_without_creating_publishers() {
     let temp_dir = tempdir().expect("tempdir");
