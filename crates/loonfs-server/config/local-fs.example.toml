@@ -37,8 +37,9 @@ writer_id = "loonfs-server-local"
 # values are `serve_only`, `maintain_only`, and `disabled`. A mode that does
 # not serve the group answers its routes with `route_not_found`; a mode that
 # does not maintain leaves background work to another process. The sweep
-# visits every namespace in the store: it folds idle WAL tails, compacts
-# metadata, builds the grep index, and collects garbage.
+# visits sessions this process wrote to and periodically every namespace in
+# the store. It folds idle WAL tails, compacts metadata, builds the grep index,
+# and collects garbage.
 #maintenance = "serve_and_maintain"
 
 # Largest request body accepted for service-proxied upload content, in
@@ -69,13 +70,18 @@ writer_id = "loonfs-server-local"
 # How many namespaces the maintenance sweep visits at once. Defaults to 8.
 #max_concurrent_maintenance = 8
 
-# Milliseconds from the start of one sweep pass to the start of the next. A
+# Milliseconds from the start of one session pass to the start of the next. A
 # pass that runs longer is followed at once. Defaults to 300000 (5 minutes).
 #maintenance_interval_ms = 300000
 
-# Least milliseconds between the starts of two sweep passes that collect
-# garbage. The first pass after a start collects. Defaults to 3600000 (1 hour).
+# Least milliseconds between session passes that collect garbage for sessions
+# whose published seq moved. Defaults to 3600000 (1 hour).
 #gc_interval_ms = 3600000
+
+# Milliseconds between full passes over every namespace, with collection.
+# The first runs at start. Defaults to 86400000 (24 hours). An idle namespace
+# costs no request between full passes.
+#full_sweep_interval_ms = 86400000
 
 # Decoded metadata bytes one maintenance step may merge. A step merges only
 # the runs that fit; a larger window runs as a streaming compaction that holds

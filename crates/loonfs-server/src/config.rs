@@ -244,16 +244,19 @@ pub struct ServerConfig {
     /// merges also wait for the fold and compaction permits. Defaults to 8.
     #[serde(default = "default_max_concurrent_maintenance")]
     pub max_concurrent_maintenance: usize,
-    /// Milliseconds from the start of one maintenance sweep pass to the
+    /// Milliseconds from the start of one session maintenance pass to the
     /// start of the next. A pass that runs longer is followed at once.
     /// Defaults to 300000 (5 minutes).
     #[serde(default = "default_maintenance_interval_ms")]
     pub maintenance_interval_ms: u64,
-    /// Least milliseconds between the starts of two sweep passes that
-    /// collect garbage. The first pass after start collects. Defaults to
-    /// 3600000 (1 hour).
+    /// Least milliseconds between session passes that collect garbage for
+    /// sessions whose published seq moved. Defaults to 3600000 (1 hour).
     #[serde(default = "default_gc_interval_ms")]
     pub gc_interval_ms: u64,
+    /// Milliseconds between full passes over every namespace, with collection.
+    /// The first runs at start. Defaults to 86400000 (24 hours).
+    #[serde(default = "default_full_sweep_interval_ms")]
+    pub full_sweep_interval_ms: u64,
     /// Decoded metadata bytes one maintenance step may merge. A step merges
     /// inline only the runs that fit; a larger window runs as a streaming
     /// compaction that holds at most this much at once. Defaults to 64 MiB.
@@ -370,6 +373,10 @@ fn default_maintenance_interval_ms() -> u64 {
 
 fn default_gc_interval_ms() -> u64 {
     3_600_000
+}
+
+fn default_full_sweep_interval_ms() -> u64 {
+    86_400_000
 }
 
 fn default_max_merge_input_bytes() -> usize {
@@ -670,6 +677,7 @@ impl ServerConfig {
             ),
             ("maintenance_interval_ms", self.maintenance_interval_ms),
             ("gc_interval_ms", self.gc_interval_ms),
+            ("full_sweep_interval_ms", self.full_sweep_interval_ms),
         ] {
             require_positive(
                 field,
@@ -1526,6 +1534,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.max_concurrent_maintenance, 8);
         assert_eq!(config.maintenance_interval_ms, 300_000);
         assert_eq!(config.gc_interval_ms, 3_600_000);
+        assert_eq!(config.full_sweep_interval_ms, 86_400_000);
 
         for field in [
             "max_download_bytes",
@@ -1536,6 +1545,7 @@ root = "/tmp/loonfs-server"
             "max_concurrent_maintenance",
             "maintenance_interval_ms",
             "gc_interval_ms",
+            "full_sweep_interval_ms",
             "max_merge_input_bytes",
         ] {
             let path = write_config(&format!(

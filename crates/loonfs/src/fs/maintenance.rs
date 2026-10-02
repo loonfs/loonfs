@@ -219,6 +219,16 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         options: &MetadataMaintenanceOptions,
     ) -> Result<MetadataMaintenanceResponse> {
+        self.metadata_step(namespace_id, options)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    async fn metadata_step(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &MetadataMaintenanceOptions,
+    ) -> Result<(MetadataMaintenanceResponse, bool)> {
         let anchor = self.load_live_anchor(namespace_id).await?;
         let status = NamespaceStorageDiagnostics::from(&anchor);
         let inline_bytes = if status.wal_tail_objects > 0 {
@@ -241,7 +251,15 @@ impl Maintenance {
             compaction = ?response.compaction,
             "metadata maintenance pass concluded"
         );
-        Ok(response)
+        let wal_caught_up = match response.wal_fold {
+            WalFoldStepOutcome::Folded { .. } => true,
+            WalFoldStepOutcome::NotNeeded => {
+                options.idle_fold_after_ms == 0 || status.wal_tail_newest_commit_at_ms.is_none()
+            }
+            WalFoldStepOutcome::AlreadyPublished { .. }
+            | WalFoldStepOutcome::RetriesExhausted { .. } => false,
+        };
+        Ok((response, wal_caught_up))
     }
 
     /// Runs [`Self::maintain_metadata_while_due_with_options`] with the
@@ -250,7 +268,7 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.maintain_metadata_while_due_with_options(
             namespace_id,
             cancellation,
@@ -272,6 +290,12 @@ impl Maintenance {
     /// dropped call leaves what a crash would: unreferenced segments, or a
     /// manifest the runtime learns of the way it learns of another
     /// process's. Fails with the first error. Keeps no state between calls.
+    ///
+    /// Returns `true` when nothing is due now and nothing can become due
+    /// without a new commit under `options`, based on the state this call
+    /// read. Returns `false` at a work limit, after lost races, on fencing or cancellation,
+    /// when streaming compaction does not finish, or while a tail waits for
+    /// the idle fold age.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.maintain_metadata_while_due",
@@ -289,7 +313,7 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
         options: &MetadataMaintenanceOptions,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.core.record_trace_context(&tracing::Span::current());
         let mut lost_races = 0;
         let mut published_units = 0;
@@ -297,10 +321,10 @@ impl Maintenance {
             && published_units < MAX_COMPACTION_UNITS_PER_CALL
             && !cancellation.is_cancelled()
         {
-            let step = tokio::select! {
+            let (step, wal_caught_up) = tokio::select! {
                 biased;
-                () = cancellation.cancelled() => return Ok(()),
-                step = self.maintain_metadata_with_options(namespace_id, options) => step?,
+                () = cancellation.cancelled() => return Ok(false),
+                step = self.metadata_step(namespace_id, options) => step?,
             };
             let won = match step.compaction {
                 CompactionStepOutcome::UnitPublished {} => true,
@@ -316,12 +340,13 @@ impl Maintenance {
                         MetadataCompactionOutcome::Abandoned => false,
                         MetadataCompactionOutcome::NotNeeded
                         | MetadataCompactionOutcome::Cancelled
-                        | MetadataCompactionOutcome::Fenced => return Ok(()),
+                        | MetadataCompactionOutcome::Fenced => return Ok(false),
                     }
                 }
-                CompactionStepOutcome::NotNeeded {} | CompactionStepOutcome::Fenced {} => {
-                    return Ok(())
+                CompactionStepOutcome::NotNeeded {} => {
+                    return Ok(wal_caught_up && !cancellation.is_cancelled())
                 }
+                CompactionStepOutcome::Fenced {} => return Ok(false),
             };
             if won {
                 published_units += 1;
@@ -330,7 +355,7 @@ impl Maintenance {
                 lost_races += 1;
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Optionally folds the WAL tail, then runs one compaction step.

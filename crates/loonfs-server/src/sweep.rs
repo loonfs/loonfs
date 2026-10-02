@@ -1,5 +1,4 @@
-//! The maintenance sweep: on a cadence, visits every namespace in the store
-//! and runs the maintenance its durable state says is due.
+//! Maintenance for sessions this process wrote to, with periodic full passes.
 
 use crate::config::{ServerConfig, ServerConfigError};
 use futures::{FutureExt as _, StreamExt as _};
@@ -10,7 +9,9 @@ use loonfs::{
     ChangeSeq, ErrorCode, Maintenance, MaintenanceCancellation, MetadataMaintenanceOptions,
     NamespaceId, SharedObjectStore,
 };
-use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepWorker};
+use loonfs_grep::{
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
+};
 use loonfs_http::Namespaces;
 use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PAGE_LIMIT};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -22,37 +23,48 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio::time::{MissedTickBehavior, Sleep};
+use tokio::time::Sleep;
+
+mod passes;
 
 /// Grep build steps one visit runs while each step publishes.
 const MAX_GREP_BUILD_STEPS_PER_VISIT: usize = 16;
-/// Time between index passes over the writer sessions this process holds.
-const INDEX_PASS_INTERVAL: Duration = Duration::from_secs(5);
+
 const SWEEP_PASS_SECONDS_BOUNDARIES: &[f64] =
     &[1.0, 10.0, 60.0, 300.0, 900.0, 3_600.0, 14_400.0, 86_400.0];
 
-/// Visits every namespace in the store on a cadence.
+/// Visits held sessions whose published seq moved since their last caught-up
+/// visit, every `maintenance_interval_ms`. A session that published nothing
+/// is skipped. Every `gc_interval_ms`, the session pass also collects garbage,
+/// grep's included, for sessions whose seq moved since their last collection.
 ///
-/// A pass lists the namespace ids in the store one page at a time and
-/// visits up to `max_concurrent_maintenance` of them at once. Every page's
-/// ids share those visit slots, and the next page is listed when a slot is
-/// free and no listed id is waiting, so a slow visit holds only its own slot.
+/// A full pass runs at start and every `full_sweep_interval_ms`. It lists
+/// every namespace in the store and collects garbage. An idle namespace
+/// costs no request between full passes. Full passes cover namespaces this
+/// process does not write to and garbage still inside a grace window.
+///
+/// One loop serializes session and full passes, sharing
+/// `max_concurrent_maintenance` visit slots. A full pass delays session passes
+/// until it ends. It does not delay the index pass. Full passes list the next
+/// page when a slot is free and no listed id is waiting.
 /// A visit folds an idle WAL tail, compacts metadata while compaction is due
 /// for at most 16 units, and runs grep build steps when this server
-/// maintains the grep index. Every `gc_interval_ms`, a pass also collects
-/// garbage, grep's included. A failed call is logged and counted, and the
-/// next pass tries it again. A failed listing starts no new visit and ends
-/// the pass once the running visits return, and the next pass lists again.
-/// The sweep keeps no state about a namespace between passes.
+/// maintains the grep index. A failed call is logged and counted, and the
+/// next eligible pass tries it again. A failed listing starts no new visit
+/// and ends the pass once running visits return. The next full pass lists again.
+/// Recorded seqs are dropped when their sessions are no longer held.
 ///
-/// When this server maintains the grep index, a second pass runs every five
-/// seconds over the writer sessions this process holds. It indexes a
-/// session only when the session's last published seq moved since that pass
-/// last indexed it, so an idle session costs no store request.
+/// When this server maintains the grep index, a separate loop runs an index
+/// pass every five seconds over the writer sessions this process holds. It
+/// indexes a session when its last published seq moved since that pass last
+/// indexed it. It also builds namespaces whose index lifecycle this worker
+/// changed, with or without a prior commit. Unfinished builds continue on
+/// later passes while held. Otherwise, an idle session costs no store request.
+/// The per-namespace grep claim prevents concurrent builds of the same index.
 ///
 /// [`app`](crate::app) builds the sweep without starting it, and
 /// [`serve`](crate::serve) starts it. A host can run passes itself with
-/// [`Self::run_pass`] and [`Self::run_index_pass`].
+/// [`Self::run_pass`], [`Self::run_session_pass`], and [`Self::run_index_pass`].
 #[derive(Clone)]
 pub struct Sweep {
     inner: Arc<SweepInner>,
@@ -67,10 +79,20 @@ struct SweepInner {
     max_concurrent_visits: usize,
     interval: Duration,
     collection_interval: Duration,
+    full_interval: Duration,
+    // Hosts can call the public pass methods while the scheduled loop runs.
+    pass: tokio::sync::Mutex<()>,
+    sessions: Mutex<HashMap<NamespaceId, SessionProgress>>,
     page_limit: EffectiveLimit,
     stop: MaintenanceCancellation,
     timer: StdMonotonicTimer,
     metrics: SweepMetrics,
+}
+
+#[derive(Default)]
+struct SessionProgress {
+    maintained: Option<ChangeSeq>,
+    collected: Option<ChangeSeq>,
 }
 
 struct GrepIndexing {
@@ -78,9 +100,13 @@ struct GrepIndexing {
     policy: GramIndexBuildPolicy,
     /// Namespaces whose index a visit or an index pass is building now.
     building: Mutex<HashSet<NamespaceId>>,
-    /// For each held session, the published seq an index pass last brought
-    /// the index up to.
-    indexed: Mutex<HashMap<NamespaceId, ChangeSeq>>,
+    progress: Mutex<GrepIndexProgress>,
+}
+
+#[derive(Default)]
+struct GrepIndexProgress {
+    indexed: HashMap<NamespaceId, ChangeSeq>,
+    pending: HashSet<NamespaceId>,
 }
 
 /// The calls one visit makes. Failures are counted by these names.
@@ -131,7 +157,7 @@ impl Sweep {
                     worker,
                     policy,
                     building: Mutex::default(),
-                    indexed: Mutex::default(),
+                    progress: Mutex::default(),
                 })
             })
             .transpose()?;
@@ -148,6 +174,9 @@ impl Sweep {
                 max_concurrent_visits: config.max_concurrent_maintenance,
                 interval: Duration::from_millis(config.maintenance_interval_ms),
                 collection_interval: Duration::from_millis(config.gc_interval_ms),
+                full_interval: Duration::from_millis(config.full_sweep_interval_ms),
+                pass: tokio::sync::Mutex::default(),
+                sessions: Mutex::default(),
                 page_limit: EffectiveLimit::new(
                     NonZeroU32::new(MAX_NAMESPACE_IDS_PAGE_LIMIT)
                         .expect("the namespace page limit should be nonzero"),
@@ -180,6 +209,7 @@ impl Sweep {
     /// streaming compaction stops at its next block.
     pub async fn run_pass(&self, collect_garbage: bool) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
+        let _pass = inner.pass.lock().await;
         let started_ms = inner.timer.monotonic_now_ms();
         let listed = self.visit_every_namespace(collect_garbage).await;
         let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_ms);
@@ -214,120 +244,12 @@ impl Sweep {
         listed
     }
 
-    /// Builds the grep index of each writer session this process holds
-    /// whose last published seq moved since this pass last indexed it, one
-    /// session at a time.
-    ///
-    /// Does nothing on a server that does not maintain the grep index. A
-    /// session that has not moved costs no store request. A namespace whose
-    /// index a sweep visit is building is left to that visit.
-    pub async fn run_index_pass(&self) {
-        let inner = &self.inner;
-        let Some(grep) = &inner.grep else {
-            return;
-        };
-        let held: HashMap<NamespaceId, ChangeSeq> = inner
-            .namespaces
-            .held()
-            .iter()
-            .filter_map(|namespace| {
-                let seq = namespace.last_published_seq()?;
-                Some((namespace.id().clone(), seq))
-            })
-            .collect();
-        let moved: Vec<(NamespaceId, ChangeSeq)> = {
-            let mut indexed = lock(&grep.indexed);
-            indexed.retain(|namespace_id, _| held.contains_key(namespace_id));
-            held.into_iter()
-                .filter(|(namespace_id, seq)| indexed.get(namespace_id) != Some(seq))
-                .collect()
-        };
-        for (namespace_id, seq) in moved {
-            if inner.stop.is_cancelled() {
-                return;
-            }
-            let Some(_building) = grep.claim(&namespace_id) else {
-                continue;
-            };
-            // Boxed for the same reason as a sweep visit.
-            let caught_up = match self.build_index(grep, &namespace_id).boxed().await {
-                Ok(caught_up) => caught_up,
-                Err(error) => {
-                    self.record_failure(&namespace_id, SweepCall::GrepIndex, error.code(), &error);
-                    // A failed build waits for the session's next commit or the
-                    // next sweep pass instead of retrying every few seconds.
-                    true
-                }
-            };
-            if caught_up {
-                lock(&grep.indexed).insert(namespace_id, seq);
-            }
-        }
-    }
-
-    /// Starts the pass loop and, when this server maintains the grep index,
-    /// the index pass loop. The first pass starts at once and collects
-    /// garbage.
-    pub(crate) fn start(&self) -> RunningSweep {
-        let inner = &self.inner;
-        tracing::info!(
-            maintenance_interval_ms = u64::try_from(inner.interval.as_millis()).unwrap_or(u64::MAX),
-            gc_interval_ms =
-                u64::try_from(inner.collection_interval.as_millis()).unwrap_or(u64::MAX),
-            max_concurrent_maintenance = inner.max_concurrent_visits,
-            maintains_grep_index = inner.grep.is_some(),
-            "maintenance sweep started"
-        );
-        let sweep = self.clone();
-        RunningSweep {
-            stop: inner.stop.clone(),
-            task: tokio::spawn(async move {
-                tokio::join!(sweep.run_passes(), sweep.run_index_passes());
-            }),
-        }
-    }
-
-    async fn run_passes(&self) {
-        let inner = &self.inner;
-        let mut ticks = tokio::time::interval(inner.interval);
-        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut last_collection = None;
-        loop {
-            let started = tokio::select! {
-                biased;
-                () = inner.stop.cancelled() => return,
-                started = ticks.tick() => started,
-            };
-            let collect_garbage = last_collection
-                .is_none_or(|at| started.duration_since(at) >= inner.collection_interval);
-            if self.run_pass(collect_garbage).await.is_ok() && collect_garbage {
-                last_collection = Some(started);
-            }
-        }
-    }
-
-    async fn run_index_passes(&self) {
-        let inner = &self.inner;
-        if inner.grep.is_none() {
-            return;
-        }
-        let mut ticks = tokio::time::interval(INDEX_PASS_INTERVAL);
-        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                biased;
-                () = inner.stop.cancelled() => return,
-                _ = ticks.tick() => {}
-            }
-            self.run_index_pass().await;
-        }
-    }
-
     async fn visit_every_namespace(
         &self,
         collect_garbage: bool,
     ) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
+        let held = self.held_seqs();
         // Boxed for the same reason as a visit: the spawned sweep's `Send`
         // check fails on the unboxed listing future.
         let pages = futures::stream::try_unfold(Some(None), move |start_after| async move {
@@ -360,52 +282,93 @@ impl Sweep {
             .for_each_concurrent(inner.max_concurrent_visits, |namespace_id| {
                 // Boxed so the spawned sweep's `Send` check does not recurse
                 // through every engine future a visit awaits.
-                self.visit(namespace_id, collect_garbage).boxed()
+                let seq = held.get(&namespace_id).copied();
+                self.visit(namespace_id, seq, collect_garbage).boxed()
             })
             .await;
         listing.map(|()| listed)
     }
 
-    async fn visit(&self, namespace_id: NamespaceId, collect_garbage: bool) {
+    async fn visit(
+        &self,
+        namespace_id: NamespaceId,
+        seq: Option<ChangeSeq>,
+        collect_garbage: bool,
+    ) {
         let inner = &self.inner;
-        let stop = &inner.stop;
-        if let Err(error) = inner
+        let metadata_caught_up = match inner
             .maintenance
-            .maintain_metadata_while_due_with_options(&namespace_id, stop, &inner.metadata)
+            .maintain_metadata_while_due_with_options(&namespace_id, &inner.stop, &inner.metadata)
             .await
         {
-            self.record_failure(&namespace_id, SweepCall::Metadata, error.code(), &error);
-        }
-        if let Some(grep) = &inner.grep {
+            Ok(caught_up) => caught_up,
+            Err(error) => {
+                self.record_failure(&namespace_id, SweepCall::Metadata, error.code(), &error);
+                false
+            }
+        };
+        let index_caught_up = if let Some(grep) = &inner.grep {
             if let Some(_building) = grep.claim(&namespace_id) {
-                if let Err(error) = self.build_index(grep, &namespace_id).await {
-                    self.record_failure(&namespace_id, SweepCall::GrepIndex, error.code(), &error);
+                match self.build_index(grep, &namespace_id).await {
+                    Ok(caught_up) => caught_up,
+                    Err(error) => {
+                        self.record_failure(
+                            &namespace_id,
+                            SweepCall::GrepIndex,
+                            error.code(),
+                            &error,
+                        );
+                        false
+                    }
                 }
+            } else {
+                false
+            }
+        } else {
+            true
+        };
+        let collected = collect_garbage && self.collect(&namespace_id).await;
+        if let Some(seq) = seq {
+            let mut sessions = lock(&inner.sessions);
+            let progress = sessions.entry(namespace_id).or_default();
+            if metadata_caught_up && index_caught_up && !inner.stop.is_cancelled() {
+                progress.maintained = Some(seq);
+            }
+            if collected {
+                progress.collected = Some(seq);
             }
         }
-        if !collect_garbage || stop.is_cancelled() {
-            return;
+    }
+
+    async fn collect(&self, namespace_id: &NamespaceId) -> bool {
+        let inner = &self.inner;
+        if inner.stop.is_cancelled() {
+            return false;
         }
-        if let Err(error) = inner.maintenance.gc(&namespace_id).await {
-            self.record_failure(&namespace_id, SweepCall::Gc, error.code(), &error);
+        let mut collected = true;
+        if let Err(error) = inner.maintenance.gc(namespace_id).await {
+            self.record_failure(namespace_id, SweepCall::Gc, error.code(), &error);
+            collected = false;
         }
         let Some(grep) = &inner.grep else {
-            return;
+            return collected;
         };
-        if stop.is_cancelled() {
-            return;
+        if inner.stop.is_cancelled() {
+            return false;
         }
-        let collected = match inner.maintenance.now_ms() {
+        let result = match inner.maintenance.now_ms() {
             Ok(now_ms) => grep
                 .worker
-                .garbage_collect_namespace(&namespace_id, now_ms)
+                .garbage_collect_namespace(namespace_id, now_ms)
                 .await
                 .map(drop),
             Err(error) => Err(GrepError::from(error)),
         };
-        if let Err(error) = collected {
-            self.record_failure(&namespace_id, SweepCall::GrepGc, error.code(), &error);
+        if let Err(error) = result {
+            self.record_failure(namespace_id, SweepCall::GrepGc, error.code(), &error);
+            collected = false;
         }
+        collected
     }
 
     /// Runs build steps while each one publishes, at most
@@ -426,10 +389,12 @@ impl Sweep {
                     continue
                 }
                 GrepBuildOutcome::UpToDate { .. } => {
-                    grep.worker
-                        .reorganize_step(namespace_id, grep.policy)
-                        .await?;
-                    return Ok(true);
+                    return Ok(matches!(
+                        grep.worker
+                            .reorganize_step(namespace_id, grep.policy)
+                            .await?,
+                        GrepReorganizeOutcome::NotNeeded { .. } | GrepReorganizeOutcome::NotEnabled
+                    ));
                 }
                 GrepBuildOutcome::NotEnabled | GrepBuildOutcome::Superseded => return Ok(true),
             }

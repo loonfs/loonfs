@@ -6,7 +6,7 @@ use super::Sweep;
 use crate::config::{GrepConfig, GrepMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
-use loonfs::{LoonFs, Maintenance, NamespaceId, SharedObjectStore, Writable};
+use loonfs::{ChangeSeq, LoonFs, Maintenance, NamespaceId, SharedObjectStore, Writable};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
 use loonfs_http::Namespaces;
@@ -58,6 +58,7 @@ impl SweepServer {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let runtime = LoonFs::builder_with_store(store)
             .writer_id("sweep-server")
+            .min_publish_interval_ms(0)
             .wall_clock(clock.clone())
             .metrics_recorder(recorder.clone() as Arc<dyn MetricsRecorder>)
             .build()
@@ -699,6 +700,86 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
 }
 
 #[tokio::test]
+async fn the_index_loop_indexes_a_moved_session_while_a_full_pass_is_parked() {
+    let directory = tempdir().expect("tempdir");
+    let parked = namespace_id("a-parked");
+    let indexed = namespace_id("b-indexed");
+    let store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
+        OperationClass::Any,
+    ));
+    let mut config = sweep_config(Some(GrepWorkerConfig::default()));
+    config.max_concurrent_maintenance = 1;
+    let server = SweepServer::start(store.clone(), &config, 0)
+        .await
+        .page_limit(page_limit(1));
+    for namespace_id in [&parked, &indexed] {
+        server
+            .runtime
+            .create_namespace(namespace_id, &test_actor())
+            .await
+            .expect("create namespace");
+    }
+    let held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&indexed)
+        .await
+        .expect("hold namespace");
+    server
+        .grep_worker
+        .as_ref()
+        .expect("grep worker")
+        .enable(&indexed)
+        .await
+        .expect("enable grep");
+    let initial = held
+        .put_file("/note", b"initial", &test_actor())
+        .await
+        .expect("publish");
+    store.block_next();
+    let running = server.sweep.start();
+    let grep = server.sweep.inner.grep.as_ref().expect("grep indexing");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        store.wait_until_blocked().await;
+        while super::lock(&grep.progress).indexed.get(&indexed) != Some(&initial.committed_seq) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the initial index pass finishes while the full pass is parked");
+
+    let moved = held
+        .put_file("/moved", b"moved", &test_actor())
+        .await
+        .expect("publish during the full pass");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while server
+            .grep_status(&indexed)
+            .await
+            .active_watermark()
+            .is_none_or(|watermark| watermark.built_through_seq() != moved.committed_seq)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the next index tick indexes the moved session while the full pass is parked");
+    assert!(server.sweep.inner.pass.try_lock().is_err());
+    assert_eq!(
+        server.counter("loonfs.maintenance.sweep_passes", &[("result", "ok")]),
+        0
+    );
+
+    running.cancel();
+    store.release();
+    running.task.await.expect("stop sweep");
+    server.runtime.shutdown().await.expect("stop runtime");
+}
+
+#[tokio::test]
 async fn the_index_pass_indexes_a_held_session_and_reads_nothing_while_it_is_idle() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
@@ -764,3 +845,213 @@ async fn the_index_pass_indexes_a_held_session_and_reads_nothing_while_it_is_idl
     );
     state.runtime.shutdown().await.expect("stop the runtime");
 }
+
+#[tokio::test]
+async fn the_index_pass_builds_a_newly_enabled_held_session_without_another_commit() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::any(),
+    ));
+    let config = sweep_config(Some(GrepWorkerConfig::default()));
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let namespace_id = namespace_id("quiet-index");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create namespace");
+    let held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .expect("hold namespace");
+    let commit = held
+        .put_file("/note.txt", b"quiet needle\n", &test_actor())
+        .await
+        .expect("publish");
+    server.sweep.run_index_pass().await;
+
+    store.reset();
+    server.sweep.run_index_pass().await;
+    assert!(
+        store.take().is_empty(),
+        "an observed disabled session costs no store request"
+    );
+
+    let worker = server.grep_worker.as_ref().expect("grep worker");
+    worker.enable(&namespace_id).await.expect("enable grep");
+    server.sweep.run_index_pass().await;
+    assert_eq!(held.last_published_seq(), Some(commit.committed_seq));
+    assert_eq!(
+        server
+            .grep_status(&namespace_id)
+            .await
+            .active_watermark()
+            .expect("an active index after the next pass")
+            .built_through_seq(),
+        commit.committed_seq
+    );
+
+    store.reset();
+    server.sweep.run_index_pass().await;
+    assert!(
+        store.take().is_empty(),
+        "the lifecycle change is drained after one pass"
+    );
+    worker.disable(&namespace_id).await.expect("disable grep");
+    store.reset();
+    server.sweep.run_index_pass().await;
+    assert!(
+        !store.take().is_empty(),
+        "disabling also clears the recorded seq"
+    );
+    server.sweep.run_index_pass().await;
+    assert!(
+        store.take().is_empty(),
+        "the disabled session is caught up again"
+    );
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn the_index_pass_builds_newly_enabled_namespaces_without_a_commit() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::any(),
+    ));
+    let config = sweep_config(Some(GrepWorkerConfig::default()));
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let held_id = namespace_id("empty-held");
+    let unheld_id = namespace_id("empty-unheld");
+    for namespace_id in [&held_id, &unheld_id] {
+        server
+            .runtime
+            .create_namespace(namespace_id, &test_actor())
+            .await
+            .expect("create namespace");
+    }
+    let held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&held_id)
+        .await
+        .expect("hold namespace");
+    assert_eq!(held.last_published_seq(), None);
+
+    store.reset();
+    server.sweep.run_index_pass().await;
+    assert!(
+        store.take().is_empty(),
+        "a session with no commit or lifecycle change costs no store request"
+    );
+
+    let worker = server.grep_worker.as_ref().expect("grep worker");
+    for namespace_id in [&held_id, &unheld_id] {
+        worker.enable(namespace_id).await.expect("enable grep");
+    }
+    server.sweep.run_index_pass().await;
+    for namespace_id in [&held_id, &unheld_id] {
+        assert_eq!(
+            server
+                .grep_status(namespace_id)
+                .await
+                .active_watermark()
+                .expect("an active index after the next pass")
+                .built_through_seq(),
+            ChangeSeq(0)
+        );
+    }
+    assert_eq!(held.last_published_seq(), None);
+
+    store.reset();
+    server.sweep.run_index_pass().await;
+    assert!(
+        store.take().is_empty(),
+        "a drained lifecycle change costs no further store request"
+    );
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn the_index_pass_finishes_a_backfill_without_a_local_commit() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::any(),
+    ));
+    let shared: SharedObjectStore = store.clone();
+    let (writer, now_ms) = seed_writer(&shared).await;
+    let namespace_id = namespace_id("pending-backfill");
+    writer
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create namespace");
+    let session = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let files = super::MAX_GREP_BUILD_STEPS_PER_VISIT + 4;
+    for index in 0..files {
+        session
+            .put_file(&format!("/file-{index}"), b"needle", &test_actor())
+            .await
+            .expect("publish before the server starts");
+    }
+    writer.shutdown().await.expect("stop writer");
+    let config = sweep_config(Some(GrepWorkerConfig {
+        max_files_per_step: 1,
+        ..GrepWorkerConfig::default()
+    }));
+    let server = SweepServer::start(store.clone(), &config, now_ms).await;
+    let held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .expect("hold namespace");
+    assert_eq!(held.last_published_seq(), None);
+    server
+        .grep_worker
+        .as_ref()
+        .expect("grep worker")
+        .enable(&namespace_id)
+        .await
+        .expect("enable grep");
+
+    server.sweep.run_index_pass().await;
+    assert!(matches!(
+        server.grep_status(&namespace_id).await,
+        GrepIndexStatus::Backfilling { .. }
+    ));
+    store.reset();
+    server.sweep.run_index_pass().await;
+    assert!(
+        !store.take().is_empty(),
+        "an unfinished backfill stays selected without a local commit"
+    );
+    assert_eq!(
+        server
+            .grep_status(&namespace_id)
+            .await
+            .active_watermark()
+            .expect("the second pass finishes the backfill")
+            .built_through_seq(),
+        ChangeSeq(u64::try_from(files).expect("file count fits"))
+    );
+    server.sweep.run_index_pass().await;
+    store.reset();
+    server.sweep.run_index_pass().await;
+    assert!(
+        store.take().is_empty(),
+        "a finished index costs no requests"
+    );
+    assert_eq!(held.last_published_seq(), None);
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+mod sessions;

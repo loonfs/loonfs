@@ -296,10 +296,10 @@ fit the namespaces a server serves.
 | `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `metadata_cache.max_segment_bytes`. |
 | `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of finding it in the head-state cache. This happens on a session's first publish, after the cache evicted the tail, after a failed publish, when the namespace's last write was more than a minute ago, and when a fold the publisher did not run has published a new manifest. |
 | `loonfs.publisher.sessions_open` | Gauge | Open writer sessions and sessions whose admitted work is still finishing. A fenced session stops counting once its work ends. |
-| `loonfs.maintenance.sweep_passes` | Counter, `result` label | A maintenance sweep pass ends: `ok` when it listed every namespace, `error` when the listing failed. |
-| `loonfs.maintenance.sweep_pass_seconds` | Histogram | How long one sweep pass took. A pass that takes longer than `maintenance_interval_ms` is followed at once by the next. |
+| `loonfs.maintenance.sweep_passes` | Counter, `result` label | A full sweep pass ends: `ok` when it listed every namespace, `error` when the listing failed. |
+| `loonfs.maintenance.sweep_pass_seconds` | Histogram | How long one full sweep pass took. Full passes run at start and every `full_sweep_interval_ms`. |
 | `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The next pass tries it again. |
-| `loonfs.maintenance.sweep_namespaces` | Gauge | Namespaces the last finished sweep pass listed, deleted ones included. |
+| `loonfs.maintenance.sweep_namespaces` | Gauge | Namespaces the last finished full sweep pass listed, deleted ones included. |
 | `loonfs.object_store.operations` | Counter, `operation`, `result`, and `key_class` labels | A store call finishes. `key_class` is `content`, `wal_object`, `namespace_manifest` (manifests and the hint), `metadata_segment`, `gc_control` (pins), `metadata` (upload sessions), or `unknown`. |
 
 ## Logs
@@ -642,11 +642,11 @@ the fold thresholds, and it compacts its namespace's metadata after each fold
 it publishes, at most 16 compaction units each time. Its next fold continues
 the work. When a session stops folding with compaction still due, the next
 sweep pass continues it. The sweep does everything else on a cadence.
-Nothing is scheduled by hints, and the sweep keeps no state about a
-namespace between passes, so a restart loses no work: the first pass after
-a start visits every namespace.
+The sweep records the last published seq it brought up to date for each held
+session, separately from the seq it last collected. Losing those records on a
+restart loses no work: the first pass after a start visits every namespace.
 
-A sweep pass lists every namespace in the store, deleted ones included. It
+A full sweep pass lists every namespace in the store, deleted ones included. It
 reads one page of up to 1,000 namespace ids per list request and visits up
 to `max_concurrent_maintenance` namespaces at once, 8 by default. The
 namespaces of every page share those visits: the sweep lists the next page
@@ -664,34 +664,54 @@ order:
    [Resource sizing](#resource-sizing).
 3. On a collection pass, collects garbage, then grep garbage.
 
-A pass starts every `maintenance_interval_ms`, 300000 ms (5 minutes) by
-default. When a pass takes longer, the next one starts as soon as it ends.
-A pass collects garbage when `gc_interval_ms`, 3600000 ms (1 hour) by
-default, has passed since the start of the last collection pass that listed
-every namespace. The first pass after a start collects.
+A session pass starts every `maintenance_interval_ms`, 300000 ms (5 minutes)
+by default. It walks the writer sessions this process holds and skips sessions
+that published nothing. It visits a session whose published seq differs from
+the seq recorded at its last caught-up visit. A visit records the seq read
+before it began, only when metadata and the maintained grep build are caught
+up. Work left after 16 units and tails waiting for their idle fold age remain
+eligible without another commit. Recorded seqs are dropped when a session is
+no longer held.
+
+Every `gc_interval_ms`, 3600000 ms (1 hour) by default, the session pass also
+collects core and grep garbage for sessions whose seq moved since their last
+successful collection. A full pass runs at start and every
+`full_sweep_interval_ms`, 86400000 ms (24 hours) by default, and always collects.
+All three interval settings must be positive. One loop serializes session and
+full passes, using the same `max_concurrent_maintenance` visit slots. A full
+pass delays session passes until it ends. It does not delay the index pass.
+
+A namespace nobody writes to through this process waits for the full pass.
+This covers forks, deleted namespaces, leftovers of a crashed process, and
+garbage still inside a grace window. Hosts that run passes themselves can use
+`Sweep::run_pass` for a full pass, `Sweep::run_session_pass` for held sessions,
+and `Sweep::run_index_pass` for indexing.
 
 A streaming compaction counts as one unit, and on a very large namespace it
 can run for a long time. It holds one visit slot while it runs, the pass
-waits for it before it ends, and the next pass starts late. The other
+waits for it before it ends, and the next maintenance pass starts late. The other
 namespaces in that pass are not held up.
 
-When `[grep].mode` maintains the index, a second, shorter pass runs every 5
-seconds over the writer sessions this server holds, one at a time. It runs
-build steps for a session only when the session has committed since that
-pass last indexed it, so a commit through this server is indexed within
-seconds. A held
-session that has not committed costs no store request. The two passes never
-build one namespace's index at the same time. Commits made through another
-server or writer are indexed by the next sweep pass. A grep query stays
-correct while the index is behind: it scans the files committed after the
-index, and fails with `index_lagging` past its scan budget unless
+When `[grep].mode` maintains the index, a separate loop runs an index pass every
+5 seconds over the writer sessions this server holds, one at a time. It runs
+build steps for a session when it has committed since that pass last indexed it.
+It also builds namespaces whose index lifecycle changed through this process.
+Enabling an index therefore starts building it on the next index pass, with or
+without a prior commit or a held session. A namespace with no published seq is
+not selected again until it publishes or its lifecycle changes again. The index
+pass can run while a session or full pass is running. A held session with neither
+change costs no store request, including when its index is disabled. The
+per-namespace grep claim prevents concurrent builds of the same index. Commits
+made through another server or writer are indexed by the next full pass. A grep
+query stays correct while the index is behind: it scans the files committed
+after the index, and fails with `index_lagging` past its scan budget unless
 `allow_stale` is set.
 
 A failed call on one namespace is logged with the namespace id and the call
 name, counted in `loonfs.maintenance.sweep_visit_failures`, and tried again
-on the next pass. It does not stop the visits to other namespaces. A failed
+on the next eligible pass. It does not stop the visits to other namespaces. A failed
 namespace listing starts no new visit. The visits already running finish,
-the pass ends with a warning, and the next pass lists again. On shutdown,
+the pass ends with a warning, and the next full pass lists again. On shutdown,
 the server stops the sweep at the same moment it stops admitting requests.
 No new visit starts, and a running streaming compaction stops at its next
 block. After the request drain, the server waits for the visits that are
@@ -701,8 +721,9 @@ shuts the runtime down. A dropped visit leaves what a crash leaves, and a
 later pass does the work again. Like an abandoned request, it does not make
 the shutdown fail.
 
-One pass costs one list request per page of namespaces, plus a fixed number
-of requests for each namespace. An idle namespace, one with nothing to fold,
+An idle namespace costs no request between full passes. A full pass costs
+one list request per page of namespaces, plus a fixed number of requests for
+each namespace. An idle namespace, one with nothing to fold,
 compact, or collect, costs:
 
 | Pass | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
@@ -712,15 +733,16 @@ compact, or collect, costs:
 
 An object still inside its collection grace adds a request on a collection
 pass, and a namespace with work due adds the requests of that work. Deleted
-namespaces stay listed, so each one keeps this cost on every pass. A server
-with 1,000 idle namespaces and no grep sends about 6,000 requests every
-5 minutes and about 19,000 on each hourly collection pass. Raise
-`maintenance_interval_ms` and `gc_interval_ms` when that is too many.
+namespaces stay listed, so each one keeps this cost on every full pass. Core
+metadata still costs 6 requests per visit and GC adds 13, for 19 total. A
+server with 1,000 caught-up idle namespaces and no grep sends no requests for
+them between full passes, and about 19,000 on each daily full pass, plus the
+namespace listing.
 
-The sweep collects deleted namespaces too. A collection pass reclaims a
-deleted namespace's content once its retirement grace passes, about 63
-minutes after the delete, and later passes keep collecting it. Late writes
-through already-issued upload capabilities and dependent forks can extend
+The full pass collects deleted namespaces too. Their content becomes eligible
+once its retirement grace passes, about 63 minutes after the delete. The next
+full pass collects eligible content, and later full passes keep collecting it.
+Late writes through already-issued upload capabilities and dependent forks can extend
 reclamation; the later passes find them.
 `deleted.retired_content_objects` in a GC report counts listed content
 objects that the pass deleted; a pass with nothing left under the content
@@ -735,16 +757,20 @@ session or the next sweep visit runs it.
 A namespace that stops writing below the fold thresholds is folded by the
 first sweep pass after its newest commit is `idle_fold_after_ms` old. The
 period defaults to 900000 ms, which is 15 minutes, so at the default
-interval an idle tail is folded within about 20 minutes, after a restart
-too. A namespace written more often than once per period is never folded
-this way; its writer folds it at the thresholds. Set
+session interval a tail written through this process is folded within about
+20 minutes. After a restart or a write through another process, it waits for
+a full pass after the age threshold. A namespace written more often than once
+per period is never folded this way; its writer folds it at the thresholds. Set
 `idle_fold_after_ms = 0` to turn the rule off. An explicit `metadata`
 maintenance request uses the same period as the sweep.
 An embedded CLI profile does not read the server config and always uses
 15 minutes. Embedded hosts pass
 `MetadataMaintenanceOptions::idle_fold_after_ms` to
 `Maintenance::maintain_metadata_while_due_with_options`, where zero also
-turns the rule off.
+turns the rule off. Both `maintain_metadata_while_due` forms return
+`Result<bool>`: `true` means no metadata work remains or can become due without
+another commit under the options used. The answer uses reads already made by
+the call.
 
 ## Current limitations
 
