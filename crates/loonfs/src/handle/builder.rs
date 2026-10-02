@@ -263,7 +263,10 @@ impl LoonFsBuilder<Writable> {
     }
 
     /// Sets the maximum number of WAL tails this runtime folds concurrently.
-    /// The default is [`crate::DEFAULT_MAX_CONCURRENT_FOLDS`].
+    /// Session folds, [`LoonFs::maintenance`] folds, namespace deletions, and
+    /// the creation of checkpoints, snapshots, and forks of the current head
+    /// all take a fold permit, because each may fold. The default is
+    /// [`crate::DEFAULT_MAX_CONCURRENT_FOLDS`].
     pub fn max_concurrent_folds(mut self, limit: NonZeroUsize) -> Self {
         self.writer.max_concurrent_folds = limit;
         self

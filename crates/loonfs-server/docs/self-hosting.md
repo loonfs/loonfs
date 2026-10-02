@@ -349,7 +349,7 @@ counted in any budget and sit on top.
 | Block memo | `max_block_memo_bytes` | 64 MiB | Metadata blocks one read, publication, or fold keeps | Per operation |
 | Merge input | `max_merge_input_bytes` | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments one fold, compaction, or maintenance step holds while it writes them | Per operation |
-| WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including folds that maintenance requests start | Concurrency |
+| WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including the folds that maintenance requests, namespace deletes, and checkpoint, snapshot, and fork creation start | Concurrency |
 | Compactions | `max_concurrent_compactions` | 2 | Metadata merges running at once, bounded steps and streaming compactions alike, whether writer sessions, the maintenance sweep, or maintenance requests start them | Concurrency |
 | Sweep visits | `max_concurrent_maintenance` | 8 | Namespaces the maintenance sweep visits at once, including their grep indexing | Concurrency |
 | Grep steps | `[grep].max_concurrent_steps` | 2 | Grep build and reorganize steps that hold file content or index segments at once, across sweep visits and the index pass | Concurrency |
@@ -369,7 +369,9 @@ steps to compactions.
 
 The segment output budget has no setting. A segment larger than the budget
 is written alone. A checkpoint, snapshot, or fork that has to fold the WAL
-tail first runs that fold with the default 64 MiB block memo.
+tail first runs that fold with the default 64 MiB block memo. Creating one
+waits for a fold permit, even when the tail is already folded. A fork of a
+snapshot never folds and takes no fold permit.
 
 Maintenance requests sent to the API run outside
 `max_concurrent_maintenance`. Their folds and merges take the same fold and

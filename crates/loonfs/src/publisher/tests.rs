@@ -3149,7 +3149,76 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     );
 }
 
+/// Holds every metadata segment write for a moment, and records the most
+/// namespaces that had one in flight at the same time.
+#[derive(Debug)]
+struct SegmentWriteWatch {
+    inner: LocalFsStore,
+    writing: Mutex<std::collections::BTreeMap<String, usize>>,
+    peak_namespaces: AtomicUsize,
+}
+
+impl SegmentWriteWatch {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("store"),
+            writing: Mutex::default(),
+            peak_namespaces: AtomicUsize::new(0),
+        }
+    }
+
+    fn enter(&self, namespace: &str) {
+        let mut writing = self.writing.lock().expect("segment write lock");
+        *writing.entry(namespace.to_owned()).or_default() += 1;
+        self.peak_namespaces
+            .fetch_max(writing.len(), AtomicOrdering::SeqCst);
+    }
+
+    fn exit(&self, namespace: &str) {
+        let mut writing = self.writing.lock().expect("segment write lock");
+        let count = writing.get_mut(namespace).expect("an entered namespace");
+        *count -= 1;
+        if *count == 0 {
+            writing.remove(namespace);
+        }
+    }
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test-side pause on segment writes leaves other merges and folds time to start theirs"
+)]
+async fn hold_segment_write() {
+    tokio::time::sleep(Duration::from_millis(5)).await;
+}
+
+#[async_trait]
+impl ObjectStore for SegmentWriteWatch {
+    delegate_object_store!(self => self.inner; except put);
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let namespace = key
+            .contains("/segments/")
+            .then(|| key.split('/').nth(1))
+            .flatten();
+        let Some(namespace) = namespace else {
+            return self.inner.put(key, bytes, mode).await;
+        };
+        self.enter(namespace);
+        hold_segment_write().await;
+        let put = self.inner.put(key, bytes, mode).await;
+        self.exit(namespace);
+        put
+    }
+}
+
 mod inline_writer;
+mod pin_folds;
 mod session_compaction;
 
 impl loonfs_core::time::WallClock for ManualMonotonicTimer {

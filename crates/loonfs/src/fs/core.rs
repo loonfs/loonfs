@@ -99,7 +99,9 @@ impl Drop for WaitingFold<'_> {
 
 impl WriterBits {
     /// Waits for one of the writer's fold permits. Every fold the runtime
-    /// starts holds one, and so does a namespace deletion.
+    /// starts holds one, and so does every operation that may fold first: a
+    /// namespace deletion, and the creation of a checkpoint, a snapshot, or a
+    /// fork of the current head.
     pub(crate) async fn fold_permit(
         &self,
         instruments: &RuntimeInstruments,
