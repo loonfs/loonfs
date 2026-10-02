@@ -463,13 +463,16 @@ max_head_state_bytes = 16777216
 
 64 + 16 + 8 + 16 + 16 + 16 + 40 + 40 = 216 MiB, which leaves 40 MiB of the
 256 MiB for allocator overhead, HTTP buffers, and the block memos of reads.
-Each read keeps at most 8 MiB. Three cases can still pass the limit:
+Each read keeps at most 8 MiB. A namespace delete that folds the WAL tail
+holds the one fold permit and no publication slot, and its fold uses the
+configured 8 MiB block memo, so the fold row already counts it. Two cases can
+still pass the limit:
 
 - Many large reads at once, because reads have no concurrency limit.
-- A namespace delete that folds the WAL tail. It runs as a publication and
-  adds a 32 MiB segment output.
-- A checkpoint, snapshot, or fork that folds the WAL tail. That fold keeps
-  the default 64 MiB block memo.
+- A checkpoint, snapshot, or fork that folds the WAL tail. It holds the one
+  fold permit, but its fold keeps the default 64 MiB block memo, not the
+  configured 8 MiB. While it runs, the fold row is 64 + 32 = 96 MiB instead
+  of 40 MiB, and the total is 216 - 40 + 96 = 272 MiB.
 
 The server keeps one writer session for each namespace it has written since
 it started. There is no cap and no eviction. One idle session holds about
@@ -493,7 +496,11 @@ commits, conflicts, and namespace deletes. A caller that disconnects stays
 charged until its admitted work settles. Requests past a count or estimated
 byte limit receive `commit_queue_full`; admitted work waits for a shared
 publication slot. Each namespace has its own allowance so one busy tenant
-cannot consume the default host budget.
+cannot consume the default host budget. The
+`loonfs.execution_budget.admission_rejections` counter counts the requests
+refused at the totals, and a sustained
+`loonfs.execution_budget.publications_waiting` gauge means namespaces are
+waiting for a publication slot.
 
 ```toml
 [publication]
@@ -508,7 +515,13 @@ These are the defaults; every value must be positive. The byte estimate counts
 request data, prepared proofs, and queue bookkeeping. It excludes allocator
 slack, HTTP request buffers, and the metadata/working copies a publication
 loads. Size process memory for those costs and the separate fold/cache limits
-too. Embedded hosts set the same limits with `LoonFsBuilder::publication_limits`.
+too. Embedded hosts set the per-namespace limits with
+`LoonFsBuilder::publication_limits`. They set `max_requests`,
+`max_estimated_bytes`, and `max_concurrent_publications` on the execution
+budget with `ExecutionBudgetBuilder::max_admitted_requests`,
+`max_admitted_bytes`, and `max_concurrent_publications`. Runtimes that share
+one budget share these three limits; each runtime keeps its own per-namespace
+limits.
 
 Hosted servers use the `[inline_content]` table with the settings below. Inline
 writes are enabled by default at a 64 KiB threshold. Set

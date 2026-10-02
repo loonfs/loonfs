@@ -564,45 +564,104 @@ impl MetadataCacheInstruments {
     }
 }
 
-/// The gauges of one execution budget, registered when the budget is built.
+/// The instruments of one execution budget, registered when the budget is
+/// built.
 pub(crate) struct ExecutionBudgetInstruments {
+    pub(crate) admission: AdmissionInstruments,
+    pub(crate) publications: PermitPoolGauges,
     pub(crate) folds: PermitPoolGauges,
     pub(crate) compactions: PermitPoolGauges,
 }
 
 impl ExecutionBudgetInstruments {
-    /// Registers every budget gauge now, or nothing without a recorder.
+    /// Registers every budget instrument now, or nothing without a recorder.
     pub(crate) fn new(recorder: Option<&dyn MetricsRecorder>) -> Self {
         Self {
-            folds: PermitPoolGauges {
-                installed: recorder.map(|recorder| InstalledPoolGauges {
-                    running: recorder.register_gauge(
-                        "loonfs.execution_budget.folds_running",
-                        "Folds, and operations that may fold first, holding a fold permit",
+            admission: AdmissionInstruments {
+                installed: recorder.map(|recorder| InstalledAdmissionInstruments {
+                    requests: recorder.register_gauge(
+                        "loonfs.execution_budget.admitted_requests",
+                        "Publication requests admitted and not yet settled",
                         &[],
                     ),
-                    waiting: recorder.register_gauge(
-                        "loonfs.execution_budget.folds_waiting",
-                        "Folds, and operations that may fold first, waiting for a fold permit",
+                    bytes: recorder.register_gauge(
+                        "loonfs.execution_budget.admitted_bytes",
+                        "Estimated retained bytes of publication requests admitted and not yet settled",
                         &[],
                     ),
-                }),
-            },
-            compactions: PermitPoolGauges {
-                installed: recorder.map(|recorder| InstalledPoolGauges {
-                    running: recorder.register_gauge(
-                        "loonfs.execution_budget.compactions_running",
-                        "Metadata merges holding a compaction permit",
-                        &[],
-                    ),
-                    waiting: recorder.register_gauge(
-                        "loonfs.execution_budget.compactions_waiting",
-                        "Metadata merges waiting for a compaction permit",
+                    rejections: recorder.register_counter(
+                        "loonfs.execution_budget.admission_rejections",
+                        "Publication requests refused because an admitted total was full",
                         &[],
                     ),
                 }),
             },
+            publications: PermitPoolGauges::register(
+                recorder,
+                (
+                    "loonfs.execution_budget.publications_running",
+                    "Publication batches holding a publication permit",
+                ),
+                (
+                    "loonfs.execution_budget.publications_waiting",
+                    "Namespace publication workers waiting for a publication permit",
+                ),
+            ),
+            folds: PermitPoolGauges::register(
+                recorder,
+                (
+                    "loonfs.execution_budget.folds_running",
+                    "Folds, and operations that may fold first, holding a fold permit",
+                ),
+                (
+                    "loonfs.execution_budget.folds_waiting",
+                    "Folds, and operations that may fold first, waiting for a fold permit",
+                ),
+            ),
+            compactions: PermitPoolGauges::register(
+                recorder,
+                (
+                    "loonfs.execution_budget.compactions_running",
+                    "Metadata merges holding a compaction permit",
+                ),
+                (
+                    "loonfs.execution_budget.compactions_waiting",
+                    "Metadata merges waiting for a compaction permit",
+                ),
+            ),
         }
+    }
+}
+
+/// The admitted totals and the total-level refusals of one execution budget.
+pub(crate) struct AdmissionInstruments {
+    installed: Option<InstalledAdmissionInstruments>,
+}
+
+struct InstalledAdmissionInstruments {
+    requests: Arc<dyn GaugeHandle>,
+    bytes: Arc<dyn GaugeHandle>,
+    rejections: Arc<dyn CounterHandle>,
+}
+
+impl AdmissionInstruments {
+    pub(crate) fn report(&self, requests: usize, bytes: usize) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed
+            .requests
+            .set(i64::try_from(requests).unwrap_or(i64::MAX));
+        installed
+            .bytes
+            .set(i64::try_from(bytes).unwrap_or(i64::MAX));
+    }
+
+    pub(crate) fn rejection(&self) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed.rejections.increment(1);
     }
 }
 
@@ -617,6 +676,19 @@ struct InstalledPoolGauges {
 }
 
 impl PermitPoolGauges {
+    fn register(
+        recorder: Option<&dyn MetricsRecorder>,
+        (running_name, running_description): (&'static str, &'static str),
+        (waiting_name, waiting_description): (&'static str, &'static str),
+    ) -> Self {
+        Self {
+            installed: recorder.map(|recorder| InstalledPoolGauges {
+                running: recorder.register_gauge(running_name, running_description, &[]),
+                waiting: recorder.register_gauge(waiting_name, waiting_description, &[]),
+            }),
+        }
+    }
+
     pub(crate) fn report(&self, running: usize, waiting: usize) {
         let Some(installed) = &self.installed else {
             return;

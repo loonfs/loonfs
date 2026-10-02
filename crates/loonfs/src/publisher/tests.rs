@@ -401,6 +401,18 @@ async fn hold_every_fold_permit(writer: &crate::LoonFs<crate::Writable>) -> Vec<
     permits
 }
 
+/// Takes every publication permit of a runtime with the default
+/// publication limit, so no batch publishes until they drop.
+async fn hold_every_publication_permit(
+    writer: &crate::LoonFs<crate::Writable>,
+) -> Vec<BudgetPermit<'_>> {
+    let mut permits = Vec::new();
+    for _ in 0..crate::execution_budget::DEFAULT_MAX_CONCURRENT_PUBLICATIONS {
+        permits.push(writer.execution_budget().publication_permit().await);
+    }
+    permits
+}
+
 /// A budget whose folds run one at a time.
 fn one_fold_at_a_time() -> ExecutionBudget {
     ExecutionBudget::builder()
@@ -484,6 +496,7 @@ fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> Na
         tokio::runtime::Handle::current(),
         TEST_STANDALONE_PACING,
         crate::PublicationLimits::default(),
+        runtime.bits.execution_budget.clone(),
     );
     NamespacePublisher::new(namespace_id.clone(), &registry)
 }
@@ -971,10 +984,12 @@ async fn publisher_contender_retries_after_active_request_fails() {
     let runtime = test_runtime(store);
     create_namespace(&runtime, &namespace_id).await;
     let mut publisher = standalone_publisher(&namespace_id, &runtime);
-    publisher.admission = Arc::new(PublicationAdmission::new(crate::PublicationLimits {
-        max_requests: NonZeroUsize::new(1).expect("one slot"),
-        ..crate::PublicationLimits::default()
-    }));
+    publisher.admission = Arc::new(PublicationAdmission::new(
+        crate::PublicationLimits::default(),
+        ExecutionBudget::builder()
+            .max_admitted_requests(NonZeroUsize::MIN)
+            .build(),
+    ));
     let commit_id = CommitId::parse("handoff").expect("valid commit id");
     let primary_identity = CommitCandidate::new(create_directory_request("handoff", "first"))
         .semantic_identity(&namespace_id)
@@ -2131,6 +2146,11 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         0,
         "panic and drain refund admission"
     );
+    assert_eq!(
+        writer.execution_budget().stats(),
+        crate::ExecutionBudgetStats::default(),
+        "panic and drain refund the budget"
+    );
 }
 
 #[tokio::test]
@@ -2678,11 +2698,12 @@ async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
     ));
     let writer = crate::LoonFs::builder_with_store(blocking.clone())
         .writer_id("writer-a")
-        .execution_budget(one_fold_at_a_time())
-        .publication_limits(crate::PublicationLimits {
-            max_concurrent_publications: NonZeroUsize::new(1).expect("one publication"),
-            ..crate::PublicationLimits::default()
-        })
+        .execution_budget(
+            ExecutionBudget::builder()
+                .max_concurrent_folds(NonZeroUsize::MIN)
+                .max_concurrent_publications(NonZeroUsize::MIN)
+                .build(),
+        )
         .build()
         .await
         .expect("build writer");
@@ -3170,10 +3191,14 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &a));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("bounded-writer")
+        .execution_budget(
+            ExecutionBudget::builder()
+                .max_admitted_requests(NonZeroUsize::new(2).expect("two requests"))
+                .max_concurrent_publications(NonZeroUsize::MIN)
+                .build(),
+        )
         .publication_limits(crate::PublicationLimits {
-            max_requests: NonZeroUsize::new(2).expect("two requests"),
             max_requests_per_namespace: NonZeroUsize::new(1).expect("one request per namespace"),
-            max_concurrent_publications: NonZeroUsize::new(1).expect("one publication"),
             ..crate::PublicationLimits::default()
         })
         .build()
@@ -3212,10 +3237,8 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     };
     let publisher = writer_b.session().publisher.clone();
     wait_for_queued_candidates(&publisher, 1).await;
-    assert_eq!(
-        registry.shared.admission.publications.available_permits(),
-        0
-    );
+    let budget = writer.execution_budget().clone();
+    assert_eq!(budget.stats().publications_running, 1);
     assert!(
         publisher.engine.lock().await.engine.is_none(),
         "waiting for a slot must not load the other namespace's engine"
@@ -3227,6 +3250,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
         2,
         "disconnected work remains charged"
     );
+    assert_eq!(budget.stats().admitted_requests, 2);
     let error = writer_a
         .session()
         .submit_delete(DeleteNamespaceOptions::default())
@@ -3240,10 +3264,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
         .expect("second publication");
     writer.shutdown().await.expect("drain");
     assert_eq!(registry.shared.admission.used_requests(), 0);
-    assert_eq!(
-        registry.shared.admission.publications.available_permits(),
-        1
-    );
+    assert_eq!(budget.stats(), crate::ExecutionBudgetStats::default());
 }
 
 /// Holds every metadata segment write for a moment, and records the most

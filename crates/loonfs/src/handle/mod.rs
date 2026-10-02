@@ -8,7 +8,8 @@
 //! writes. A `LoonFs<ReadOnly>` returns only `Namespace<ReadOnly>` handles,
 //! from [`LoonFs::namespace`]; they own no writer session and cost nothing
 //! to create. A `LoonFs<Writable>` also owns the writer identity, the
-//! publication service, the admission budgets, and shutdown. It creates and
+//! publication service, the per-namespace admission limits, and shutdown,
+//! and runs its work under an execution budget it may share. It creates and
 //! forks namespaces, and [`LoonFs::open_namespace`] returns a
 //! `Namespace<Writable>`, which is that namespace's writer session. The host
 //! owns each session: it lives while the host holds a handle for it.

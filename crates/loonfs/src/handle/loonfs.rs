@@ -19,9 +19,10 @@ use std::sync::Arc;
 /// [`MetadataCache`] it may share with other runtimes, and returns read-only
 /// [`Namespace`] handles from [`Self::namespace`]. A
 /// writable runtime also owns the writer identity, the publication service,
-/// and the admission budgets. It creates and forks namespaces, opens a
-/// writable handle on each namespace it writes, runs maintenance through
-/// [`Self::maintenance`], and shuts down.
+/// and the per-namespace admission limits, and runs its work under an
+/// [`ExecutionBudget`] it may share with other runtimes. It creates and forks
+/// namespaces, opens a writable handle on each namespace it writes, runs
+/// maintenance through [`Self::maintenance`], and shuts down.
 ///
 /// Build a runtime inside the Tokio runtime that will use it. Do not share a
 /// provider client across unrelated runtimes; build another runtime from
@@ -194,8 +195,8 @@ impl LoonFs<Writable> {
         )
     }
 
-    /// Returns the execution budget this runtime's folds and merges take
-    /// their permits from, which other runtimes may share.
+    /// Returns the execution budget this runtime's publications, folds, and
+    /// merges draw from, which other runtimes may share.
     pub fn execution_budget(&self) -> &ExecutionBudget {
         &self.mode.bits.execution_budget
     }

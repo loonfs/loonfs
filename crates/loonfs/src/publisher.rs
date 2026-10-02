@@ -77,8 +77,8 @@ pub enum NamespaceSessionState {
     Closed,
 }
 
-/// The live writer sessions of one writer, and the admission budgets they
-/// share.
+/// The live writer sessions of one writer, and the publication admission
+/// they share.
 ///
 /// Clones share the same sessions and worker tasks. The table holds a
 /// session while a writable [`Namespace`](crate::Namespace) holds it or
@@ -231,10 +231,14 @@ impl PublisherRegistry {
         runtime: Handle,
         min_publish_interval: Duration,
         publication_limits: crate::PublicationLimits,
+        execution_budget: crate::ExecutionBudget,
     ) -> Self {
         Self {
             shared: Arc::new(RegistryShared {
-                admission: Arc::new(PublicationAdmission::new(publication_limits)),
+                admission: Arc::new(PublicationAdmission::new(
+                    publication_limits,
+                    execution_budget,
+                )),
                 state: Mutex::new(RegistryState {
                     closed: false,
                     sessions: HashMap::new(),
@@ -982,12 +986,7 @@ impl NamespacePublisher {
             self.await_publish_slot().await;
             // Queue ownership and admission remain intact while another
             // namespace uses the shared publication slots. No engine is held.
-            let publication = self
-                .admission
-                .publications
-                .acquire()
-                .await
-                .expect("publication semaphore is never closed");
+            let publication = self.admission.publication_permit().await;
             let Some(item) = self.take_next_item() else {
                 self.forget_if_ended();
                 return;

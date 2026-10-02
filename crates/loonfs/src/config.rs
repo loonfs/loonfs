@@ -13,41 +13,30 @@ pub(crate) const DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS: u64 = 1000;
 /// keeps only the batching that in-flight publications force.
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 
-/// Shared limits for queued and active publications owned by one writer.
+/// The admission limits one writable runtime applies to each namespace's
+/// publication requests.
 ///
 /// Every admitted caller counts, including duplicate commits and namespace
 /// deletes. Counts and bytes remain charged until the work settles, even if
-/// the caller disconnects. Reaching either admission limit returns
-/// `commit_queue_full`; admitted work waits for a publication slot.
+/// the caller disconnects. Reaching either limit returns
+/// `commit_queue_full`. The totals across namespaces, and across the runtimes
+/// that share an execution budget, are limits of the
+/// [`ExecutionBudget`](crate::ExecutionBudget).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationLimits {
-    /// Maximum admitted requests across all namespaces. Defaults to 8,192.
-    pub max_requests: std::num::NonZeroUsize,
     /// Maximum admitted requests for one namespace. Defaults to 1,024.
     pub max_requests_per_namespace: std::num::NonZeroUsize,
-    /// Approximate retained request bytes across all namespaces. Defaults to
-    /// 64 MiB. This includes request data, prepared proofs, and waiter overhead;
-    /// it is not a bound on allocator capacity or working publication memory.
-    pub max_estimated_bytes: std::num::NonZeroUsize,
     /// Approximate retained request bytes for one namespace. Defaults to 8 MiB.
     pub max_estimated_bytes_per_namespace: std::num::NonZeroUsize,
-    /// Maximum publication batches running at once. Defaults to 8. Namespace
-    /// deletes do not count here; a fold permit bounds them.
-    pub max_concurrent_publications: std::num::NonZeroUsize,
 }
 
 impl Default for PublicationLimits {
     fn default() -> Self {
         Self {
-            max_requests: std::num::NonZeroUsize::new(8192).expect("nonzero request limit"),
             max_requests_per_namespace: std::num::NonZeroUsize::new(1024)
                 .expect("nonzero namespace request limit"),
-            max_estimated_bytes: std::num::NonZeroUsize::new(64 * 1024 * 1024)
-                .expect("nonzero request byte limit"),
             max_estimated_bytes_per_namespace: std::num::NonZeroUsize::new(8 * 1024 * 1024)
                 .expect("nonzero namespace byte limit"),
-            max_concurrent_publications: std::num::NonZeroUsize::new(8)
-                .expect("nonzero publication limit"),
         }
     }
 }
