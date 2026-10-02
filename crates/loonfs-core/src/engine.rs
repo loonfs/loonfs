@@ -127,6 +127,7 @@ pub struct NamespaceEngine<S, M> {
     subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
     lsm_policy: crate::manifest::MetadataLsmPolicy,
+    segment_cache: Option<Arc<MetadataSegmentCache>>,
     /// A narrowed per-step row budget, so a test can reach a frozen base
     /// without writing the hundred thousand rows the shipped budget admits.
     /// See [`Self::starve_compaction_row_budget`].
@@ -357,6 +358,7 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
             subject: None,
             authorization_head: None,
             lsm_policy: crate::manifest::MetadataLsmPolicy::default(),
+            segment_cache: None,
             #[cfg(any(test, feature = "test-support"))]
             compaction_row_budget: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -376,6 +378,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             subject: None,
             authorization_head: None,
             lsm_policy: crate::manifest::MetadataLsmPolicy::default(),
+            segment_cache: None,
             #[cfg(any(test, feature = "test-support"))]
             compaction_row_budget: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -391,6 +394,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Sets the budgets this engine's WAL folds and compactions run under.
     pub fn with_metadata_lsm_policy(mut self, policy: crate::manifest::MetadataLsmPolicy) -> Self {
         self.lsm_policy = policy;
+        self
+    }
+
+    /// Uses the runtime's metadata cache for folds during pin creation.
+    pub fn with_metadata_segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
+        self.segment_cache = Some(segment_cache);
         self
     }
 
@@ -482,6 +491,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             snapshot_id,
             &self.mutation_context()?,
             Arc::new(crate::time::StdMonotonicTimer::default()),
+            self.metadata_lsm_policy(),
+            self.segment_cache.as_deref(),
         )
         .await
     }
@@ -1214,6 +1225,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 expires_at_ms,
             },
             &context,
+            self.metadata_lsm_policy(),
+            self.segment_cache.as_deref(),
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -1230,6 +1243,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 expires_at_ms,
             },
             &context,
+            self.metadata_lsm_policy(),
+            self.segment_cache.as_deref(),
         )
         .await
         .map(crate::pin::checkpoint_summary)

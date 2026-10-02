@@ -445,6 +445,8 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         None,
         &setup,
         Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
     )
     .await
     .expect("fork");
@@ -1531,6 +1533,8 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
             expires_at_ms: None,
         },
         &setup,
+        Default::default(),
+        None,
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -1543,6 +1547,8 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
             expires_at_ms: None,
         },
         &setup,
+        Default::default(),
+        None,
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -1675,6 +1681,8 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         None,
         &setup,
         Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
     )
     .await
     .expect("fork");
@@ -1788,6 +1796,8 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         None,
         &setup,
         Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
     )
     .await
     .expect("fork");
@@ -1832,6 +1842,8 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         None,
         &setup,
         Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
     )
     .await
     .expect("fork");
@@ -1898,6 +1910,8 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
             target_namespace_id: clone.clone(),
         },
         &setup,
+        Default::default(),
+        None,
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -1911,6 +1925,8 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         None,
         &setup,
         Arc::new(StdMonotonicTimer::default()),
+        Default::default(),
+        None,
     )
     .await
     .expect("fork retry after abandonment");
@@ -2562,10 +2578,17 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         },
     ] {
         pins.push(
-            crate::pin::create_pin(&store, &namespace_id, owner, &setup)
-                .await
-                .map(crate::pin::checkpoint_summary)
-                .expect("pin"),
+            crate::pin::create_pin(
+                &store,
+                &namespace_id,
+                owner,
+                &setup,
+                Default::default(),
+                None,
+            )
+            .await
+            .map(crate::pin::checkpoint_summary)
+            .expect("pin"),
         );
     }
     let before = gc_namespace(
@@ -2661,6 +2684,8 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
             expires_at_ms: None,
         },
         &setup,
+        Default::default(),
+        None,
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -2710,6 +2735,8 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
             None,
             &setup,
             Arc::new(StdMonotonicTimer::default()),
+            Default::default(),
+            None,
         )
         .await
         .expect("fork");

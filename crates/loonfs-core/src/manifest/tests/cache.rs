@@ -564,7 +564,7 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     )
     .await
     .expect("read view");
-    let fold_view = fold::load_manifest_projection(&store, &namespace_id, 0)
+    let fold_view = fold::load_manifest_projection(&store, &namespace_id, 0, None)
         .await
         .expect("fold view")
         .manifest_segments;

@@ -49,6 +49,8 @@ async fn pin_named<S: ObjectStore + ?Sized>(
             expires_at_ms,
         },
         context,
+        Default::default(),
+        None,
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -480,6 +482,8 @@ async fn a_snapshot_lists_with_its_owner_and_its_required_expiry() {
             expires_at_ms,
         },
         &context,
+        Default::default(),
+        None,
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -524,10 +528,17 @@ async fn a_refused_owner_writes_no_record_to_find() {
         },
     ];
     for owner in refused {
-        let error = create::create_pin(&store, &namespace_id, owner.clone(), &context)
-            .await
-            .map(crate::pin::checkpoint_summary)
-            .expect_err("the owner is not creatable");
+        let error = create::create_pin(
+            &store,
+            &namespace_id,
+            owner.clone(),
+            &context,
+            Default::default(),
+            None,
+        )
+        .await
+        .map(crate::pin::checkpoint_summary)
+        .expect_err("the owner is not creatable");
         assert_eq!(error.code(), ErrorCode::InvalidRequest, "owner: {owner:?}");
     }
 

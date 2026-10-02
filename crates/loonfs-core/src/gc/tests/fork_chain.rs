@@ -91,6 +91,8 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
                 None,
                 &setup,
                 Arc::new(StdMonotonicTimer::default()),
+                Default::default(),
+                None,
             )
             .await
             .expect("fork");

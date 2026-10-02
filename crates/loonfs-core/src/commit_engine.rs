@@ -1886,6 +1886,8 @@ mod tests {
                 expires_at_ms: None,
             },
             &writer,
+            Default::default(),
+            None,
         )
         .await
         .map(crate::pin::checkpoint_summary)

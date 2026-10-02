@@ -16,6 +16,118 @@ use tempfile::tempdir;
 const FOLDED: &str = "/folded/file.txt";
 const TAIL: &str = "/tail.txt";
 
+#[derive(Clone, Copy, Debug)]
+enum PinCreation {
+    Checkpoint,
+    Snapshot,
+    Fork,
+}
+
+async fn pin_fold_reads(
+    creation: PinCreation,
+    max_block_memo_bytes: usize,
+    max_segment_bytes: usize,
+) -> usize {
+    let root = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::metadata_segments(
+        LocalFsStore::new(root.path()).expect("store"),
+    ));
+    let runtime = LoonFs::builder_with_store(store.clone())
+        .writer_id("pin-writer")
+        .max_block_memo_bytes(max_block_memo_bytes)
+        .metadata_cache(
+            MetadataCache::builder()
+                .max_segment_bytes(max_segment_bytes)
+                .build(),
+        )
+        .build()
+        .await
+        .expect("build writer");
+    runtime
+        .create_namespace(&demo(), &test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = runtime.open_namespace(&demo()).expect("open namespace");
+    for path in ["/first", "/second"] {
+        namespace
+            .create_directory(path, &test_actor())
+            .await
+            .expect("create directory");
+    }
+    let maintenance = runtime.maintenance(writer_id("pin-maintenance"));
+    maintenance
+        .fold_wal(&demo())
+        .await
+        .expect("fold directories");
+    for path in ["/first", "/second"] {
+        namespace
+            .delete_path(path, &test_actor())
+            .await
+            .expect("delete directory");
+    }
+    assert!(
+        loonfs_core::cache::load_namespace_diagnostics(store.as_ref(), &demo())
+            .await
+            .expect("diagnostics before creation")
+            .wal_tail_objects
+            > 0
+    );
+    store.reset();
+    match creation {
+        PinCreation::Checkpoint => {
+            maintenance
+                .create_checkpoint(&demo(), "checkpoint")
+                .await
+                .expect("create checkpoint");
+        }
+        PinCreation::Snapshot => {
+            namespace
+                .create_snapshot(
+                    "snapshot",
+                    runtime.now_ms().expect("read clock") + 60_000,
+                    &crate::SnapshotPolicy::default(),
+                )
+                .await
+                .expect("create snapshot");
+        }
+        PinCreation::Fork => {
+            runtime
+                .fork_namespace(&demo(), &namespace_id("fork"), &test_actor())
+                .await
+                .expect("fork head");
+        }
+    }
+    let reads = store.count(OperationClass::Read);
+    assert_eq!(
+        loonfs_core::cache::load_namespace_diagnostics(store.as_ref(), &demo())
+            .await
+            .expect("diagnostics after creation")
+            .wal_tail_objects,
+        0
+    );
+    runtime.shutdown().await.expect("shut down writer");
+    reads
+}
+
+#[tokio::test]
+async fn pin_folds_use_the_runtime_block_memo_and_segment_cache() {
+    for creation in [
+        PinCreation::Checkpoint,
+        PinCreation::Snapshot,
+        PinCreation::Fork,
+    ] {
+        let small_memo_reads = pin_fold_reads(creation, 1, 0).await;
+        let default_memo_reads = pin_fold_reads(creation, 64 * 1024 * 1024, 0).await;
+        let warm_cache_reads = pin_fold_reads(creation, 1, 1024 * 1024).await;
+        assert!(default_memo_reads > 0, "{creation:?} reads deletion roots");
+        assert!(
+            small_memo_reads > default_memo_reads,
+            "{creation:?}: a one-byte memo must reread blocks: {small_memo_reads} against {default_memo_reads}"
+        );
+        assert_eq!(warm_cache_reads, 0, "{creation:?} reuses cached blocks");
+    }
+}
+
 fn demo() -> NamespaceId {
     namespace_id("demo")
 }

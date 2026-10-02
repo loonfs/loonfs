@@ -551,20 +551,34 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     .await
     .expect("write");
 
-    let first = crate::pin::create_pin(&store, &namespace_id, owner(Some(10_000)), &context)
-        .await
-        .map(crate::pin::checkpoint_summary)
-        .expect("create checkpoint");
+    let first = crate::pin::create_pin(
+        &store,
+        &namespace_id,
+        owner(Some(10_000)),
+        &context,
+        Default::default(),
+        None,
+    )
+    .await
+    .map(crate::pin::checkpoint_summary)
+    .expect("create checkpoint");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
     let mut later_context = test_context();
     later_context.now_ms = 2_000;
     let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
     for expiry in [Some(99_000), Some(5_000), None] {
-        let next = crate::pin::create_pin(&store, &namespace_id, owner(expiry), &later_context)
-            .await
-            .map(crate::pin::checkpoint_summary)
-            .expect("create checkpoint");
+        let next = crate::pin::create_pin(
+            &store,
+            &namespace_id,
+            owner(expiry),
+            &later_context,
+            Default::default(),
+            None,
+        )
+        .await
+        .map(crate::pin::checkpoint_summary)
+        .expect("create checkpoint");
         assert!(
             minted.insert(next.checkpoint_id.clone()),
             "each pin gets an id of its own"
@@ -621,6 +635,8 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
             expires_at_ms: Some(context.now_ms),
         },
         &context,
+        Default::default(),
+        None,
     )
     .await
     .map(crate::pin::checkpoint_summary)

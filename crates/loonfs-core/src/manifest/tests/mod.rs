@@ -103,7 +103,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> crate::error::Result<(NamespaceReadState, MetadataState)> {
     let projection =
-        super::fold::load_manifest_projection(store, namespace_id, DEFAULT_BLOCK_MEMO_BYTES)
+        super::fold::load_manifest_projection(store, namespace_id, DEFAULT_BLOCK_MEMO_BYTES, None)
             .await?;
     let tail_state = projection.tail_with_deletion_inodes().await?;
     let mut metadata_state = MetadataStateBuilder::default();
@@ -147,6 +147,8 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             expires_at_ms: None,
         },
         context,
+        Default::default(),
+        None,
     )
     .await
     .map(crate::pin::checkpoint_summary)
