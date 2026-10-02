@@ -8,15 +8,13 @@ use crate::metrics::{
 };
 use crate::publisher::PublisherRegistry;
 use crate::{
-    Error, InlineContentPolicy, MetadataCache, PublicationLimits, Result, SharedObjectStore,
-    StoreConfig, TraceMode, TraceStoreKind,
+    Error, ExecutionBudget, InlineContentPolicy, MetadataCache, PublicationLimits, Result,
+    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::StoredMetadataBlockCache;
 use loonfs_core::MetadataLsmPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use std::marker::PhantomData;
-use std::num::NonZeroUsize;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -48,7 +46,8 @@ struct CoreSettings {
     /// `None` builds a private cache when the core opens.
     metadata_cache: Option<MetadataCache>,
     manifest_revalidation_interval_ms: u64,
-    /// Carries the merge input budget and the block memo budget.
+    /// Carries the block memo budget, and for a writable runtime the merge
+    /// input size of its execution budget.
     metadata_lsm_policy: MetadataLsmPolicy,
     timer: Arc<dyn loonfs_types::MonotonicTimer>,
     wall_clock: Arc<dyn crate::WallClock>,
@@ -65,8 +64,8 @@ struct WriterSettings {
     min_publish_interval_ms: u64,
     publication_limits: PublicationLimits,
     inline_content: InlineContentPolicy,
-    max_concurrent_folds: NonZeroUsize,
-    max_concurrent_compactions: NonZeroUsize,
+    /// `None` builds a private budget when the runtime builds.
+    execution_budget: Option<ExecutionBudget>,
 }
 
 impl<M> LoonFsBuilder<M> {
@@ -100,14 +99,7 @@ impl<M> LoonFsBuilder<M> {
                 min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
                 publication_limits: PublicationLimits::default(),
                 inline_content: InlineContentPolicy::default(),
-                max_concurrent_folds: NonZeroUsize::new(
-                    crate::config::DEFAULT_MAX_CONCURRENT_FOLDS,
-                )
-                .expect("default maximum concurrent folds should be nonzero"),
-                max_concurrent_compactions: NonZeroUsize::new(
-                    crate::config::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
-                )
-                .expect("default maximum concurrent compactions should be nonzero"),
+                execution_budget: None,
             },
             mode: PhantomData,
         }
@@ -221,7 +213,9 @@ impl<M> LoonFsBuilder<M> {
     /// publications, compactions, and collection passes. A runtime built
     /// without one registers nothing. The private metadata cache a runtime
     /// creates without [`Self::metadata_cache`] reports here too; a cache
-    /// given to that setting reports only to its own recorder.
+    /// given to that setting reports only to its own recorder. The same holds
+    /// for the execution budget of a writable runtime (see
+    /// [`LoonFsBuilder::execution_budget`]).
     pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
         self
@@ -262,35 +256,17 @@ impl LoonFsBuilder<Writable> {
         self
     }
 
-    /// Sets the maximum number of WAL tails this runtime folds concurrently.
-    /// Session folds, [`LoonFs::maintenance`] folds, namespace deletions, and
-    /// the creation of checkpoints, snapshots, and forks of the current head
-    /// all take a fold permit, because each may fold. The default is
-    /// [`crate::DEFAULT_MAX_CONCURRENT_FOLDS`].
-    pub fn max_concurrent_folds(mut self, limit: NonZeroUsize) -> Self {
-        self.writer.max_concurrent_folds = limit;
-        self
-    }
-
-    /// Sets the maximum number of metadata merges this runtime runs at once,
-    /// bounded compaction steps and streaming compactions alike, whether its
-    /// sessions or [`LoonFs::maintenance`] calls start them. Each merge holds
-    /// at most the merge input budget of decoded input. A merge never holds
-    /// a fold permit. The default is
-    /// [`crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS`].
-    pub fn max_concurrent_compactions(mut self, limit: NonZeroUsize) -> Self {
-        self.writer.max_concurrent_compactions = limit;
-        self
-    }
-
-    /// Sets the decoded metadata bytes one maintenance step may merge. A step
-    /// merges inline only the runs that fit; a larger window runs as a
-    /// streaming compaction that holds at most this much at once. Applies to
-    /// this runtime's [`LoonFs::maintenance`]. Defaults to 64 MiB.
-    pub fn max_merge_input_bytes(mut self, max_merge_input_bytes: NonZeroUsize) -> Self {
-        self.core
-            .metadata_lsm_policy
-            .max_decoded_input_bytes_per_step = max_merge_input_bytes;
+    /// Runs this runtime's folds and merges under `execution_budget`, which
+    /// other runtimes may share.
+    ///
+    /// Session folds and merges, [`LoonFs::maintenance`] work, namespace
+    /// deletions, and the creation of checkpoints, snapshots, and forks of
+    /// the current head take their permits from it, and every merge holds at
+    /// most its merge input size. The budget reports its metrics to its own
+    /// recorder. Without this setting, the runtime creates a private budget
+    /// with the default limits that reports to [`Self::metrics_recorder`].
+    pub fn execution_budget(mut self, execution_budget: ExecutionBudget) -> Self {
+        self.writer.execution_budget = Some(execution_budget);
         self
     }
 
@@ -310,7 +286,8 @@ impl LoonFsBuilder<Writable> {
     ///
     /// It keeps the settings both modes share, such as the store, the
     /// metadata cache, and the manifest revalidation interval. It drops the
-    /// writer-only ones, such as the writer id and the publication limits.
+    /// writer-only ones, such as the writer id, the publication limits, and
+    /// the execution budget.
     pub fn read_only(self) -> LoonFsBuilder<ReadOnly> {
         LoonFsBuilder {
             core: self.core,
@@ -340,13 +317,22 @@ impl LoonFsBuilder<Writable> {
         }
         let identity = WriterIdentity::new(writer_id)?;
         let runtime = owning_runtime()?;
-        let core = self.core.open()?;
+        let mut core = self.core;
+        let execution_budget = writer.execution_budget.unwrap_or_else(|| {
+            let builder = ExecutionBudget::builder();
+            match &core.metrics_recorder {
+                Some(recorder) => builder.metrics_recorder(Arc::clone(recorder)),
+                None => builder,
+            }
+            .build()
+        });
+        core.metadata_lsm_policy.max_decoded_input_bytes_per_step =
+            execution_budget.max_merge_input_bytes();
+        let core = core.open()?;
         let bits = Arc::new(WriterBits {
             inline_content: writer.inline_content,
             identity,
-            wal_fold_permits: Semaphore::new(writer.max_concurrent_folds.get()),
-            wal_folds_waiting: AtomicUsize::new(0),
-            compaction_permits: Semaphore::new(writer.max_concurrent_compactions.get()),
+            execution_budget,
             compactor_epochs: tokio::sync::Mutex::default(),
         });
         let publisher = PublisherRegistry::new(

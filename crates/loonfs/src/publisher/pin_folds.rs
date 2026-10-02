@@ -1,5 +1,5 @@
 //! Checkpoint, snapshot, and fork creation fold the WAL tail under the
-//! runtime's fold permits.
+//! fold permits of the runtime's execution budget.
 
 use super::*;
 
@@ -26,12 +26,12 @@ async fn wal_tail_objects<S: ObjectStore + ?Sized>(store: &S, namespace_id: &Nam
 
 async fn writer_over(
     store: SharedStore,
-    max_concurrent_folds: NonZeroUsize,
+    execution_budget: ExecutionBudget,
     namespaces: &[&NamespaceId],
 ) -> crate::LoonFs<crate::Writable> {
     let writer = crate::LoonFs::builder_with_store(store)
         .writer_id("writer-a")
-        .max_concurrent_folds(max_concurrent_folds)
+        .execution_budget(execution_budget)
         .build()
         .await
         .expect("build writer");
@@ -97,7 +97,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
     let folded = NamespaceId::parse("folded").expect("namespace id");
     let writer = writer_over(
         store.clone(),
-        NonZeroUsize::new(crate::DEFAULT_MAX_CONCURRENT_FOLDS).expect("nonzero fold limit"),
+        ExecutionBudget::default(),
         &[&unfolded, &folded],
     )
     .await;
@@ -116,13 +116,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
     assert!(unfolded_tail > 0);
     assert_eq!(wal_tail_objects(store.as_ref(), &folded).await, 0);
 
-    let permits = writer
-        .mode
-        .bits
-        .wal_fold_permits
-        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-        .await
-        .expect("hold every fold permit");
+    let permits = hold_every_fold_permit(&writer).await;
     let mut creations = start_creations(&writer, &unfolded);
     creations.extend(start_creations(&writer, &folded));
     wait_for_fold_waiters(&writer, creations.len()).await;
@@ -149,7 +143,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
     drop(permits);
     finish(creations).await;
     assert_eq!(wal_tail_objects(store.as_ref(), &unfolded).await, 0);
-    assert_eq!(writer.mode.bits.wal_folds_waiting.load(Ordering::SeqCst), 0);
+    assert_eq!(writer.execution_budget().stats().folds_waiting, 0);
     writer.shutdown().await.expect("shut down writer");
 }
 
@@ -162,7 +156,7 @@ async fn creations_started_together_fold_one_at_a_time_at_a_limit_of_one() {
         .collect::<Vec<_>>();
     let writer = writer_over(
         store.clone(),
-        NonZeroUsize::MIN,
+        one_fold_at_a_time(),
         &namespaces.iter().collect::<Vec<_>>(),
     )
     .await;
@@ -196,7 +190,7 @@ async fn dropped_creations_return_their_fold_permits() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         metadata_manifest_prefix(&namespace_id),
     ));
-    let writer = writer_over(store.clone(), NonZeroUsize::MIN, &[&namespace_id]).await;
+    let writer = writer_over(store.clone(), one_fold_at_a_time(), &[&namespace_id]).await;
     seed_unfolded_tail(store.as_ref(), &namespace_id).await;
 
     // The checkpoint takes the permit and parks at its manifest put; the
@@ -205,7 +199,7 @@ async fn dropped_creations_return_their_fold_permits() {
     let creations = start_creations(&writer, &namespace_id);
     store.wait_until_blocked().await;
     wait_for_fold_waiters(&writer, 2).await;
-    assert_eq!(writer.mode.bits.wal_fold_permits.available_permits(), 0);
+    assert_eq!(writer.execution_budget().stats().folds_running, 1);
 
     for creation in &creations {
         creation.abort();
@@ -216,8 +210,10 @@ async fn dropped_creations_return_their_fold_permits() {
             .expect_err("the creation was aborted")
             .is_cancelled());
     }
-    assert_eq!(writer.mode.bits.wal_folds_waiting.load(Ordering::SeqCst), 0);
-    assert_eq!(writer.mode.bits.wal_fold_permits.available_permits(), 1);
+    assert_eq!(
+        writer.execution_budget().stats(),
+        crate::ExecutionBudgetStats::default()
+    );
     store.release();
     writer.shutdown().await.expect("shut down writer");
 }

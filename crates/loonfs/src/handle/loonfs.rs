@@ -4,7 +4,8 @@ use super::{LoonFsBuilder, Maintenance, Namespace};
 use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::publisher::PublisherRegistry;
 use crate::{
-    CapabilityDocument, MetadataCache, NamespaceId, Result, SharedObjectStore, StoreConfig,
+    CapabilityDocument, ExecutionBudget, MetadataCache, NamespaceId, Result, SharedObjectStore,
+    StoreConfig,
 };
 #[cfg(test)]
 use loonfs_core::cache::MetadataSegmentCache;
@@ -179,7 +180,8 @@ impl LoonFs<Writable> {
     /// publication service, so fold decisions see the inline bytes of the
     /// sessions this runtime holds. It also shares the runtime's compactor
     /// claim, so it never fences this runtime's sessions or another value
-    /// from this runtime, and its folds take the runtime's fold permits.
+    /// from this runtime, and its folds and merges take their permits from
+    /// the runtime's [`ExecutionBudget`].
     /// Operations that mutate durable control state record `writer_id`. A
     /// process that only maintains builds a writable runtime and never opens
     /// a namespace.
@@ -190,6 +192,12 @@ impl LoonFs<Writable> {
             Arc::clone(&self.mode.bits),
             WriterIdentity { writer_id },
         )
+    }
+
+    /// Returns the execution budget this runtime's folds and merges take
+    /// their permits from, which other runtimes may share.
+    pub fn execution_budget(&self) -> &ExecutionBudget {
+        &self.mode.bits.execution_budget
     }
 
     /// Closes publication admission before shutdown drains, and cancels the

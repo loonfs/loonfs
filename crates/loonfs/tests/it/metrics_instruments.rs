@@ -133,7 +133,7 @@ fn a_writer_with_a_recorder_reports_stores_and_publications() {
         "the threshold-crossing publish records its fold"
     );
     assert_eq!(
-        gauge(&snapshot, "loonfs.publisher.wal_folds_waiting", &[]),
+        gauge(&snapshot, "loonfs.execution_budget.folds_waiting", &[]),
         0,
         "the completed fold leaves no waiter"
     );

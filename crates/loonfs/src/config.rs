@@ -12,11 +12,6 @@ pub(crate) const DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS: u64 = 1000;
 /// larger WAL objects. Zero
 /// keeps only the batching that in-flight publications force.
 pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
-/// Default maximum WAL-tail folds one writer runs concurrently.
-pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
-/// Default maximum metadata merges, bounded or streaming, one writer runs
-/// concurrently.
-pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 2;
 
 /// Shared limits for queued and active publications owned by one writer.
 ///

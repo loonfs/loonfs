@@ -1388,7 +1388,7 @@ impl NamespacePublisher {
         let Some(writer) = self.writer.upgrade() else {
             return false;
         };
-        let _permit = writer.fold_permit(self.runtime_core.instruments()).await;
+        let _permit = writer.execution_budget.fold_permit().await;
         let input = {
             let mut slot = self.engine.lock().await;
             let fold_at_bytes = self.inline_content.inline_content_fold_at_bytes;
@@ -1515,7 +1515,7 @@ impl NamespacePublisher {
         let Some(writer) = self.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());
         };
-        let _permit = writer.fold_permit(self.runtime_core.instruments()).await;
+        let _permit = writer.execution_budget.fold_permit().await;
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
         crate::fs::delete_namespace_with_engine(

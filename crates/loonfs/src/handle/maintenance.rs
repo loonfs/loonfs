@@ -12,8 +12,7 @@ use std::sync::Arc;
 /// call runs in the caller's task; this value starts no background work.
 /// Operations that mutate durable control state record the writer id it was
 /// created with. Every value from one runtime shares that runtime's
-/// compactor claim, fold permits, and compaction permits with its writer
-/// sessions.
+/// compactor claim and execution budget with its writer sessions.
 #[derive(Clone)]
 pub struct Maintenance {
     pub(crate) core: RuntimeCore,

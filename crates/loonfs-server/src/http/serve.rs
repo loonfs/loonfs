@@ -289,10 +289,11 @@ async fn open_local_cache(
 /// metrics recorder.
 ///
 /// The runtime reads through one metadata cache built from the
-/// `[metadata_cache]` table, which reports to the same recorder. An optional
-/// JSONL recorder receives the same object-store samples. The local block
-/// cache is installed once on the runtime, so its reads and its maintenance
-/// use the same cache hierarchy.
+/// `[metadata_cache]` table, and runs its folds and merges under one
+/// execution budget built from the fold, compaction, and merge input limits.
+/// Both report to the same recorder. An optional JSONL recorder receives the
+/// same object-store samples. The local block cache is installed once on the
+/// runtime, so its reads and its maintenance use the same cache hierarchy.
 pub(super) async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
@@ -312,18 +313,7 @@ pub(super) async fn build_handles(
         .min_publish_interval_ms(config.min_publish_interval_ms)
         .publication_limits(config.publication.resolve())
         .inline_content(config.inline_content.resolve())
-        .max_concurrent_folds(
-            std::num::NonZeroUsize::new(config.max_concurrent_folds)
-                .expect("validated maximum concurrent folds should be nonzero"),
-        )
-        .max_concurrent_compactions(
-            std::num::NonZeroUsize::new(config.max_concurrent_compactions)
-                .expect("validated maximum concurrent compactions should be nonzero"),
-        )
-        .max_merge_input_bytes(
-            std::num::NonZeroUsize::new(config.max_merge_input_bytes)
-                .expect("validated merge input budget should be nonzero"),
-        )
+        .execution_budget(config.execution_budget(metrics.recorder()))
         // Every read the server serves goes through this runtime, so the
         // read cap covers every proxied content read.
         .max_read_content_bytes(config.max_download_bytes)

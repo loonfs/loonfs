@@ -91,13 +91,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .create_directory_with_options("/warmup", &actor, &warmup_options)
         .await
         .expect("writer epoch");
-    let permits = writer
-        .mode
-        .bits
-        .wal_fold_permits
-        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-        .await
-        .expect("hold folds");
+    let permits = hold_every_fold_permit(&writer).await;
     armed.store(true, Ordering::SeqCst);
     let uncertain = put_options("uncertain");
     let first = namespace_writer.put_file_with_options("/file", b"four", &actor, &uncertain);
@@ -227,13 +221,7 @@ async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_
     }
     namespace_writer.close().await.expect("close session");
     let namespace_writer = writer.open_namespace(&namespace).expect("reopen namespace");
-    let folds = writer
-        .mode
-        .bits
-        .wal_fold_permits
-        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-        .await
-        .expect("hold folds");
+    let folds = hold_every_fold_permit(&writer).await;
     let registry = writer.mode.publisher.clone();
     let slots = registry
         .shared
@@ -634,13 +622,7 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
         })
         .await;
     let namespace_reader = writer.namespace(&namespace);
-    let fold_permits = writer
-        .mode
-        .bits
-        .wal_fold_permits
-        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-        .await
-        .expect("hold folds");
+    let fold_permits = hold_every_fold_permit(&writer).await;
     namespace_writer
         .put_file_with_options(
             "/first",
@@ -994,13 +976,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
                 .await
                 .expect_err("directory cannot be replaced by a file");
             assert_eq!(store.count(OperationClass::Put), 0);
-            let folds = writer
-                .mode
-                .bits
-                .wal_fold_permits
-                .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-                .await
-                .expect("hold folds");
+            let folds = hold_every_fold_permit(&writer).await;
             namespace
                 .put_file_with_options(
                     "/after-failure",
@@ -1030,13 +1006,7 @@ async fn repeated_projection_invalidation_does_not_repeat_the_tail_limit_oversho
             ..policy()
         })
         .await;
-    let folds = writer
-        .mode
-        .bits
-        .wal_fold_permits
-        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-        .await
-        .expect("hold folds");
+    let folds = hold_every_fold_permit(&writer).await;
     let registry = writer.mode.publisher.clone();
     for index in 0..4 {
         writer.invalidate_namespace(&namespace);
@@ -1117,13 +1087,7 @@ async fn fold_completion_reports_only_inline_bytes_published_since_it_began() {
         Some(4)
     );
 
-    let fold_permits = writer
-        .mode
-        .bits
-        .wal_fold_permits
-        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-        .await
-        .expect("hold next fold");
+    let fold_permits = hold_every_fold_permit(&writer).await;
     commit_two_values(&writer, &namespace, "after-fold").await;
     let usage = loonfs_core::cache::load_namespace_wal_tail_usage(store.as_ref(), &namespace)
         .await
@@ -1199,15 +1163,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .await;
         let namespace_reader = writer.namespace(&namespace);
         let permits = if automatic {
-            Some(
-                writer
-                    .mode
-                    .bits
-                    .wal_fold_permits
-                    .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-                    .await
-                    .expect("hold folds"),
-            )
+            Some(hold_every_fold_permit(&writer).await)
         } else {
             None
         };
@@ -1463,13 +1419,7 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
             put_operation("/last", &prepared[1]),
         ],
     };
-    let permits = writer
-        .mode
-        .bits
-        .wal_fold_permits
-        .acquire_many(crate::DEFAULT_MAX_CONCURRENT_FOLDS as u32)
-        .await
-        .expect("hold the fold the full tail starts");
+    let permits = hold_every_fold_permit(&writer).await;
     namespace_writer
         .commit_candidate(CommitCandidate::prepared(request, prepared))
         .await

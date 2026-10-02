@@ -3,7 +3,7 @@
 
 use crate::local_cache::{DISK_BLOCK_BYTES, MIN_DISK_BYTES};
 use loonfs::metrics::MetricsRecorder;
-use loonfs::MetadataCache;
+use loonfs::{ExecutionBudget, MetadataCache};
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, StoreConfigError};
 use loonfs_types::env::{AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV};
@@ -147,7 +147,8 @@ pub struct ServerConfig {
     pub content_token_secret: SecretString,
     pub writer_id: String,
     /// Maximum WAL folds this server runs concurrently. A sustained
-    /// `loonfs.publisher.wal_folds_waiting` gauge means this cap is too low.
+    /// `loonfs.execution_budget.folds_waiting` gauge means this cap is too
+    /// low.
     #[serde(default = "default_max_concurrent_folds")]
     pub max_concurrent_folds: usize,
     /// Maximum metadata merges this server runs at once, bounded compaction
@@ -718,6 +719,20 @@ impl ServerConfig {
         self.store.validate()?;
 
         Ok(())
+    }
+
+    /// Builds the execution budget of the server's one runtime from its fold,
+    /// compaction, and merge input limits, reporting to `recorder`.
+    pub(crate) fn execution_budget(&self, recorder: Arc<dyn MetricsRecorder>) -> ExecutionBudget {
+        let positive = |value: usize| {
+            std::num::NonZeroUsize::new(value).expect("validated budget limits should be nonzero")
+        };
+        ExecutionBudget::builder()
+            .max_concurrent_folds(positive(self.max_concurrent_folds))
+            .max_concurrent_compactions(positive(self.max_concurrent_compactions))
+            .max_merge_input_bytes(positive(self.max_merge_input_bytes))
+            .metrics_recorder(recorder)
+            .build()
     }
 }
 
