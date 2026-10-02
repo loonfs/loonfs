@@ -16,7 +16,6 @@ use loonfs_core::MetadataLsmPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 
 /// Builder for a [`LoonFs`] runtime in mode `M`.
 ///
@@ -256,21 +255,28 @@ impl LoonFsBuilder<Writable> {
         self
     }
 
-    /// Runs this runtime's folds and merges under `execution_budget`, which
-    /// other runtimes may share.
+    /// Runs this runtime's publications, folds, and merges under
+    /// `execution_budget`, which other runtimes may share.
     ///
-    /// Session folds and merges, [`LoonFs::maintenance`] work, namespace
+    /// Every publication request this runtime admits counts against the
+    /// budget's admitted totals until its work settles. Publication batches,
+    /// session folds and merges, [`LoonFs::maintenance`] work, namespace
     /// deletions, and the creation of checkpoints, snapshots, and forks of
     /// the current head take their permits from it, and every merge holds at
-    /// most its merge input size. The budget reports its metrics to its own
-    /// recorder. Without this setting, the runtime creates a private budget
-    /// with the default limits that reports to [`Self::metrics_recorder`].
+    /// most its merge input size. The per-namespace admission limits stay
+    /// with this runtime (see [`Self::publication_limits`]). The budget
+    /// reports its metrics to its own recorder. Without this setting, the
+    /// runtime creates a private budget with the default limits that reports
+    /// to [`Self::metrics_recorder`].
     pub fn execution_budget(mut self, execution_budget: ExecutionBudget) -> Self {
         self.writer.execution_budget = Some(execution_budget);
         self
     }
 
-    /// Sets the shared admission and concurrency limits for publications.
+    /// Sets the admission limits this runtime applies to each namespace's
+    /// publication requests. The totals across namespaces, and the
+    /// publications running at once, are limits of the execution budget (see
+    /// [`Self::execution_budget`]).
     pub fn publication_limits(mut self, limits: PublicationLimits) -> Self {
         self.writer.publication_limits = limits;
         self
@@ -309,12 +315,6 @@ impl LoonFsBuilder<Writable> {
         let writer_id = writer
             .writer_id
             .ok_or_else(|| Error::Config("writer_id is required".to_owned()))?;
-        if writer.publication_limits.max_concurrent_publications.get() > Semaphore::MAX_PERMITS {
-            return Err(Error::Config(format!(
-                "max_concurrent_publications must not exceed {}",
-                Semaphore::MAX_PERMITS
-            )));
-        }
         let identity = WriterIdentity::new(writer_id)?;
         let runtime = owning_runtime()?;
         let mut core = self.core;
@@ -332,7 +332,7 @@ impl LoonFsBuilder<Writable> {
         let bits = Arc::new(WriterBits {
             inline_content: writer.inline_content,
             identity,
-            execution_budget,
+            execution_budget: execution_budget.clone(),
             compactor_epochs: tokio::sync::Mutex::default(),
         });
         let publisher = PublisherRegistry::new(
@@ -341,6 +341,7 @@ impl LoonFsBuilder<Writable> {
             runtime,
             std::time::Duration::from_millis(writer.min_publish_interval_ms),
             writer.publication_limits,
+            execution_budget,
         );
         Ok(LoonFs {
             core,

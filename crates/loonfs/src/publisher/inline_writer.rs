@@ -96,14 +96,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     let uncertain = put_options("uncertain");
     let first = namespace_writer.put_file_with_options("/file", b"four", &actor, &uncertain);
     let first_error = if include_replay {
-        let registry = writer.mode.publisher.clone();
-        let slots = registry
-            .shared
-            .admission
-            .publications
-            .acquire_many(8)
-            .await
-            .expect("hold publications");
+        let slots = hold_every_publication_permit(&writer).await;
         let publisher = namespace_writer.session().publisher.clone();
         let (replayed, first, ()) = tokio::join!(
             namespace_writer.create_directory_with_options("/warmup", &actor, &warmup_options),
@@ -222,14 +215,7 @@ async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_
     namespace_writer.close().await.expect("close session");
     let namespace_writer = writer.open_namespace(&namespace).expect("reopen namespace");
     let folds = hold_every_fold_permit(&writer).await;
-    let registry = writer.mode.publisher.clone();
-    let slots = registry
-        .shared
-        .admission
-        .publications
-        .acquire_many(8)
-        .await
-        .expect("hold publications");
+    let slots = hold_every_publication_permit(&writer).await;
     store.reset();
     let actor = loonfs_test_support::test_actor();
     let (a, b, c) = (put_options("a"), put_options("b"), put_options("c"));
@@ -925,14 +911,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
             options.inline_content_tail_limit_bytes = 5;
         }
         let (_directory, store, writer, _namespace, namespace) = writer_with_policy(options).await;
-        let registry = writer.mode.publisher.clone();
-        let slots = registry
-            .shared
-            .admission
-            .publications
-            .acquire_many(8)
-            .await
-            .expect("hold publications");
+        let slots = hold_every_publication_permit(&writer).await;
         let publisher = namespace.session().publisher.clone();
         let actor = loonfs_test_support::test_actor();
         let (one, two) = (put_options("one"), put_options("two"));

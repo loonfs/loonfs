@@ -1,12 +1,18 @@
 //! One execution budget shared by runtimes over different stores: its
-//! limits hold across runtimes, idle runtimes hold nothing back, a runtime
-//! that leaves gives everything back, and every wait can be dropped.
+//! limits hold across runtimes, admission totals are shared while each
+//! store's namespaces are charged on their own, idle runtimes hold nothing
+//! back, a runtime that leaves gives everything back, and every wait can be
+//! dropped.
 
 #![allow(clippy::panic)]
 
 use super::{ExecutionBudget, ExecutionBudgetStats};
 use crate::metrics::{DefaultMetricsRecorder, MetricValue};
-use crate::{LoonFs, LoonFsBuilder, NamespaceId, Writable};
+use crate::{
+    CommitId, CreateDirectoryOptions, ErrorCode, LoonFs, LoonFsBuilder, Namespace, NamespaceId,
+    PublicationLimits, Writable,
+};
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
@@ -21,8 +27,9 @@ use tokio::time::timeout;
 const TWO: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
 
 /// A writable runtime over a local store of its own. While the store is
-/// armed, every metadata segment write parks, so a fold or a merge that
-/// starts holds its permit until the store is released.
+/// armed, every WAL object and metadata segment write parks, so a
+/// publication, a fold, or a merge that starts holds its permit until the
+/// store is released.
 struct GatedRuntime {
     _root: TempDir,
     store: Arc<BlockingStore<LocalFsStore>>,
@@ -35,7 +42,14 @@ async fn gated_runtime(
     let root = tempdir().expect("tempdir");
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(root.path()).expect("create local-fs store"),
-        KeyPredicate::metadata_segment(),
+        KeyPredicate::new(|key| {
+            parse_object_key(key).is_some_and(|parsed| {
+                matches!(
+                    parsed.family(),
+                    DurableObjectFamily::WalObject | DurableObjectFamily::MetadataSegment
+                )
+            })
+        }),
         OperationClass::Put,
     ));
     let runtime = configure(LoonFs::builder_with_store(store.clone()).writer_id("budget-writer"))
@@ -54,6 +68,17 @@ async fn sharing(budget: &ExecutionBudget) -> GatedRuntime {
 }
 
 impl GatedRuntime {
+    async fn namespace(&self, name: &str) -> Namespace<Writable> {
+        let namespace_id = namespace_id(name);
+        self.runtime
+            .create_namespace(&namespace_id, &test_actor())
+            .await
+            .expect("create namespace");
+        self.runtime
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+    }
+
     /// Creates `name` with two delta runs, so a merge is due, and one file in
     /// its WAL tail, so a fold is due.
     async fn namespace_with_work(&self, name: &str) -> NamespaceId {
@@ -107,17 +132,56 @@ impl GatedRuntime {
     }
 }
 
-async fn wait_for_stats(budget: &ExecutionBudget, expected: ExecutionBudgetStats) {
+/// Creates `/directory` under one fixed commit id, so every call admits a
+/// request of the same estimated size.
+async fn create_directory(namespace: &Namespace<Writable>) -> crate::Result<()> {
+    let mut options = CreateDirectoryOptions::default();
+    options.commit.commit_id = Some(CommitId::parse("directory").expect("valid commit id"));
+    namespace
+        .create_directory_with_options("/directory", &test_actor(), &options)
+        .await
+        .map(drop)
+}
+
+fn start_directory(namespace: &Namespace<Writable>) -> JoinHandle<()> {
+    let namespace = namespace.clone();
+    tokio::spawn(async move {
+        create_directory(&namespace)
+            .await
+            .expect("create the directory");
+    })
+}
+
+async fn wait_until(budget: &ExecutionBudget, done: impl Fn(ExecutionBudgetStats) -> bool) {
     if timeout(Duration::from_secs(10), async {
-        while budget.stats() != expected {
+        while !done(budget.stats()) {
             tokio::task::yield_now().await;
         }
     })
     .await
     .is_err()
     {
-        panic!("expected {expected:?}, found {:?}", budget.stats());
+        panic!(
+            "the budget never reached the expected state: {:?}",
+            budget.stats()
+        );
     }
+}
+
+async fn wait_for_stats(budget: &ExecutionBudget, expected: ExecutionBudgetStats) {
+    wait_until(budget, |stats| stats == expected).await;
+}
+
+/// Waits until the budget matches `expected` in everything but the admitted
+/// bytes, which depend on request encodings.
+async fn wait_for_counts(budget: &ExecutionBudget, expected: ExecutionBudgetStats) {
+    wait_until(budget, |stats| {
+        ExecutionBudgetStats {
+            admitted_bytes: expected.admitted_bytes,
+            ..stats
+        } == expected
+    })
+    .await;
 }
 
 async fn finish(work: Vec<JoinHandle<()>>) {
@@ -130,18 +194,21 @@ async fn finish(work: Vec<JoinHandle<()>>) {
 }
 
 /// Samples the budget until the returned flag is set, and returns the most
-/// running work it saw.
-fn watch_peak_running(budget: &ExecutionBudget) -> (Arc<AtomicBool>, JoinHandle<(usize, usize)>) {
+/// running publications, folds, and merges it saw.
+fn watch_peak_running(
+    budget: &ExecutionBudget,
+) -> (Arc<AtomicBool>, JoinHandle<(usize, usize, usize)>) {
     let stop = Arc::new(AtomicBool::new(false));
     let watcher = tokio::spawn({
         let budget = budget.clone();
         let stop = Arc::clone(&stop);
         async move {
-            let mut peak = (0, 0);
+            let mut peak = (0, 0, 0);
             while !stop.load(Ordering::SeqCst) {
                 let stats = budget.stats();
-                peak.0 = peak.0.max(stats.folds_running);
-                peak.1 = peak.1.max(stats.compactions_running);
+                peak.0 = peak.0.max(stats.publications_running);
+                peak.1 = peak.1.max(stats.folds_running);
+                peak.2 = peak.2.max(stats.compactions_running);
                 tokio::task::yield_now().await;
             }
             peak
@@ -162,9 +229,38 @@ fn gauge(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
     }
 }
 
+fn admission_rejections(recorder: &DefaultMetricsRecorder) -> u64 {
+    let snapshot = recorder.snapshot();
+    let entry = snapshot
+        .by_name("loonfs.execution_budget.admission_rejections")
+        .next()
+        .expect("the admission refusal counter is registered");
+    match entry.value {
+        MetricValue::Counter(value) => value,
+        ref other => panic!("expected a counter, found {other:?}"),
+    }
+}
+
+/// The estimated bytes one [`create_directory`] request charges, read from a
+/// budget of its own.
+async fn admitted_bytes_of_one_directory() -> usize {
+    let budget = ExecutionBudget::default();
+    let probe = sharing(&budget).await;
+    let documents = probe.namespace("documents").await;
+    probe.store.arm();
+    let work = start_directory(&documents);
+    wait_until(&budget, |stats| stats.admitted_requests == 1).await;
+    let bytes = budget.stats().admitted_bytes;
+    probe.store.release();
+    finish(vec![work]).await;
+    probe.runtime.shutdown().await.expect("shut down");
+    bytes
+}
+
 #[tokio::test]
 async fn runtimes_sharing_a_budget_never_exceed_its_limits() {
     let budget = ExecutionBudget::builder()
+        .max_concurrent_publications(TWO)
         .max_concurrent_folds(TWO)
         .max_concurrent_compactions(TWO)
         .build();
@@ -173,12 +269,14 @@ async fn runtimes_sharing_a_budget_never_exceed_its_limits() {
         runtimes.push(sharing(&budget).await);
     }
     let mut namespaces = Vec::new();
+    let mut publishing = Vec::new();
     for (index, gated) in runtimes.iter().enumerate() {
         for name in ["a", "b"] {
             namespaces.push((
                 gated,
                 gated.namespace_with_work(&format!("{name}-{index}")).await,
             ));
+            publishing.push(gated.namespace(&format!("published-{name}-{index}")).await);
         }
     }
 
@@ -191,9 +289,16 @@ async fn runtimes_sharing_a_budget_never_exceed_its_limits() {
         work.push(gated.start_fold(namespace_id));
         work.push(gated.start_merge(namespace_id));
     }
-    wait_for_stats(
+    for namespace in &publishing {
+        work.push(start_directory(namespace));
+    }
+    wait_for_counts(
         &budget,
         ExecutionBudgetStats {
+            admitted_requests: 8,
+            admitted_bytes: 0,
+            publications_running: 2,
+            publications_waiting: 6,
             folds_running: 2,
             folds_waiting: 6,
             compactions_running: 2,
@@ -207,13 +312,18 @@ async fn runtimes_sharing_a_budget_never_exceed_its_limits() {
     }
     finish(work).await;
     stop.store(true, Ordering::SeqCst);
-    let (peak_folds, peak_compactions) = watcher.await.expect("join the watcher");
+    let (peak_publications, peak_folds, peak_compactions) =
+        watcher.await.expect("join the watcher");
+    assert!(
+        peak_publications <= 2,
+        "{peak_publications} publications ran at once"
+    );
     assert!(peak_folds <= 2, "{peak_folds} folds ran at once");
     assert!(
         peak_compactions <= 2,
         "{peak_compactions} merges ran at once"
     );
-    assert_eq!(budget.stats(), ExecutionBudgetStats::default());
+    wait_for_stats(&budget, ExecutionBudgetStats::default()).await;
     for gated in &runtimes {
         gated.runtime.shutdown().await.expect("shut down");
     }
@@ -221,7 +331,9 @@ async fn runtimes_sharing_a_budget_never_exceed_its_limits() {
 
 #[tokio::test]
 async fn an_idle_runtime_strands_no_capacity() {
-    let budget = ExecutionBudget::default();
+    let budget = ExecutionBudget::builder()
+        .max_concurrent_publications(TWO)
+        .build();
     let mut idle = Vec::new();
     for index in 0..3 {
         let gated = sharing(&budget).await;
@@ -244,12 +356,19 @@ async fn an_idle_runtime_strands_no_capacity() {
     let busy = sharing(&budget).await;
     let first = busy.namespace_with_work("busy-a").await;
     let second = busy.namespace_with_work("busy-b").await;
+    let publishing = [
+        busy.namespace("busy-published-a").await,
+        busy.namespace("busy-published-b").await,
+    ];
 
     busy.store.arm();
-    let work = vec![busy.start_fold(&first), busy.start_fold(&second)];
-    wait_for_stats(
+    let mut work = vec![busy.start_fold(&first), busy.start_fold(&second)];
+    work.extend(publishing.iter().map(start_directory));
+    wait_for_counts(
         &budget,
         ExecutionBudgetStats {
+            admitted_requests: 2,
+            publications_running: 2,
             folds_running: 2,
             ..ExecutionBudgetStats::default()
         },
@@ -258,7 +377,7 @@ async fn an_idle_runtime_strands_no_capacity() {
 
     busy.store.release();
     finish(work).await;
-    assert_eq!(budget.stats(), ExecutionBudgetStats::default());
+    wait_for_stats(&budget, ExecutionBudgetStats::default()).await;
     for (gated, _session) in &idle {
         gated.runtime.shutdown().await.expect("shut down");
     }
@@ -357,10 +476,15 @@ async fn a_runtime_without_a_budget_reports_the_default_limits_to_its_recorder()
         folds_waiting: namespaces.len() - crate::DEFAULT_MAX_CONCURRENT_FOLDS,
         compactions_running: crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         compactions_waiting: namespaces.len() - crate::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+        ..ExecutionBudgetStats::default()
     };
     wait_for_stats(gated.runtime.execution_budget(), expected).await;
     let gauges = || {
         [
+            "loonfs.execution_budget.admitted_requests",
+            "loonfs.execution_budget.admitted_bytes",
+            "loonfs.execution_budget.publications_running",
+            "loonfs.execution_budget.publications_waiting",
             "loonfs.execution_budget.folds_running",
             "loonfs.execution_budget.folds_waiting",
             "loonfs.execution_budget.compactions_running",
@@ -371,6 +495,10 @@ async fn a_runtime_without_a_budget_reports_the_default_limits_to_its_recorder()
     assert_eq!(
         gauges(),
         [
+            expected.admitted_requests,
+            expected.admitted_bytes,
+            expected.publications_running,
+            expected.publications_waiting,
             expected.folds_running,
             expected.folds_waiting,
             expected.compactions_running,
@@ -378,10 +506,11 @@ async fn a_runtime_without_a_budget_reports_the_default_limits_to_its_recorder()
         ]
         .map(|count| i64::try_from(count).expect("a small count"))
     );
+    assert_eq!(admission_rejections(&recorder), 0);
 
     gated.store.release();
     finish(work).await;
-    assert_eq!(gauges(), [0; 4]);
+    assert_eq!(gauges(), [0; 8]);
     gated.runtime.shutdown().await.expect("shut down");
 }
 
@@ -419,4 +548,109 @@ async fn a_dropped_wait_gives_up_its_place_and_its_count() {
     );
     drop(kept);
     assert_eq!(budget.stats(), ExecutionBudgetStats::default());
+}
+
+#[tokio::test]
+async fn admitted_bytes_are_shared_and_refunded() {
+    let charge = admitted_bytes_of_one_directory().await;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let budget = ExecutionBudget::builder()
+        .max_admitted_bytes(NonZeroUsize::new(charge).expect("a request charges bytes"))
+        .metrics_recorder(recorder.clone())
+        .build();
+    let filling = sharing(&budget).await;
+    let refused = sharing(&budget).await;
+    let filling_documents = filling.namespace("documents").await;
+    let refused_documents = refused.namespace("documents").await;
+
+    filling.store.arm();
+    let held = start_directory(&filling_documents);
+    wait_for_counts(
+        &budget,
+        ExecutionBudgetStats {
+            admitted_requests: 1,
+            publications_running: 1,
+            ..ExecutionBudgetStats::default()
+        },
+    )
+    .await;
+    assert_eq!(budget.stats().admitted_bytes, charge);
+    let error = create_directory(&refused_documents)
+        .await
+        .expect_err("the other runtime filled the shared total");
+    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
+    assert_eq!(admission_rejections(&recorder), 1);
+    assert_eq!(budget.stats().admitted_requests, 1);
+
+    filling.store.release();
+    finish(vec![held]).await;
+    wait_for_stats(&budget, ExecutionBudgetStats::default()).await;
+    create_directory(&refused_documents)
+        .await
+        .expect("the refunded total admits the other runtime");
+    wait_for_stats(&budget, ExecutionBudgetStats::default()).await;
+    filling.runtime.shutdown().await.expect("shut down");
+    refused.runtime.shutdown().await.expect("shut down");
+}
+
+#[tokio::test]
+async fn one_namespace_id_in_two_stores_is_charged_separately() {
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let budget = ExecutionBudget::builder()
+        .metrics_recorder(recorder.clone())
+        .build();
+    let one_request_per_namespace = || PublicationLimits {
+        max_requests_per_namespace: NonZeroUsize::MIN,
+        ..PublicationLimits::default()
+    };
+    let first = gated_runtime(|builder| {
+        builder
+            .execution_budget(budget.clone())
+            .publication_limits(one_request_per_namespace())
+    })
+    .await;
+    let second = gated_runtime(|builder| {
+        builder
+            .execution_budget(budget.clone())
+            .publication_limits(one_request_per_namespace())
+    })
+    .await;
+    let first_documents = first.namespace("documents").await;
+    let second_documents = second.namespace("documents").await;
+
+    first.store.arm();
+    second.store.arm();
+    let mut work = vec![start_directory(&first_documents)];
+    wait_until(&budget, |stats| stats.publications_running == 1).await;
+    let error = create_directory(&first_documents)
+        .await
+        .expect_err("the first store's namespace is at its limit");
+    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
+    work.push(start_directory(&second_documents));
+    wait_for_counts(
+        &budget,
+        ExecutionBudgetStats {
+            admitted_requests: 2,
+            publications_running: 2,
+            ..ExecutionBudgetStats::default()
+        },
+    )
+    .await;
+    let error = create_directory(&second_documents)
+        .await
+        .expect_err("the second store's namespace is at its own limit");
+    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
+    assert_eq!(budget.stats().admitted_requests, 2);
+    assert_eq!(
+        admission_rejections(&recorder),
+        0,
+        "a namespace refusal is not a refusal at the total"
+    );
+
+    first.store.release();
+    second.store.release();
+    finish(work).await;
+    wait_for_stats(&budget, ExecutionBudgetStats::default()).await;
+    first.runtime.shutdown().await.expect("shut down");
+    second.runtime.shutdown().await.expect("shut down");
 }

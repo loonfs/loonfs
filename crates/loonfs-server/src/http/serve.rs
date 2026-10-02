@@ -289,11 +289,12 @@ async fn open_local_cache(
 /// metrics recorder.
 ///
 /// The runtime reads through one metadata cache built from the
-/// `[metadata_cache]` table, and runs its folds and merges under one
-/// execution budget built from the fold, compaction, and merge input limits.
-/// Both report to the same recorder. An optional JSONL recorder receives the
-/// same object-store samples. The local block cache is installed once on the
-/// runtime, so its reads and its maintenance use the same cache hierarchy.
+/// `[metadata_cache]` table, and runs its publications, folds, and merges
+/// under one execution budget built from the fold, compaction, and merge
+/// input limits and the `[publication]` totals. Both report to the same
+/// recorder. An optional JSONL recorder receives the same object-store
+/// samples. The local block cache is installed once on the runtime, so its
+/// reads and its maintenance use the same cache hierarchy.
 pub(super) async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,

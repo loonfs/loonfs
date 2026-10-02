@@ -1,23 +1,26 @@
-//! One budget for every caller whose publication has been admitted.
+//! Admission of one runtime's publication requests: its per-namespace limits,
+//! and the totals of the execution budget it shares.
 
 use super::{CoreError, NamespaceId, PreparedCandidate};
-use crate::PublicationLimits;
+use crate::execution_budget::BudgetPermit;
+use crate::{ExecutionBudget, PublicationLimits};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio::sync::{oneshot, Semaphore};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use tokio::sync::oneshot;
 
+/// Admits one runtime's publication requests against its per-namespace
+/// limits and the totals of its execution budget.
+///
+/// The per-namespace usage stays in the runtime because a namespace id names
+/// a namespace only within one store, and runtimes over other stores may
+/// share the budget. Lock order: this runtime's usage, then the budget's
+/// totals. Neither lock is held across an await.
 pub(super) struct PublicationAdmission {
     limits: PublicationLimits,
-    usage: Mutex<Usage>,
-    pub(super) publications: Semaphore,
-}
-
-#[derive(Default)]
-struct Usage {
-    total: RequestWeight,
-    namespaces: HashMap<NamespaceId, RequestWeight>,
+    namespaces: Mutex<HashMap<NamespaceId, RequestWeight>>,
+    budget: ExecutionBudget,
 }
 
 #[derive(Default)]
@@ -28,23 +31,30 @@ struct RequestWeight {
 }
 
 impl PublicationAdmission {
-    pub(super) fn new(limits: PublicationLimits) -> Self {
+    pub(super) fn new(limits: PublicationLimits, budget: ExecutionBudget) -> Self {
         Self {
-            publications: Semaphore::new(limits.max_concurrent_publications.get()),
             limits,
-            usage: Mutex::new(Usage::default()),
+            namespaces: Mutex::default(),
+            budget,
         }
     }
 
-    fn lock_usage(&self) -> std::sync::MutexGuard<'_, Usage> {
-        self.usage
+    fn lock_namespaces(&self) -> MutexGuard<'_, HashMap<NamespaceId, RequestWeight>> {
+        self.namespaces
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     #[cfg(test)]
     pub(super) fn used_requests(&self) -> usize {
-        self.lock_usage().total.requests
+        self.lock_namespaces()
+            .values()
+            .map(|namespace| namespace.requests)
+            .sum()
+    }
+
+    pub(super) async fn publication_permit(&self) -> BudgetPermit<'_> {
+        self.budget.publication_permit().await
     }
 
     pub(super) fn acquire_candidate(
@@ -80,33 +90,25 @@ impl PublicationAdmission {
         let estimated_bytes = estimated_request_bytes
             .saturating_add(512)
             .saturating_add(namespace_id.as_str().len());
-        let mut usage = self.lock_usage();
+        let mut namespaces = self.lock_namespaces();
         let empty = RequestWeight::default();
-        let namespace = usage.namespaces.get(namespace_id).unwrap_or(&empty);
-        if usage.total.requests >= self.limits.max_requests.get()
-            || namespace.requests >= self.limits.max_requests_per_namespace.get()
+        let namespace = namespaces.get(namespace_id).unwrap_or(&empty);
+        if namespace.requests >= self.limits.max_requests_per_namespace.get()
             || estimated_bytes
                 > self
                     .limits
                     .max_estimated_bytes_per_namespace
                     .get()
                     .saturating_sub(namespace.estimated_bytes)
-            || estimated_bytes
-                > self
-                    .limits
-                    .max_estimated_bytes
-                    .get()
-                    .saturating_sub(usage.total.estimated_bytes)
         {
             return Err(CoreError::CommitQueueFull);
         }
-        usage.total.requests += 1;
-        usage.total.estimated_bytes += estimated_bytes;
-        let namespace = usage.namespaces.entry(namespace_id.clone()).or_default();
+        self.budget.charge_admission(estimated_bytes)?;
+        let namespace = namespaces.entry(namespace_id.clone()).or_default();
         namespace.requests += 1;
         namespace.estimated_bytes += estimated_bytes;
         Ok(Arc::new(AdmissionPermit {
-            budget: Arc::clone(self),
+            admission: Arc::clone(self),
             namespace_id: namespace_id.clone(),
             estimated_bytes,
             inline_bytes: AtomicUsize::new(0),
@@ -115,7 +117,7 @@ impl PublicationAdmission {
 }
 
 pub(super) struct AdmissionPermit {
-    budget: Arc<PublicationAdmission>,
+    admission: Arc<PublicationAdmission>,
     namespace_id: NamespaceId,
     estimated_bytes: usize,
     inline_bytes: AtomicUsize,
@@ -128,9 +130,8 @@ impl AdmissionPermit {
         unfolded_bytes: usize,
         limit: usize,
     ) -> usize {
-        let mut usage = self.budget.lock_usage();
-        let namespace = usage
-            .namespaces
+        let mut namespaces = self.admission.lock_namespaces();
+        let namespace = namespaces
             .get_mut(&self.namespace_id)
             .expect("admitted namespace should have usage");
         let mut remaining = limit
@@ -152,9 +153,9 @@ impl AdmissionPermit {
     }
 
     pub(super) fn release_inline(&self) {
-        let mut usage = self.budget.lock_usage();
+        let mut namespaces = self.admission.lock_namespaces();
         let bytes = self.inline_bytes.swap(0, Ordering::Relaxed);
-        if let Some(namespace) = usage.namespaces.get_mut(&self.namespace_id) {
+        if let Some(namespace) = namespaces.get_mut(&self.namespace_id) {
             namespace.inline_bytes -= bytes;
         }
     }
@@ -162,17 +163,18 @@ impl AdmissionPermit {
 
 impl Drop for AdmissionPermit {
     fn drop(&mut self) {
-        let mut usage = self.budget.lock_usage();
-        usage.total.requests -= 1;
-        usage.total.estimated_bytes -= self.estimated_bytes;
-        if let Some(namespace) = usage.namespaces.get_mut(&self.namespace_id) {
+        let mut namespaces = self.admission.lock_namespaces();
+        if let Some(namespace) = namespaces.get_mut(&self.namespace_id) {
             namespace.requests -= 1;
             namespace.estimated_bytes -= self.estimated_bytes;
             namespace.inline_bytes -= self.inline_bytes.load(Ordering::Relaxed);
             if namespace.requests == 0 {
-                usage.namespaces.remove(&self.namespace_id);
+                namespaces.remove(&self.namespace_id);
             }
         }
+        // Refunded under this runtime's lock, as it was charged, so this
+        // runtime never sees its namespace refunded while the total is not.
+        self.admission.budget.refund_admission(self.estimated_bytes);
     }
 }
 
@@ -201,27 +203,40 @@ impl<T> AdmittedWaiter<T> {
 mod tests {
     use super::*;
     use crate::publish::CommitCandidate;
+    use crate::ExecutionBudgetStats;
     use std::num::NonZeroUsize;
 
     fn limit(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("nonzero test limit")
     }
 
+    fn runtime_admission(
+        limits: PublicationLimits,
+        budget: &ExecutionBudget,
+    ) -> Arc<PublicationAdmission> {
+        Arc::new(PublicationAdmission::new(limits, budget.clone()))
+    }
+
+    fn admitted(budget: &ExecutionBudget) -> (usize, usize) {
+        let stats = budget.stats();
+        (stats.admitted_requests, stats.admitted_bytes)
+    }
+
     #[test]
     fn an_oversized_commit_is_rejected_before_queue_capacity() {
-        let budget = Arc::new(PublicationAdmission::new(PublicationLimits {
-            max_requests: limit(1),
-            ..PublicationLimits::default()
-        }));
+        let budget = ExecutionBudget::builder()
+            .max_admitted_requests(limit(1))
+            .build();
+        let admission = runtime_admission(PublicationLimits::default(), &budget);
         let namespace_id = NamespaceId::parse("large").expect("namespace");
-        let permit = budget.acquire(&namespace_id, 0).expect("fill queue");
+        let permit = admission.acquire(&namespace_id, 0).expect("fill queue");
         let mut candidate = PreparedCandidate::new(CommitCandidate::new(
             super::super::tests::create_directory_request("large", "large"),
         ))
         .expect("prepare");
         candidate.wal_record_bytes_upper_bound =
             MAX_WAL_OBJECT_BYTES - WAL_OBJECT_OVERHEAD_BYTES + 1;
-        let error = budget
+        let error = admission
             .acquire_candidate(&namespace_id, &candidate)
             .err()
             .expect("oversized commit");
@@ -229,27 +244,33 @@ mod tests {
         assert!(error.to_string().contains("too large for one WAL object"));
         assert!(error.to_string().contains("MAX_WAL_OBJECT_BYTES"));
         drop(permit);
-        assert_eq!(budget.used_requests(), 0);
+        assert_eq!(admission.used_requests(), 0);
+        assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
     #[test]
     fn global_and_namespace_limits_share_one_charge_until_last_owner_drops() {
-        let budget = Arc::new(PublicationAdmission::new(PublicationLimits {
-            max_requests: limit(3),
-            max_requests_per_namespace: limit(2),
-            ..PublicationLimits::default()
-        }));
+        let budget = ExecutionBudget::builder()
+            .max_admitted_requests(limit(3))
+            .build();
+        let admission = runtime_admission(
+            PublicationLimits {
+                max_requests_per_namespace: limit(2),
+                ..PublicationLimits::default()
+            },
+            &budget,
+        );
         let a = NamespaceId::parse("a").expect("namespace");
         let b = NamespaceId::parse("b").expect("namespace");
-        let first = budget.acquire(&a, 0).expect("first");
-        let second = budget.acquire(&a, 0).expect("second");
+        let first = admission.acquire(&a, 0).expect("first");
+        let second = admission.acquire(&a, 0).expect("second");
         assert!(matches!(
-            budget.acquire(&a, 0),
+            admission.acquire(&a, 0),
             Err(CoreError::CommitQueueFull)
         ));
-        let third = budget.acquire(&b, 0).expect("other namespace has room");
+        let third = admission.acquire(&b, 0).expect("other namespace has room");
         assert!(matches!(
-            budget.acquire(&b, 0),
+            admission.acquire(&b, 0),
             Err(CoreError::CommitQueueFull)
         ));
         let (sender, receiver) = oneshot::channel();
@@ -257,39 +278,46 @@ mod tests {
         drop(receiver);
         drop(first);
         assert_eq!(
-            budget.lock_usage().total.requests,
+            admission.used_requests(),
             3,
             "disconnect keeps worker charged"
         );
+        assert_eq!(budget.stats().admitted_requests, 3);
         let _ = waiter.send(());
-        assert_eq!(budget.lock_usage().total.requests, 2);
+        assert_eq!(admission.used_requests(), 2);
+        assert_eq!(budget.stats().admitted_requests, 2);
         drop((second, third));
-        let usage = budget.lock_usage();
-        assert_eq!(usage.total.requests, 0);
-        assert_eq!(usage.total.estimated_bytes, 0);
         assert!(
-            usage.namespaces.is_empty(),
+            admission.lock_namespaces().is_empty(),
             "closed namespaces leave no accounting entries"
         );
+        assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
     #[test]
     fn namespace_byte_limit_leaves_room_for_another_tenant() {
         let a = NamespaceId::parse("a").expect("namespace");
         let b = NamespaceId::parse("b").expect("namespace");
-        let budget = Arc::new(PublicationAdmission::new(PublicationLimits {
-            max_estimated_bytes: limit(1026),
-            max_estimated_bytes_per_namespace: limit(513),
-            ..PublicationLimits::default()
-        }));
-        let first = budget.acquire(&a, 0).expect("first tenant");
+        let budget = ExecutionBudget::builder()
+            .max_admitted_bytes(limit(1026))
+            .build();
+        let admission = runtime_admission(
+            PublicationLimits {
+                max_estimated_bytes_per_namespace: limit(513),
+                ..PublicationLimits::default()
+            },
+            &budget,
+        );
+        let first = admission.acquire(&a, 0).expect("first tenant");
         assert!(matches!(
-            budget.acquire(&a, 0),
+            admission.acquire(&a, 0),
             Err(CoreError::CommitQueueFull)
         ));
-        let second = budget.acquire(&b, 0).expect("other tenant has room");
+        let second = admission.acquire(&b, 0).expect("other tenant has room");
+        assert_eq!(admitted(&budget), (2, 1026));
         drop((first, second));
-        assert_eq!(budget.used_requests(), 0);
+        assert_eq!(admission.used_requests(), 0);
+        assert_eq!(admitted(&budget), (0, 0));
     }
 
     #[test]
@@ -303,38 +331,149 @@ mod tests {
             .expect("request weight")
             + 512
             + namespace.as_str().len();
-        let budget = Arc::new(PublicationAdmission::new(PublicationLimits {
-            max_estimated_bytes: limit(charge),
-            ..PublicationLimits::default()
-        }));
-        let permit = budget
+        let budget = ExecutionBudget::builder()
+            .max_admitted_bytes(limit(charge))
+            .build();
+        let admission = runtime_admission(PublicationLimits::default(), &budget);
+        let permit = admission
             .acquire(
                 &namespace,
                 candidate.estimated_retained_bytes().expect("weight"),
             )
             .expect("exact fit");
+        assert_eq!(admitted(&budget), (1, charge));
         assert!(matches!(
-            budget.acquire(&namespace, 0),
+            admission.acquire(&namespace, 0),
             Err(CoreError::CommitQueueFull)
         ));
         drop(permit);
-        assert!(budget
+        assert!(admission
             .acquire(
                 &namespace,
                 candidate.estimated_retained_bytes().expect("weight")
             )
             .is_ok());
-        let too_small = Arc::new(PublicationAdmission::new(PublicationLimits {
-            max_estimated_bytes: limit(charge - 1),
-            ..PublicationLimits::default()
-        }));
+        let too_small = ExecutionBudget::builder()
+            .max_admitted_bytes(limit(charge - 1))
+            .build();
+        let refused = runtime_admission(PublicationLimits::default(), &too_small);
         assert!(matches!(
-            too_small.acquire(
+            refused.acquire(
                 &namespace,
                 candidate.estimated_retained_bytes().expect("weight")
             ),
             Err(CoreError::CommitQueueFull)
         ));
-        assert!(too_small.lock_usage().namespaces.is_empty());
+        assert!(refused.lock_namespaces().is_empty());
+        assert_eq!(too_small.stats(), ExecutionBudgetStats::default());
+    }
+
+    #[test]
+    fn a_refused_admission_charges_nothing() {
+        let budget = ExecutionBudget::builder()
+            .max_admitted_requests(limit(2))
+            .build();
+        let one_per_namespace = PublicationLimits {
+            max_requests_per_namespace: limit(1),
+            ..PublicationLimits::default()
+        };
+        let first_runtime = runtime_admission(one_per_namespace.clone(), &budget);
+        let second_runtime = runtime_admission(one_per_namespace, &budget);
+        let documents = NamespaceId::parse("documents").expect("namespace");
+        let notes = NamespaceId::parse("notes").expect("namespace");
+        let held = first_runtime.acquire(&documents, 0).expect("first request");
+        let charged = admitted(&budget);
+
+        assert!(matches!(
+            first_runtime.acquire(&documents, 0),
+            Err(CoreError::CommitQueueFull)
+        ));
+        assert_eq!(
+            admitted(&budget),
+            charged,
+            "a namespace refusal charges no total"
+        );
+        let other = second_runtime.acquire(&notes, 0).expect("second request");
+        let full = admitted(&budget);
+        assert!(matches!(
+            second_runtime.acquire(&documents, 0),
+            Err(CoreError::CommitQueueFull)
+        ));
+        assert_eq!(admitted(&budget), full, "a total refusal charges no total");
+        assert_eq!(
+            second_runtime.used_requests(),
+            1,
+            "a total refusal charges no namespace"
+        );
+        assert!(!second_runtime.lock_namespaces().contains_key(&documents));
+
+        drop((held, other));
+        assert_eq!(first_runtime.used_requests(), 0);
+        assert_eq!(second_runtime.used_requests(), 0);
+        assert_eq!(budget.stats(), ExecutionBudgetStats::default());
+    }
+
+    #[tokio::test]
+    async fn a_runtime_without_a_budget_admits_and_runs_the_default_totals() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(
+            loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store"),
+        );
+        let writer = crate::LoonFs::builder_with_store(store)
+            .writer_id("default-budget")
+            .build()
+            .await
+            .expect("writer");
+        let admission = &writer.mode.publisher.shared.admission;
+        let budget = writer.execution_budget();
+        let namespaces = (0..9)
+            .map(|index| NamespaceId::parse(format!("ns-{index}")).expect("namespace"))
+            .collect::<Vec<_>>();
+        let overhead = 512 + namespaces[0].as_str().len();
+
+        let mut permits = Vec::new();
+        for namespace_id in &namespaces[..8] {
+            for _ in 0..1024 {
+                permits.push(admission.acquire(namespace_id, 0).expect("default room"));
+            }
+            assert!(matches!(
+                admission.acquire(namespace_id, 0),
+                Err(CoreError::CommitQueueFull)
+            ));
+        }
+        assert_eq!(budget.stats().admitted_requests, 8192);
+        assert!(matches!(
+            admission.acquire(&namespaces[8], 0),
+            Err(CoreError::CommitQueueFull)
+        ));
+        permits.clear();
+
+        for namespace_id in &namespaces[..8] {
+            permits.push(
+                admission
+                    .acquire(namespace_id, 8 * 1024 * 1024 - overhead)
+                    .expect("a full namespace byte allowance"),
+            );
+        }
+        assert_eq!(admitted(budget), (8, 64 * 1024 * 1024));
+        assert!(matches!(
+            admission.acquire(&namespaces[8], 0),
+            Err(CoreError::CommitQueueFull)
+        ));
+        permits.clear();
+        assert_eq!(admitted(budget), (0, 0));
+
+        let mut running = Vec::new();
+        for _ in 0..8 {
+            running.push(admission.publication_permit().await);
+        }
+        let mut ninth = Box::pin(admission.publication_permit());
+        assert!(futures::poll!(ninth.as_mut()).is_pending());
+        assert_eq!(budget.stats().publications_running, 8);
+        assert_eq!(budget.stats().publications_waiting, 1);
+        drop(ninth);
+        drop(running);
+        assert_eq!(budget.stats(), ExecutionBudgetStats::default());
+        writer.shutdown().await.expect("shut down");
     }
 }

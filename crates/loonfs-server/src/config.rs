@@ -95,7 +95,12 @@ impl InlineContentOverrides {
     }
 }
 
-/// Optional overrides for the writer's shared publication budget.
+/// The server's `[publication]` table. Omitted fields keep the runtime
+/// defaults.
+///
+/// `max_requests`, `max_estimated_bytes`, and `max_concurrent_publications`
+/// are limits of the server's execution budget. The two per-namespace fields
+/// are the runtime's publication limits.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicationLimitsOverrides {
@@ -107,22 +112,16 @@ pub struct PublicationLimitsOverrides {
 }
 
 impl PublicationLimitsOverrides {
+    /// The per-namespace limits the server's runtime applies.
     pub(crate) fn resolve(&self) -> loonfs::PublicationLimits {
         let defaults = loonfs::PublicationLimits::default();
         loonfs::PublicationLimits {
-            max_requests: self.max_requests.unwrap_or(defaults.max_requests),
             max_requests_per_namespace: self
                 .max_requests_per_namespace
                 .unwrap_or(defaults.max_requests_per_namespace),
-            max_estimated_bytes: self
-                .max_estimated_bytes
-                .unwrap_or(defaults.max_estimated_bytes),
             max_estimated_bytes_per_namespace: self
                 .max_estimated_bytes_per_namespace
                 .unwrap_or(defaults.max_estimated_bytes_per_namespace),
-            max_concurrent_publications: self
-                .max_concurrent_publications
-                .unwrap_or(defaults.max_concurrent_publications),
         }
     }
 }
@@ -701,14 +700,6 @@ impl ServerConfig {
                 });
             }
         }
-        if self.publication.resolve().max_concurrent_publications.get()
-            > tokio::sync::Semaphore::MAX_PERMITS
-        {
-            return Err(ServerConfigError::InvalidField {
-                field: "publication.max_concurrent_publications",
-                reason: format!("must not exceed {}", tokio::sync::Semaphore::MAX_PERMITS),
-            });
-        }
         if let Err(error) = self.grep.worker_config().validate() {
             return Err(ServerConfigError::InvalidField {
                 field: "grep",
@@ -722,17 +713,27 @@ impl ServerConfig {
     }
 
     /// Builds the execution budget of the server's one runtime from its fold,
-    /// compaction, and merge input limits, reporting to `recorder`.
+    /// compaction, and merge input limits and the totals of its
+    /// `[publication]` table, reporting to `recorder`.
     pub(crate) fn execution_budget(&self, recorder: Arc<dyn MetricsRecorder>) -> ExecutionBudget {
         let positive = |value: usize| {
             std::num::NonZeroUsize::new(value).expect("validated budget limits should be nonzero")
         };
-        ExecutionBudget::builder()
+        let mut builder = ExecutionBudget::builder()
             .max_concurrent_folds(positive(self.max_concurrent_folds))
             .max_concurrent_compactions(positive(self.max_concurrent_compactions))
             .max_merge_input_bytes(positive(self.max_merge_input_bytes))
-            .metrics_recorder(recorder)
-            .build()
+            .metrics_recorder(recorder);
+        if let Some(limit) = self.publication.max_requests {
+            builder = builder.max_admitted_requests(limit);
+        }
+        if let Some(limit) = self.publication.max_estimated_bytes {
+            builder = builder.max_admitted_bytes(limit);
+        }
+        if let Some(limit) = self.publication.max_concurrent_publications {
+            builder = builder.max_concurrent_publications(limit);
+        }
+        builder.build()
     }
 }
 
@@ -1488,10 +1489,13 @@ root = "/tmp/loonfs-server"
         }
         assert!(toml::from_str::<PublicationLimitsOverrides>("max_requsets = 10").is_err());
         let overrides: PublicationLimitsOverrides =
-            toml::from_str("max_requests = 12\nmax_concurrent_publications = 3")
-                .expect("overrides");
-        assert_eq!(overrides.resolve().max_requests.get(), 12);
-        assert_eq!(overrides.resolve().max_concurrent_publications.get(), 3);
+            toml::from_str("max_requests = 12\nmax_requests_per_namespace = 3").expect("overrides");
+        assert_eq!(overrides.max_requests, std::num::NonZeroUsize::new(12));
+        assert_eq!(overrides.resolve().max_requests_per_namespace.get(), 3);
+        assert_eq!(
+            overrides.resolve().max_estimated_bytes_per_namespace,
+            loonfs::PublicationLimits::default().max_estimated_bytes_per_namespace
+        );
     }
 
     #[test]

@@ -23,7 +23,8 @@ use std::sync::Arc;
 /// namespace's writer session: one publication queue, one WAL-tail fold, one
 /// metadata compaction that each published fold starts, and the writer epoch
 /// that the session's first publish acquires. It shares the runtime's store
-/// client, caches, admission budgets, compactor claim, and shutdown.
+/// client, caches, admission limits, execution budget, compactor claim, and
+/// shutdown.
 ///
 /// The host that holds a writable handle owns the session. Clones share it,
 /// and the session lives while any clone is held. [`Namespace::close`] ends
