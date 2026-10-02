@@ -53,6 +53,14 @@ impl PublicationAdmission {
             .sum()
     }
 
+    #[cfg(test)]
+    pub(super) fn namespace_usage(&self, namespace_id: &NamespaceId) -> (usize, usize, usize) {
+        self.lock_namespaces()
+            .get(namespace_id)
+            .map(|usage| (usage.requests, usage.estimated_bytes, usage.inline_bytes))
+            .unwrap_or_default()
+    }
+
     pub(super) async fn publication_permit(&self) -> BudgetPermit<'_> {
         self.budget.publication_permit().await
     }

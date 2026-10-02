@@ -560,7 +560,7 @@ fn try_admit_prepared_candidate(
     candidate: PreparedCandidate,
 ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
     let commit_id = candidate.candidate.commit_id().clone();
-    publisher.check_admission(&publisher.lock_state())?;
+    drop(publisher.check_admission(&publisher.lock_state())?);
     let permit = publisher
         .admission
         .acquire_candidate(namespace_id, &candidate)?;
@@ -3335,6 +3335,7 @@ impl ObjectStore for SegmentWriteWatch {
     }
 }
 
+mod fenced_session;
 mod inline_writer;
 mod pin_folds;
 mod session_compaction;
