@@ -297,7 +297,7 @@ The full registry (`ErrorCode` in `loonfs-types`):
 | `namespace_unrestricted` | 409 | The namespace's access mode is unrestricted, so it holds no access rows. |
 | `binding_version_mismatch` | 409 | The binding version supplied for an inode move or delete is not the entry's current binding version. Re-read the entry before retrying. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
-| `writer_fenced` | 409 | The writer epoch was superseded by another session. |
+| `writer_fenced` | 409 | Another writer superseded this session. The session is dead and this request fails. The host drops it; a later request opens a new session whose first publish takes the namespace back. Sustained fencing of one namespace means two writers receive its traffic. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
 | `upload_already_completed` | 409 | The upload session is already completed, so it cannot select other content and cannot be aborted. |
@@ -322,10 +322,12 @@ The full registry (`ErrorCode` in `loonfs-types`):
 | `server_error` | 500 | Unclassified internal failure. |
 
 Automated retry is narrower than the HTTP status. Raw transport failures may
-be retried. Of the registered error codes, only `commit_queue_full`,
-`server_busy`, and `shutting_down` can clear without caller or operator action.
-`writer_session_closed` is resolved by routing the request to the node that
-holds the namespace, not by waiting, and carries no `Retry-After` header.
+be retried. Of the registered error codes, clients automatically retry only
+`commit_queue_full`, `server_busy`, and `shutting_down`.
+`writer_session_closed` requires routing to the node assigned the namespace.
+It can also occur there while a fenced session finishes its work; a later
+request can open a new session after that work ends. It carries no
+`Retry-After` header and clients do not retry it automatically.
 `checkpoint_unavailable`, `maintenance_required`, and `index_lagging` require
 maintenance. `storage_permission_denied` requires the operator to fix the
 storage credentials or bucket policy. `commit_outcome_unknown`,
@@ -845,9 +847,9 @@ operator can tell a planned failover from two writers misconfigured against
 one namespace.
 
 The host owns each writer session. A session opens when the host opens a
-namespace for writing, and it lives until the host closes it or stops holding
-it. The runtime never opens a session on its own and never closes one to make
-room for another; it keeps no cap on how many sessions exist. Opening a
+namespace for writing, and it lives until the host closes it, stops holding
+it, or another writer fences it. The runtime never opens a session on its
+own and never closes one to make room for another; it keeps no cap on how many sessions exist. Opening a
 session writes nothing durable; its first publish acquires the next writer
 epoch.
 
@@ -859,7 +861,19 @@ after its close began fails with `writer_session_closed`.
 The reference server opens a namespace's session on the first request that
 writes to it and keeps it open, with no cap and no eviction. It stops holding
 the session when the namespace is deleted or when a request finds that the
-namespace does not exist.
+namespace does not exist. It also stops holding a fenced session. The
+request that finds the fence fails with `writer_fenced`. The server does not
+resubmit it. The session is dead, including every clone held by a request
+still in flight. A later request opens a new session, whose first publish
+takes the namespace back. Until the old session's work ends, an open can
+return `writer_session_closed` (503); a later request can open after it ends.
+One namespace's fence does not affect sessions for other namespaces.
+Sustained fencing of one namespace means two writers are being sent its
+traffic. Route that namespace to one writer. Each dropped fenced session
+produces a warning with the namespace and the winning writer id when the
+error carries it. The host table keeps a cumulative count of these drops.
+Typed hosts use `Namespaces::forget_if_fenced` after a failure and read
+`Namespaces::fenced_sessions_dropped` for the count.
 
 The standard mutation operations are defined in [the format specification](format.md#66-operations-and-wal-deltas). `POST /commits` (section 6.8) exposes those operations
 over HTTP. The same identity, durability, and visibility rules apply to every

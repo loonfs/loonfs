@@ -82,7 +82,8 @@ pub enum NamespaceSessionState {
 ///
 /// Clones share the same sessions and worker tasks. The table holds a
 /// session while a writable [`Namespace`](crate::Namespace) holds it or
-/// while work it admitted is still running. Nothing here decides how many
+/// while work it admitted is still running. A fenced session leaves once
+/// its work ends, even while handles still hold it. Nothing here decides how many
 /// sessions exist or how long they live.
 #[derive(Clone)]
 pub(crate) struct PublisherRegistry {
@@ -258,7 +259,9 @@ impl PublisherRegistry {
     ///
     /// A session whose last handle dropped stays in the table until its
     /// admitted work finishes, and an open before then continues it: a
-    /// second session would acquire a new epoch and fence that work.
+    /// second session would acquire a new epoch and fence that work. A fenced
+    /// session cannot continue: an open fails while its work ends, then starts
+    /// a new session even while old handles are held.
     pub(crate) fn open_session(
         &self,
         namespace_id: &NamespaceId,
@@ -266,6 +269,16 @@ impl PublisherRegistry {
         let mut state = self.shared.lock_state();
         if state.closed {
             return Err(CoreError::ShuttingDown);
+        }
+        if let Some(live) = state.sessions.get(namespace_id) {
+            if live.publisher.session_is_fenced() {
+                if !live.publisher.lock_state().has_ended(false) {
+                    return Err(CoreError::WriterSessionClosed {
+                        namespace_id: namespace_id.clone(),
+                    });
+                }
+                state.sessions.remove(namespace_id);
+            }
         }
         if let Some(live) = state.sessions.get_mut(namespace_id) {
             if live.publisher.session_closed() {
@@ -725,7 +738,11 @@ impl NamespacePublisher {
     /// Removes this session from the table once it has ended and nothing it
     /// admitted is still running. Dropping the last handle, the worker's
     /// exit, the fold's exit, a close, and a landed delete each call this,
-    /// so whichever of them comes last removes the session.
+    /// so whichever of them comes last removes the session. Fenced sessions
+    /// end even while handles are held.
+    /// A session the registry has forgotten never starts a task and never
+    /// holds queued work. Admission and task starts hold the writer-session
+    /// lock through their decision, so fencing prevents both before removal.
     fn forget_if_ended(&self) {
         let Some(shared) = self.shared.upgrade() else {
             return;
@@ -737,6 +754,7 @@ impl NamespacePublisher {
             }
             _ => return,
         };
+        let held = held && !self.session_is_fenced();
         if !self.lock_state().has_ended(held) {
             return;
         }
@@ -746,16 +764,31 @@ impl NamespacePublisher {
             .publisher_sessions(registry.sessions.len());
     }
 
-    /// Returns the error for the current admission state, or succeeds when open.
-    fn check_admission(&self, state: &NamespacePublisherState) -> Result<(), CoreError> {
+    fn check_admission(
+        &self,
+        state: &NamespacePublisherState,
+    ) -> Result<std::sync::MutexGuard<'_, WriterSessionState>, CoreError> {
         match state.admission {
-            PublisherAdmissionState::Open => Ok(()),
+            PublisherAdmissionState::Open => self.check_fence(),
             PublisherAdmissionState::Closed => Err(CoreError::ShuttingDown),
             PublisherAdmissionState::SessionClosed => Err(CoreError::WriterSessionClosed {
                 namespace_id: self.namespace_id.clone(),
             }),
             PublisherAdmissionState::Deleted => Err(self.namespace_deleted()),
         }
+    }
+
+    /// Keeps fencing from racing with admission or a task start until the
+    /// caller drops the guard.
+    fn check_fence(&self) -> Result<std::sync::MutexGuard<'_, WriterSessionState>, CoreError> {
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let WriterSessionState::Fenced(fence) = &*session {
+            return Err(CoreError::WriterFenced(fence.clone()));
+        }
+        Ok(session)
     }
 
     fn session_is_fenced(&self) -> bool {
@@ -784,11 +817,9 @@ impl NamespacePublisher {
     /// Once the candidate enters the queue, cancelling the caller only drops
     /// result delivery; the worker still owns and publishes the request.
     async fn submit_candidate(&self, candidate: CommitCandidate) -> CommitResult {
-        self.check_admission(&self.lock_state())?;
+        drop(self.check_admission(&self.lock_state())?);
         let plan = self.plan_inline_candidate(candidate)?;
-        let permit = self
-            .admission
-            .acquire_candidate(&self.namespace_id, &plan.candidate)?;
+        let permit = self.acquire_candidate(&plan.candidate)?;
         let candidate = self.stage_inline_candidate(plan, &permit).await?;
         PublicationAdmission::validate_candidate(&candidate)?;
         submit_with_admission(
@@ -817,10 +848,7 @@ impl NamespacePublisher {
     #[cfg(test)]
     async fn submit(&self, candidate: CommitCandidate) -> CommitResult {
         let candidate = PreparedCandidate::new(candidate)?;
-        self.check_admission(&self.lock_state())?;
-        let permit = self
-            .admission
-            .acquire_candidate(&self.namespace_id, &candidate)?;
+        let permit = self.acquire_candidate(&candidate)?;
         submit_with_admission(
             &self.namespace_id,
             candidate,
@@ -838,6 +866,16 @@ impl NamespacePublisher {
         .await
     }
 
+    fn acquire_candidate(
+        &self,
+        candidate: &PreparedCandidate,
+    ) -> Result<Arc<AdmissionPermit>, CoreError> {
+        let state = self.lock_state();
+        let _session = self.check_admission(&state)?;
+        self.admission
+            .acquire_candidate(&self.namespace_id, candidate)
+    }
+
     fn admit(
         &self,
         commit_id: CommitId,
@@ -847,7 +885,7 @@ impl NamespacePublisher {
         enqueued_at: u64,
     ) -> Result<SubmissionAdmission, CoreError> {
         let mut state = self.lock_state();
-        self.check_admission(&state)?;
+        let _session = self.check_admission(&state)?;
         if let Some(existing) = state.in_flight.get_mut(&commit_id) {
             if existing.semantic_identity != semantic_identity {
                 let primary_identity = existing.semantic_identity.clone();
@@ -928,7 +966,7 @@ impl NamespacePublisher {
         let (sender, receiver) = oneshot::channel();
         {
             let mut state = self.lock_state();
-            self.check_admission(&state)?;
+            let _session = self.check_admission(&state)?;
             let permit = self.admission.acquire(&self.namespace_id, 0)?;
             let sender = AdmittedWaiter::new(sender, &permit);
             match state.queue.back_mut() {
@@ -1260,6 +1298,7 @@ impl NamespacePublisher {
     /// session's compaction after it releases its fold permit.
     fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
+        let _session = self.check_fence().ok()?;
         if state
             .fold
             .as_ref()
@@ -1288,11 +1327,13 @@ impl NamespacePublisher {
     /// the next fold. The drain reports the contained panic.
     fn start_compaction(&self) {
         let mut state = self.lock_state();
-        if !matches!(state.admission, PublisherAdmissionState::Open)
-            || state
-                .compaction
-                .as_ref()
-                .is_some_and(SessionTask::is_running)
+        let Ok(_session) = self.check_admission(&state) else {
+            return;
+        };
+        if state
+            .compaction
+            .as_ref()
+            .is_some_and(SessionTask::is_running)
         {
             return;
         }

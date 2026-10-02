@@ -136,13 +136,16 @@ impl ApiResponseError {
     }
 
     /// Maps a failure from the host's writable handle for `namespace_id`, and
-    /// stops holding that handle when the namespace is missing or deleted.
+    /// stops holding it when its session is fenced or its namespace is gone.
     pub(super) fn runtime_for_namespace_writer(
         namespaces: &Namespaces,
         namespace_id: &NamespaceId,
         error: loonfs::Error,
     ) -> Self {
         namespaces.forget_if_gone(namespace_id, error.code());
+        if error.code() == ErrorCode::WriterFenced {
+            namespaces.forget_if_fenced(namespace_id, &error);
+        }
         Self::runtime_for_namespace(namespace_id, error)
     }
 

@@ -150,12 +150,14 @@ impl LoonFs<Writable> {
     /// Opens the writer session for `namespace_id` and returns a handle to it.
     ///
     /// If a handle for this namespace is already open in this runtime, the
-    /// new handle shares its session. Opening does no store IO and acquires
+    /// new handle shares its session unless that session is fenced. Opening
+    /// does no store IO and acquires
     /// no writer epoch; the session's first publish does. The caller owns
     /// the session from here on (see [`Namespace`]). Fails with
     /// `writer_session_closed` while a [`Namespace::close`] of this
-    /// namespace's session drains, and with `shutting_down` after shutdown
-    /// begins.
+    /// namespace's session drains or a fenced session finishes its work. Once
+    /// that work ends, opening starts a new session even if old clones are
+    /// still held. Fails with `shutting_down` after shutdown begins.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.open_namespace",

@@ -34,6 +34,9 @@ use std::sync::Arc;
 /// has ended, the next [`LoonFs::open_namespace`] starts a new one, and its
 /// first publish acquires a new writer epoch. The runtime never opens a
 /// session by itself and never closes one to make room for another.
+/// A fenced session stays dead through every clone. Opening again returns
+/// `writer_session_closed` while its work ends, then starts a new session
+/// even if clones of the dead session are still held.
 #[derive(Clone)]
 pub struct Namespace<M> {
     pub(crate) core: RuntimeCore,

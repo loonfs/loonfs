@@ -295,7 +295,7 @@ fit the namespaces a server serves.
 | `loonfs.head_state_cache.retained_decoded_bytes` | Gauge | Decoded bytes of head anchors and WAL-tail projections held now, writers' tails included. |
 | `loonfs.metadata_segment_cache.retained_decoded_bytes` | Gauge | Decoded bytes the metadata segment cache holds, up to `metadata_cache.max_segment_bytes`. |
 | `loonfs.publisher.tail_replays` | Counter | A publish rereads the WAL tail from the store instead of finding it in the head-state cache. This happens on a session's first publish, after the cache evicted the tail, after a failed publish, when the namespace's last write was more than a minute ago, and when a fold the publisher did not run has published a new manifest. |
-| `loonfs.publisher.sessions_open` | Gauge | Writer sessions the server holds: one for each namespace it has written since it started, plus any whose admitted work is still finishing. |
+| `loonfs.publisher.sessions_open` | Gauge | Open writer sessions and sessions whose admitted work is still finishing. A fenced session stops counting once its work ends. |
 | `loonfs.maintenance.sweep_passes` | Counter, `result` label | A maintenance sweep pass ends: `ok` when it listed every namespace, `error` when the listing failed. |
 | `loonfs.maintenance.sweep_pass_seconds` | Histogram | How long one sweep pass took. A pass that takes longer than `maintenance_interval_ms` is followed at once by the next. |
 | `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The next pass tries it again. |
@@ -476,8 +476,19 @@ it started. There is no cap and no eviction. One idle session holds about
 WAL tail lives in the head-state cache between publishes, so it is counted
 there, not here. The server stops holding a session when its
 namespace is deleted, or when a request finds that the namespace does not
-exist. After a restart, the first write to each namespace acquires a new
-writer epoch.
+exist. A request that finds a fenced session fails with `writer_fenced`,
+and the server drops the handle. That session is dead. The server does not
+resubmit the request. A later request starts a new session, whose first
+publish takes the namespace back. While the old session's work ends, an open
+can return `writer_session_closed` (503); a later request can open once it
+ends. Other namespaces keep their sessions.
+
+Each dropped fenced session produces a warning with `namespace_id` and
+`active_writer_id` when the error carries the winning writer. The host table
+exposes the cumulative count as `Namespaces::fenced_sessions_dropped`.
+Sustained fencing of one namespace means two writers are being sent its
+traffic. Route that namespace to one writer. After a restart, the first
+write to each namespace acquires a new writer epoch.
 
 `max_concurrent_folds` defaults to 2. A sustained
 `loonfs.execution_budget.folds_waiting` gauge means WAL folds are waiting at

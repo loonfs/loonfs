@@ -2,14 +2,15 @@
 
 use crate::HttpMetrics;
 use loonfs::{
-    CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, Namespace, SharedObjectStore,
-    SnapshotPolicy, Writable,
+    CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, Namespace,
+    NamespaceSessionState, SharedObjectStore, SnapshotPolicy, Writable,
 };
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{ErrorCode, NamespaceId, SecretString};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Semaphore;
 
@@ -78,9 +79,15 @@ impl BindingState {
 /// handle only for a namespace that existed when the handle was first
 /// opened. It keeps each such handle, with no cap and no eviction, and stops
 /// holding it when the namespace is deleted or a request finds it gone.
+/// A request that finds its session fenced fails with `writer_fenced` and
+/// drops the held handle. The session stays dead. A later request opens a
+/// new session, whose first publish takes the namespace back. While the old
+/// session's work ends, an open can fail with retryable `writer_session_closed`.
+/// Sustained fencing of one namespace means two writers receive its traffic.
 pub struct Namespaces {
     runtime: LoonFs<Writable>,
     handles: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
+    fenced_sessions_dropped: AtomicU64,
 }
 
 impl Namespaces {
@@ -88,6 +95,7 @@ impl Namespaces {
         Self {
             runtime,
             handles: Mutex::default(),
+            fenced_sessions_dropped: AtomicU64::new(0),
         }
     }
 
@@ -128,6 +136,37 @@ impl Namespaces {
     /// Returns a clone of every handle this host holds.
     pub fn held(&self) -> Vec<Namespace<Writable>> {
         self.lock().values().cloned().collect()
+    }
+
+    /// Checks the held session under the table lock, so a late error cannot
+    /// drop a healthy replacement. `error` supplies the winning writer for
+    /// the warning. Returns whether a fenced handle was dropped.
+    pub fn forget_if_fenced(&self, namespace_id: &NamespaceId, error: &loonfs::Error) -> bool {
+        let mut handles = self.lock();
+        if !handles
+            .get(namespace_id)
+            .is_some_and(|handle| handle.session_state() == NamespaceSessionState::Fenced)
+        {
+            return false;
+        }
+        handles.remove(namespace_id);
+        self.fenced_sessions_dropped.fetch_add(1, Ordering::Relaxed);
+        drop(handles);
+        let active_writer_id = error
+            .to_api_error()
+            .details
+            .and_then(|details| details.active_writer_id);
+        tracing::warn!(
+            %namespace_id,
+            active_writer_id = active_writer_id.as_ref().map(tracing::field::display),
+            "host dropped a fenced writer session"
+        );
+        true
+    }
+
+    /// Counts fenced handles dropped over this table's lifetime.
+    pub fn fenced_sessions_dropped(&self) -> u64 {
+        self.fenced_sessions_dropped.load(Ordering::Relaxed)
     }
 
     /// Stops holding the handle of a deleted namespace.

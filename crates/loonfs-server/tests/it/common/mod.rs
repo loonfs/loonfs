@@ -95,6 +95,7 @@ pub(crate) fn series(scrape: &BTreeMap<String, f64>, name: &str) -> f64 {
 }
 
 pub(crate) struct TestServer {
+    pub(crate) namespaces: std::sync::Arc<loonfs_http::Namespaces>,
     pub(crate) client: Client,
     pub(crate) server_url: String,
     pub(crate) store_root: Option<PathBuf>,
@@ -117,13 +118,14 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let (router, _state) = app(config, AppOptions::default()).await.expect("build app");
+    let (router, state) = app(config, AppOptions::default()).await.expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
     let server_url = format!("http://{addr}");
 
     TestServer {
+        namespaces: state.binding.namespaces.clone(),
         client: Client::new(ClientConfig {
             server_url: server_url.clone(),
             auth_token: auth_token.map(Into::into),
