@@ -12,8 +12,10 @@ use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
+use crate::namespace::control::CurrentManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::{
@@ -53,8 +55,8 @@ pub(crate) enum TryFoldWal {
     /// that basis itself.
     Settled(Box<FoldedBasis>),
     /// A concurrent manifest publication does not cover this attempt's
-    /// target; retry against a fresh projection.
-    RaceLost,
+    /// target. It carries the current manifest the attempt lost to.
+    RaceLost(CurrentManifest),
 }
 
 /// Folds the visible WAL tail into segments and publishes the next manifest.
@@ -84,10 +86,15 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
 ) -> Result<FoldedBasis> {
     retry_while_contended(|| async move {
+        // The fallback reloads after every lost race, so it never relies on
+        // the rule that keeps a held tail.
+        let projection = load_fold_projection(store, namespace_id, policy).await?;
         Result::Ok(
-            match try_fold_wal(store, namespace_id, deadline, policy).await? {
+            match try_fold_wal_projection(store, namespace_id, &projection, deadline, policy)
+                .await?
+            {
                 TryFoldWal::Settled(basis) => CasAttempt::Settled(*basis),
-                TryFoldWal::RaceLost => {
+                TryFoldWal::RaceLost(_) => {
                     CasAttempt::Contended(CoreError::WalPublish(WalPublishError::NumberTaken))
                 }
             },
@@ -96,19 +103,93 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     .await?
 }
 
+/// Loads the namespace and folds its tail, keeping that tail across
+/// manifests that fold no WAL (see `fold_held_projection`).
 pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
 ) -> Result<TryFoldWal> {
-    let projection = load_manifest_projection(store, namespace_id, policy.max_block_memo_bytes)
+    let projection = load_fold_projection(store, namespace_id, policy).await?;
+    fold_held_projection(store, None, namespace_id, projection, deadline, policy).await
+}
+
+async fn load_fold_projection<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    namespace_id: &NamespaceId,
+    policy: MetadataLsmPolicy,
+) -> Result<ManifestProjection<'a, S>> {
+    load_manifest_projection(store, namespace_id, policy.max_block_memo_bytes)
         .instrument(tracing::debug_span!(
             "loonfs.phase",
             phase = "scan_namespace_state"
         ))
-        .await?;
-    try_fold_wal_projection(store, namespace_id, &projection, deadline, policy).await
+        .await
+}
+
+/// Folds a projection the caller already holds. When a manifest that folded
+/// no WAL past the projection's basis takes the fold's number, the fold
+/// takes that manifest as its basis and publishes again from the same tail,
+/// up to the contention limit. Any other lost race is returned.
+async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    segment_cache: Option<&'a MetadataSegmentCache>,
+    namespace_id: &NamespaceId,
+    mut projection: ManifestProjection<'a, S>,
+    deadline: &Deadline,
+    policy: MetadataLsmPolicy,
+) -> Result<TryFoldWal> {
+    let mut attempt =
+        try_fold_wal_projection(store, namespace_id, &projection, deadline, policy).await?;
+    for _retry in 0..CONTENTION_RETRY_LIMIT {
+        let TryFoldWal::RaceLost(winner) = &attempt else {
+            break;
+        };
+        if !keeps_held_tail(
+            projection.manifest_segments.manifest().payload(),
+            winner.envelope.payload(),
+        ) {
+            break;
+        }
+        projection.basis = MetadataBasis(winner.manifest());
+        projection.manifest_segments =
+            load_basis_metadata_segments(store, segment_cache, &projection.basis)
+                .await?
+                .segments;
+        attempt = publish_fold(store, namespace_id, &projection, deadline, policy).await?;
+    }
+    Ok(attempt)
+}
+
+/// Whether a tail replayed above `basis` is also the tail above `winner`, a
+/// later manifest that took the fold's number.
+fn keeps_held_tail(basis: &NamespaceManifestPayload, winner: &NamespaceManifestPayload) -> bool {
+    // The winner may differ from the basis only where a compactor claim, a
+    // compaction, or a retention advance writes. Everything the fold holds
+    // is then still right over the winner:
+    // - Tail rows: replay reads the WAL above `folded_wal_no`, starts from
+    //   `head_seq` and `next_inode_id`, and adds the root inode only when
+    //   there are no runs. All of these are equal.
+    // - Deletion roots: the fold reads each one through the winner's runs,
+    //   which hold the same view at `head_seq`. A compaction keeps every
+    //   view at or above the floor, and the floor is at most `head_seq`.
+    // - Activity: a successor at the same `head_seq` keeps it, so the
+    //   basis activity plus the tail's is still the total.
+    // - Run numbers: the retry takes its runs and run number from the winner.
+    // - Inline content: the first attempt wrote it, and nothing deletes the
+    //   content of a live namespace. A deleted winner differs in `status`.
+    winner.manifest_no > basis.manifest_no
+        && winner.runs.is_empty() == basis.runs.is_empty()
+        && *winner
+            == NamespaceManifestPayload {
+                manifest_no: winner.manifest_no,
+                compactor_epoch: winner.compactor_epoch,
+                retention_floor_seq: winner.retention_floor_seq,
+                next_run_no: winner.next_run_no,
+                runs: winner.runs.clone(),
+                ..basis.clone()
+            }
 }
 
 async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
@@ -119,7 +200,6 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
 ) -> Result<TryFoldWal> {
     let head_seq = projection.head.seq;
-    let basis_manifest_no = projection.basis.manifest_no();
     let basis_manifest = projection.basis.manifest();
     if projection
         .manifest_segments
@@ -138,8 +218,18 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
     }
 
     materialize_inline_content(store, projection).await?;
+    publish_fold(store, namespace_id, projection, deadline, policy).await
+}
+
+async fn publish_fold<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    projection: &ManifestProjection<'_, S>,
+    deadline: &Deadline,
+    policy: MetadataLsmPolicy,
+) -> Result<TryFoldWal> {
     deadline.ensure_metadata_publication_budget(namespace_id)?;
-    let manifest_no = next_manifest_no_after(basis_manifest_no)?;
+    let manifest_no = next_manifest_no_after(projection.basis.manifest_no())?;
     let manifest = build_namespace_manifest_for_projection(
         store,
         namespace_id,
@@ -158,16 +248,16 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
         }
         // A same-sequence compaction can replace the predecessor without
         // covering the newer WAL head. That manifest wins, but it has not
-        // satisfied the fold: reload its runs, replay the tail, try again.
-        ManifestPublicationOutcome::PredecessorChanged(_) => {
-            return Ok(TryFoldWal::RaceLost);
+        // satisfied the fold.
+        ManifestPublicationOutcome::PredecessorChanged(current) => {
+            return Ok(TryFoldWal::RaceLost(current));
         }
     };
     Ok(TryFoldWal::Settled(Box::new(FoldedBasis {
         current_manifest_no: current.manifest().manifest_no,
         current_manifest_head_seq: current.manifest().head_seq,
         manifest: current.manifest(),
-        target_head_seq: head_seq,
+        target_head_seq: projection.head.seq,
         outcome,
     })))
 }
@@ -217,11 +307,18 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
             tail_state: input.tail_state,
         };
         // A fold publishes metadata without updating the namespace head.
-        match try_fold_wal_projection(store, namespace_id, &manifest_projection, deadline, policy)
-            .await?
+        match fold_held_projection(
+            store,
+            segment_cache,
+            namespace_id,
+            manifest_projection,
+            deadline,
+            policy,
+        )
+        .await?
         {
             TryFoldWal::Settled(basis) => *basis,
-            TryFoldWal::RaceLost => {
+            TryFoldWal::RaceLost(_) => {
                 fold_wal_basis_with_deadline(store, namespace_id, deadline, policy).await?
             }
         }
