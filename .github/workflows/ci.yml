@@ -77,6 +77,24 @@ jobs:
       - run: cargo nextest run --workspace --locked
       - run: cargo test --workspace --doc --locked
 
+  write-stress:
+    name: write path stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: rust
+        run: echo "version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/config.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-
+      - run: scripts/stress-write-path.sh
+
   openapi:
     name: openapi
     runs-on: ubuntu-latest
