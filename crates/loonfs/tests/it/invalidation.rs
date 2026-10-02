@@ -759,8 +759,8 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
     let hint_key = loonfs_objectstore::keys::hint(&namespace_id);
     let blocking = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(hint_key.clone()),
-        OperationClass::GetWithMetadata,
+        KeyPredicate::manifest(&namespace_id),
+        OperationClass::Head,
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
@@ -790,9 +790,9 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
         .expect("first put");
     writer.drain().await.expect("finish hints");
 
-    // The next put starts more than a budget later, so it discovers the
-    // namespace again, and that discovery is held at the hint. Meanwhile the
-    // reader checks the old basis, and a fold publishes a new one.
+    // The quiet writer confirms its tip. Hold the successor HEAD while the
+    // reader checks the old basis and a fold publishes a new one. The held
+    // HEAD then finds that fold and the writer reloads.
     let check_after_attempt_ms = 10_000;
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
     recording.inner().block_next();

@@ -3089,7 +3089,7 @@ async fn writer_tails_stay_within_the_head_state_budget() {
 }
 
 #[tokio::test]
-async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
+async fn a_quiet_minute_confirms_the_tip_but_the_revalidation_bound_replays_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -3106,9 +3106,15 @@ async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
-    for (commit_id, now_ms) in [
-        ("first", 0),
-        ("second", loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1_000),
+    let quiet_ms = loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1_000;
+    for (commit_id, now_ms, replays) in [
+        ("first", 0, 1),
+        ("quiet", quiet_ms, 1),
+        (
+            "expired",
+            quiet_ms + loonfs_core::limits::READ_REVALIDATION_BOUND_MS,
+            2,
+        ),
     ] {
         timer.set(now_ms);
         namespace
@@ -3117,12 +3123,12 @@ async fn a_publish_past_the_publish_budget_counts_a_tail_replay() {
             )))
             .await
             .expect("commit");
+        assert_eq!(
+            counter(&recorder, "loonfs.publisher.tail_replays"),
+            replays,
+            "{commit_id}"
+        );
     }
-    assert_eq!(
-        counter(&recorder, "loonfs.publisher.tail_replays"),
-        2,
-        "the engine drops a projection older than the publish budget and rereads the tail"
-    );
 
     writer
         .shutdown()
