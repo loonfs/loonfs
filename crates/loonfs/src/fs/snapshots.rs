@@ -87,6 +87,7 @@ impl<M> Namespace<M> {
         &self,
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<ListSnapshotsResponse> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         if self.core.subject.is_some() {
             self.core
                 .read(&self.namespace_id, |engine, context| async move {

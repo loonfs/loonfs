@@ -40,6 +40,7 @@ enum StoreSource {
 
 /// What the runtime core opens from, in every mode.
 struct CoreSettings {
+    execution_budget: Option<ExecutionBudget>,
     source: StoreSource,
     max_read_content_bytes: Option<u64>,
     /// `None` builds a private cache when the core opens.
@@ -63,8 +64,6 @@ struct WriterSettings {
     min_publish_interval_ms: u64,
     publication_limits: PublicationLimits,
     inline_content: InlineContentPolicy,
-    /// `None` builds a private budget when the runtime builds.
-    execution_budget: Option<ExecutionBudget>,
 }
 
 impl<M> LoonFsBuilder<M> {
@@ -79,6 +78,7 @@ impl<M> LoonFsBuilder<M> {
     fn new(source: StoreSource) -> Self {
         Self {
             core: CoreSettings {
+                execution_budget: None,
                 source,
                 max_read_content_bytes: None,
                 metadata_cache: None,
@@ -98,7 +98,6 @@ impl<M> LoonFsBuilder<M> {
                 min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
                 publication_limits: PublicationLimits::default(),
                 inline_content: InlineContentPolicy::default(),
-                execution_budget: None,
             },
             mode: PhantomData,
         }
@@ -203,6 +202,25 @@ impl<M> LoonFsBuilder<M> {
         self
     }
 
+    /// Runs this runtime's reads, publications, folds, and merges under
+    /// `execution_budget`, which other runtimes may share.
+    ///
+    /// Every publication request this runtime admits counts against the
+    /// budget's admitted totals until its work settles. Public reads wait for
+    /// a read permit before loading anything. Publication batches,
+    /// session folds and merges, [`LoonFs::maintenance`] work, namespace
+    /// deletions, and the creation of checkpoints, snapshots, and forks of
+    /// the current head take their permits from it, and every merge holds at
+    /// most its merge input size. The per-namespace admission limits stay
+    /// with this runtime (see [`LoonFsBuilder::publication_limits`]). The budget
+    /// reports its metrics to its own recorder. Without this setting, the
+    /// runtime creates a private budget with the default limits that reports
+    /// to [`Self::metrics_recorder`].
+    pub fn execution_budget(mut self, execution_budget: ExecutionBudget) -> Self {
+        self.core.execution_budget = Some(execution_budget);
+        self
+    }
+
     /// Installs the metrics recorder this runtime reports its instruments to
     /// (see [`crate::metrics`]).
     ///
@@ -213,7 +231,7 @@ impl<M> LoonFsBuilder<M> {
     /// without one registers nothing. The private metadata cache a runtime
     /// creates without [`Self::metadata_cache`] reports here too; a cache
     /// given to that setting reports only to its own recorder. The same holds
-    /// for the execution budget of a writable runtime (see
+    /// for the execution budget (see
     /// [`LoonFsBuilder::execution_budget`]).
     pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
@@ -255,24 +273,6 @@ impl LoonFsBuilder<Writable> {
         self
     }
 
-    /// Runs this runtime's publications, folds, and merges under
-    /// `execution_budget`, which other runtimes may share.
-    ///
-    /// Every publication request this runtime admits counts against the
-    /// budget's admitted totals until its work settles. Publication batches,
-    /// session folds and merges, [`LoonFs::maintenance`] work, namespace
-    /// deletions, and the creation of checkpoints, snapshots, and forks of
-    /// the current head take their permits from it, and every merge holds at
-    /// most its merge input size. The per-namespace admission limits stay
-    /// with this runtime (see [`Self::publication_limits`]). The budget
-    /// reports its metrics to its own recorder. Without this setting, the
-    /// runtime creates a private budget with the default limits that reports
-    /// to [`Self::metrics_recorder`].
-    pub fn execution_budget(mut self, execution_budget: ExecutionBudget) -> Self {
-        self.writer.execution_budget = Some(execution_budget);
-        self
-    }
-
     /// Sets the admission limits this runtime applies to each namespace's
     /// publication requests. The totals across namespaces, and the
     /// publications running at once, are limits of the execution budget (see
@@ -291,9 +291,8 @@ impl LoonFsBuilder<Writable> {
     /// Turns this builder into one for a read-only runtime.
     ///
     /// It keeps the settings both modes share, such as the store, the
-    /// metadata cache, and the manifest revalidation interval. It drops the
-    /// writer-only ones, such as the writer id, the publication limits, and
-    /// the execution budget.
+    /// metadata cache, execution budget, and manifest revalidation interval.
+    /// It drops writer-only settings such as the writer id and publication limits.
     pub fn read_only(self) -> LoonFsBuilder<ReadOnly> {
         LoonFsBuilder {
             core: self.core,
@@ -317,18 +316,8 @@ impl LoonFsBuilder<Writable> {
             .ok_or_else(|| Error::Config("writer_id is required".to_owned()))?;
         let identity = WriterIdentity::new(writer_id)?;
         let runtime = owning_runtime()?;
-        let mut core = self.core;
-        let execution_budget = writer.execution_budget.unwrap_or_else(|| {
-            let builder = ExecutionBudget::builder();
-            match &core.metrics_recorder {
-                Some(recorder) => builder.metrics_recorder(Arc::clone(recorder)),
-                None => builder,
-            }
-            .build()
-        });
-        core.metadata_lsm_policy.max_decoded_input_bytes_per_step =
-            execution_budget.max_merge_input_bytes();
-        let core = core.open()?;
+        let core = self.core.open()?;
+        let execution_budget = core.inner.execution_budget.clone();
         let bits = Arc::new(WriterBits {
             inline_content: writer.inline_content,
             identity,
@@ -357,7 +346,17 @@ impl CoreSettings {
     /// A builder given no recorder of either kind wraps nothing: the store
     /// the core holds is the store it was handed, and the instrument set it
     /// carries reports nowhere.
-    fn open(self) -> Result<RuntimeCore> {
+    fn open(mut self) -> Result<RuntimeCore> {
+        let execution_budget = self.execution_budget.unwrap_or_else(|| {
+            let builder = ExecutionBudget::builder();
+            match &self.metrics_recorder {
+                Some(recorder) => builder.metrics_recorder(Arc::clone(recorder)),
+                None => builder,
+            }
+            .build()
+        });
+        self.metadata_lsm_policy.max_decoded_input_bytes_per_step =
+            execution_budget.max_merge_input_bytes();
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
                 let kind = TraceStoreKind::from(config.kind());
@@ -397,6 +396,7 @@ impl CoreSettings {
                 trace_mode: self.trace_mode,
                 trace_store_kind,
             },
+            execution_budget,
             metadata_cache,
             self.stored_metadata_block_cache,
             instruments,

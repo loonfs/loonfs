@@ -2,6 +2,7 @@
 
 use super::core::{decode_page_request, encode_next_cursor, file_revisions_page_response};
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
+use crate::execution_budget::BudgetPermit;
 use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, ContentRef, CoreError,
@@ -169,6 +170,7 @@ impl ReadView {
         loonfs_types::Pager::new(move |request: PageRequest<ChangeSeq>| {
             let view = view.clone();
             async move {
+                let _permit = view.core.inner.execution_budget.read_permit().await;
                 view.read(change_feed_page(
                     &view.engine,
                     &view.context,
@@ -192,6 +194,16 @@ impl ReadView {
         &self,
         absolute_path: &str,
         options: &StatOptions,
+    ) -> Result<PathEntry> {
+        let permit = self.core.inner.execution_budget.read_permit().await;
+        self.stat_with_permit(absolute_path, options, &permit).await
+    }
+
+    async fn stat_with_permit(
+        &self,
+        absolute_path: &str,
+        options: &StatOptions,
+        _permit: &BudgetPermit<'_>,
     ) -> Result<PathEntry> {
         self.read(async {
             self.require_same_snapshot(options.snapshot_id.as_ref())?;
@@ -223,8 +235,14 @@ impl ReadView {
             let absolute_path = absolute_path.clone();
             let options = options.clone();
             async move {
-                view.path_entries_page(&absolute_path, decode_page_request(request)?, options)
-                    .await
+                let permit = view.core.inner.execution_budget.read_permit().await;
+                view.path_entries_page(
+                    &absolute_path,
+                    decode_page_request(request)?,
+                    options,
+                    &permit,
+                )
+                .await
             }
         })
     }
@@ -234,6 +252,7 @@ impl ReadView {
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
         options: ListOptions,
+        _permit: &BudgetPermit<'_>,
     ) -> Result<ListPathEntriesResponse> {
         self.read(async {
             self.require_same_snapshot(options.snapshot_id.as_ref())?;
@@ -275,6 +294,17 @@ impl ReadView {
         inode_id: InodeId,
         options: &StatOptions,
     ) -> Result<PathEntry> {
+        let permit = self.core.inner.execution_budget.read_permit().await;
+        self.stat_by_inode_with_permit(inode_id, options, &permit)
+            .await
+    }
+
+    async fn stat_by_inode_with_permit(
+        &self,
+        inode_id: InodeId,
+        options: &StatOptions,
+        _permit: &BudgetPermit<'_>,
+    ) -> Result<PathEntry> {
         self.read(async {
             self.require_same_snapshot(options.snapshot_id.as_ref())?;
             Ok(self
@@ -303,7 +333,8 @@ impl ReadView {
             let view = view.clone();
             let options = options.clone();
             async move {
-                view.inode_children_page(inode_id, decode_page_request(request)?, options)
+                let permit = view.core.inner.execution_budget.read_permit().await;
+                view.inode_children_page(inode_id, decode_page_request(request)?, options, &permit)
                     .await
             }
         })
@@ -314,6 +345,7 @@ impl ReadView {
         inode_id: InodeId,
         request: PageRequest<DirectoryPageCursor>,
         options: ListOptions,
+        _permit: &BudgetPermit<'_>,
     ) -> Result<ListInodeChildrenResponse> {
         self.read(async {
             self.require_same_snapshot(options.snapshot_id.as_ref())?;
@@ -347,6 +379,7 @@ impl ReadView {
         &self,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.read(async {
             Ok(self
                 .engine
@@ -362,6 +395,7 @@ impl ReadView {
     /// this view, including through a fork. Otherwise returns
     /// `path_not_found` without reading content bytes.
     pub async fn read_content(&self, content_ref: &ContentRef, max_bytes: u64) -> Result<Vec<u8>> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.read(async {
             Ok(self
                 .engine
@@ -384,6 +418,7 @@ impl ReadView {
         revision_no: RevisionNo,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.read(async {
             Ok(self
                 .engine
@@ -395,6 +430,7 @@ impl ReadView {
 
     /// Reads the file selected by this view.
     pub async fn read_file(&self, absolute_path: &str) -> Result<FileBytes> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.read(async {
             Ok(self
                 .engine
@@ -426,6 +462,7 @@ impl ReadView {
         absolute_path: &str,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.read(async {
             if options.revision_no.is_some() {
                 return Err(CoreError::InvalidCheckpointRequest(
@@ -449,6 +486,7 @@ impl ReadView {
 
     /// Resolves the file selected by this view for a direct download.
     pub async fn create_download(&self, absolute_path: &str) -> Result<DirectDownloadTarget> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.read(async {
             Ok(self
                 .engine
@@ -506,6 +544,7 @@ impl<M> Namespace<M> {
         )
     )]
     pub async fn read_view(&self) -> Result<ReadView> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
         Ok(self.read_view_from(engine, context, ReadSource::Head))
@@ -528,6 +567,7 @@ impl<M> Namespace<M> {
         )
     )]
     pub async fn read_view_at_checkpoint(&self, checkpoint_id: &PinId) -> Result<ReadView> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
             .core
@@ -555,6 +595,16 @@ impl<M> Namespace<M> {
         )
     )]
     pub async fn read_view_at_snapshot(&self, snapshot_id: &PinId) -> Result<ReadView> {
+        let permit = self.core.inner.execution_budget.read_permit().await;
+        self.read_view_at_snapshot_with_permit(snapshot_id, &permit)
+            .await
+    }
+
+    async fn read_view_at_snapshot_with_permit(
+        &self,
+        snapshot_id: &PinId,
+        _permit: &BudgetPermit<'_>,
+    ) -> Result<ReadView> {
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, context) = self
             .core
@@ -579,6 +629,7 @@ impl<M> Namespace<M> {
         )
     )]
     pub async fn metadata(&self) -> Result<crate::NamespaceMetadata> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         Ok(loonfs_core::cache::load_namespace(self.core.store(), &self.namespace_id).await?)
     }
@@ -609,11 +660,12 @@ impl<M> Namespace<M> {
         absolute_path: &str,
         options: &StatOptions,
     ) -> Result<PathEntry> {
+        let permit = self.core.inner.execution_budget.read_permit().await;
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .read_view_at_snapshot(snapshot_id)
+                .read_view_at_snapshot_with_permit(snapshot_id, &permit)
                 .await?
-                .stat_with_options(absolute_path, options)
+                .stat_with_permit(absolute_path, options, &permit)
                 .await;
         }
         let span = tracing::Span::current();
@@ -656,11 +708,12 @@ impl<M> Namespace<M> {
         inode_id: InodeId,
         options: &StatOptions,
     ) -> Result<PathEntry> {
+        let permit = self.core.inner.execution_budget.read_permit().await;
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .read_view_at_snapshot(snapshot_id)
+                .read_view_at_snapshot_with_permit(snapshot_id, &permit)
                 .await?
-                .stat_by_inode_with_options(inode_id, options)
+                .stat_by_inode_with_permit(inode_id, options, &permit)
                 .await;
         }
         let span = tracing::Span::current();
@@ -725,11 +778,12 @@ impl<M> Namespace<M> {
         request: PageRequest<DirectoryPageCursor>,
         options: ListOptions,
     ) -> Result<ListPathEntriesResponse> {
+        let permit = self.core.inner.execution_budget.read_permit().await;
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .read_view_at_snapshot(snapshot_id)
+                .read_view_at_snapshot_with_permit(snapshot_id, &permit)
                 .await?
-                .path_entries_page(absolute_path, request, options)
+                .path_entries_page(absolute_path, request, options, &permit)
                 .await;
         }
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
@@ -808,11 +862,12 @@ impl<M> Namespace<M> {
         request: PageRequest<DirectoryPageCursor>,
         options: ListOptions,
     ) -> Result<ListInodeChildrenResponse> {
+        let permit = self.core.inner.execution_budget.read_permit().await;
         if let Some(snapshot_id) = &options.snapshot_id {
             return self
-                .read_view_at_snapshot(snapshot_id)
+                .read_view_at_snapshot_with_permit(snapshot_id, &permit)
                 .await?
-                .inode_children_page(inode_id, request, options)
+                .inode_children_page(inode_id, request, options, &permit)
                 .await;
         }
         reject_pinned_directory_cursor(request.cursor.as_ref())?;
@@ -856,6 +911,7 @@ impl<M> Namespace<M> {
         )
     )]
     pub async fn read_file(&self, absolute_path: &str) -> Result<FileBytes> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.get_current_file_bytes(absolute_path).await
     }
@@ -899,6 +955,7 @@ impl<M> Namespace<M> {
         absolute_path: &str,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let options = *options;
         self.core
@@ -938,6 +995,7 @@ impl<M> Namespace<M> {
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadTarget> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
@@ -968,6 +1026,7 @@ impl<M> Namespace<M> {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<DirectDownloadByInodeTarget> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
@@ -1031,6 +1090,7 @@ impl<M> Namespace<M> {
         request: PageRequest<CheckpointFilesPageCursor>,
         options: ListCheckpointFilesOptions,
     ) -> Result<CheckpointFilesPage> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let (engine, read_context) = self.core.pinned_read(&self.namespace_id).await?;
         engine
@@ -1063,6 +1123,7 @@ impl<M> Namespace<M> {
         &self,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
@@ -1097,6 +1158,7 @@ impl<M> Namespace<M> {
         )
     )]
     pub async fn read_content(&self, content_ref: &ContentRef, max_bytes: u64) -> Result<Vec<u8>> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
@@ -1135,6 +1197,7 @@ impl<M> Namespace<M> {
         &self,
         request: PageRequest<TrashPageCursor>,
     ) -> Result<loonfs_types::ListTrashResponse> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| {
@@ -1185,6 +1248,7 @@ impl<M> Namespace<M> {
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let absolute_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
@@ -1237,6 +1301,7 @@ impl<M> Namespace<M> {
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| {
@@ -1274,6 +1339,7 @@ impl<M> Namespace<M> {
         absolute_path: &str,
         revision_no: RevisionNo,
     ) -> Result<FileBytes> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
@@ -1309,6 +1375,7 @@ impl<M> Namespace<M> {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<FileContentStream<SharedObjectStore>> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, context| async move {
@@ -1338,6 +1405,7 @@ impl<M> Namespace<M> {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
@@ -1384,6 +1452,7 @@ impl<M> Namespace<M> {
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
     ) -> Result<ListChangesResponse> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         self.core
             .read(&self.namespace_id, |engine, context| async move {

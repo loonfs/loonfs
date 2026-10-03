@@ -102,6 +102,11 @@ impl<M> LoonFs<M> {
         self.core.capabilities()
     }
 
+    /// Returns the budget shared by this runtime's reads and writable work.
+    pub fn execution_budget(&self) -> &ExecutionBudget {
+        &self.core.inner.execution_budget
+    }
+
     /// Returns the metadata cache this runtime reads through, which
     /// [`Maintenance`] work fills too.
     pub fn metadata_cache(&self) -> &MetadataCache {
@@ -195,12 +200,6 @@ impl LoonFs<Writable> {
             Arc::clone(&self.mode.bits),
             WriterIdentity { writer_id },
         )
-    }
-
-    /// Returns the execution budget this runtime's publications, folds, and
-    /// merges draw from, which other runtimes may share.
-    pub fn execution_budget(&self) -> &ExecutionBudget {
-        &self.mode.bits.execution_budget
     }
 
     /// Closes publication admission before shutdown drains, and cancels the

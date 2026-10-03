@@ -203,7 +203,7 @@ pub use loonfs_objectstore::{
 pub use config::{InlineContentPolicy, PublicationLimits};
 pub use execution_budget::{
     ExecutionBudget, ExecutionBudgetBuilder, ExecutionBudgetStats,
-    DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS,
+    DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS,
 };
 pub use fs::{
     ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,

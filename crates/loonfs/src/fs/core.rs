@@ -34,6 +34,7 @@ pub(crate) struct RuntimeCore {
 pub(crate) struct RuntimeCoreInner {
     pub(crate) store: SharedObjectStore,
     pub(crate) config: ReadConfig,
+    pub(crate) execution_budget: ExecutionBudget,
     pub(crate) timer: Arc<dyn loonfs_types::MonotonicTimer>,
     pub(crate) wall_clock: Arc<dyn crate::WallClock>,
     pub(crate) metadata_cache: MetadataCache,
@@ -84,9 +85,11 @@ impl RuntimeCore {
     /// Opens a runtime core that reads through `metadata_cache` under a
     /// scope of its own, with `stored_metadata_block_cache` as its node-local
     /// encoded tier.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         store: SharedObjectStore,
         config: ReadConfig,
+        execution_budget: ExecutionBudget,
         metadata_cache: MetadataCache,
         stored_metadata_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
         instruments: Arc<RuntimeInstruments>,
@@ -102,6 +105,7 @@ impl RuntimeCore {
             inner: Arc::new(RuntimeCoreInner {
                 store,
                 config,
+                execution_budget,
                 timer,
                 wall_clock,
                 metadata_cache,

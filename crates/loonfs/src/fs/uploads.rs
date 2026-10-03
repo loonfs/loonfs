@@ -279,6 +279,7 @@ impl Namespace<Writable> {
         )
     )]
     pub async fn get_upload(&self, upload_id: &UploadId) -> Result<UploadSessionView> {
+        let _permit = self.core.inner.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine()

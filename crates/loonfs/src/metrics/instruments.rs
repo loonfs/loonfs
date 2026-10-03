@@ -568,6 +568,7 @@ impl MetadataCacheInstruments {
 /// built.
 pub(crate) struct ExecutionBudgetInstruments {
     pub(crate) admission: AdmissionInstruments,
+    pub(crate) reads: PermitPoolGauges,
     pub(crate) publications: PermitPoolGauges,
     pub(crate) folds: PermitPoolGauges,
     pub(crate) compactions: PermitPoolGauges,
@@ -596,6 +597,17 @@ impl ExecutionBudgetInstruments {
                     ),
                 }),
             },
+            reads: PermitPoolGauges::register(
+                recorder,
+                (
+                    "loonfs.execution_budget.reads_running",
+                    "Public reads holding a read permit",
+                ),
+                (
+                    "loonfs.execution_budget.reads_waiting",
+                    "Public reads waiting for a read permit",
+                ),
+            ),
             publications: PermitPoolGauges::register(
                 recorder,
                 (

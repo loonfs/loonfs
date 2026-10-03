@@ -7,6 +7,10 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-local"
+# Public reads running at once. Each page takes one slot. A streamed read
+# releases its slot before returning the body. Reads past this limit wait.
+#max_concurrent_reads = 64
+
 # Maximum WAL folds this server runs at once. A sustained
 # `loonfs.execution_budget.folds_waiting` gauge means the cap is too low.
 # Defaults to 2.
