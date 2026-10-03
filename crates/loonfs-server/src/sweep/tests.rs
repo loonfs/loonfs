@@ -193,6 +193,7 @@ root = "unused"
         config.grep = GrepConfig {
             mode: GrepMode::ServeAndMaintain,
             worker,
+            ..GrepConfig::default()
         };
     }
     config

@@ -45,6 +45,27 @@ image from this crate's `Dockerfile`.
 credentials and the optional server settings. Copy the one you need and edit
 it.
 
+Set top-level `memory_limit_bytes` to size the server from one memory limit.
+When omitted on Linux, the server tries cgroup v2, then cgroup v1. Without a
+finite limit it keeps the existing defaults and logs that it is unsized.
+See [Set one number](docs/self-hosting.md#set-one-number) for the formula.
+
+Each memory setting is derived by default when a limit is available. An
+explicit setting overrides its share. The final values must still fit.
+
+| Setting | Default with a limit | Default without a limit |
+| --- | --- | --- |
+| `metadata_cache.max_segment_bytes` | Derived: 40% of managed memory; 50% when grep is not served | 256 MiB |
+| `metadata_cache.max_head_state_bytes` | Derived: 10% | 64 MiB |
+| `grep.max_cache_bytes` | Derived: 10% when grep is served | 256 MiB when grep is served |
+| `max_read_working_bytes` | Derived: 20% | 256 MiB |
+| `publication.max_estimated_bytes` | Derived: 10% | 64 MiB |
+| `max_merge_input_bytes` | Derived: 10% divided by `max_concurrent_compactions` | 64 MiB per compaction |
+
+Cache sizes and `max_read_working_bytes` accept zero to disable retention.
+Publication bytes and merge input must be positive. `grep.max_cache_bytes`
+applies only when the configured grep mode serves queries.
+
 The host admission settings are top-level positive integers:
 
 | Setting | Default | At the limit |
@@ -54,9 +75,9 @@ The host admission settings are top-level positive integers:
 
 A request holds its slot until its response body yields its last frame,
 fails, or is dropped. Response data frames are at most 64 KiB. Uploads
-and downloads also take their existing transfer slots. Size both settings
-from pod memory left after runtime budgets, using measured peak memory per
-request and per connection, with room for allocator overhead.
+and downloads also take their existing transfer slots. The sizing formula
+reserves 472 KiB per configured connection. Changing the connection or
+transfer counts changes the memory left for the derived pools.
 
 After the request permit is released, the HTTP transport can still retain
 response data up to its write threshold plus one frame per response in

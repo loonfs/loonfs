@@ -754,6 +754,7 @@ async fn seed_namespace(
 fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
+        memory_limit_bytes: None,
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: format!("grep-mode-{mode:?}"),
@@ -787,7 +788,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         gc_interval_ms: 3_600_000,
         full_sweep_interval_ms: 86_400_000,
         idle_session_close_after_ms: 1_800_000,
-        max_merge_input_bytes: loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+        max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,
         max_read_working_bytes: None,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
