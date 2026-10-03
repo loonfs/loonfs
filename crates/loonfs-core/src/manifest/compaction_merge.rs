@@ -64,6 +64,27 @@ pub(super) fn locality_of(
 pub trait SegmentBlockLoader<Row, Segment> {
     type Error;
 
+    /// Selects a prefix of the remaining index; zero ends the segment.
+    fn data_block_count(&self, entries: &[SegmentIndexEntry], decoded_byte_limit: usize) -> usize {
+        let mut count = 0;
+        let mut stored_bytes = 0;
+        let mut decoded_bytes = 0;
+        let target_bytes = ITERATOR_FETCH_TARGET_BYTES.min(decoded_byte_limit);
+        for entry in entries {
+            let next_decoded_bytes = decoded_bytes + entry.block.decoded_bytes as usize;
+            // A block cannot be split, even when it exceeds the iterator's share.
+            if count > 0
+                && (stored_bytes >= target_bytes || next_decoded_bytes > decoded_byte_limit)
+            {
+                break;
+            }
+            stored_bytes += entry.block.stored_bytes as usize;
+            decoded_bytes = next_decoded_bytes;
+            count += 1;
+        }
+        count
+    }
+
     fn load_index(
         &self,
         segment: Segment,
@@ -119,6 +140,13 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
     pub fn head(&self) -> Option<(&str, &Row)> {
         let block = self.blocks.front()?;
         Some((block.row_keys[self.row].as_str(), &block.rows[self.row]))
+    }
+
+    pub(super) fn loaded_through_key(&self) -> Option<&str> {
+        self.index
+            .as_ref()?
+            .get(self.next_block.checked_sub(1)?)
+            .map(|entry| entry.last_row_key.as_str())
     }
 
     /// Removes and returns the next row.
@@ -188,22 +216,12 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
                 }
             };
             let segment = self.segments[self.next_segment - 1].clone();
-            let mut end = self.next_block;
-            let mut stored_bytes = 0;
-            let mut decoded_bytes = 0;
-            let target_bytes = ITERATOR_FETCH_TARGET_BYTES.min(decoded_byte_limit);
-            while let Some(entry) = index.get(end) {
-                let next_decoded_bytes = decoded_bytes + entry.block.decoded_bytes as usize;
-                // A block cannot be split, even when it exceeds the iterator's share.
-                if end > self.next_block
-                    && (stored_bytes >= target_bytes || next_decoded_bytes > decoded_byte_limit)
-                {
-                    break;
-                }
-                stored_bytes += entry.block.stored_bytes as usize;
-                decoded_bytes = next_decoded_bytes;
-                end += 1;
+            let count = loader.data_block_count(&index[self.next_block..], decoded_byte_limit);
+            if count == 0 {
+                self.next_block = index.len();
+                continue;
             }
+            let end = self.next_block + count;
             let entries = index[self.next_block..end].to_vec();
             let blocks = loader.load_data_blocks(segment, entries).await?;
             self.next_block = end;

@@ -1,5 +1,6 @@
 //! SST block-range selection and per-view block memoization.
 
+#[cfg(test)]
 use super::block_fetch::load_segment_index;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
 use super::data_block_load::{
@@ -7,12 +8,19 @@ use super::data_block_load::{
 };
 use super::error::ManifestLoadError;
 use super::scan::Readahead;
+#[cfg(test)]
 use super::validate::validate_manifest_row_seq_range;
 use bytes::Bytes;
+#[cfg(test)]
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::{MetadataRow, MetadataSegmentRef};
-use loonfs_types::format::sst_blocks::{index_blocks_for_key_range, DecodedDataBlock};
+#[cfg(test)]
+use loonfs_types::format::manifest::MetadataRow;
+use loonfs_types::format::manifest::MetadataSegmentRef;
+#[cfg(test)]
+use loonfs_types::format::sst_blocks::index_blocks_for_key_range;
+use loonfs_types::format::sst_blocks::DecodedDataBlock;
+#[cfg(test)]
 use loonfs_types::ChangeSeq;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -27,10 +35,12 @@ pub(crate) const DEFAULT_BLOCK_MEMO_BYTES: usize = 64 * 1024 * 1024;
 /// memo and caches. Row access borrows from the blocks rather than building
 /// an owned row set, which would clone every row and key of every touched
 /// block on every scan.
+#[cfg(test)]
 pub(crate) struct SegmentKeyRangeBlocks {
     blocks: Vec<Arc<DecodedDataBlock>>,
 }
 
+#[cfg(test)]
 impl SegmentKeyRangeBlocks {
     /// Rows whose keys fall in `[lower_bound, upper_bound)`, in row order,
     /// found by binary search over each block's decode-validated key order.
@@ -195,6 +205,7 @@ const RANGE_SCAN_READAHEAD_BLOCKS: usize = 32;
 /// `[lower_bound, upper_bound)`: index first, then only the data blocks the
 /// index says can match. Callers trim edge blocks with
 /// [`SegmentKeyRangeBlocks::rows_in_key_range`].
+#[cfg(test)]
 #[allow(
     clippy::too_many_arguments,
     reason = "the segment scan inputs stay explicit at the shared load boundary"
@@ -217,10 +228,6 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     let mut remaining_rows = row_limit;
     let mut start = needed.start;
     while start < needed.end && remaining_rows > 0 {
-        // A page only needs the first `row_limit` matching rows from each
-        // segment before the global merge truncates it. Count actual decoded
-        // matches one aligned window at a time; byte size is not a row count.
-        // Unbounded scans retain their existing coalesced range fetch.
         let required_end = if readahead == Readahead::Stored {
             start + 1
         } else if row_limit == usize::MAX {
@@ -231,39 +238,16 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
                 .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
                 .min(needed.end)
         };
-        // Preserve the aligned read-ahead policy for subsequent pages.
-        let extended_end = if readahead != Readahead::Disabled {
-            required_end
-                .div_ceil(RANGE_SCAN_READAHEAD_BLOCKS)
-                .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
-                .min(index.len())
-        } else {
-            required_end
-        };
-        let blocks = if readahead == Readahead::Stored {
-            vec![
-                load_segment_data_block_with_readahead(
-                    store,
-                    segment_cache,
-                    Some(memo),
-                    descriptor,
-                    &index[start..extended_end],
-                )
-                .await?,
-            ]
-        } else {
-            load_segment_data_block_span(
-                store,
-                segment_cache,
-                Some(memo),
-                descriptor,
-                &index[start..extended_end],
-            )
-            .await?
-            .into_iter()
-            .take(required_end - start)
-            .collect()
-        };
+        let blocks = load_segment_blocks_with_readahead(
+            store,
+            segment_cache,
+            memo,
+            descriptor,
+            &index,
+            start..required_end,
+            readahead,
+        )
+        .await?;
         let batch = SegmentKeyRangeBlocks { blocks };
         if row_limit != usize::MAX {
             remaining_rows = remaining_rows
@@ -279,6 +263,54 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
         max_seq,
     )?;
     Ok(result)
+}
+
+pub(super) async fn load_segment_blocks_with_readahead<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
+    memo: &SessionBlockMemo,
+    descriptor: &MetadataSegmentRef,
+    index: &[loonfs_types::format::sst_blocks::SegmentIndexEntry],
+    range: std::ops::Range<usize>,
+    readahead: Readahead,
+) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
+    let extended_end = if readahead != Readahead::Disabled {
+        range
+            .end
+            .div_ceil(RANGE_SCAN_READAHEAD_BLOCKS)
+            .saturating_mul(RANGE_SCAN_READAHEAD_BLOCKS)
+            .min(index.len())
+    } else {
+        range.end
+    };
+    if readahead == Readahead::Stored {
+        let mut blocks = Vec::new();
+        for position in range {
+            blocks.push(
+                load_segment_data_block_with_readahead(
+                    store,
+                    segment_cache,
+                    Some(memo),
+                    descriptor,
+                    &index[position..extended_end],
+                )
+                .await?,
+            );
+        }
+        Ok(blocks)
+    } else {
+        Ok(load_segment_data_block_span(
+            store,
+            segment_cache,
+            Some(memo),
+            descriptor,
+            &index[range.start..extended_end],
+        )
+        .await?
+        .into_iter()
+        .take(range.len())
+        .collect())
+    }
 }
 
 #[cfg(test)]

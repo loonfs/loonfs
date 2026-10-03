@@ -2,12 +2,11 @@
 //! caching and prefix-window pruning.
 
 use super::cache::MetadataSegmentCache;
+use super::compaction_merge::{refill_iterators, SegmentRowIterator};
 use super::error::ManifestLoadError;
-use super::load::{
-    load_manifest_segment_rows_in_key_range_with_cache, load_segment_filter, SegmentKeyRangeBlocks,
-    SessionBlockMemo,
-};
+use super::load::{load_segment_filter, SessionBlockMemo};
 use super::runs::{MetadataFamilySegments, MetadataRunManifest, MANIFEST_ROW_FAMILIES};
+use super::scan_load::{ScanDescriptor, ScanLoader};
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use crate::store_waves::STORE_READ_WAVE;
@@ -17,7 +16,7 @@ use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_types::format::sst_blocks::{key_range_may_intersect, string_prefix_upper_bound};
-use loonfs_types::ChangeSeq;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,10 +45,17 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(super) scan_runs: Arc<Vec<MetadataRunManifest>>,
     /// Retains fetched blocks within the operation's data budget.
     pub(super) block_memo: SessionBlockMemo,
+    #[cfg(test)]
+    pub(super) peak_page_rows: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
 impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
+    pub(crate) fn peak_page_rows(&self) -> usize {
+        self.peak_page_rows
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(super) fn from_runs(
         store: &'a S,
         segment_cache: &'a MetadataSegmentCache,
@@ -63,6 +69,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             manifest_bytes: 0,
             scan_runs: Arc::new(scan_runs),
             block_memo: SessionBlockMemo::default(),
+            peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -156,7 +163,11 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             upper_bound,
             limit,
             None,
-            Readahead::Enabled,
+            if family == MetadataRowFamily::Commits {
+                Readahead::Stored
+            } else {
+                Readahead::Enabled
+            },
         )
         .await
     }
@@ -287,61 +298,90 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 .then(left.descriptor.segment_id.cmp(&right.descriptor.segment_id))
         });
 
-        let mut rows = Vec::<(String, MetadataRow)>::new();
-        let mut next_descriptor_index = 0;
-        while next_descriptor_index < matching_descriptors.len() {
-            let should_load_next = if rows.len() < limit {
-                true
-            } else {
-                let boundary_key = &rows[limit - 1].0;
-                matching_descriptors[next_descriptor_index]
-                    .descriptor
-                    .min_row_key
-                    <= *boundary_key
-            };
-            if !should_load_next {
-                break;
-            }
-
-            let chunk_end =
-                (next_descriptor_index + STORE_READ_WAVE).min(matching_descriptors.len());
-            let loaded_segments = try_join_all(
-                matching_descriptors[next_descriptor_index..chunk_end]
-                    .iter()
-                    .map(|scan_descriptor| {
-                        self.segment_rows(
-                            scan_descriptor,
-                            lower_bound,
-                            upper_bound,
-                            limit,
-                            readahead,
-                        )
-                    }),
-            )
-            .await?;
-            next_descriptor_index = chunk_end;
-
-            for segment_rows in loaded_segments {
-                let matched_before = rows.len();
-                // Rows are ascending within a segment, so a row past the
-                // segment's first `limit` matches can never survive the
-                // merged truncation below; stopping there bounds how many
-                // rows a page clones out of the shared blocks.
-                rows.extend(
-                    segment_rows
-                        .rows_in_key_range(lower_bound, upper_bound)
-                        .take(limit)
-                        .map(|(row_key, row)| (row_key.to_owned(), row.clone())),
-                );
-                if filter_probe.is_some() {
-                    self.record_filter_false_positive_if_empty(rows.len() - matched_before);
+        let loader = ScanLoader {
+            segments: self,
+            readahead,
+            upper_bound,
+        };
+        let mut iterators = Vec::new();
+        let mut descriptors = matching_descriptors.into_iter();
+        let mut rows: BTreeMap<String, MetadataRow> = BTreeMap::new();
+        loop {
+            let mut open_through = rows
+                .last_key_value()
+                .map_or(lower_bound, |(key, _)| key.as_str());
+            if iterators.is_empty() && rows.len() < limit {
+                if let Some(candidate) =
+                    descriptors.as_slice()[..descriptors.len().min(STORE_READ_WAVE)].last()
+                {
+                    open_through = open_through.max(&candidate.descriptor.min_row_key);
                 }
             }
-            rows.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+            let previously_open = iterators.len();
+            while descriptors
+                .as_slice()
+                .first()
+                .is_some_and(|candidate| candidate.descriptor.min_row_key.as_str() <= open_through)
+            {
+                let descriptor = descriptors
+                    .next()
+                    .expect("a pending descriptor should exist");
+                iterators.push(SegmentRowIterator::new(
+                    (),
+                    vec![descriptor],
+                    Some(lower_bound.to_owned()),
+                ));
+            }
+            if iterators.is_empty() {
+                break;
+            }
+            refill_iterators(&loader, &mut iterators, 1).await?;
+            if filter_probe.is_some() {
+                for iterator in &iterators[previously_open..] {
+                    let matched = iterator
+                        .head()
+                        .is_some_and(|(key, _)| upper_bound.is_none_or(|upper| key < upper));
+                    self.record_filter_false_positive_if_empty(usize::from(matched));
+                }
+            }
+            // Keeping only the smallest page lets exhausted blocks refill together.
+            for iterator in &mut iterators {
+                while let Some((key, _)) = iterator.head() {
+                    if upper_bound.is_some_and(|upper| key >= upper) {
+                        break;
+                    }
+                    if rows.len() == limit {
+                        if rows
+                            .last_key_value()
+                            .is_some_and(|(last, _)| key >= last.as_str())
+                        {
+                            break;
+                        }
+                        rows.pop_last();
+                    }
+                    rows.insert(key.to_owned(), iterator.take_head());
+                    #[cfg(test)]
+                    self.peak_page_rows
+                        .fetch_max(rows.len(), std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            iterators.retain(|iterator| {
+                let Some(last_key) = iterator.loaded_through_key() else {
+                    return false;
+                };
+                iterator.head().is_none()
+                    && iterator
+                        .current_segment()
+                        .is_some_and(|segment| last_key < segment.descriptor.max_row_key.as_str())
+                    && upper_bound.is_none_or(|upper| last_key < upper)
+                    && (rows.len() < limit
+                        || rows
+                            .last_key_value()
+                            .is_some_and(|(last, _)| last_key < last.as_str()))
+            });
         }
 
-        rows.truncate(limit);
-        Ok(rows)
+        Ok(rows.into_iter().collect())
     }
 
     /// Drops the descriptors whose bloom filter rules the probe out; with no
@@ -371,34 +411,6 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         }
         Ok(admitted)
     }
-
-    async fn segment_rows(
-        &self,
-        scan_descriptor: &ScanDescriptor<'_>,
-        lower_bound: &str,
-        upper_bound: Option<&str>,
-        row_limit: usize,
-        readahead: Readahead,
-    ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
-        load_manifest_segment_rows_in_key_range_with_cache(
-            self.store,
-            self.segment_cache,
-            &self.block_memo,
-            scan_descriptor.descriptor,
-            scan_descriptor.max_seq,
-            lower_bound,
-            upper_bound,
-            row_limit,
-            readahead,
-        )
-        .await
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ScanDescriptor<'a> {
-    descriptor: &'a MetadataSegmentRef,
-    max_seq: ChangeSeq,
 }
 
 fn strip_row_keys(rows: Vec<(String, MetadataRow)>) -> Vec<MetadataRow> {

@@ -20,6 +20,7 @@ mod retention;
 mod row;
 mod runs;
 mod scan;
+mod scan_load;
 mod statistics;
 mod stored_block_cache;
 mod streaming_compaction;

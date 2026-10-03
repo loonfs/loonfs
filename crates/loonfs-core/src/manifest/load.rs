@@ -28,9 +28,6 @@ use std::sync::Arc;
 use tracing::Instrument;
 
 pub(super) use super::block_fetch::load_segment_filter;
-pub(super) use super::block_load::{
-    load_manifest_segment_rows_in_key_range_with_cache, SegmentKeyRangeBlocks,
-};
 #[cfg(test)]
 pub(super) use super::tests::inspection_materialization::append_rows_to_metadata;
 #[cfg(test)]
@@ -144,6 +141,8 @@ pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
         manifest_bytes: manifest.manifest_bytes,
         scan_runs,
         block_memo: SessionBlockMemo::new(block_memo_bytes(segment_cache)),
+        #[cfg(test)]
+        peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 
@@ -266,6 +265,8 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
         manifest_bytes,
         scan_runs,
         block_memo: SessionBlockMemo::new(block_memo_bytes(segment_cache)),
+        #[cfg(test)]
+        peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
     };
     Ok(segments)
 }

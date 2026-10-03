@@ -2936,9 +2936,15 @@ destination fields describe the new binding.
 
 `directory_created`, `file_created`, `moved`, and `undeleted` include the `binding_version` they created. It matches later reads of the same binding. Other events do not create bindings and omit the field.
 
-If `limit` truncates the page before the namespace head, the response includes
+The commit `limit` is an upper bound. A page may contain fewer commits when
+its events are large. The reference implementation budgets 4 MiB of event
+heap per page, including vector capacity and owned event data. A commit is
+never split; a single commit larger than the budget is returned alone.
+
+If either bound ends the page before the namespace head, the response includes
 `next_after_seq` set to the last returned change's `committed_seq`. The client
-resumes with `after_seq={next_after_seq}`.
+resumes with `after_seq={next_after_seq}`. Clients must follow `next_after_seq`
+rather than count commits to decide whether another page remains.
 
 `after_seq` may equal the current namespace head, which returns an empty page.
 An `after_seq` above the head the request reads answers `invalid_request`.

@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 /// Longest single ranged GET issued while bulk-reading a block span; longer
 /// spans split into consecutive requests.
-const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
+pub(super) const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
     store: &S,

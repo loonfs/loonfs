@@ -2,6 +2,8 @@
 //! commit's durable WAL deltas mapped to semantic filesystem events.
 
 use crate::error::{CoreError, Result};
+use crate::heap_bytes::HeapBytes;
+use crate::limits::CHANGE_FEED_PAGE_BYTES;
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::{Commit, FilesystemChange, ListChangesResponse};
@@ -41,26 +43,28 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         });
     }
 
-    let records = view
-        .metadata_view()
-        .commits_after(after_seq, limit.as_usize())
-        .await?;
-    let changes = records
-        .iter()
-        .map(|record| committed_change_from_wal_record(namespace_id, record))
-        .collect::<Result<Vec<_>>>()?;
-    let (through_seq, next_after_seq) = if changes.len() == limit.as_usize() {
-        let committed_seq = changes
-            .last()
-            .expect("a full change page should contain a change")
-            .committed_seq;
-        (
-            committed_seq,
-            (committed_seq < head.seq).then_some(committed_seq),
-        )
-    } else {
-        (head.seq, None)
-    };
+    let mut changes = Vec::new();
+    let mut event_bytes = 0_usize;
+    let mut through_seq = after_seq;
+    while changes.len() < limit.as_usize() && through_seq < head.seq {
+        let records = view.metadata_view().commits_after(through_seq, 1).await?;
+        let Some(record) = records.first() else {
+            through_seq = head.seq;
+            break;
+        };
+        let change = committed_change_from_wal_record(namespace_id, record)?;
+        let next_event_bytes = event_bytes.saturating_add(change.events.heap_bytes());
+        if !changes.is_empty() && next_event_bytes > CHANGE_FEED_PAGE_BYTES {
+            break;
+        }
+        event_bytes = next_event_bytes;
+        through_seq = change.committed_seq;
+        changes.push(change);
+        if event_bytes >= CHANGE_FEED_PAGE_BYTES {
+            break;
+        }
+    }
+    let next_after_seq = (through_seq < head.seq).then_some(through_seq);
 
     Ok(ListChangesResponse {
         namespace_id: namespace_id.clone(),
@@ -352,6 +356,147 @@ mod tests {
             .await
             .expect_err("an unpublished sequence cannot be a valid cursor");
         assert!(matches!(error, CoreError::InvalidCursor(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn large_commits_page_by_event_bytes_without_splitting_or_skipping() {
+        use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
+        use crate::heap_bytes::HeapBytes;
+        use crate::limits::{CHANGE_FEED_PAGE_BYTES, MAX_COMMIT_OPERATIONS};
+        use crate::path::read::load_current_metadata_view;
+        use crate::publish::{CommitRequest, FilesystemOperation};
+        use loonfs_types::{AbsolutePath, CommitId};
+
+        let directory = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let namespace_id = namespace_id();
+        let context = MutationContext {
+            writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
+            now_ms: 1,
+        };
+        create(&store, &namespace_id, &context)
+            .await
+            .expect("bootstrap");
+        let mut expected = Vec::new();
+        for number in 1..=5 {
+            let depth = if number == 4 { 4 } else { 2 };
+            let request = CommitRequest {
+                preconditions: Vec::new(),
+                commit_id: CommitId::parse(format!("commit-{number}")).expect("commit id"),
+                actor_id: loonfs_test_support::test_actor(),
+                subject: None,
+                message: None,
+                operations: (0..MAX_COMMIT_OPERATIONS)
+                    .map(|operation| FilesystemOperation::CreateDirectory {
+                        path: AbsolutePath::parse(format!(
+                            "/directory-{number}-{operation}{}",
+                            "/child".repeat(depth - 1)
+                        ))
+                        .expect("path"),
+                        parents: true,
+                    })
+                    .collect(),
+            };
+            let commit = publish_namespace_commits_batch(
+                &store,
+                &namespace_id,
+                vec![CommitCandidate::new(request)],
+                &context,
+            )
+            .await
+            .pop()
+            .expect("one result")
+            .expect("publish commit");
+            assert_eq!(commit.events.len(), MAX_COMMIT_OPERATIONS * depth);
+            assert_eq!(
+                commit.events.heap_bytes() > CHANGE_FEED_PAGE_BYTES,
+                number == 4
+            );
+            expected.push((commit.committed_seq, commit.commit_id, commit.events.len()));
+            if number == 2 || number == 4 {
+                crate::manifest::fold_wal(&store, &namespace_id)
+                    .await
+                    .expect("fold commits");
+            }
+        }
+
+        for fully_folded in [false, true] {
+            if fully_folded {
+                crate::manifest::fold_wal(&store, &namespace_id)
+                    .await
+                    .expect("fold tail");
+            }
+            let view = load_current_metadata_view(&store, &namespace_id)
+                .await
+                .expect("read view");
+            for commit_limit in [1000, 1] {
+                let limit = EffectiveLimit::new(NonZeroU32::new(commit_limit).expect("limit"));
+                let mut after_seq = ChangeSeq(0);
+                let mut actual = Vec::new();
+                loop {
+                    let page = super::list_changes_after(&view, after_seq, limit)
+                        .await
+                        .expect("page");
+                    assert!(!page.changes.is_empty());
+                    assert!(page.changes.len() <= limit.as_usize());
+                    let bytes: usize = page
+                        .changes
+                        .iter()
+                        .map(|commit| commit.events.heap_bytes())
+                        .sum();
+                    if bytes > CHANGE_FEED_PAGE_BYTES {
+                        assert_eq!(page.changes.len(), 1);
+                        assert_eq!(page.changes[0].committed_seq, ChangeSeq(4));
+                    }
+                    if after_seq == ChangeSeq(0) && commit_limit == 1000 {
+                        assert!(page.changes.len() < limit.as_usize());
+                        assert!(bytes <= CHANGE_FEED_PAGE_BYTES);
+                        assert!(page.next_after_seq.is_some());
+                    }
+                    let last = page.changes.last().expect("nonempty page").committed_seq;
+                    assert_eq!(page.through_seq, last);
+                    actual.extend(page.changes.into_iter().map(|commit| {
+                        (commit.committed_seq, commit.commit_id, commit.events.len())
+                    }));
+                    let Some(next) = page.next_after_seq else {
+                        break;
+                    };
+                    assert_eq!(next, last);
+                    assert!(next > after_seq);
+                    after_seq = next;
+                    assert!(actual.len() < expected.len());
+                }
+                assert_eq!(actual, expected);
+            }
+        }
+        let manifest = crate::namespace::control::load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("manifest");
+        let basis = crate::manifest::metadata_basis_from_manifest(&store, None, &manifest);
+        let rows = basis
+            .segments
+            .scan_range_page(
+                loonfs_types::format::manifest::MetadataRowFamily::Commits,
+                &loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(2)),
+                None,
+                2,
+            )
+            .await
+            .expect("commit row page");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(basis.segments.peak_page_rows(), 2);
+        assert_eq!(
+            rows.iter()
+                .map(|row| {
+                    row.row_key_for_family(
+                        loonfs_types::format::manifest::MetadataRowFamily::Commits,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [2, 3].map(|seq| {
+                loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(seq))
+            })
+        );
     }
 
     #[test]

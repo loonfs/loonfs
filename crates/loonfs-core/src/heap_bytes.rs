@@ -1,5 +1,5 @@
-//! The heap that decoded metadata holds, which the metadata segment cache,
-//! the per-view block memo, and the head-state budgets charge.
+//! Heap weights charged to metadata caches, the per-view block memo,
+//! head-state budgets, and change feed pages.
 //!
 //! A weight counts the bytes a value asks the allocator for: every slot a
 //! container reserved, filled or not, and every string, vector, map table,
@@ -7,6 +7,7 @@
 //! bookkeeping stay outside every budget.
 
 use crate::namespace::state::NamespaceReadState;
+use loonfs_types::api::v0::FilesystemChange;
 use loonfs_types::format::control::{ForkBasis, ManifestRef, WriterBlock};
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
@@ -18,9 +19,9 @@ use loonfs_types::format::manifest::{
 use loonfs_types::format::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_types::{
-    AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, ChangeSeq, CommitFingerprint,
-    CommitId, ContentId, ContentRef, DisplayName, InodeId, MetadataSegmentId, NameKey, NamespaceId,
-    PinId, PrincipalId, PrincipalScope, WriterId,
+    AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,
+    CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName, InodeId, MetadataSegmentId,
+    NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, WriterId,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
@@ -128,6 +129,7 @@ text_heap_bytes!(
     ActorId,
     AttributeKey,
     AttributeValue,
+    BindingVersion,
     CommitFingerprint,
     CommitId,
     ContentId,
@@ -158,6 +160,47 @@ impl HeapBytes for ContentRef {
         self.owner_namespace_id.heap_bytes()
             + self.content_id.heap_bytes()
             + self.checksum.value.heap_bytes()
+    }
+}
+
+impl HeapBytes for FilesystemChange {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::DirectoryCreated {
+                display_name,
+                binding_version,
+                ..
+            }
+            | Self::Undeleted {
+                display_name,
+                binding_version,
+                ..
+            } => display_name.heap_bytes() + binding_version.heap_bytes(),
+            Self::FileCreated {
+                display_name,
+                binding_version,
+                content_ref,
+                ..
+            } => {
+                display_name.heap_bytes() + binding_version.heap_bytes() + content_ref.heap_bytes()
+            }
+            Self::ContentChanged { content_ref, .. } => content_ref.heap_bytes(),
+            Self::Moved {
+                source_display_name,
+                destination_display_name,
+                binding_version,
+                ..
+            } => {
+                source_display_name.heap_bytes()
+                    + destination_display_name.heap_bytes()
+                    + binding_version.heap_bytes()
+            }
+            Self::Deleted {
+                deleted_binding, ..
+            } => deleted_binding.name_key.heap_bytes() + deleted_binding.display_name.heap_bytes(),
+            Self::AttributesChanged { attributes, .. } => attributes.heap_bytes(),
+            Self::AccessChanged { grants, .. } => grants.heap_bytes(),
+        }
     }
 }
 

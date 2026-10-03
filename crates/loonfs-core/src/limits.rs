@@ -18,6 +18,9 @@ use loonfs_objectstore::{
 /// materialization.
 pub const MAX_COMMIT_OPERATIONS: usize = 4096;
 
+/// Four MiB of event heap keeps ordinary change pages small while allowing several large commits per page.
+pub const CHANGE_FEED_PAGE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Bounds the admission work for one commit.
 pub const MAX_COMMIT_PRECONDITIONS: usize = 1024;
 
