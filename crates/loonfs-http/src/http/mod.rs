@@ -16,6 +16,8 @@ pub(crate) mod metrics;
 mod openapi;
 mod page_response;
 mod query_params;
+pub(crate) mod request_limit;
+mod response_frames;
 #[cfg(test)]
 mod tests;
 
@@ -423,10 +425,17 @@ pub fn authenticate_routes(router: Router, state: &BindingState) -> Router {
         ))
 }
 
-/// Applies error envelopes, correlation IDs, and request metrics to host routes.
+/// Applies request admission, error envelopes, correlation IDs, and metrics to host routes.
 pub fn observe_routes(router: Router, state: &BindingState) -> Router {
     router
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(tower::util::MapResponseLayer::new(
+            response_frames::split_response,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_limit::admit_request,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             with_request_observability,

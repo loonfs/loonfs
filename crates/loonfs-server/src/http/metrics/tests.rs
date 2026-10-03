@@ -143,19 +143,21 @@ fn scrape_time_gauges_carry_permit_levels() {
         }),
         4,
         2,
+        7,
     );
 
     assert!(rendered.contains("loonfs_grep_steps_running 1\n"));
     assert!(rendered.contains("loonfs_grep_steps_waiting 3\n"));
     assert!(rendered.contains("loonfs_server_upload_permits_available 4\n"));
     assert!(rendered.contains("loonfs_server_download_permits_available 2\n"));
+    assert!(rendered.contains("loonfs_server_in_flight_requests 7\n"));
     assert_eq!(
         rendered
             .lines()
             .filter(|line| line.starts_with("# TYPE"))
             .count(),
-        if cfg!(target_os = "linux") { 5 } else { 4 },
-        "the grep steps, the two permit pools, and Linux RSS where available"
+        if cfg!(target_os = "linux") { 6 } else { 5 },
+        "the grep steps, transfer slots, request count, and Linux RSS where available"
     );
 }
 
@@ -163,7 +165,7 @@ fn scrape_time_gauges_carry_permit_levels() {
 #[test]
 fn a_scrape_reports_positive_process_resident_bytes() {
     let mut rendered = String::new();
-    render_scrape_gauges(&mut rendered, None, None, 0, 0);
+    render_scrape_gauges(&mut rendered, None, None, 0, 0, 0);
 
     let resident_bytes = rendered
         .lines()

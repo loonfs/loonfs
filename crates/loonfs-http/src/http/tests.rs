@@ -10,6 +10,7 @@ mod inline_commits;
 mod maintenance_runs;
 mod namespaces;
 mod pin_deletion;
+mod request_limit;
 mod surface;
 
 use super::error::{status_for_core_error_code, ServedErrorCode};
@@ -131,6 +132,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "maintain_only",
     "manifest_advanced",
     "manifest_no",
+    "max_connections",
+    "max_in_flight_requests",
     "max_wal_tail_objects",
     "metadata_compaction",
     "recover_administrator",
@@ -2479,11 +2482,13 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
     .await;
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.binding.max_concurrent_downloads = 1;
-    let (router, state) = test_app(config, options_with_store(store))
+    let (_, mut state) = test_app(config, options_with_store(store))
         .await
         .expect("build app");
 
-    let response = router
+    state.request_limit = Some(crate::RequestLimit::new(std::num::NonZeroUsize::MIN));
+    let limit = state.request_limit.as_ref().expect("request limit");
+    let response = crate::router(state.clone())
         .oneshot(
             axum::http::Request::builder()
                 .uri("/v0/namespaces/demo/filesystem/content?path=%2Fnote.txt")
@@ -2502,6 +2507,7 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
         ))
     );
     assert_eq!(state.download_permits.available_permits(), 0);
+    assert_eq!(limit.in_flight(), 1);
 
     let next_permit = state.download_permits.clone().acquire_owned();
     tokio::pin!(next_permit);
@@ -2519,6 +2525,7 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
         .expect("the next download is admitted after full consumption");
     drop(acquired);
     assert_eq!(state.download_permits.available_permits(), 1);
+    assert_eq!(limit.in_flight(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

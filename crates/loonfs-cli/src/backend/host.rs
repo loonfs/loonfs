@@ -52,6 +52,7 @@ pub(crate) fn client(
         auth_policy: AuthPolicy::Unauthenticated,
     });
     let state = BindingState {
+        request_limit: None,
         upload_permits: Arc::new(Semaphore::new(options.max_concurrent_uploads)),
         download_permits: Arc::new(Semaphore::new(options.max_concurrent_downloads)),
         options,

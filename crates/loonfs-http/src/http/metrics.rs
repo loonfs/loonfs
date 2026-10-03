@@ -23,6 +23,7 @@ pub struct HttpMetrics {
     recorder: Arc<DefaultMetricsRecorder>,
     routes: Mutex<RouteLabels>,
     requests: Mutex<HashMap<&'static str, RequestInstruments>>,
+    busy_requests: Arc<dyn CounterHandle>,
     busy_uploads: Arc<dyn CounterHandle>,
     busy_downloads: Arc<dyn CounterHandle>,
 }
@@ -35,9 +36,6 @@ struct RequestInstruments {
 }
 
 impl HttpMetrics {
-    /// Builds the server's recorder and registers what it can register up
-    /// front: the two admission-rejection counters, whose labels are the
-    /// closed pair of things this server refuses when it is full.
     pub fn new() -> Arc<Self> {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let busy = |kind: &'static str| {
@@ -48,6 +46,7 @@ impl HttpMetrics {
             )
         };
         Arc::new(Self {
+            busy_requests: busy("request"),
             busy_uploads: busy("upload"),
             busy_downloads: busy("download"),
             routes: Mutex::new(RouteLabels::default()),
@@ -99,6 +98,10 @@ impl HttpMetrics {
     /// Reports one proxied content read refused for want of a transfer slot.
     pub(super) fn download_rejected_as_busy(&self) {
         self.busy_downloads.increment(1);
+    }
+
+    pub(super) fn request_rejected_as_busy(&self) {
+        self.busy_requests.increment(1);
     }
 
     pub fn snapshot(&self) -> MetricsSnapshot {

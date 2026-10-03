@@ -63,6 +63,14 @@ writer_id = "loonfs-server-local"
 #snapshot_max_lifetime_ms = 604800000
 #snapshot_max_live_per_namespace = 16
 
+# Requests hold a slot through response completion; health and readiness are
+# exempt. A full request cap returns 503 server_busy before reading the body.
+#max_in_flight_requests = 256
+# A full connection cap pauses TCP accept; TLS handshakes hold a slot too.
+#max_connections = 1024
+# Size both from pod memory left after runtime budgets, using measured peak
+# bytes per request and connection, and leave room for allocator overhead.
+
 # How many proxied upload bodies the server will stream at once and how many
 # content streams it will serve at once. Requests past a cap answer 503
 # `server_busy`. Upload memory tracks at most one 8 MiB transfer part per
