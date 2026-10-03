@@ -771,7 +771,7 @@ impl NamespaceCommitEngine {
             acquired_writer,
             context,
             &deadline,
-            crate::manifest::MetadataLsmPolicy::for_segment_cache(self.segment_cache.as_deref()),
+            crate::manifest::read_working_memory(self.segment_cache.as_deref()),
         )
         .await;
         self.invalidate_projection();

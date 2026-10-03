@@ -8,6 +8,35 @@ A writable session folds its WAL tail when the tail reaches the fold thresholds,
 
 One call of `maintain_metadata_while_due` publishes at most 16 compaction units, bounded or streaming, and then returns. Both forms return `Result<bool>`. `true` means nothing is due now and nothing becomes due without another commit under the supplied options. The result comes from reads the call already made. The call returns `false` when it stops at the unit or lost-race limit, is fenced or cancelled, leaves a streaming compaction unfinished, or leaves a tail waiting for the idle fold age. The session's next fold starts compaction again. The sweep continues unfinished work even without another commit.
 
+## Shared read working memory
+
+`ExecutionBudget` owns `max_read_working_bytes`, defaulting to 256 MiB. All
+read-only and writable runtimes given clones of a budget share this pool.
+A runtime without an explicit budget creates a private one. Core callers
+without a runtime budget use an unshared 64 MiB pool. Metadata cache limits
+are unchanged and have a separate owner.
+
+| Limit | Owner | Default | At the limit |
+| --- | --- | --- | --- |
+| `max_read_working_bytes` | `ExecutionBudget` | 256 MiB | A memo evicts its own entries and continues without retaining blocks that do not fit. Nothing waits. |
+
+Read, publication, fold, pin-fold, and bounded compaction memos reserve from
+this pool. Reservations include decoded data blocks, stored read-ahead
+bytes, decoded indexes and filters, keys, reference counts, and allocated
+memo container capacity. Eviction and drop release the reservation. A
+caller that already holds a block keeps it valid after eviction. Cache
+entries are charged to their own limits even when they share an allocation
+with a memo. Allocator bookkeeping, temporary decoding, returned rows, and
+blocks borrowed after eviction are outside this pool. The pool does not
+limit read concurrency.
+
+`ExecutionBudget::stats().read_working_bytes` reports retained bytes.
+The budget's recorder exposes `loonfs.execution_budget.read_working_bytes`
+and `loonfs.execution_budget.read_working_reservation_failures`. The second
+gauge counts failed attempts to reserve, including retries after eviction.
+The reference server sets the pool through `max_read_working_bytes`; zero
+disables memo retention.
+
 ## The sweep
 
 The reference server runs the sweep when its `maintenance` mode maintains. One loop serializes session and full passes:

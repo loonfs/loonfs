@@ -1,9 +1,10 @@
-//! The work in flight that one or more writable runtimes share.
+//! The work in flight that one or more runtimes share.
 
 use crate::metrics::{
     AdmissionInstruments, ExecutionBudgetInstruments, MetricsRecorder, PermitPoolGauges,
 };
 use crate::CoreError;
+use loonfs_core::cache::ReadWorkingMemory;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -19,12 +20,14 @@ pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
 /// sharing one budget run at once.
 pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 2;
 pub(crate) const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: usize = 8;
+/// Default bytes retained across read, publication, and fold memos.
+pub const DEFAULT_MAX_READ_WORKING_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_MAX_ADMITTED_REQUESTS: usize = 8192;
 const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 
-/// Work in flight that one or more writable runtimes share: admitted
+/// Work in flight that one or more runtimes share: admitted
 /// publication requests, running publications, WAL folds, metadata merges,
-/// and the decoded input one merge may hold.
+/// the decoded input one merge may hold, and retained read working memory.
 ///
 /// Each [`LoonFs`](crate::LoonFs) built with the budget charges the
 /// publication requests it admits to the budget's totals, and takes its
@@ -36,7 +39,7 @@ const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 /// host that wants to isolate runtimes from each other gives them separate
 /// budgets. The per-namespace admission limits stay with each runtime (see
 /// [`PublicationLimits`](crate::PublicationLimits)). Clones share the budget.
-/// A writable runtime built without one creates a private budget with the
+/// A runtime built without one creates a private budget with the
 /// default limits.
 #[derive(Clone)]
 pub struct ExecutionBudget {
@@ -44,6 +47,7 @@ pub struct ExecutionBudget {
 }
 
 struct ExecutionBudgetInner {
+    read_working_memory: Arc<ReadWorkingMemory>,
     admission: AdmittedTotals,
     publications: PermitPool,
     folds: PermitPool,
@@ -71,6 +75,7 @@ impl ExecutionBudget {
     /// recorder.
     pub fn builder() -> ExecutionBudgetBuilder {
         ExecutionBudgetBuilder {
+            max_read_working_bytes: DEFAULT_MAX_READ_WORKING_BYTES,
             max_admitted_requests: const { NonZeroUsize::new(DEFAULT_MAX_ADMITTED_REQUESTS).unwrap() },
             max_admitted_bytes: const { NonZeroUsize::new(DEFAULT_MAX_ADMITTED_BYTES).unwrap() },
             max_concurrent_publications: const {
@@ -98,6 +103,7 @@ impl ExecutionBudget {
         let folds = self.inner.folds.counts();
         let compactions = self.inner.compactions.counts();
         ExecutionBudgetStats {
+            read_working_bytes: self.inner.read_working_memory.in_use(),
             admitted_requests: admitted.requests,
             admitted_bytes: admitted.bytes,
             publications_running: publications.running,
@@ -107,6 +113,10 @@ impl ExecutionBudget {
             compactions_running: compactions.running,
             compactions_waiting: compactions.waiting,
         }
+    }
+
+    pub(crate) fn read_working_memory(&self) -> Arc<ReadWorkingMemory> {
+        Arc::clone(&self.inner.read_working_memory)
     }
 
     /// Charges one admitted publication request of `estimated_bytes` to the
@@ -150,6 +160,7 @@ impl ExecutionBudget {
 /// Builder for an [`ExecutionBudget`].
 #[must_use]
 pub struct ExecutionBudgetBuilder {
+    max_read_working_bytes: usize,
     max_admitted_requests: NonZeroUsize,
     max_admitted_bytes: NonZeroUsize,
     max_concurrent_publications: NonZeroUsize,
@@ -160,6 +171,15 @@ pub struct ExecutionBudgetBuilder {
 }
 
 impl ExecutionBudgetBuilder {
+    /// Sets the bytes retained by read, publication, and fold memos across
+    /// all runtimes sharing this budget. A full pool makes a memo evict its
+    /// own entries or leave blocks unretained. Reads never wait or fail for
+    /// memory. Defaults to 256 MiB; zero disables retention.
+    pub fn max_read_working_bytes(mut self, bytes: usize) -> Self {
+        self.max_read_working_bytes = bytes;
+        self
+    }
+
     /// Sets the maximum publication requests admitted and not yet settled,
     /// across every namespace of every runtime that shares the budget. Every
     /// admitted caller counts, including duplicate commits and namespace
@@ -236,9 +256,14 @@ impl ExecutionBudgetBuilder {
             publications,
             folds,
             compactions,
+            read_working_memory,
         } = ExecutionBudgetInstruments::new(self.metrics_recorder.as_deref());
         ExecutionBudget {
             inner: Arc::new(ExecutionBudgetInner {
+                read_working_memory: Arc::new(ReadWorkingMemory::new(
+                    self.max_read_working_bytes,
+                    read_working_memory,
+                )),
                 admission: AdmittedTotals {
                     max_requests: self.max_admitted_requests,
                     max_bytes: self.max_admitted_bytes,
@@ -258,6 +283,8 @@ impl ExecutionBudgetBuilder {
 /// over every runtime that shares it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExecutionBudgetStats {
+    /// Bytes retained by metadata block memos, including index and filter sections.
+    pub read_working_bytes: usize,
     /// Publication requests admitted and not yet settled.
     pub admitted_requests: usize,
     /// Estimated retained bytes of the publication requests admitted and not

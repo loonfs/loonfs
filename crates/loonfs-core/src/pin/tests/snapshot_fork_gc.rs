@@ -64,6 +64,7 @@ impl Fixture {
             selected.state.compactor_epoch(),
             MetadataLsmPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
+            Arc::default(),
         )
         .await
         .expect("replace old runs");
@@ -306,7 +307,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
                 writer,
                 &fixture.context,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                MetadataLsmPolicy::default(),
+                Arc::default(),
             )
             .await
             .expect("delete source before the fork pin lands");

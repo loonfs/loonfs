@@ -109,8 +109,9 @@ impl InlineContentPolicy {
 }
 
 /// Read configuration shared by all handles of one runtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct ReadConfig {
+    pub(crate) execution_budget: crate::ExecutionBudget,
     /// Largest file content the buffered read APIs will materialize for one
     /// call, checked against resolved metadata before any content fetch.
     /// `None` (the embedded default) reads files of any size; servers set
@@ -119,8 +120,7 @@ pub(crate) struct ReadConfig {
     /// Minimum monotonic interval between checks for a successor to a cached
     /// manifest. Zero checks on every read.
     pub manifest_revalidation_interval_ms: u64,
-    /// Budgets for WAL folds and metadata compactions, and the block memo
-    /// budget of every read, publication, and fold.
+    /// Layout and input limits for metadata compactions.
     pub metadata_lsm_policy: loonfs_core::MetadataLsmPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,

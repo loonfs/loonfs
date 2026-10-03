@@ -17,10 +17,11 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
     context: &crate::context::MutationContext,
     deadline: &Deadline,
-    fold_policy: crate::manifest::MetadataLsmPolicy,
+    pool: std::sync::Arc<crate::cache::ReadWorkingMemory>,
 ) -> Result<DeleteNamespaceResponse> {
     update_manifest(store, namespace_id, deadline, |mut payload| {
         let acquired_writer = &acquired_writer;
+        let pool = std::sync::Arc::clone(&pool);
         async move {
             let anchor = load_read_anchor(store, namespace_id).await?;
             let head = &anchor.read_state;
@@ -37,8 +38,14 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             }
             if payload.folded_wal_no < head.wal_no {
                 deadline.ensure_metadata_publication_budget(namespace_id)?;
-                crate::manifest::fold_wal_with_deadline(store, namespace_id, deadline, fold_policy)
-                    .await?;
+                crate::manifest::fold_wal_with_deadline(
+                    store,
+                    namespace_id,
+                    deadline,
+                    crate::manifest::MetadataLsmPolicy::default(),
+                    pool,
+                )
+                .await?;
                 return Ok(ManifestChange::Again);
             }
             payload.status = NamespaceStatus::Deleted {

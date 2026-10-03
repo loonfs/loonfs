@@ -196,7 +196,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             acquired_writer.clone(),
             &context,
             &deadline,
-            crate::manifest::MetadataLsmPolicy::default(),
+            Arc::default(),
         )
         .await
         .expect_err("deletion rejected before folding");

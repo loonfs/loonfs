@@ -56,6 +56,12 @@ impl fmt::Debug for Writable {
 }
 
 impl<M> LoonFs<M> {
+    /// Returns the execution budget this runtime's reads, publications, folds, and
+    /// merges draw from, which other runtimes may share.
+    pub fn execution_budget(&self) -> &ExecutionBudget {
+        &self.core.inner.config.execution_budget
+    }
+
     /// Returns the subject this runtime acts for, or `None` for an unscoped
     /// service runtime.
     pub fn subject(&self) -> Option<&Subject> {
@@ -195,12 +201,6 @@ impl LoonFs<Writable> {
             Arc::clone(&self.mode.bits),
             WriterIdentity { writer_id },
         )
-    }
-
-    /// Returns the execution budget this runtime's publications, folds, and
-    /// merges draw from, which other runtimes may share.
-    pub fn execution_budget(&self) -> &ExecutionBudget {
-        &self.mode.bits.execution_budget
     }
 
     /// Closes publication admission before shutdown drains, and cancels the

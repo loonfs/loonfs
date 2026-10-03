@@ -1479,6 +1479,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
             loonfs_types::CompactorEpoch(0),
             merge_policy,
             MetadataCompactionPolicy::default(),
+            Arc::default(),
         )
         .await
         .expect("compact step");

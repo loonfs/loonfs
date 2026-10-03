@@ -204,6 +204,7 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
     RuntimeCore::open(
         store,
         ReadConfig {
+            execution_budget: ExecutionBudget::default(),
             max_read_content_bytes: None,
             manifest_revalidation_interval_ms: 1000,
             metadata_lsm_policy: loonfs_core::MetadataLsmPolicy::default(),

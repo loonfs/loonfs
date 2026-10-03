@@ -567,6 +567,7 @@ impl MetadataCacheInstruments {
 /// The instruments of one execution budget, registered when the budget is
 /// built.
 pub(crate) struct ExecutionBudgetInstruments {
+    pub(crate) read_working_memory: Option<Arc<dyn loonfs_core::cache::ReadWorkingMemoryObserver>>,
     pub(crate) admission: AdmissionInstruments,
     pub(crate) publications: PermitPoolGauges,
     pub(crate) folds: PermitPoolGauges,
@@ -577,6 +578,7 @@ impl ExecutionBudgetInstruments {
     /// Registers every budget instrument now, or nothing without a recorder.
     pub(crate) fn new(recorder: Option<&dyn MetricsRecorder>) -> Self {
         Self {
+            read_working_memory: recorder.map(super::read_working_memory::register),
             admission: AdmissionInstruments {
                 installed: recorder.map(|recorder| InstalledAdmissionInstruments {
                     requests: recorder.register_gauge(

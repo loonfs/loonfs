@@ -267,10 +267,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             );
             let filter = decode_filter_block(stored, &filter_handle)
                 .map_err(|err| segment_codec_error(&object_key, err))?;
-            let block = DecodedMetadataSegmentBlock::Filter {
-                decoded_bytes: filter_handle.decoded_bytes as usize,
-                filter: Arc::new(filter),
-            };
+            let block = filter_cache_block(filter);
             publish_segment_block(
                 segment_cache,
                 memo,
@@ -339,6 +336,13 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             "requested section outside the segment object bounds",
         )
     })
+}
+
+fn filter_cache_block(filter: SegmentFilter) -> DecodedMetadataSegmentBlock {
+    DecodedMetadataSegmentBlock::Filter {
+        decoded_bytes: filter.decoded_bytes() + crate::heap_bytes::arc_bytes::<()>(),
+        filter: Arc::new(filter),
+    }
 }
 
 fn index_cache_block(entries: Vec<SegmentIndexEntry>) -> DecodedMetadataSegmentBlock {
@@ -472,16 +476,12 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
             .map_err(|err| segment_codec_error(&object_key, format!("inline filter: {err}")))?;
         // The handle names and verifies the durable filter block; decoding
         // the inline copy against it proves the two are byte-identical.
-        let filter = Arc::new(
+        let block = filter_cache_block(
             decode_filter_block(&bytes, &handle)
                 .map_err(|err| segment_codec_error(&object_key, err))?,
         );
-        let block = DecodedMetadataSegmentBlock::Filter {
-            decoded_bytes: handle.decoded_bytes as usize,
-            filter: Arc::clone(&filter),
-        };
         publish_segment_block(segment_cache, Some(memo), cache_key, &block);
-        return Ok(filter);
+        return block.into_filter(&object_key);
     }
     let fetch = || async {
         // Reached only when the descriptor carried no inline copy: an
@@ -495,10 +495,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         )
         .await
         {
-            return Ok(DecodedMetadataSegmentBlock::Filter {
-                decoded_bytes: handle.decoded_bytes as usize,
-                filter: Arc::new(filter),
-            });
+            return Ok(filter_cache_block(filter));
         }
         load_and_publish_segment_sections(
             store,

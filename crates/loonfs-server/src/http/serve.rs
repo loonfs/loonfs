@@ -325,9 +325,6 @@ pub(super) async fn build_handles(
     if let Some(interval_ms) = config.manifest_revalidation_interval_ms {
         builder = builder.manifest_revalidation_interval_ms(interval_ms);
     }
-    if let Some(bytes) = config.max_block_memo_bytes {
-        builder = builder.max_block_memo_bytes(bytes);
-    }
     if let Some(samples) = &samples {
         builder = builder.object_store_metrics_recorder(Arc::clone(samples));
     }

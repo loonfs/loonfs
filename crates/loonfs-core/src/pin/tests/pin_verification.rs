@@ -95,6 +95,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         selected.state.compactor_epoch(),
         MetadataLsmPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
+        Arc::default(),
     )
     .await
     .expect("compact");
@@ -209,7 +210,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 writer,
                 &context,
                 &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
-                MetadataLsmPolicy::default(),
+                Arc::default(),
             )
             .await
             .expect("delete namespace during verification");
