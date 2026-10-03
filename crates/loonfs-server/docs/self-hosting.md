@@ -346,7 +346,7 @@ counted in any budget and sit on top.
 | Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
-| Block memo | `max_block_memo_bytes` | 64 MiB | Metadata blocks one read, publication, or fold keeps | Per operation |
+| Read working memory | `max_read_working_bytes` | 256 MiB | Blocks retained across read, publication, fold, and bounded compaction memos | Shared |
 | Merge input | `max_merge_input_bytes` | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments one fold, compaction, or maintenance step holds while it writes them | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including the folds that maintenance requests, namespace deletes, and checkpoint, snapshot, and fork creation start | Concurrency |
@@ -355,9 +355,14 @@ counted in any budget and sit on top.
 | Grep steps | `[grep].max_concurrent_steps` | 2 | Grep build and reorganize steps that hold file content or index segments at once, across daily visits and session ticks | Concurrency |
 | Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
-A fold holds a block memo and its segment output, so it can use up to 96 MiB.
-A merge holds its merge input and its segment output, so it can also use up
-to 96 MiB, and `max_concurrent_compactions` merges can use that much each. A
+Memos share one read working memory pool. A full pool makes a memo evict
+its own entries or leave new blocks unretained. Reads never wait or fail for
+memory. The pool counts decoded data, index and filter sections, stored
+read-ahead bytes, keys, reference counts, and memo containers. Zero disables
+retention. Blocks a caller already holds remain valid after eviction.
+
+A fold holds its segment output and draws its memo from the shared pool.
+A merge holds its merge input and its segment output, up to 96 MiB, and `max_concurrent_compactions` merges can use that much each. A
 sweep visit that folds the WAL tail and then merges takes a fold permit for
 the fold and then a compaction permit for the merge, so the fold and
 compaction limits, not `max_concurrent_maintenance`, bound that memory.
@@ -369,7 +374,7 @@ steps to compactions.
 
 The segment output budget has no setting. A segment larger than the budget
 is written alone. A checkpoint, snapshot, or fork that has to fold the WAL
-tail first runs that fold with the configured `max_block_memo_bytes`. Creating one
+tail first runs that fold with the shared read working memory pool. Creating one
 waits for a fold permit, even when the tail is already folded. A fork of a
 snapshot never folds and takes no fold permit.
 
@@ -381,7 +386,7 @@ compaction permits as every other fold and merge.
 transfer. Both default to 256 MiB. They do not reserve memory.
 
 Without grep and without the local cache, the budgets that have a
-process-wide limit add up to 960 MiB by default:
+process-wide limit add up to 1,088 MiB by default:
 
 | Budget | Ceiling |
 | --- | --- |
@@ -390,16 +395,17 @@ process-wide limit add up to 960 MiB by default:
 | Publication queue | 64 MiB |
 | 8 uploads at 8 MiB | 64 MiB |
 | 16 downloads at 8 MiB | 128 MiB |
-| 2 folds at 96 MiB | 192 MiB |
+| Read working memory | 256 MiB |
+| 2 fold outputs at 32 MiB | 64 MiB |
 | 2 compactions at 96 MiB | 192 MiB |
-| Total | 960 MiB |
+| Total | 1,088 MiB |
 
-The total leaves out writer sessions, the block memos of reads
-and publications, the WAL tails that running reads, publications, and folds
-hold outside the head-state cache, and the work of maintenance requests sent
-to the API other than their folds and merges. Eight running
-publications can hold up to 512 MiB of block memos at the default budget.
-Reads have no concurrency limit, so their block memos have no total.
+The total leaves out writer sessions, page results, decoded blocks borrowed
+by callers after memo eviction, the WAL tails that running operations hold
+outside the head-state cache, and maintenance work other than folds and
+merges. Shared cache entries and memo entries are charged independently,
+even when they refer to the same allocation. Reads have no concurrency
+limit, so the pool bounds memo retention, not all read memory.
 
 Grep adds a 256 MiB block cache on a server that answers queries. The cache
 has no setting. A query reads up to 32 candidate files of at most 8 MiB each
@@ -427,7 +433,7 @@ tier, and up to 256 MiB of inserts waiting for the disk tier. The last two
 have no setting.
 
 This config for a 256 MiB container uses a 64 MiB segment cache, a 16 MiB
-head-state budget, 8 MiB block memos, an 8 MiB merge input, two running
+head-state budget, an 8 MiB shared read working pool, an 8 MiB merge input, two running
 publications, one fold, one compaction, and one sweep visit at a time:
 
 ```toml
@@ -437,7 +443,7 @@ max_concurrent_maintenance = 1
 max_concurrent_uploads = 2
 max_concurrent_downloads = 2
 max_merge_input_bytes = 8388608
-max_block_memo_bytes = 8388608
+max_read_working_bytes = 8388608
 
 [publication]
 max_estimated_bytes = 8388608
@@ -455,19 +461,17 @@ max_head_state_bytes = 16777216
 | Publication queue | 8 MiB |
 | 2 uploads at 8 MiB | 16 MiB |
 | 2 downloads at 8 MiB | 16 MiB |
-| 2 publications at an 8 MiB block memo | 16 MiB |
-| 1 fold: 8 MiB block memo and 32 MiB segment output | 40 MiB |
+| Shared read working memory | 8 MiB |
+| 1 fold output | 32 MiB |
 | 1 compaction: 8 MiB merge input and 32 MiB segment output | 40 MiB |
-| Total | 216 MiB |
+| Total | 200 MiB |
 
-64 + 16 + 8 + 16 + 16 + 16 + 40 + 40 = 216 MiB, which leaves 40 MiB of the
-256 MiB for allocator overhead, HTTP buffers, and the block memos of reads.
-Each read keeps at most 8 MiB. A namespace delete, and a checkpoint, snapshot,
-or fork that folds the WAL tail, each hold the one fold permit and no
-publication slot. Each of those folds uses the configured 8 MiB block memo, so
-the fold row already counts it. One case can still pass the limit:
-
-- Many large reads at once, because reads have no concurrency limit.
+64 + 16 + 8 + 16 + 16 + 8 + 32 + 40 = 200 MiB, which leaves 56 MiB of the
+256 MiB for allocator overhead, HTTP buffers, and other working memory.
+A namespace delete, checkpoint, snapshot, or fork that folds the WAL tail
+holds the one fold permit and draws from the same 8 MiB read working pool.
+Many concurrent reads can still exceed the container's memory because page
+results, temporary decoding, and borrowed blocks have no combined limit.
 
 The server keeps one writer session for each namespace it has written since
 it started. There is no cap and no eviction. One idle session holds about

@@ -9,6 +9,7 @@
 //! labels. This module also re-exports the object-store metrics API.
 
 mod instruments;
+mod read_working_memory;
 
 pub use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricSample,

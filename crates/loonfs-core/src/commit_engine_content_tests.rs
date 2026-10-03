@@ -565,6 +565,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
                 ..MetadataLsmPolicy::default()
             },
             MetadataCompactionPolicy::default(),
+            Arc::default(),
         )
         .await
         .expect("compact metadata");

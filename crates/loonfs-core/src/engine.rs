@@ -1313,6 +1313,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
             self.metadata_lsm_policy(),
+            crate::manifest::read_working_memory(self.segment_cache.as_deref()),
         )
         .await
     }
@@ -1334,6 +1335,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             compactor_epoch,
             self.metadata_lsm_policy(),
             compaction_policy,
+            crate::manifest::read_working_memory(self.segment_cache.as_deref()),
         )
         .await
     }

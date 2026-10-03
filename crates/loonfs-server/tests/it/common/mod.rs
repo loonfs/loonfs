@@ -332,7 +332,7 @@ pub(crate) fn test_config(
         idle_session_close_after_ms: 1_800_000,
         max_merge_input_bytes: loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
         manifest_revalidation_interval_ms: None,
-        max_block_memo_bytes: None,
+        max_read_working_bytes: None,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,

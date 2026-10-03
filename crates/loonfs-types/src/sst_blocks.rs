@@ -548,6 +548,11 @@ pub fn decode_filter_block(
 }
 
 impl SegmentFilter {
+    /// Includes the filter value and the allocated capacity of its bit vector.
+    pub fn decoded_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.bits.capacity()
+    }
+
     /// False means no row with this filter key is in the segment; true
     /// means one may be.
     pub fn may_contain(&self, filter_key: &str) -> bool {

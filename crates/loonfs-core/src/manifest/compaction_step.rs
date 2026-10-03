@@ -9,6 +9,7 @@
 //! [`MetadataCompactionPolicy`] decides when input sizes warrant a merge.
 
 use super::block_fetch::{load_segment_index_for_compaction, segment_object_len};
+use super::block_load::SessionBlockMemo;
 use super::error::ManifestLoadError;
 use super::fold::{next_manifest_no_after, next_run_no_after};
 use super::load::load_manifest_segments;
@@ -19,6 +20,7 @@ use super::runs::{
 };
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
+use crate::cache::ReadWorkingMemory;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
@@ -103,6 +105,7 @@ pub(crate) async fn compaction_step<S: ObjectStore + ?Sized>(
     compactor_epoch: CompactorEpoch,
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
+    pool: Arc<ReadWorkingMemory>,
 ) -> Result<CompactionStepOutcome> {
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     compaction_step_with_deadline(
@@ -112,6 +115,7 @@ pub(crate) async fn compaction_step<S: ObjectStore + ?Sized>(
         policy,
         compaction_policy,
         &deadline,
+        pool,
     )
     .await
 }
@@ -123,6 +127,7 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
     compaction_policy: MetadataCompactionPolicy,
     deadline: &Deadline,
+    pool: Arc<ReadWorkingMemory>,
 ) -> Result<CompactionStepOutcome> {
     let current_manifest = load_current_manifest(store, namespace_id)
         .await
@@ -132,7 +137,8 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
         return Ok(CompactionStepOutcome::Fenced);
     }
     let floor_seq = current_manifest.retention_floor_seq();
-    let segments = load_manifest_segments(store, None, &current_manifest.manifest()).await?;
+    let mut segments = load_manifest_segments(store, None, &current_manifest.manifest()).await?;
+    segments.block_memo = SessionBlockMemo::new(pool);
     let previous = segments.manifest();
 
     let delta_runs = delta_run_count(previous.payload());

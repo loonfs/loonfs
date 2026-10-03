@@ -270,10 +270,9 @@ pub struct ServerConfig {
     /// in milliseconds. Zero checks on every read. Unset keeps the runtime
     /// default of 1000.
     pub manifest_revalidation_interval_ms: Option<u64>,
-    /// Metadata block bytes one read, publication, or fold keeps for itself
-    /// on top of the metadata cache. Zero keeps none. Unset keeps the
-    /// runtime default of 64 MiB.
-    pub max_block_memo_bytes: Option<usize>,
+    /// Bytes retained by all read, publication, and fold memos. Zero keeps
+    /// none. Unset keeps the execution budget default of 256 MiB.
+    pub max_read_working_bytes: Option<usize>,
     /// How old a WAL tail's newest commit must be before maintenance folds
     /// a tail that is below the fold thresholds, in milliseconds. The
     /// maintenance sweep and explicit `metadata` requests use the same
@@ -749,6 +748,9 @@ impl ServerConfig {
             .max_concurrent_compactions(positive(self.max_concurrent_compactions))
             .max_merge_input_bytes(positive(self.max_merge_input_bytes))
             .metrics_recorder(recorder);
+        if let Some(bytes) = self.max_read_working_bytes {
+            builder = builder.max_read_working_bytes(bytes);
+        }
         if let Some(limit) = self.publication.max_requests {
             builder = builder.max_admitted_requests(limit);
         }
@@ -1896,7 +1898,7 @@ root = "/tmp/loonfs-server"
             super::MetadataCacheOverrides::default()
         );
         assert_eq!(config.manifest_revalidation_interval_ms, None);
-        assert_eq!(config.max_block_memo_bytes, None);
+        assert_eq!(config.max_read_working_bytes, None);
     }
 
     #[test]
@@ -1907,7 +1909,7 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 manifest_revalidation_interval_ms = 250
-max_block_memo_bytes = 8192
+max_read_working_bytes = 8192
 
 [metadata_cache]
 max_segment_bytes = 16384
@@ -1921,7 +1923,7 @@ root = "/tmp/loonfs-server"
 
         let config = load_server_config(&path).expect("load config");
         assert_eq!(config.manifest_revalidation_interval_ms, Some(250));
-        assert_eq!(config.max_block_memo_bytes, Some(8192));
+        assert_eq!(config.max_read_working_bytes, Some(8192));
         assert_eq!(
             config.metadata_cache,
             super::MetadataCacheOverrides {

@@ -553,7 +553,7 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     let cache = MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(0, None)),
         CacheScope::new(0),
-        0,
+        Arc::new(crate::cache::ReadWorkingMemory::new(0, None)),
         None,
     );
     let read_view = super::load_manifest_segments_for_inspection(
@@ -564,7 +564,7 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     )
     .await
     .expect("read view");
-    let fold_view = fold::load_manifest_projection(&store, &namespace_id, 0, None)
+    let fold_view = fold::load_manifest_projection(&store, &namespace_id, Some(&cache))
         .await
         .expect("fold view")
         .manifest_segments;
@@ -841,7 +841,7 @@ fn segment_cache_over(blocks: &Arc<RecordingStoredMetadataBlockCache>) -> Metada
     MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(usize::MAX, None)),
         CacheScope::new(0),
-        DEFAULT_BLOCK_MEMO_BYTES,
+        Arc::default(),
         Some(Arc::clone(blocks) as Arc<dyn StoredMetadataBlockCache>),
     )
 }
@@ -1613,4 +1613,99 @@ async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
             .expect("load checkpoint manifest");
     // One delta run per checkpoint, the first included.
     assert_eq!(delta_runs(&materialized.manifest).len(), 2);
+}
+
+#[tokio::test]
+async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows() {
+    use crate::cache::ReadWorkingMemory;
+
+    let (_root, store, descriptor) = checkpointed_direntry_segment().await;
+    let namespace_id = &descriptor.owner_namespace_id;
+    let manifest_number = current_manifest_number(&store, namespace_id).await;
+    let cache = |pool| {
+        MetadataSegmentCache::new(
+            Arc::new(SharedSegmentBlocks::new(0, None)),
+            CacheScope::new(0),
+            pool,
+            None,
+        )
+    };
+    let probe_pool = Arc::new(ReadWorkingMemory::default());
+    let probe_cache = cache(Arc::clone(&probe_pool));
+    let probe = load_manifest_segments_for_inspection(
+        &store,
+        Some(&probe_cache),
+        namespace_id,
+        &manifest_number,
+    )
+    .await
+    .expect("probe view");
+    let expected = probe
+        .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+        .await
+        .expect("probe rows");
+    let working_bytes = probe_pool.in_use();
+    assert!(working_bytes > 0);
+    drop(probe);
+    assert_eq!(probe_pool.in_use(), 0);
+    let pool = Arc::new(ReadWorkingMemory::new(working_bytes, None));
+    let shared_cache = cache(Arc::clone(&pool));
+    let first = load_manifest_segments_for_inspection(
+        &store,
+        Some(&shared_cache),
+        namespace_id,
+        &manifest_number,
+    )
+    .await
+    .expect("first view");
+    let second = load_manifest_segments_for_inspection(
+        &store,
+        Some(&shared_cache),
+        namespace_id,
+        &manifest_number,
+    )
+    .await
+    .expect("second view");
+    for view in [&first, &second] {
+        assert_eq!(
+            view.scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+                .await
+                .expect("rows"),
+            expected
+        );
+    }
+    assert_eq!(pool.in_use(), working_bytes);
+    store.reset();
+    assert_eq!(
+        first
+            .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+            .await
+            .expect("first reread"),
+        expected
+    );
+    assert_eq!(store.count(OperationClass::Read), 0);
+    store.reset();
+    assert_eq!(
+        second
+            .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+            .await
+            .expect("second reread"),
+        expected
+    );
+    assert!(store.count(OperationClass::Read) > 0);
+    drop(first);
+    assert_eq!(pool.in_use(), 0);
+    second
+        .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+        .await
+        .expect("read after release");
+    assert_eq!(pool.in_use(), working_bytes);
+    store.reset();
+    second
+        .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+        .await
+        .expect("retained reread");
+    assert_eq!(store.count(OperationClass::Read), 0);
+    drop(second);
+    assert_eq!(pool.in_use(), 0);
 }

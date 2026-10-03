@@ -71,6 +71,7 @@ mod namespace;
 mod options;
 mod pin;
 mod protocol;
+mod read_working_memory;
 mod recency;
 mod storage;
 mod store_waves;
@@ -109,6 +110,7 @@ pub mod cache {
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
         DecodedBlockCacheStats, DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
     };
+    pub use crate::read_working_memory::{ReadWorkingMemory, ReadWorkingMemoryObserver};
     pub use crate::recency::Recency;
     pub use crate::wal::ProjectedWalTail;
 

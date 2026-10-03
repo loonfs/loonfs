@@ -15,6 +15,35 @@ The runtime records the last published seq and its monotonic time. A publish cle
 
 Each held entry in `Namespaces` keeps the handle, last opened time, indexed seq, index-dirty flag, collected seq and time, and metadata retry time. Dropping the entry drops these facts. Visits retain the entry they started with, so a result cannot update a replacement after close. The ordered table releases its lock between entries. The sweep has no namespace progress maps. The HTTP enable and disable handlers hold a session and mark its entry dirty. The grep worker keeps no host lifecycle-change set.
 
+## Shared read working memory
+
+`ExecutionBudget` owns `max_read_working_bytes`, defaulting to 256 MiB. All
+read-only and writable runtimes given clones of a budget share this pool.
+A runtime without an explicit budget creates a private one. Core callers
+without a runtime budget use an unshared 64 MiB pool. Metadata cache limits
+are unchanged and have a separate owner.
+
+| Limit | Owner | Default | At the limit |
+| --- | --- | --- | --- |
+| `max_read_working_bytes` | `ExecutionBudget` | 256 MiB | A memo evicts its own entries and continues without retaining blocks that do not fit. Nothing waits. |
+
+Read, publication, fold, pin-fold, and bounded compaction memos reserve from
+this pool. Reservations include decoded data blocks, stored read-ahead
+bytes, decoded indexes and filters, keys, reference counts, and allocated
+memo container capacity. Eviction and drop release the reservation. A
+caller that already holds a block keeps it valid after eviction. Cache
+entries are charged to their own limits even when they share an allocation
+with a memo. Allocator bookkeeping, temporary decoding, returned rows, and
+blocks borrowed after eviction are outside this pool. The pool does not
+limit read concurrency.
+
+`ExecutionBudget::stats().read_working_bytes` reports retained bytes.
+The budget's recorder exposes `loonfs.execution_budget.read_working_bytes`
+and `loonfs.execution_budget.read_working_reservation_failures`. The second
+gauge counts failed attempts to reserve, including retries after eviction.
+The reference server sets the pool through `max_read_working_bytes`; zero
+disables memo retention.
+
 ## Tick and daily pass
 
 Every `tick_interval_ms`, 5000 ms by default, `Sweep::tick` walks held ids without cloning handles. Once a session has gone one tick without a commit, it runs the first due step:

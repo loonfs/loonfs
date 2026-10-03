@@ -101,9 +101,9 @@ writer_id = "loonfs-server-local"
 # milliseconds. Zero checks on every read. Defaults to 1000.
 #manifest_revalidation_interval_ms = 1000
 
-# Metadata blocks one read, publication, or fold keeps for itself on top of
-# the metadata cache. Zero keeps none. Defaults to 64 MiB.
-#max_block_memo_bytes = 67108864
+# Bytes retained across read, publication, and fold memos. Zero disables
+# retention. Reads continue when the pool is full. Defaults to 256 MiB.
+#max_read_working_bytes = 268435456
 
 # How old a namespace's newest commit must be before maintenance folds a WAL
 # tail that is below the fold thresholds, in milliseconds. The maintenance
