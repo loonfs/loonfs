@@ -211,7 +211,12 @@ async fn a_session_stays_due_until_its_grep_build_catches_up() {
         .enable(&namespace_id)
         .await
         .expect("enable grep");
+    drop(held);
+    server
+        .clock
+        .advance_ms(config.idle_session_close_after_ms + 1);
     server.sweep.run_session_pass(false).await;
+    assert_eq!(server.sweep.inner.namespaces.held().len(), 1);
     assert!(matches!(
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Backfilling { .. }
@@ -230,7 +235,9 @@ async fn a_session_stays_due_until_its_grep_build_catches_up() {
         "the completed reorganization needs a step that reports nothing left"
     );
     server.sweep.run_session_pass(false).await;
-    assert!(store.take().is_empty());
+    assert!(store.take().is_empty(), "closing costs zero store requests");
+    assert!(server.sweep.inner.namespaces.held().is_empty());
+    assert!(lock(&server.sweep.inner.sessions).is_empty());
     server.runtime.shutdown().await.expect("shutdown");
 }
 
@@ -472,5 +479,221 @@ async fn a_session_visit_records_the_seq_before_a_concurrent_publish() {
     );
     server.sweep.run_session_pass(false).await;
     assert!(store.inner().take().is_empty());
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn idle_sessions_close_after_requests_release_them_and_reopen_with_a_new_epoch() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::any(),
+    ));
+    let mut config = sweep_config(Some(GrepWorkerConfig::default()));
+    config.idle_fold_after_ms = 0;
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let namespaces = &server.sweep.inner.namespaces;
+    let namespace_id = namespace_id("idle-close");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create namespace");
+    let held = namespaces.open(&namespace_id).await.expect("open session");
+    held.put_file("/first", b"first", &test_actor())
+        .await
+        .expect("publish");
+    server
+        .grep_worker
+        .as_ref()
+        .expect("grep worker")
+        .enable(&namespace_id)
+        .await
+        .expect("enable grep");
+    drop(held);
+    server.sweep.run_session_pass(true).await;
+    server.sweep.run_index_pass().await;
+    let first_epoch = loonfs_core::control::load_read_anchor(&*store, &namespace_id)
+        .await
+        .expect("read writer epoch")
+        .read_state
+        .writer_epoch;
+
+    server.clock.advance_ms(config.idle_session_close_after_ms);
+    store.reset();
+    server.sweep.run_session_pass(true).await;
+    assert_eq!(namespaces.held().len(), 1, "the threshold must be passed");
+    assert!(
+        store.take().is_empty(),
+        "a caught-up session costs zero requests"
+    );
+
+    let request = namespaces
+        .open(&namespace_id)
+        .await
+        .expect("take handle again");
+    request
+        .put_file("/recent", b"recent", &test_actor())
+        .await
+        .expect("publish again");
+    drop(request);
+    server.sweep.run_session_pass(true).await;
+    server.clock.advance_ms(1);
+    store.reset();
+    server.sweep.run_session_pass(true).await;
+    assert_eq!(namespaces.held().len(), 1, "an open resets idle time");
+    assert!(
+        store.take().is_empty(),
+        "a recent write keeps the caught-up session open"
+    );
+
+    let request = namespaces
+        .open(&namespace_id)
+        .await
+        .expect("hold request clone");
+    let clone = request.clone();
+    drop(request);
+    server
+        .clock
+        .advance_ms(config.idle_session_close_after_ms + 1);
+    store.reset();
+    server.sweep.run_session_pass(true).await;
+    assert_eq!(
+        namespaces.held().len(),
+        1,
+        "a request clone prevents closing"
+    );
+    assert!(
+        store.take().is_empty(),
+        "checking a held clone costs zero requests"
+    );
+    drop(clone);
+    server.sweep.run_session_pass(true).await;
+    assert!(
+        namespaces.held().is_empty(),
+        "the next pass closes the session"
+    );
+    assert!(lock(&server.sweep.inner.sessions).is_empty());
+    assert!(lock(
+        &server
+            .sweep
+            .inner
+            .grep
+            .as_ref()
+            .expect("grep indexing")
+            .progress
+    )
+    .indexed
+    .is_empty());
+    assert!(
+        store.take().is_empty(),
+        "an idle close costs zero store requests"
+    );
+
+    let reopened = namespaces
+        .open(&namespace_id)
+        .await
+        .expect("reopen session");
+    assert_eq!(reopened.last_published_seq(), None);
+    let committed = reopened
+        .put_file("/after-close", b"reopened", &test_actor())
+        .await
+        .expect("publish after close");
+    let anchor = loonfs_core::control::load_read_anchor(&*store, &namespace_id)
+        .await
+        .expect("read new writer epoch");
+    assert_eq!(anchor.read_state.writer_epoch.0, first_epoch.0 + 1);
+    assert_eq!(anchor.read_state.seq, committed.committed_seq);
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_session_that_only_aborted_an_upload_closes_after_the_idle_threshold() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::any(),
+    ));
+    let config = sweep_config(None);
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let namespaces = &server.sweep.inner.namespaces;
+    let namespace_id = namespace_id("aborted-upload");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create namespace");
+    let held = namespaces.open(&namespace_id).await.expect("open session");
+    let upload = held.create_upload().await.expect("create upload");
+    held.abort_upload(&upload.upload_id)
+        .await
+        .expect("abort upload");
+    assert_eq!(held.last_published_seq(), None);
+    drop(held);
+
+    server
+        .clock
+        .advance_ms(config.idle_session_close_after_ms - 1);
+    store.reset();
+    server.sweep.run_session_pass(true).await;
+    assert_eq!(namespaces.held().len(), 1, "a recent session stays open");
+    assert!(store.take().is_empty());
+
+    server.clock.advance_ms(2);
+    server.sweep.run_session_pass(false).await;
+    assert!(
+        namespaces.held().is_empty(),
+        "the next pass closes the session"
+    );
+    assert!(store.take().is_empty(), "closing costs zero store requests");
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn an_idle_session_waiting_for_its_fold_is_visited_and_kept_open() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::any(),
+    ));
+    let mut config = sweep_config(None);
+    config.idle_session_close_after_ms = 1;
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let namespaces = &server.sweep.inner.namespaces;
+    let namespace_id = namespace_id("idle-unfolded");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create namespace");
+    let held = namespaces.open(&namespace_id).await.expect("open session");
+    held.put_file("/note", b"note", &test_actor())
+        .await
+        .expect("publish");
+    drop(held);
+    server
+        .clock
+        .advance_ms(config.idle_session_close_after_ms + 1);
+    store.reset();
+    server.sweep.run_session_pass(false).await;
+    assert_eq!(
+        namespaces.held().len(),
+        1,
+        "unfinished metadata prevents closing"
+    );
+    assert!(!store.take().is_empty(), "the session is visited");
+    assert!(server.wal_tail_objects(&namespace_id).await > 0);
+
+    server.clock.advance_ms(config.idle_fold_after_ms);
+    server.sweep.run_session_pass(false).await;
+    assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
+    assert_eq!(namespaces.held().len(), 1, "this pass had unfinished work");
+    store.reset();
+    server.sweep.run_session_pass(true).await;
+    assert!(namespaces.held().is_empty());
+    assert!(
+        !store.take().is_empty(),
+        "the due collection runs before closing"
+    );
     server.runtime.shutdown().await.expect("shutdown");
 }

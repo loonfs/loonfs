@@ -124,6 +124,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "grep_gc",
     "head_drift",
     "head_seq",
+    "idle_session_close_after_ms",
     "include_attributes",
     "inode_id",
     "inode_kind",

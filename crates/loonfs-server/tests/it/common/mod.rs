@@ -331,6 +331,7 @@ pub(crate) fn test_config(
         maintenance_interval_ms: 300_000,
         gc_interval_ms: 3_600_000,
         full_sweep_interval_ms: 86_400_000,
+        idle_session_close_after_ms: 1_800_000,
         max_merge_input_bytes: loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
         manifest_revalidation_interval_ms: None,
         max_read_working_bytes: None,

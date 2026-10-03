@@ -733,6 +733,23 @@ up. Work left after 16 units and tails waiting for their idle fold age remain
 eligible without another commit. Recorded seqs are dropped when a session is
 no longer held.
 
+A caught-up session closes when its last open is older than
+`idle_session_close_after_ms`, 1800000 ms (30 minutes) by default, and no
+request holds a clone. This setting must be positive. Sessions with unfinished metadata or index
+work stay open for that pass. The close uses monotonic time and checks the
+shared handle count and published seq under the handle table lock. An idle
+close costs zero store requests and drops the sweep's progress records. A
+write after close opens a fresh session; its first publish acquires a new
+writer epoch. A request arriving while close drains can receive retryable
+`writer_session_closed`.
+
+Each held idle session keeps its publisher, commit engine and writer epoch,
+head position, and the allocated capacities of its publication queue and
+in-flight map. These are separate from the runtime's shared caches and
+execution limits. Closing releases that retained session memory after its
+admitted work ends. A server whose maintenance mode does not maintain has no
+sweep to close idle sessions.
+
 Every `gc_interval_ms`, 3600000 ms (1 hour) by default, the session pass also
 collects core and grep garbage for sessions whose seq moved since their last
 successful collection. A full pass runs at start and every

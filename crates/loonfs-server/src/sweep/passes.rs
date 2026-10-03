@@ -12,41 +12,93 @@ const INDEX_PASS_INTERVAL: Duration = Duration::from_secs(5);
 impl Sweep {
     /// Visits held sessions until metadata and grep are caught up with their
     /// published seq. With `collect_garbage`, also visits sessions whose seq
-    /// moved since collection. Skipped sessions cost no store request.
+    /// moved since collection. Caught-up sessions and sessions that never
+    /// published close when idle and no request holds a clone. Skipped
+    /// sessions and an idle close cost no store request.
     pub async fn run_session_pass(&self, collect_garbage: bool) {
         let inner = &self.inner;
         let _pass = inner.pass.lock().await;
         let held = self.held_seqs();
-        let visits: Vec<_> = {
+        let sessions: Vec<_> = {
             let sessions = lock(&inner.sessions);
             held.into_iter()
-                .filter_map(|(namespace_id, seq)| {
+                .map(|(namespace_id, seq)| {
                     let previous = sessions.get(&namespace_id);
-                    let collect = collect_garbage
-                        && previous.and_then(|progress| progress.collected) != Some(seq);
-                    (collect || previous.and_then(|progress| progress.maintained) != Some(seq))
-                        .then_some((namespace_id, seq, collect))
+                    let collect = seq.is_some()
+                        && collect_garbage
+                        && previous.and_then(|progress| progress.collected) != seq;
+                    let maintain =
+                        seq.is_some() && previous.and_then(|progress| progress.maintained) != seq;
+                    (namespace_id, seq, maintain, collect)
                 })
                 .collect()
         };
-        futures::stream::iter(visits)
+        futures::stream::iter(sessions)
             .take_until(inner.stop.cancelled())
             .for_each_concurrent(
                 inner.max_concurrent_visits,
-                |(namespace_id, seq, collect)| self.visit(namespace_id, Some(seq), collect).boxed(),
+                |(namespace_id, seq, maintain, collect)| {
+                    async move {
+                        let caught_up = if maintain || collect {
+                            self.visit(namespace_id.clone(), seq, collect).await
+                        } else {
+                            true
+                        };
+                        if !maintain && caught_up {
+                            self.close_idle_session(&namespace_id, seq).await;
+                        }
+                    }
+                    .boxed()
+                },
             )
             .await;
     }
 
-    pub(super) fn held_seqs(&self) -> HashMap<NamespaceId, ChangeSeq> {
+    async fn close_idle_session(&self, namespace_id: &NamespaceId, seq: Option<ChangeSeq>) {
+        let inner = &self.inner;
+        if inner.stop.is_cancelled() {
+            return;
+        }
+        let _building = if let Some(grep) = &inner.grep {
+            let Some(building) = grep.claim(namespace_id) else {
+                return;
+            };
+            Some(building)
+        } else {
+            None
+        };
+        match inner
+            .namespaces
+            .close_if_idle(namespace_id, seq, inner.idle_session_close_after_ms)
+            .await
+        {
+            Ok(Some(_)) => {
+                lock(&inner.sessions).remove(namespace_id);
+                if let Some(grep) = &inner.grep {
+                    let mut progress = lock(&grep.progress);
+                    progress.indexed.remove(namespace_id);
+                    progress.pending.remove(namespace_id);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                %namespace_id,
+                error = %error,
+                "idle session close failed"
+            ),
+        }
+    }
+
+    pub(super) fn held_seqs(&self) -> HashMap<NamespaceId, Option<ChangeSeq>> {
         let held: HashMap<_, _> = self
             .inner
             .namespaces
             .held()
             .iter()
-            .filter_map(|namespace| Some((namespace.id().clone(), namespace.last_published_seq()?)))
+            .map(|namespace| (namespace.id().clone(), namespace.last_published_seq()))
             .collect();
-        lock(&self.inner.sessions).retain(|namespace_id, _| held.contains_key(namespace_id));
+        lock(&self.inner.sessions)
+            .retain(|namespace_id, _| held.get(namespace_id).is_some_and(Option::is_some));
         held
     }
 
