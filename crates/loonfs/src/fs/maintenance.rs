@@ -471,14 +471,18 @@ impl Maintenance {
             .await
             .get(namespace_id)
             .copied();
+        if let Some(epoch) = claimed {
+            if observed.is_some_and(|anchor| epoch != anchor.compactor_epoch()) {
+                self.forget_fenced_compactor_epoch(namespace_id, epoch)
+                    .await;
+                return Ok(CompactionStep::Fenced);
+            }
+        }
         let due = |anchor: &NamespaceReadAnchor| {
             loonfs_core::cache::metadata_compaction_due(anchor, compaction_policy)
         };
         let step_due = match observed {
-            // A claim the manifest no longer carries is a fence the step reports.
-            Some(anchor) => {
-                claimed.is_some_and(|epoch| epoch != anchor.compactor_epoch()) || due(anchor)
-            }
+            Some(anchor) => due(anchor),
             // A claimed step reads less than loading an anchor to check first.
             None => claimed.is_some() || due(&self.load_live_anchor(namespace_id).await?),
         };

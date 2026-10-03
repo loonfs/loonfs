@@ -148,7 +148,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
         tag = "maintenance",
         summary = "Enable the grep index",
-        description = "Enables the namespace's grep index. A deployment that runs maintenance builds the backfill on its next maintenance pass. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
+        description = "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill on its next session tick and continues until it is active. The response reports the lifecycle and bookkeeping read after the transition: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with its current status. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep index enabled or already enabled", body = GrepIndex),
@@ -167,11 +167,17 @@ pub(super) async fn enable_grep_index(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
+    let _handle = state
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let outcome = state
         .grep_worker()
         .enable(&namespace_id)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
+    state.namespaces.mark_index_dirty(&namespace_id);
     match outcome {
         GrepEnableOutcome::Enabled { .. } | GrepEnableOutcome::AlreadyEnabled { .. } => {}
         GrepEnableOutcome::Superseded => {
@@ -252,11 +258,17 @@ pub(super) async fn disable_grep_index(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
+    let _handle = state
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let outcome = state
         .grep_worker()
         .disable(&namespace_id)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
+    state.namespaces.mark_index_dirty(&namespace_id);
     match outcome {
         GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {}
         GrepDisableOutcome::Superseded => {

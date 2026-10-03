@@ -1,57 +1,99 @@
-//! Session selection and the sweep's pass schedule.
+//! The first due step for each held session and the two host intervals.
 
-use super::{lock, RunningSweep, Sweep, SweepCall};
+use super::{lock, RunningSweep, Sweep};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, NamespaceId};
-use std::collections::HashMap;
-use std::time::Duration;
 use tokio::time::MissedTickBehavior;
 
-const INDEX_PASS_INTERVAL: Duration = Duration::from_secs(5);
+enum Due {
+    Metadata,
+    Index,
+    Collection,
+    Close,
+}
 
 impl Sweep {
-    /// Visits held sessions until metadata and grep are caught up with their
-    /// published seq. With `collect_garbage`, also visits sessions whose seq
-    /// moved since collection. Caught-up sessions and sessions that never
-    /// published close when idle and no request holds a clone. Skipped
-    /// sessions and an idle close cost no store request.
-    pub async fn run_session_pass(&self, collect_garbage: bool) {
+    /// Runs at most one due step per held session without cloning writer handles.
+    pub async fn tick(&self) {
         let inner = &self.inner;
-        let _pass = inner.pass.lock().await;
-        let held = self.held_seqs();
-        let sessions: Vec<_> = {
-            let sessions = lock(&inner.sessions);
-            held.into_iter()
-                .map(|(namespace_id, seq)| {
-                    let previous = sessions.get(&namespace_id);
-                    let collect = seq.is_some()
-                        && collect_garbage
-                        && previous.and_then(|progress| progress.collected) != seq;
-                    let maintain =
-                        seq.is_some() && previous.and_then(|progress| progress.maintained) != seq;
-                    (namespace_id, seq, maintain, collect)
-                })
-                .collect()
-        };
-        futures::stream::iter(sessions)
+        let mut after = None;
+        let held = std::iter::from_fn(|| {
+            let namespace_id = inner.namespaces.next_held_id(after.as_ref())?;
+            after = Some(namespace_id.clone());
+            Some(namespace_id)
+        });
+        futures::stream::iter(held)
             .take_until(inner.stop.cancelled())
-            .for_each_concurrent(
-                inner.max_concurrent_visits,
-                |(namespace_id, seq, maintain, collect)| {
-                    async move {
-                        let caught_up = if maintain || collect {
-                            self.visit(namespace_id.clone(), seq, collect).await
-                        } else {
-                            true
-                        };
-                        if !maintain && caught_up {
-                            self.close_idle_session(&namespace_id, seq).await;
-                        }
-                    }
-                    .boxed()
-                },
-            )
+            .for_each_concurrent(inner.max_concurrent_visits, |namespace_id| {
+                self.tick_session(namespace_id).boxed()
+            })
             .await;
+    }
+
+    async fn tick_session(&self, namespace_id: NamespaceId) {
+        let inner = &self.inner;
+        let Some(_visit) = self.claim(&namespace_id).await else {
+            return;
+        };
+        let now_ms = inner.namespaces.now_ms();
+        let Some(entry) = inner.namespaces.entry(&namespace_id) else {
+            return;
+        };
+        let (seq, due) = {
+            let held = lock(&entry);
+            let seq = held.handle.last_published_seq();
+            if held.handle.last_published_ms().is_some_and(|published_ms| {
+                u128::from(now_ms.saturating_sub(published_ms)) < inner.tick_interval.as_millis()
+            }) {
+                return;
+            }
+            let metadata_caught_up = held.handle.metadata_caught_up();
+            let idle_fold_due = inner.metadata.idle_fold_after_ms != 0
+                && held.handle.last_published_ms().is_some_and(|published_ms| {
+                    let fold_after_ms =
+                        published_ms.saturating_add(inner.metadata.idle_fold_after_ms);
+                    now_ms >= fold_after_ms
+                        && held
+                            .metadata_retry_after_ms
+                            .saturating_sub(inner.metadata_retry_ms)
+                            < fold_after_ms
+                });
+            let due = if !metadata_caught_up
+                && (now_ms >= held.metadata_retry_after_ms || idle_fold_due)
+            {
+                Due::Metadata
+            } else if inner.grep.is_some() && (held.index_dirty || held.indexed_seq != seq) {
+                Due::Index
+            } else if seq.is_some()
+                && seq != held.collected_seq
+                && now_ms.saturating_sub(held.collected_ms) >= inner.collection_interval_ms
+            {
+                Due::Collection
+            } else if metadata_caught_up {
+                Due::Close
+            } else {
+                return;
+            };
+            (seq, due)
+        };
+        match due {
+            Due::Metadata => {
+                let caught_up = self.maintain_metadata(&namespace_id).await;
+                self.record_metadata(&entry, seq, caught_up);
+            }
+            Due::Index => {
+                if let Some(grep) = &inner.grep {
+                    self.maintain_index(grep, &namespace_id, Some(&entry), seq)
+                        .await;
+                }
+            }
+            Due::Collection => {
+                if self.collect(&namespace_id).await {
+                    self.record_collection(&entry, seq);
+                }
+            }
+            Due::Close => self.close_idle_session(&namespace_id, seq).await,
+        }
     }
 
     async fn close_idle_session(&self, namespace_id: &NamespaceId, seq: Option<ChangeSeq>) {
@@ -59,133 +101,32 @@ impl Sweep {
         if inner.stop.is_cancelled() {
             return;
         }
-        let _building = if let Some(grep) = &inner.grep {
-            let Some(building) = grep.claim(namespace_id) else {
-                return;
-            };
-            Some(building)
-        } else {
-            None
-        };
-        match inner
+        if let Err(error) = inner
             .namespaces
-            .close_if_idle(namespace_id, seq, inner.idle_session_close_after_ms)
+            .close_if_idle(
+                namespace_id,
+                seq,
+                inner.idle_session_close_after_ms,
+                |held| {
+                    held.handle.metadata_caught_up()
+                        && (inner.grep.is_none() || (!held.index_dirty && held.indexed_seq == seq))
+                        && (held.collected_seq == seq
+                            || inner.namespaces.now_ms().saturating_sub(held.collected_ms)
+                                < inner.collection_interval_ms)
+                },
+            )
             .await
         {
-            Ok(Some(_)) => {
-                lock(&inner.sessions).remove(namespace_id);
-                if let Some(grep) = &inner.grep {
-                    let mut progress = lock(&grep.progress);
-                    progress.indexed.remove(namespace_id);
-                    progress.pending.remove(namespace_id);
-                }
-            }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(
-                %namespace_id,
-                error = %error,
-                "idle session close failed"
-            ),
+            tracing::warn!(%namespace_id, error = %error, "idle session close failed");
         }
     }
 
-    pub(super) fn held_seqs(&self) -> HashMap<NamespaceId, Option<ChangeSeq>> {
-        let held: HashMap<_, _> = self
-            .inner
-            .namespaces
-            .held()
-            .iter()
-            .map(|namespace| (namespace.id().clone(), namespace.last_published_seq()))
-            .collect();
-        lock(&self.inner.sessions)
-            .retain(|namespace_id, _| held.get(namespace_id).is_some_and(Option::is_some));
-        held
-    }
-
-    /// Builds the grep index of each writer session this process holds
-    /// whose last published seq moved since this pass last indexed it, one
-    /// session at a time. Also builds namespaces whose lifecycle changed
-    /// through this worker, even when no held session has published a seq.
-    /// Unfinished builds continue on later passes while held.
-    ///
-    /// Does nothing on a server that does not maintain the grep index. A
-    /// session with no change costs no store request. A namespace whose
-    /// index a sweep visit is building is left to that visit.
-    pub async fn run_index_pass(&self) {
-        let inner = &self.inner;
-        let Some(grep) = &inner.grep else {
-            return;
-        };
-        let lifecycle_changes = grep.worker.drain_lifecycle_changes();
-        let held: HashMap<NamespaceId, Option<ChangeSeq>> = inner
-            .namespaces
-            .held()
-            .iter()
-            .map(|namespace| (namespace.id().clone(), namespace.last_published_seq()))
-            .collect();
-        let selected: HashMap<NamespaceId, Option<ChangeSeq>> = {
-            let mut progress = lock(&grep.progress);
-            for namespace_id in &lifecycle_changes {
-                progress.indexed.remove(namespace_id);
-            }
-            progress
-                .indexed
-                .retain(|namespace_id, _| held.get(namespace_id).is_some_and(Option::is_some));
-            progress.pending.retain(|namespace_id| {
-                held.contains_key(namespace_id) || lifecycle_changes.contains(namespace_id)
-            });
-            let mut selected: HashMap<_, _> = held
-                .iter()
-                .filter_map(|(namespace_id, seq)| {
-                    let seq = (*seq)?;
-                    (progress.indexed.get(namespace_id) != Some(&seq))
-                        .then(|| (namespace_id.clone(), Some(seq)))
-                })
-                .collect();
-            for namespace_id in lifecycle_changes.iter().chain(&progress.pending) {
-                selected
-                    .entry(namespace_id.clone())
-                    .or_insert(held.get(namespace_id).copied().flatten());
-            }
-            selected
-        };
-        for (namespace_id, seq) in selected {
-            if inner.stop.is_cancelled() {
-                return;
-            }
-            let Some(_building) = grep.claim(&namespace_id) else {
-                continue;
-            };
-            // Boxed for the same reason as a sweep visit.
-            let caught_up = match self.build_index(grep, &namespace_id).boxed().await {
-                Ok(caught_up) => caught_up,
-                Err(error) => {
-                    self.record_failure(&namespace_id, SweepCall::GrepIndex, error.code(), &error);
-                    // A failed build waits for the session's next commit or the
-                    // next sweep pass instead of retrying every few seconds.
-                    true
-                }
-            };
-            let mut progress = lock(&grep.progress);
-            if caught_up {
-                progress.pending.remove(&namespace_id);
-                if let Some(seq) = seq {
-                    progress.indexed.insert(namespace_id, seq);
-                }
-            } else {
-                progress.pending.insert(namespace_id);
-            }
-        }
-    }
-
-    /// Starts the maintenance loop with a full pass and collection, and
-    /// the separate index loop when this server maintains the grep index.
     pub(crate) fn start(&self) -> RunningSweep {
         let inner = &self.inner;
         tracing::info!(
-            maintenance_interval_ms = u64::try_from(inner.interval.as_millis()).unwrap_or(u64::MAX),
-            gc_interval_ms =
-                u64::try_from(inner.collection_interval.as_millis()).unwrap_or(u64::MAX),
+            tick_interval_ms = u64::try_from(inner.tick_interval.as_millis()).unwrap_or(u64::MAX),
+            maintenance_interval_ms = inner.metadata_retry_ms,
+            gc_interval_ms = inner.collection_interval_ms,
             full_sweep_interval_ms =
                 u64::try_from(inner.full_interval.as_millis()).unwrap_or(u64::MAX),
             max_concurrent_maintenance = inner.max_concurrent_visits,
@@ -196,45 +137,14 @@ impl Sweep {
         RunningSweep {
             stop: inner.stop.clone(),
             task: tokio::spawn(async move {
-                tokio::join!(sweep.run_passes(), sweep.run_index_passes());
+                tokio::join!(sweep.run_passes(), sweep.run_ticks());
             }),
         }
     }
 
     async fn run_passes(&self) {
         let inner = &self.inner;
-        let mut ticks = tokio::time::interval(inner.interval);
-        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut full_ticks = tokio::time::interval(inner.full_interval);
-        full_ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let started = full_ticks.tick().await;
-        let mut last_collection = self.run_pass(true).await.is_ok().then_some(started);
-        loop {
-            tokio::select! {
-                () = inner.stop.cancelled() => return,
-                started = full_ticks.tick() => {
-                    if self.run_pass(true).await.is_ok() {
-                        last_collection = Some(started);
-                    }
-                }
-                started = ticks.tick() => {
-                    let collect = last_collection
-                        .is_none_or(|at| started.saturating_duration_since(at) >= inner.collection_interval);
-                    self.run_session_pass(collect).await;
-                    if collect {
-                        last_collection = Some(started);
-                    }
-                }
-            }
-        }
-    }
-
-    async fn run_index_passes(&self) {
-        let inner = &self.inner;
-        if inner.grep.is_none() {
-            return;
-        }
-        let mut ticks = tokio::time::interval(INDEX_PASS_INTERVAL);
+        let mut ticks = tokio::time::interval(inner.full_interval);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -242,7 +152,21 @@ impl Sweep {
                 () = inner.stop.cancelled() => return,
                 _ = ticks.tick() => {}
             }
-            self.run_index_pass().await;
+            let _ = self.run_pass(true).await;
+        }
+    }
+
+    async fn run_ticks(&self) {
+        let inner = &self.inner;
+        let mut ticks = tokio::time::interval(inner.tick_interval);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                () = inner.stop.cancelled() => return,
+                _ = ticks.tick() => {}
+            }
+            self.tick().await;
         }
     }
 }

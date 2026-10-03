@@ -167,6 +167,23 @@ impl NamespaceSession {
         self.publisher.lock_state().last_published_seq
     }
 
+    pub(crate) fn last_published_ms(&self) -> Option<u64> {
+        self.publisher.lock_state().last_published_ms
+    }
+
+    pub(crate) fn metadata_caught_up(&self) -> bool {
+        self.publisher.lock_state().metadata_caught_up
+    }
+
+    pub(crate) fn record_metadata_maintenance(
+        &self,
+        expected_seq: Option<ChangeSeq>,
+        caught_up: bool,
+    ) {
+        self.publisher
+            .record_metadata_maintenance(expected_seq, caught_up);
+    }
+
     pub(crate) async fn wait_for_fold(&self) -> Result<(), Error> {
         self.publisher.wait_for_fold().await
     }
@@ -507,6 +524,8 @@ struct NamespacePublisherState {
     /// immediately.
     last_publish: Option<Observation>,
     last_published_seq: Option<ChangeSeq>,
+    last_published_ms: Option<u64>,
+    metadata_caught_up: bool,
 }
 
 impl NamespacePublisherState {
@@ -659,6 +678,8 @@ impl NamespacePublisher {
                 next_task_id: 0,
                 last_publish: None,
                 last_published_seq: None,
+                last_published_ms: None,
+                metadata_caught_up: true,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
                 engine: None,
@@ -1270,6 +1291,8 @@ impl NamespacePublisher {
         if committed_seq.is_some() {
             let mut state = self.lock_state();
             state.last_published_seq = state.last_published_seq.max(committed_seq);
+            state.last_published_ms = Some(self.timer.monotonic_now_ms());
+            state.metadata_caught_up = false;
         }
         drop(slot);
         if let Some(start) = fold_start {
@@ -1379,17 +1402,20 @@ impl NamespacePublisher {
         let never_fold = crate::MetadataMaintenanceOptions {
             max_wal_tail_objects: std::num::NonZeroU64::MAX,
             inline_content_fold_at_bytes: std::num::NonZeroUsize::MAX,
-            idle_fold_after_ms: 0,
+            // A remaining tail must stay unsettled for the host's idle fold.
+            idle_fold_after_ms: u64::MAX,
             ..crate::MetadataMaintenanceOptions::default()
         };
-        if let Err(error) = maintenance
+        let seq = self.lock_state().last_published_seq;
+        let result = maintenance
             .maintain_metadata_while_due_with_options(
                 &self.namespace_id,
                 &self.compaction_cancellation,
                 &never_fold,
             )
-            .await
-        {
+            .await;
+        self.record_metadata_maintenance(seq, matches!(result, Ok(true)));
+        if let Err(error) = result {
             phase_event!(
                 self.runtime_core,
                 "metadata_compaction",
@@ -1398,6 +1424,13 @@ impl NamespacePublisher {
                 error = %error.public_message(),
                 "session metadata compaction failed; the next fold starts it again"
             );
+        }
+    }
+
+    fn record_metadata_maintenance(&self, expected_seq: Option<ChangeSeq>, caught_up: bool) {
+        let mut state = self.lock_state();
+        if state.last_published_seq == expected_seq {
+            state.metadata_caught_up = caught_up;
         }
     }
 
