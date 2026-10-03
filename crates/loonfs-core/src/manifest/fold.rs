@@ -1,8 +1,9 @@
 //! Folds the visible WAL tail and publishes the next manifest number.
 
+use super::block_load::SessionBlockMemo;
 use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
-use super::cache::MetadataSegmentCache;
-use super::load::{load_basis_metadata_segments, SessionBlockMemo};
+use super::cache::{read_working_memory, MetadataSegmentCache};
+use super::load::load_basis_metadata_segments;
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
@@ -18,6 +19,7 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::CurrentManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
+use crate::read_working_memory::ReadWorkingMemory;
 use crate::storage::content::{
     content_object_key_for_ref, materialize_content, validate_loaded_content_bytes,
 };
@@ -66,7 +68,14 @@ pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> Result<FoldWalResponse> {
     let deadline = Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default()));
-    fold_wal_with_deadline(store, namespace_id, &deadline, MetadataLsmPolicy::default()).await
+    fold_wal_with_deadline(
+        store,
+        namespace_id,
+        &deadline,
+        MetadataLsmPolicy::default(),
+        Arc::default(),
+    )
+    .await
 }
 
 pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
@@ -74,8 +83,9 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
+    pool: Arc<ReadWorkingMemory>,
 ) -> Result<FoldWalResponse> {
-    let basis = fold_wal_basis_with_deadline(store, namespace_id, deadline, policy).await?;
+    let basis = fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool).await?;
     Ok(fold_wal_response(namespace_id, basis))
 }
 
@@ -84,11 +94,13 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
+    pool: &Arc<ReadWorkingMemory>,
 ) -> Result<FoldedBasis> {
     retry_while_contended(|| async move {
         // The fallback reloads after every lost race, so it never relies on
         // the rule that keeps a held tail.
-        let projection = load_fold_projection(store, namespace_id, policy, None).await?;
+        let mut projection = load_fold_projection(store, namespace_id, None).await?;
+        projection.manifest_segments.block_memo = SessionBlockMemo::new(Arc::clone(pool));
         Result::Ok(
             match try_fold_wal_projection(store, namespace_id, &projection, deadline, policy)
                 .await?
@@ -112,7 +124,7 @@ pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
 ) -> Result<TryFoldWal> {
-    let projection = load_fold_projection(store, namespace_id, policy, segment_cache).await?;
+    let projection = load_fold_projection(store, namespace_id, segment_cache).await?;
     fold_held_projection(
         store,
         segment_cache,
@@ -127,20 +139,14 @@ pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
 async fn load_fold_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
-    policy: MetadataLsmPolicy,
     segment_cache: Option<&'a MetadataSegmentCache>,
 ) -> Result<ManifestProjection<'a, S>> {
-    load_manifest_projection(
-        store,
-        namespace_id,
-        policy.max_block_memo_bytes,
-        segment_cache,
-    )
-    .instrument(tracing::debug_span!(
-        "loonfs.phase",
-        phase = "scan_namespace_state"
-    ))
-    .await
+    load_manifest_projection(store, namespace_id, segment_cache)
+        .instrument(tracing::debug_span!(
+            "loonfs.phase",
+            phase = "scan_namespace_state"
+        ))
+        .await
 }
 
 /// Folds a projection the caller already holds. When a manifest that folded
@@ -172,8 +178,6 @@ async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
             load_basis_metadata_segments(store, segment_cache, &projection.basis)
                 .await?
                 .segments;
-        projection.manifest_segments.block_memo =
-            SessionBlockMemo::new(policy.max_block_memo_bytes);
         attempt = publish_fold(store, namespace_id, &projection, deadline, policy).await?;
     }
     Ok(attempt)
@@ -314,7 +318,8 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     input: Option<WalFoldInput>,
     deadline: &Deadline,
 ) -> Result<FoldedWalTail> {
-    let policy = MetadataLsmPolicy::for_segment_cache(segment_cache);
+    let policy = MetadataLsmPolicy::default();
+    let pool = read_working_memory(segment_cache);
     let folded = if let Some(input) = input {
         let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
         let manifest_projection = ManifestProjection {
@@ -336,11 +341,11 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         {
             TryFoldWal::Settled(basis) => *basis,
             TryFoldWal::RaceLost(_) => {
-                fold_wal_basis_with_deadline(store, namespace_id, deadline, policy).await?
+                fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool).await?
             }
         }
     } else {
-        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy).await?
+        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool).await?
     };
     Ok(FoldedWalTail {
         basis: MetadataBasis(folded.manifest.clone()),
@@ -402,7 +407,6 @@ impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
 pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
-    max_block_memo_bytes: usize,
     segment_cache: Option<&'a MetadataSegmentCache>,
 ) -> Result<ManifestProjection<'a, S>> {
     let anchor = load_read_anchor(store, namespace_id)
@@ -420,10 +424,7 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     let loaded_basis =
         super::load::metadata_basis_from_manifest(store, segment_cache, &anchor.manifest);
     let manifest_head = loaded_basis.replay_head(&head);
-    let manifest_segments = VerifiedMetadataSegments {
-        block_memo: SessionBlockMemo::new(max_block_memo_bytes),
-        ..loaded_basis.segments
-    };
+    let manifest_segments = loaded_basis.segments;
     let replayed = replay_discovered_tail(&manifest_head, &loaded_basis.base_state, &anchor.tail)
         .map_err(CoreError::MetadataProjection)?;
     Ok(ManifestProjection {

@@ -362,3 +362,63 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
         }
     }
 }
+
+#[tokio::test]
+async fn read_working_memory_counts_large_indexes_and_filters() {
+    use crate::cache::ReadWorkingMemory;
+    use crate::heap_bytes::index_block_heap_bytes;
+
+    let temp = tempdir().expect("tempdir");
+    let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
+    let mut expected = rows(0, 2048, 1);
+    for (index, row) in expected.iter_mut().enumerate() {
+        let MetadataRow::DirentryBinding(binding) = row else {
+            panic!("binding row")
+        };
+        let name = format!("file-{index:06}-{}", "x".repeat(200));
+        binding.name_key = NameKey::parse(&name).expect("name");
+        binding.state = loonfs_types::format::manifest::DirentryBindingState::Bound {
+            display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
+        };
+    }
+    let mut descriptor = segment(&store, &expected).await;
+    descriptor.filter_inline = None;
+    let pool = Arc::new(ReadWorkingMemory::default());
+    let memo = load::SessionBlockMemo::new(Arc::clone(&pool));
+    store.reset();
+    let index = block_fetch::load_segment_index(&store, None, &memo, &descriptor)
+        .await
+        .expect("index");
+    let index_bytes = index_block_heap_bytes(&index);
+    let stored_data_bytes: usize = index
+        .iter()
+        .map(|entry| entry.block.stored_bytes as usize)
+        .sum();
+    assert!(
+        index_bytes > stored_data_bytes,
+        "index {index_bytes}, stored data {stored_data_bytes}"
+    );
+    let index_reservation = pool.in_use();
+    assert!(
+        index_reservation > index_bytes,
+        "the index and memo containers are charged"
+    );
+    assert_eq!(store.count(OperationClass::Read), 1);
+    let filter = block_fetch::load_segment_filter(&store, None, &memo, &descriptor)
+        .await
+        .expect("filter");
+    let filter_bytes = filter.decoded_bytes() + 2 * std::mem::size_of::<usize>();
+    assert!(pool.in_use() >= index_reservation + filter_bytes);
+    assert_eq!(store.count(OperationClass::Read), 2);
+    assert_eq!(
+        *block_fetch::load_segment_index(&store, None, &memo, &descriptor)
+            .await
+            .expect("retained index"),
+        *index
+    );
+    assert_eq!(store.count(OperationClass::Read), 2);
+    drop(memo);
+    assert_eq!(pool.in_use(), 0);
+    assert_eq!(index.len(), 2048);
+    assert!(filter.may_contain(&expected[0].filter_key_for_family(FAMILY)));
+}

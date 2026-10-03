@@ -94,7 +94,7 @@ impl MetadataCache {
     /// two stores.
     pub(crate) fn bind(
         &self,
-        max_block_memo_bytes: usize,
+        read_working_memory: Arc<loonfs_core::cache::ReadWorkingMemory>,
         stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
     ) -> (MetadataSegmentCache, HeadStateCache) {
         let scope = CacheScope::new(self.inner.next_scope.fetch_add(1, Ordering::SeqCst));
@@ -102,7 +102,7 @@ impl MetadataCache {
             MetadataSegmentCache::new(
                 Arc::clone(&self.inner.segment_blocks),
                 scope,
-                max_block_memo_bytes,
+                read_working_memory,
                 stored_block_cache,
             ),
             HeadStateCache::new(Arc::clone(&self.inner.head_state), scope),

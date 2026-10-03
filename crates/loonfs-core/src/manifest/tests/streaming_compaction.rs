@@ -553,6 +553,7 @@ async fn merge_group_whole<S: ObjectStore + ?Sized>(
         loonfs_types::CompactorEpoch(0),
         merge_everything_policy(),
         MetadataCompactionPolicy::default(),
+        Arc::default(),
     )
     .await
     .expect("merge the group whole");
@@ -643,6 +644,7 @@ async fn a_step_that_plans_a_compaction_publishes_nothing_itself() {
         loonfs_types::CompactorEpoch(0),
         starving_policy(),
         MetadataCompactionPolicy::default(),
+        Arc::default(),
     )
     .await
     .expect("budgeted step");
@@ -694,6 +696,7 @@ async fn a_small_group_over_the_step_budget_starts_a_job_without_counting_merges
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::SizeTiered,
+            Arc::default(),
         )
         .await
         .expect("maintenance pass");
@@ -754,6 +757,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
+            Arc::default(),
         )
         .await
         .expect("maintenance pass");
@@ -801,6 +805,7 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
+            Arc::default(),
         )
         .await
         .expect("maintenance pass");
@@ -2257,6 +2262,7 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
+            Arc::default(),
         )
         .await
         .expect("maintenance pass");
@@ -2394,6 +2400,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
+            Arc::default(),
         )
         .await
         .expect("maintenance pass");
@@ -2907,6 +2914,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         epoch,
         merge_everything_policy(),
         MetadataCompactionPolicy::CompactImmediately,
+        Arc::default(),
     )
     .await
     .expect("bounded fence");

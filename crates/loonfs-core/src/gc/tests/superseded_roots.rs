@@ -33,6 +33,7 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
         loonfs_types::CompactorEpoch(0),
         Default::default(),
         MetadataCompactionPolicy::CompactImmediately,
+        Arc::default(),
     )
     .await
     .expect("compact bindings");

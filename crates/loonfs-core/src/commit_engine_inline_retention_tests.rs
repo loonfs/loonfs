@@ -47,6 +47,7 @@ async fn compact_and_check_pair(
             loonfs_types::CompactorEpoch(0),
             MetadataLsmPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
+            Arc::default(),
         )
         .await
         .expect("compact a family group");

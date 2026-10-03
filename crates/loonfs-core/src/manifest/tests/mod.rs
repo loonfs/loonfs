@@ -18,7 +18,6 @@ mod manifest_round_trips;
 mod retention;
 mod streaming_compaction;
 
-use super::block_load::DEFAULT_BLOCK_MEMO_BYTES;
 use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
 use super::cache::{
     CacheScope, MetadataSegmentBlockKind, MetadataSegmentCache, SharedSegmentBlocks,
@@ -102,9 +101,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> crate::error::Result<(NamespaceReadState, MetadataState)> {
-    let projection =
-        super::fold::load_manifest_projection(store, namespace_id, DEFAULT_BLOCK_MEMO_BYTES, None)
-            .await?;
+    let projection = super::fold::load_manifest_projection(store, namespace_id, None).await?;
     let tail_state = projection.tail_with_deletion_inodes().await?;
     let mut metadata_state = MetadataStateBuilder::default();
     for family in MANIFEST_ROW_FAMILIES {
@@ -337,6 +334,7 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
             loonfs_types::CompactorEpoch(0),
             policy,
             MetadataCompactionPolicy::default(),
+            Arc::default(),
         )
         .await
         .expect("compaction step");
@@ -459,6 +457,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
         loonfs_types::CompactorEpoch(0),
         policy,
         MetadataCompactionPolicy::default(),
+        Arc::default(),
     )
     .await
     .expect("plan a streaming compaction");

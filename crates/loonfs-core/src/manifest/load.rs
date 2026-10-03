@@ -6,8 +6,8 @@
 
 pub(super) use super::block_load::SessionBlockMemo;
 use super::cache::{
-    block_memo_bytes, DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, MetadataSegmentCache,
-    MetadataSegmentCacheKey,
+    read_working_memory, DecodedMetadataSegmentBlock, MetadataSegmentBlockKind,
+    MetadataSegmentCache, MetadataSegmentCacheKey,
 };
 use super::error::ManifestLoadError;
 use super::runs::{manifest_cache_heap_bytes, runs_newest_first};
@@ -143,7 +143,7 @@ pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
         manifest: Some(Arc::clone(&manifest.state.envelope)),
         manifest_bytes: manifest.manifest_bytes,
         scan_runs,
-        block_memo: SessionBlockMemo::new(block_memo_bytes(segment_cache)),
+        block_memo: SessionBlockMemo::new(read_working_memory(segment_cache)),
     })
 }
 
@@ -265,7 +265,7 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
         manifest: Some(manifest),
         manifest_bytes,
         scan_runs,
-        block_memo: SessionBlockMemo::new(block_memo_bytes(segment_cache)),
+        block_memo: SessionBlockMemo::new(read_working_memory(segment_cache)),
     };
     Ok(segments)
 }
