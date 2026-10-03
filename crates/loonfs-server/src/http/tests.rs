@@ -2,6 +2,7 @@
 
 #![allow(clippy::panic)]
 
+mod admission;
 mod composition;
 
 use super::serve::{build_handles, serve_on};
@@ -77,7 +78,7 @@ async fn a_server_without_the_table_builds_no_local_cache() {
         .await
         .expect("build app");
     assert!(state.local_cache.is_none());
-    let rendered = super::metrics::render(&state.binding.metrics, None, None, 0, 0);
+    let rendered = super::metrics::render(&state.binding.metrics, None, None, 0, 0, 0);
     assert!(!rendered.contains("loonfs_local_cache_"));
 }
 
@@ -90,7 +91,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_recorder() {
     let (_router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
-    let rendered = super::metrics::render(&state.binding.metrics, None, None, 0, 0);
+    let rendered = super::metrics::render(&state.binding.metrics, None, None, 0, 0, 0);
 
     for name in [
         "loonfs_runtime_cache_latest_metadata_view_reads_total",
@@ -138,6 +139,7 @@ async fn a_configured_local_cache_is_built_and_scraped() {
         &state.binding.metrics,
         Some(local_cache.foyer_stats()),
         None,
+        0,
         0,
         0,
     );
@@ -834,6 +836,8 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         snapshot_max_ttl_ms: 86_400_000,
         snapshot_max_lifetime_ms: 604_800_000,
         snapshot_max_live_per_namespace: 16,
+        max_in_flight_requests: 256,
+        max_connections: 1024,
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: 8,

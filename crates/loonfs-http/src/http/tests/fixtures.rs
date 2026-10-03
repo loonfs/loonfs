@@ -89,6 +89,7 @@ pub(super) async fn test_app(
         Arc::new(GrepService::new(cache))
     });
     let state = BindingState {
+        request_limit: None,
         upload_permits: Arc::new(Semaphore::new(options.max_concurrent_uploads)),
         download_permits: Arc::new(Semaphore::new(options.max_concurrent_downloads)),
         options,

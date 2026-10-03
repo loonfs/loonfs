@@ -145,6 +145,10 @@ pub struct ServerConfig {
     #[serde(default)]
     pub content_token_secret: SecretString,
     pub writer_id: String,
+    #[serde(default = "default_max_in_flight_requests")]
+    pub max_in_flight_requests: usize,
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
     /// Maximum WAL folds this server runs concurrently. A sustained
     /// `loonfs.execution_budget.folds_waiting` gauge means this cap is too
     /// low.
@@ -342,6 +346,14 @@ fn default_snapshot_max_lifetime_ms() -> u64 {
 
 fn default_snapshot_max_live_per_namespace() -> usize {
     loonfs::SnapshotPolicy::default().max_live_per_namespace
+}
+
+fn default_max_in_flight_requests() -> usize {
+    256
+}
+
+fn default_max_connections() -> usize {
+    1024
 }
 
 fn default_max_concurrent_uploads() -> usize {
@@ -656,6 +668,18 @@ impl ServerConfig {
             ("max_merge_input_bytes", self.max_merge_input_bytes as u64),
         ] {
             require_positive(field, value, None)?;
+        }
+        for (field, value) in [
+            ("max_in_flight_requests", self.max_in_flight_requests),
+            ("max_connections", self.max_connections),
+        ] {
+            require_positive(field, value as u64, None)?;
+            if value > tokio::sync::Semaphore::MAX_PERMITS {
+                return Err(ServerConfigError::InvalidField {
+                    field,
+                    reason: format!("must not exceed {}", tokio::sync::Semaphore::MAX_PERMITS),
+                });
+            }
         }
         if self.snapshot_max_ttl_ms > self.snapshot_max_lifetime_ms {
             return Err(ServerConfigError::InvalidField {
@@ -1521,6 +1545,17 @@ root = "/tmp/loonfs-server"
             config.max_concurrent_compactions,
             loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS
         );
+        for field in ["max_in_flight_requests", "max_connections"] {
+            let mut oversized = config.clone();
+            let value = tokio::sync::Semaphore::MAX_PERMITS + 1;
+            match field {
+                "max_in_flight_requests" => oversized.max_in_flight_requests = value,
+                _ => oversized.max_connections = value,
+            }
+            assert_invalid_field(oversized.validate().expect_err("oversized bound"), field);
+        }
+        assert_eq!(config.max_in_flight_requests, 256);
+        assert_eq!(config.max_connections, 1024);
         assert_eq!(config.max_concurrent_uploads, 8);
         assert_eq!(config.max_concurrent_downloads, 16);
         assert_eq!(config.max_concurrent_maintenance, 8);
@@ -1529,6 +1564,8 @@ root = "/tmp/loonfs-server"
 
         for field in [
             "max_download_bytes",
+            "max_in_flight_requests",
+            "max_connections",
             "max_concurrent_folds",
             "max_concurrent_compactions",
             "max_concurrent_uploads",

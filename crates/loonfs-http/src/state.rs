@@ -1,6 +1,6 @@
 //! Host-supplied options and handles for HTTP requests.
 
-use crate::HttpMetrics;
+use crate::{HttpMetrics, RequestLimit};
 use loonfs::{
     CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, Namespace,
     NamespaceSessionState, SharedObjectStore, SnapshotPolicy, Writable,
@@ -53,6 +53,7 @@ pub struct BindingState {
     pub direct_transfers: Option<DirectTransferIssuers>,
     pub grep_worker: Option<GrepWorker<SharedObjectStore>>,
     pub grep_service: Option<Arc<GrepService>>,
+    pub request_limit: Option<RequestLimit>,
     pub upload_permits: Arc<Semaphore>,
     pub download_permits: Arc<Semaphore>,
     pub metrics: Arc<HttpMetrics>,

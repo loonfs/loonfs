@@ -1,5 +1,6 @@
 //! HTTP composition for the standalone server.
 
+mod connection_limit;
 mod metrics;
 mod serve;
 #[cfg(test)]
@@ -66,6 +67,11 @@ async fn get_metrics(State(state): State<AppState>) -> Response {
             .map(|worker| worker.step_budget().stats()),
         state.binding.upload_permits.available_permits(),
         state.binding.download_permits.available_permits(),
+        state
+            .binding
+            .request_limit
+            .as_ref()
+            .map_or(0, loonfs_http::RequestLimit::in_flight),
     );
     ([(CONTENT_TYPE, "text/plain; version=0.0.4")], rendered).into_response()
 }
