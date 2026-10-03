@@ -108,6 +108,11 @@ impl<M> LoonFs<M> {
         self.core.capabilities()
     }
 
+    /// Returns the budget shared by this runtime's reads and writable work.
+    pub fn execution_budget(&self) -> &ExecutionBudget {
+        &self.core.inner.execution_budget
+    }
+
     /// Returns the metadata cache this runtime reads through, which
     /// [`Maintenance`] work fills too.
     pub fn metadata_cache(&self) -> &MetadataCache {

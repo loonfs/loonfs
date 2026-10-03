@@ -145,6 +145,9 @@ pub struct ServerConfig {
     #[serde(default)]
     pub content_token_secret: SecretString,
     pub writer_id: String,
+    /// Maximum public reads running at once. Reads past this limit wait.
+    #[serde(default = "default_max_concurrent_reads")]
+    pub max_concurrent_reads: usize,
     /// Maximum WAL folds this server runs concurrently. A sustained
     /// `loonfs.execution_budget.folds_waiting` gauge means this cap is too
     /// low.
@@ -352,6 +355,10 @@ fn default_snapshot_max_live_per_namespace() -> usize {
 
 fn default_max_concurrent_uploads() -> usize {
     loonfs_http::DEFAULT_MAX_CONCURRENT_UPLOADS
+}
+
+fn default_max_concurrent_reads() -> usize {
+    loonfs::DEFAULT_MAX_CONCURRENT_READS
 }
 
 fn default_max_concurrent_folds() -> usize {
@@ -661,6 +668,7 @@ impl ServerConfig {
                 "snapshot_max_live_per_namespace",
                 self.snapshot_max_live_per_namespace as u64,
             ),
+            ("max_concurrent_reads", self.max_concurrent_reads as u64),
             ("max_concurrent_folds", self.max_concurrent_folds as u64),
             (
                 "max_concurrent_compactions",
@@ -744,6 +752,7 @@ impl ServerConfig {
             std::num::NonZeroUsize::new(value).expect("validated budget limits should be nonzero")
         };
         let mut builder = ExecutionBudget::builder()
+            .max_concurrent_reads(positive(self.max_concurrent_reads))
             .max_concurrent_folds(positive(self.max_concurrent_folds))
             .max_concurrent_compactions(positive(self.max_concurrent_compactions))
             .max_merge_input_bytes(positive(self.max_merge_input_bytes))
@@ -1541,6 +1550,10 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path).expect("valid config");
         assert_eq!(config.max_download_bytes, 256 * 1024 * 1024);
         assert_eq!(
+            config.max_concurrent_reads,
+            loonfs::DEFAULT_MAX_CONCURRENT_READS
+        );
+        assert_eq!(
             config.max_concurrent_folds,
             loonfs::DEFAULT_MAX_CONCURRENT_FOLDS
         );
@@ -1559,6 +1572,7 @@ root = "/tmp/loonfs-server"
 
         for field in [
             "max_download_bytes",
+            "max_concurrent_reads",
             "max_concurrent_folds",
             "max_concurrent_compactions",
             "max_concurrent_uploads",

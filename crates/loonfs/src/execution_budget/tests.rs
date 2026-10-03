@@ -217,7 +217,7 @@ fn watch_peak_running(
     (stop, watcher)
 }
 
-fn gauge(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
+pub(super) fn gauge(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
     let snapshot = recorder.snapshot();
     let entry = snapshot
         .by_name(name)
@@ -304,6 +304,7 @@ async fn runtimes_sharing_a_budget_never_exceed_its_limits() {
             folds_waiting: 6,
             compactions_running: 2,
             compactions_waiting: 6,
+            ..ExecutionBudgetStats::default()
         },
     )
     .await;

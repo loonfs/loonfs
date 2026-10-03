@@ -211,6 +211,7 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
             trace_mode: TraceMode::Remote,
             trace_store_kind: TraceStoreKind::LocalFs,
         },
+        ExecutionBudget::default(),
         MetadataCache::default(),
         None,
         RuntimeInstruments::new(None),

@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 #[cfg(test)]
+mod read_tests;
+#[cfg(test)]
 mod tests;
 
 /// Default maximum WAL-tail folds that the runtimes sharing one budget run at
@@ -19,6 +21,8 @@ pub const DEFAULT_MAX_CONCURRENT_FOLDS: usize = 2;
 /// Default maximum metadata merges, bounded or streaming, that the runtimes
 /// sharing one budget run at once.
 pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: usize = 2;
+/// Default maximum public reads that runtimes sharing one budget run at once.
+pub const DEFAULT_MAX_CONCURRENT_READS: usize = 64;
 pub(crate) const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: usize = 8;
 /// Default bytes retained across read, publication, and fold memos.
 pub const DEFAULT_MAX_READ_WORKING_BYTES: usize = 256 * 1024 * 1024;
@@ -26,13 +30,14 @@ const DEFAULT_MAX_ADMITTED_REQUESTS: usize = 8192;
 const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Work in flight that one or more runtimes share: admitted
-/// publication requests, running publications, WAL folds, metadata merges,
-/// the decoded input one merge may hold, and retained read working memory.
+/// publication requests, running reads and publications, WAL folds, metadata
+/// merges, the decoded input one merge may hold, and retained read working
+/// memory.
 ///
 /// Each [`LoonFs`](crate::LoonFs) built with the budget charges the
 /// publication requests it admits to the budget's totals, and takes its
-/// publication, fold, and compaction permits from it, so the limits bound the
-/// work of every runtime that shares it. Admission never waits: a request
+/// read, publication, fold, and compaction permits from it, so the limits bound the
+/// work of every runtime that shares it. Publication admission never waits: a request
 /// past an admitted total fails at once with `commit_queue_full`. Permit
 /// waits are first come, first served, whichever runtime they belong to. No
 /// runtime has a reserved share, so an idle runtime holds nothing back. A
@@ -49,6 +54,7 @@ pub struct ExecutionBudget {
 struct ExecutionBudgetInner {
     read_working_memory: Arc<ReadWorkingMemory>,
     admission: AdmittedTotals,
+    reads: PermitPool,
     publications: PermitPool,
     folds: PermitPool,
     compactions: PermitPool,
@@ -78,6 +84,7 @@ impl ExecutionBudget {
             max_read_working_bytes: DEFAULT_MAX_READ_WORKING_BYTES,
             max_admitted_requests: const { NonZeroUsize::new(DEFAULT_MAX_ADMITTED_REQUESTS).unwrap() },
             max_admitted_bytes: const { NonZeroUsize::new(DEFAULT_MAX_ADMITTED_BYTES).unwrap() },
+            max_concurrent_reads: const { NonZeroUsize::new(DEFAULT_MAX_CONCURRENT_READS).unwrap() },
             max_concurrent_publications: const {
                 NonZeroUsize::new(DEFAULT_MAX_CONCURRENT_PUBLICATIONS).unwrap()
             },
@@ -99,6 +106,7 @@ impl ExecutionBudget {
     /// summed over every runtime that shares it.
     pub fn stats(&self) -> ExecutionBudgetStats {
         let admitted = *self.inner.admission.lock();
+        let reads = self.inner.reads.counts();
         let publications = self.inner.publications.counts();
         let folds = self.inner.folds.counts();
         let compactions = self.inner.compactions.counts();
@@ -106,6 +114,8 @@ impl ExecutionBudget {
             read_working_bytes: self.inner.read_working_memory.in_use(),
             admitted_requests: admitted.requests,
             admitted_bytes: admitted.bytes,
+            reads_running: reads.running,
+            reads_waiting: reads.waiting,
             publications_running: publications.running,
             publications_waiting: publications.waiting,
             folds_running: folds.running,
@@ -130,6 +140,10 @@ impl ExecutionBudget {
     /// work settles.
     pub(crate) fn refund_admission(&self, estimated_bytes: usize) {
         self.inner.admission.refund(estimated_bytes);
+    }
+
+    pub(crate) async fn read_permit(&self) -> BudgetPermit<'_> {
+        self.inner.reads.acquire().await
     }
 
     /// Waits for a publication permit. A namespace's worker holds one while
@@ -163,6 +177,7 @@ pub struct ExecutionBudgetBuilder {
     max_read_working_bytes: usize,
     max_admitted_requests: NonZeroUsize,
     max_admitted_bytes: NonZeroUsize,
+    max_concurrent_reads: NonZeroUsize,
     max_concurrent_publications: NonZeroUsize,
     max_concurrent_folds: NonZeroUsize,
     max_concurrent_compactions: NonZeroUsize,
@@ -199,6 +214,16 @@ impl ExecutionBudgetBuilder {
     /// limit fails at once with `commit_queue_full`. Defaults to 64 MiB.
     pub fn max_admitted_bytes(mut self, limit: NonZeroUsize) -> Self {
         self.max_admitted_bytes = limit;
+        self
+    }
+
+    /// Limits public reads across every runtime sharing this budget. Reads wait
+    /// before their first store request. Each pager page takes one permit.
+    /// Streams release it after metadata and content lookup, before returning
+    /// the body. Internal reads made by mutations and maintenance take none.
+    /// Defaults to [`DEFAULT_MAX_CONCURRENT_READS`].
+    pub fn max_concurrent_reads(mut self, limit: NonZeroUsize) -> Self {
+        self.max_concurrent_reads = limit;
         self
     }
 
@@ -253,6 +278,7 @@ impl ExecutionBudgetBuilder {
     pub fn build(self) -> ExecutionBudget {
         let ExecutionBudgetInstruments {
             admission,
+            reads,
             publications,
             folds,
             compactions,
@@ -270,6 +296,7 @@ impl ExecutionBudgetBuilder {
                     admitted: Mutex::default(),
                     instruments: admission,
                 },
+                reads: PermitPool::new(self.max_concurrent_reads, reads),
                 publications: PermitPool::new(self.max_concurrent_publications, publications),
                 folds: PermitPool::new(self.max_concurrent_folds, folds),
                 compactions: PermitPool::new(self.max_concurrent_compactions, compactions),
@@ -290,6 +317,10 @@ pub struct ExecutionBudgetStats {
     /// Estimated retained bytes of the publication requests admitted and not
     /// yet settled.
     pub admitted_bytes: usize,
+    /// Public reads holding a read permit.
+    pub reads_running: usize,
+    /// Public reads waiting for a read permit.
+    pub reads_waiting: usize,
     /// Publication batches holding a publication permit.
     pub publications_running: usize,
     /// Namespace publication workers waiting for a publication permit.

@@ -415,6 +415,21 @@ opaque value and MUST NOT create IDs or infer ordering from the numeric suffix.
   `/health`, `/readiness`, and `/metrics` probes are HTTP-only and have no
   SDK method.
 
+Public embedded reads take one slot from the runtime's `ExecutionBudget`
+before their first store request. `ExecutionBudgetBuilder::max_concurrent_reads`
+defaults to 64; reads beyond the limit wait. Read-only and writable runtimes
+sharing a budget share this limit. Dropping a waiting read removes it from the queue.
+
+Each pager page takes and releases its own slot. Capturing a `ReadView` takes
+one slot; the view holds none between calls, and each read through it takes
+one. Nested snapshot stat and list calls reuse the outer read's slot. Buffered
+content reads hold their slot through completion. Streamed and ranged content
+reads release it after metadata and content lookup, before returning the body;
+existing transfer limits bound body consumption. Core reads within mutations
+and maintenance take no read slot. Grep queries and index steps acquire and
+release a slot for each public read. A read slot holder never waits for a grep
+step permit.
+
 ### 4.2 Checksums
 
 Every public checksum value uses one shape:
