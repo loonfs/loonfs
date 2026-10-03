@@ -353,6 +353,7 @@ counted in any budget and sit on top.
 | Compactions | `max_concurrent_compactions` | 2 | Metadata merges running at once, bounded steps and streaming compactions alike, whether writer sessions, the maintenance sweep, or maintenance requests start them | Concurrency |
 | Sweep visits | `max_concurrent_maintenance` | 8 | Namespaces the maintenance sweep visits at once, including their grep indexing | Concurrency |
 | Grep steps | `[grep].max_concurrent_steps` | 2 | Grep build and reorganize steps that hold file content or index segments at once, across sweep visits and the index pass | Concurrency |
+| Reads | `max_concurrent_reads` | 64 | Public reads running at once; each page takes one slot | Concurrency |
 | Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
 Memos share one read working memory pool. A full pool makes a memo evict
@@ -501,6 +502,21 @@ CPU work. `loonfs.execution_budget.compactions_waiting` says the same about
 `max_concurrent_compactions`.
 
 `min_publish_interval_ms` defaults to 1000 ms between publication starts per namespace; cold namespaces publish immediately.
+
+`max_concurrent_reads` defaults to 64. Public runtime reads wait for a slot
+before their first store request. Each pager page takes one slot and releases
+it before returning. A streamed or ranged read releases its slot after
+metadata and content lookup, before returning the body. The existing transfer
+limits bound the body. Buffered reads keep the slot until the call returns.
+The `loonfs.execution_budget.reads_running` and
+`loonfs.execution_budget.reads_waiting` gauges report active and queued reads.
+
+Embedded hosts set `ExecutionBudgetBuilder::max_concurrent_reads`. Read-only
+and writable runtimes can share the budget through
+`LoonFsBuilder::execution_budget`. Reads inside commits, folds, compactions,
+pin creation, and collection call core directly and take no read slot.
+Grep queries and index steps take a slot for each public read they call.
+A read slot holder never waits for a grep step permit.
 
 Publication admission counts queued and active callers, including duplicate
 commits, conflicts, and namespace deletes. A caller that disconnects stays

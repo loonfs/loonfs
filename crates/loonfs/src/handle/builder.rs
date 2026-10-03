@@ -142,7 +142,8 @@ impl<M> LoonFsBuilder<M> {
     ///
     /// Read memos share its read working memory pool.
     /// Every publication request this runtime admits counts against the
-    /// budget's admitted totals until its work settles. Publication batches,
+    /// budget's admitted totals until its work settles. Public reads wait for
+    /// a read permit before loading anything. Publication batches,
     /// session folds and merges, [`LoonFs::maintenance`] work, namespace
     /// deletions, and the creation of checkpoints, snapshots, and forks of
     /// the current head take their permits from it, and every merge holds at
@@ -279,8 +280,8 @@ impl LoonFsBuilder<Writable> {
     /// Turns this builder into one for a read-only runtime.
     ///
     /// It keeps the settings both modes share, such as the store, the
-    /// metadata cache, and the manifest revalidation interval. It drops the
-    /// writer-only ones, such as the writer id and the publication limits.
+    /// metadata cache, execution budget, and manifest revalidation interval.
+    /// It drops writer-only settings such as the writer id and publication limits.
     pub fn read_only(self) -> LoonFsBuilder<ReadOnly> {
         LoonFsBuilder {
             core: self.core,

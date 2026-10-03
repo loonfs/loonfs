@@ -133,6 +133,7 @@ impl Maintenance {
         )
     )]
     pub async fn diagnostics(&self, namespace_id: &NamespaceId) -> Result<NamespaceDiagnostics> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let diagnostics =
             loonfs_core::cache::load_namespace_diagnostics(self.core.store(), namespace_id).await?;
@@ -797,6 +798,7 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<ListCheckpointsResponse> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let page = self
             .engine(namespace_id)
