@@ -7,6 +7,8 @@ bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-local"
+# Derive memory pools from 4 GiB. Omit this to use the Linux cgroup limit.
+memory_limit_bytes = 4294967296
 # Public reads running at once. Each page takes one slot. A streamed read
 # releases its slot before returning the body. Reads past this limit wait.
 #max_concurrent_reads = 64
@@ -68,8 +70,7 @@ writer_id = "loonfs-server-local"
 #max_in_flight_requests = 256
 # A full connection cap pauses TCP accept; TLS handshakes hold a slot too.
 #max_connections = 1024
-# Size both from pod memory left after runtime budgets, using measured peak
-# bytes per request and connection, and leave room for allocator overhead.
+# The memory formula reserves 472 KiB per configured connection.
 
 # How many proxied upload bodies the server will stream at once and how many
 # content streams it will serve at once. Requests past a cap answer 503
@@ -104,18 +105,9 @@ writer_id = "loonfs-server-local"
 # whose first publish acquires a new writer epoch.
 #idle_session_close_after_ms = 1800000
 
-# Decoded metadata bytes one maintenance step may merge. A step merges only
-# the runs that fit; a larger window runs as a streaming compaction that holds
-# at most this much at once. Defaults to 64 MiB.
-#max_merge_input_bytes = 67108864
-
 # Minimum interval between checks for a successor to a cached manifest, in
 # milliseconds. Zero checks on every read. Defaults to 1000.
 #manifest_revalidation_interval_ms = 1000
-
-# Bytes retained across read, publication, and fold memos. Zero disables
-# retention. Reads continue when the pool is full. Defaults to 256 MiB.
-#max_read_working_bytes = 268435456
 
 # How old a namespace's newest commit must be before maintenance folds a WAL
 # tail that is below the fold thresholds, in milliseconds. The maintenance
@@ -128,17 +120,6 @@ writer_id = "loonfs-server-local"
 # a first-party AWS S3 or Cloudflare R2 domain, so it is unavailable on this
 # local-fs store.
 # Clients gate on `filesystem.uploads.direct_put` in the capability document.
-
-# Limits of the one metadata cache this server reads through; omitted fields
-# keep the runtime defaults. `max_segment_bytes` holds decoded metadata
-# blocks and manifests. Defaults to 256 MiB. `max_head_state_bytes` holds
-# namespace head anchors and WAL-tail projections, the tails the writer's
-# namespace publishers publish from included, with no limit on how many
-# namespaces stay cached. Defaults to 64 MiB. Neither bounds writer sessions:
-# the server keeps one for each namespace it has written since it started.
-#[metadata_cache]
-#max_segment_bytes = 268435456
-#max_head_state_bytes = 67108864
 
 # Optional node-local cache of encoded metadata blocks, on this machine's own
 # disk. Omit the table and there is none: every metadata block the decoded
@@ -200,6 +181,5 @@ key_prefix = "local-demo"
 #[publication]
 #max_requests = 8192
 #max_requests_per_namespace = 1024
-#max_estimated_bytes = 67108864
 #max_estimated_bytes_per_namespace = 8388608
 #max_concurrent_publications = 8

@@ -3,7 +3,7 @@
 
 use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
-use crate::config::{ServerConfig, ServerConfigError};
+use crate::config::{MemorySizing, ServerConfig, ServerConfigError};
 use crate::local_cache::FoyerStoredMetadataBlockCache;
 use crate::sweep::Sweep;
 use axum::body::Body;
@@ -16,9 +16,7 @@ use loonfs::{
     LoonFs, Maintenance, SharedObjectStore, StoredMetadataBlockCache,
     StoredMetadataBlockCacheCloseError, TraceMode, TraceStoreKind, Writable, WriterId,
 };
-use loonfs_grep::{
-    new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-};
+use loonfs_grep::{new_grep_block_cache, GrepService, GrepWorker};
 use loonfs_http::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
@@ -154,7 +152,8 @@ pub async fn app(
     // The one unavoidable validation point: configs that skipped
     // `load_server_config` (direct Rust construction) fail here exactly as
     // file-loaded ones fail at load.
-    config.validate()?;
+    let memory = config.validate()?;
+    memory.log();
     let AppOptions {
         store,
         direct_transfers,
@@ -177,6 +176,7 @@ pub async fn app(
     // groups use, so it is composed after it.
     let (runtime, maintenance) = build_handles(
         &config,
+        &memory,
         store,
         &metrics,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
@@ -202,7 +202,7 @@ pub async fn app(
         });
     let grep_service = config.grep.mode.serves_grep().then(|| {
         let grep_block_cache = Arc::new(new_grep_block_cache(
-            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+            memory.grep.bytes,
             metrics.recorder().as_ref(),
         ));
         Arc::new(GrepService::new(grep_block_cache))
@@ -301,6 +301,7 @@ async fn open_local_cache(
 /// reads and its maintenance use the same cache hierarchy.
 pub(super) async fn build_handles(
     config: &ServerConfig,
+    memory: &MemorySizing,
     store: SharedObjectStore,
     metrics: &HttpMetrics,
     metrics_jsonl_path: Option<OsString>,
@@ -318,11 +319,11 @@ pub(super) async fn build_handles(
         .min_publish_interval_ms(config.min_publish_interval_ms)
         .publication_limits(config.publication.resolve())
         .inline_content(config.inline_content.resolve())
-        .execution_budget(config.execution_budget(metrics.recorder()))
+        .execution_budget(config.execution_budget(memory, metrics.recorder()))
         // Every read the server serves goes through this runtime, so the
         // read cap covers every proxied content read.
         .max_read_content_bytes(config.max_download_bytes)
-        .metadata_cache(config.metadata_cache.build(metrics.recorder()))
+        .metadata_cache(memory.metadata_cache(metrics.recorder()))
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind)
         .metrics_recorder(metrics.recorder());
