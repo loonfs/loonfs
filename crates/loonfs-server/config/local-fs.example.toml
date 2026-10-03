@@ -83,6 +83,13 @@ writer_id = "loonfs-server-local"
 # costs no request between full passes.
 #full_sweep_interval_ms = 86400000
 
+# Close a caught-up session when its last open is older than this many
+# milliseconds and no request holds a clone. Must be positive. Defaults to
+# 1800000 (30 minutes). Each held session keeps its publisher, engine state,
+# head position, and queue capacities. A write after close opens a new session
+# whose first publish acquires a new writer epoch.
+#idle_session_close_after_ms = 1800000
+
 # Decoded metadata bytes one maintenance step may merge. A step merges only
 # the runs that fit; a larger window runs as a streaming compaction that holds
 # at most this much at once. Defaults to 64 MiB.

@@ -24,6 +24,10 @@ A visit:
 
 The sweep records the seq read before the visit only when metadata and, where maintained, the grep build are caught up. A commit during the visit therefore remains eligible for the next session pass. It records collection separately when core and grep collection succeed. It drops recorded seqs for sessions no longer held. A full pass can record progress for held sessions too.
 
+A session pass closes a caught-up session when its last open is older than `idle_session_close_after_ms`, 1800000 ms (30 minutes) by default, and no request holds a clone. The setting must be positive. A session with unfinished metadata or index work stays open for that pass. Under the handle table lock, the close checks the elapsed monotonic time, the shared session's reference count, and the caught-up published seq. The sweep drops its own handle clones before that check. Closing drops the session's maintenance, collection, and index progress records. A later write opens a fresh session whose first publish acquires a new writer epoch.
+
+Each held session keeps its publisher, commit engine and writer epoch, head position, and the allocated capacities of its publication queue and in-flight map. These remain allocated while the session is idle. Runtime caches and execution limits are shared across sessions. Closing releases the session's retained memory after admitted work ends; it leaves the shared caches under their own limits.
+
 Session and full passes share `max_concurrent_maintenance` visit slots. A full pass lists namespace ids with `loonfs_objectstore::layout::list_namespace_ids`, one page of up to 1,000 ids per list request. The sweep lists the next page when a slot is free and no listed id is waiting, so a slow visit does not delay later pages. A failed call is logged with the namespace id and call name, counted, and left for a later pass. A failed listing starts no new visit. Running visits finish, and the pass ends with the listing error. The next full pass lists again.
 
 Hosts can drive the passes directly through `run_pass`, `run_session_pass`, and `run_index_pass`. Public session and full pass calls are serialized with the scheduled maintenance passes. A full pass delays session passes until it ends. It does not delay the index pass.
@@ -43,7 +47,7 @@ An idle namespace costs no request between full passes. A session still waiting 
 | Does not collect | 6 GET or HEAD | 7 GET or HEAD | 26 GET or HEAD |
 | Collects | 12 GET or HEAD and 7 LIST | 20 GET or HEAD and 9 LIST | 38 GET or HEAD and 9 LIST |
 
-The core metadata visit remains 6 requests, and core collection remains 13 additional requests, for 19 total. At the former five-minute listing cadence, metadata alone cost 1,728 requests per idle namespace per day. Session passes now cost zero for a caught-up idle namespace. Each unreferenced object still inside its grace adds a request on a collection pass, and work that is due adds its own requests. A deleted namespace stays listed because its tombstone manifest is never collected; it costs a visit on each full pass.
+The core metadata visit remains 6 requests, and core collection remains 13 additional requests, for 19 total. At the former five-minute listing cadence, metadata alone cost 1,728 requests per idle namespace per day. Session passes now cost zero for a caught-up idle namespace. Closing an idle session also costs zero store requests; close only drains work already admitted. Each unreferenced object still inside its grace adds a request on a collection pass, and work that is due adds its own requests. A deleted namespace stays listed because its tombstone manifest is never collected; it costs a visit on each full pass.
 
 ## Recovery after a restart
 

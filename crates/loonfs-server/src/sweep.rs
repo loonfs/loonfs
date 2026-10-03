@@ -35,8 +35,9 @@ const SWEEP_PASS_SECONDS_BOUNDARIES: &[f64] =
 
 /// Visits held sessions whose published seq moved since their last caught-up
 /// visit, every `maintenance_interval_ms`. A session that published nothing
-/// is skipped. Every `gc_interval_ms`, the session pass also collects garbage,
-/// grep's included, for sessions whose seq moved since their last collection.
+/// needs no visit but can close when idle. Every `gc_interval_ms`, the session
+/// pass also collects garbage, grep's included, for sessions whose seq moved
+/// since their last collection.
 ///
 /// A full pass runs at start and every `full_sweep_interval_ms`. It lists
 /// every namespace in the store and collects garbage. An idle namespace
@@ -53,6 +54,11 @@ const SWEEP_PASS_SECONDS_BOUNDARIES: &[f64] =
 /// next eligible pass tries it again. A failed listing starts no new visit
 /// and ends the pass once running visits return. The next full pass lists again.
 /// Recorded seqs are dropped when their sessions are no longer held.
+/// A caught-up session closes when no request holds a clone and its last
+/// open is older than `idle_session_close_after_ms`, 30 minutes by default.
+/// Each held session keeps its publisher, engine state, head position, and
+/// allocated queue capacities. Closing releases these; a later write opens
+/// a new session and its first publish acquires a new writer epoch.
 ///
 /// When this server maintains the grep index, a separate loop runs an index
 /// pass every five seconds over the writer sessions this process holds. It
@@ -80,6 +86,7 @@ struct SweepInner {
     interval: Duration,
     collection_interval: Duration,
     full_interval: Duration,
+    idle_session_close_after_ms: u64,
     // Hosts can call the public pass methods while the scheduled loop runs.
     pass: tokio::sync::Mutex<()>,
     sessions: Mutex<HashMap<NamespaceId, SessionProgress>>,
@@ -175,6 +182,7 @@ impl Sweep {
                 interval: Duration::from_millis(config.maintenance_interval_ms),
                 collection_interval: Duration::from_millis(config.gc_interval_ms),
                 full_interval: Duration::from_millis(config.full_sweep_interval_ms),
+                idle_session_close_after_ms: config.idle_session_close_after_ms,
                 pass: tokio::sync::Mutex::default(),
                 sessions: Mutex::default(),
                 page_limit: EffectiveLimit::new(
@@ -282,8 +290,10 @@ impl Sweep {
             .for_each_concurrent(inner.max_concurrent_visits, |namespace_id| {
                 // Boxed so the spawned sweep's `Send` check does not recurse
                 // through every engine future a visit awaits.
-                let seq = held.get(&namespace_id).copied();
-                self.visit(namespace_id, seq, collect_garbage).boxed()
+                let seq = held.get(&namespace_id).copied().flatten();
+                self.visit(namespace_id, seq, collect_garbage)
+                    .map(drop)
+                    .boxed()
             })
             .await;
         listing.map(|()| listed)
@@ -294,7 +304,7 @@ impl Sweep {
         namespace_id: NamespaceId,
         seq: Option<ChangeSeq>,
         collect_garbage: bool,
-    ) {
+    ) -> bool {
         let inner = &self.inner;
         let metadata_caught_up = match inner
             .maintenance
@@ -328,16 +338,18 @@ impl Sweep {
             true
         };
         let collected = collect_garbage && self.collect(&namespace_id).await;
+        let caught_up = metadata_caught_up && index_caught_up && !inner.stop.is_cancelled();
         if let Some(seq) = seq {
             let mut sessions = lock(&inner.sessions);
             let progress = sessions.entry(namespace_id).or_default();
-            if metadata_caught_up && index_caught_up && !inner.stop.is_cancelled() {
+            if caught_up {
                 progress.maintained = Some(seq);
             }
             if collected {
                 progress.collected = Some(seq);
             }
         }
+        caught_up
     }
 
     async fn collect(&self, namespace_id: &NamespaceId) -> bool {
