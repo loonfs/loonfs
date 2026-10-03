@@ -45,6 +45,29 @@ image from this crate's `Dockerfile`.
 credentials and the optional server settings. Copy the one you need and edit
 it.
 
+The host admission settings are top-level positive integers:
+
+| Setting | Default | At the limit |
+| --- | ---: | --- |
+| `max_in_flight_requests` | 256 | Returns `503 server_busy` before reading a request body; health and readiness probes are exempt. |
+| `max_connections` | 1,024 | Waits before TCP accept until a connection closes; TLS handshakes and idle keep-alive connections count. |
+
+A request holds its slot until its response body yields its last frame,
+fails, or is dropped. Response data frames are at most 64 KiB. Uploads
+and downloads also take their existing transfer slots. Size both settings
+from pod memory left after runtime budgets, using measured peak memory per
+request and per connection, with room for allocator overhead.
+
+After the request permit is released, the HTTP transport can still retain
+response data up to its write threshold plus one frame per response in
+flight. With the library defaults, that is 472 KiB per HTTP/1 connection
+(408 KiB + 64 KiB), or 464 KiB per HTTP/2 stream (400 KiB + 64 KiB), both
+about 480 KiB. HTTP/2 allows 200 streams per connection by default, so its
+sum is 90.625 MiB per connection. At `max_connections = 1024`, these sums
+are 472 MiB for HTTP/1 or 90.625 GiB for HTTP/2. Retained transport response
+bytes are the one memory term the request cap does not cover. These figures
+count response data, not total connection memory.
+
 Validate a config without starting the server:
 
 ```bash

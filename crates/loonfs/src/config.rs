@@ -111,7 +111,6 @@ impl InlineContentPolicy {
 /// Read configuration shared by all handles of one runtime.
 #[derive(Debug, Clone)]
 pub(crate) struct ReadConfig {
-    pub(crate) execution_budget: crate::ExecutionBudget,
     /// Largest file content the buffered read APIs will materialize for one
     /// call, checked against resolved metadata before any content fetch.
     /// `None` (the embedded default) reads files of any size; servers set

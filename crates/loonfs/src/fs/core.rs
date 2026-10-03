@@ -97,7 +97,7 @@ impl RuntimeCore {
         wall_clock: Arc<dyn crate::WallClock>,
     ) -> Self {
         let (metadata_segment_cache, head_state) = metadata_cache.bind(
-            config.execution_budget.read_working_memory(),
+            execution_budget.read_working_memory(),
             stored_metadata_block_cache,
         );
         Self {

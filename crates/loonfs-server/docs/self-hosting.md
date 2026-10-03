@@ -290,6 +290,9 @@ fit the namespaces a server serves.
 
 | Metric | Type | What moves it |
 | --- | --- | --- |
+| `loonfs_server_in_flight_requests` | Gauge | Requests holding a slot, through response completion. |
+| `loonfs_server_connection_accept_waiting` | Gauge | 1 while TCP accept waits for a free connection slot, otherwise 0. This is not an OS backlog count; that count is not available to the server. |
+| `loonfs_server_busy_rejections_total` | Counter, `kind` label | A concurrency refusal: `request`, `upload`, or `download`. Connections wait and do not increment this counter. |
 | `loonfs.namespace_head_cache.gets` | Counter, `result` label | A read looks up its namespace head: `hit` or `miss`. |
 | `loonfs.head_state_cache.evictions` | Counter | A head anchor or WAL-tail projection is evicted at the `metadata_cache.max_head_state_bytes` limit. The tails writers publish from are evicted the same way. |
 | `loonfs.head_state_cache.retained_decoded_bytes` | Gauge | Decoded bytes of head anchors and WAL-tail projections held now, writers' tails included. |
@@ -334,6 +337,38 @@ defaults, like metadata compaction. The accepted input limits are
 
 `request_deadline_ms` defaults to 60000 ms for metadata and query requests; streamed content and long-running operator work are exempt.
 
+`max_in_flight_requests` defaults to 256 and `max_connections` to 1,024.
+Both must be positive. Size them from pod memory left after runtime budgets,
+using measured peak memory per request and per connection, with room for
+allocator overhead and the pod's open-file limit.
+
+The request cap runs before authentication and body extraction. A request
+past it receives `503 server_busy` with `Retry-After: 1`, the usual error
+envelope, and a request ID. No body is read and no store call is made.
+Each admitted request holds its slot until its response body yields its
+last frame, fails, or is dropped. Downloads, JSON pages, and error envelopes
+all use data frames of at most 64 KiB. Uploads and downloads also count
+against their existing transfer caps. `GET` and `HEAD` on `/health` and
+`/readiness` are exempt, including probe query parameters. `/metrics` is
+subject to the request cap.
+
+After a request releases its permit, the HTTP transport can still retain
+response data up to its write threshold plus one frame per response in
+flight. At the library defaults, HTTP/1 retains at most 408 KiB + 64 KiB =
+472 KiB per connection. HTTP/2 retains at most 400 KiB + 64 KiB = 464 KiB
+per stream. Both are about 480 KiB. The default 200 HTTP/2 streams sum to
+90.625 MiB per connection. At `max_connections = 1024`, the sums are
+472 MiB for HTTP/1 or 90.625 GiB for HTTP/2. Retained transport response
+bytes are the one memory term the request cap does not cover. These figures
+count response data, not total connection memory.
+
+At the connection cap, the server waits before TCP accept. Clients may
+complete a TCP connection into the OS backlog but receive no HTTP response
+or TLS handshake until a slot is free. If the backlog fills, connecting
+clients can time out or fail according to the OS. Idle keep-alive connections
+and incomplete TLS handshakes hold slots until they close. Probes still need
+a connection slot, so size the connection cap to leave room for them.
+
 Each cache, queue, and unit of work has its own memory budget. The values
 below are ceilings, not allocations. Memory grows toward a ceiling only as a
 cache fills or as work runs. Allocator overhead and HTTP buffers are not
@@ -344,6 +379,8 @@ counted in any budget and sit on top.
 | Metadata segment cache | `metadata_cache.max_segment_bytes` | 256 MiB | Decoded metadata blocks and manifests | Steady |
 | Head state | `metadata_cache.max_head_state_bytes` | 64 MiB | Cached namespace heads and WAL tails, for reads and for writer sessions, for any number of namespaces | Steady |
 | Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
+| HTTP requests | `max_in_flight_requests` | 256 | Requests through response completion, excluding health and readiness probes | Concurrency |
+| Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
 | Read working memory | `max_read_working_bytes` | 256 MiB | Blocks retained across read, publication, fold, and bounded compaction memos | Shared |
@@ -405,14 +442,18 @@ The total leaves out writer sessions, page results, decoded blocks borrowed
 by callers after memo eviction, the WAL tails that running operations hold
 outside the head-state cache, and maintenance work other than folds and
 merges. Shared cache entries and memo entries are charged independently,
-even when they refer to the same allocation. Reads have no concurrency
-limit, so the pool bounds memo retention, not all read memory.
+even when they refer to the same allocation. Public reads wait at
+`max_concurrent_reads`; HTTP reads also share the request cap. The pool bounds
+memo retention, not all read memory. Embedded reads share the read limit but
+have no HTTP request cap.
 
 Grep adds a 256 MiB block cache on a server that answers queries. The cache
 has no setting. A query reads up to 32 candidate files of at most 8 MiB each
 at once, so one query can hold up to 256 MiB. Queries have no concurrency
-limit. Index building runs in daily sweep visits and session ticks. A build
-step reads at most `max_content_bytes_per_step` of file content, 64 MiB by default, and a reorganize step merges at most 64 MiB of
+limit of their own; HTTP queries share the request cap. Index building runs
+in daily sweep visits and session ticks. A build step reads at most
+`max_content_bytes_per_step` of file content, 64 MiB by default, and a
+reorganize step merges at most 64 MiB of
 decoded index blocks. A step that finds work waits for one of
 `[grep].max_concurrent_steps` permits before it reads either, and holds it
 until it publishes. Indexing therefore holds at most two steps of content at
@@ -441,6 +482,8 @@ publications, one fold, one compaction, and one sweep visit at a time:
 max_concurrent_folds = 1
 max_concurrent_compactions = 1
 max_concurrent_maintenance = 1
+max_in_flight_requests = 4
+max_connections = 32
 max_concurrent_uploads = 2
 max_concurrent_downloads = 2
 max_merge_input_bytes = 8388608

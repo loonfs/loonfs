@@ -205,7 +205,7 @@ struct LoonfsOpenApi;
 /// OpenAPI definition for the 503 response every operation can return.
 #[derive(utoipa::ToResponse)]
 #[response(
-    description = "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, writer-session admission, required maintenance, or invalid storage credentials. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
+    description = "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, writer-session admission, required maintenance, or invalid storage credentials. The reference server returns `server_busy` with `Retry-After: 1` before reading a body when its request cap is full; health and readiness probes are exempt. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
 )]
 #[expect(
     dead_code,
@@ -251,7 +251,7 @@ impl utoipa::Modify for BearerAuth {
                             "The deployment's `auth_token`, sent as \
                              `Authorization: Bearer <token>`. A server configured \
                              without a token accepts every request; one configured \
-                             with a token answers 401 `unauthorized` without it.",
+                             with a token answers 401 `unauthorized` without it after request admission.",
                         ))
                         .build(),
                 ),

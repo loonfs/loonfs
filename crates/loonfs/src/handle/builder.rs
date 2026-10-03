@@ -40,7 +40,6 @@ enum StoreSource {
 
 /// What the runtime core opens from, in every mode.
 struct CoreSettings {
-    execution_budget: Option<ExecutionBudget>,
     source: StoreSource,
     max_read_content_bytes: Option<u64>,
     /// `None` builds a private cache when the core opens.
@@ -76,7 +75,6 @@ impl<M> LoonFsBuilder<M> {
     fn new(source: StoreSource) -> Self {
         Self {
             core: CoreSettings {
-                execution_budget: None,
                 source,
                 max_read_content_bytes: None,
                 metadata_cache: None,
@@ -139,25 +137,6 @@ impl<M> LoonFsBuilder<M> {
         self
     }
 
-    /// Runs this runtime's reads, publications, folds, and merges under
-    /// `execution_budget`, which other runtimes may share.
-    ///
-    /// Read memos share its read working memory pool.
-    /// Every publication request this runtime admits counts against the
-    /// budget's admitted totals until its work settles. Publication batches,
-    /// session folds and merges, [`LoonFs::maintenance`] work, namespace
-    /// deletions, and the creation of checkpoints, snapshots, and forks of
-    /// the current head take their permits from it, and every merge holds at
-    /// most its merge input size. The per-namespace admission limits stay
-    /// with this runtime. The budget
-    /// reports its metrics to its own recorder. Without this setting, the
-    /// runtime creates a private budget with the default limits that reports
-    /// to [`Self::metrics_recorder`].
-    pub fn execution_budget(mut self, execution_budget: ExecutionBudget) -> Self {
-        self.core.execution_budget = Some(execution_budget);
-        self
-    }
-
     /// Caps the file content size the buffered read APIs will materialize
     /// for one call, checked against resolved metadata before any content
     /// fetch; over-limit reads fail with `content_too_large`. Unset by
@@ -214,6 +193,7 @@ impl<M> LoonFsBuilder<M> {
     /// Runs this runtime's reads, publications, folds, and merges under
     /// `execution_budget`, which other runtimes may share.
     ///
+    /// Read memos share its read working memory pool.
     /// Every publication request this runtime admits counts against the
     /// budget's admitted totals until its work settles. Public reads wait for
     /// a read permit before loading anything. Publication batches,
@@ -355,17 +335,7 @@ impl CoreSettings {
     /// A builder given no recorder of either kind wraps nothing: the store
     /// the core holds is the store it was handed, and the instrument set it
     /// carries reports nowhere.
-    fn open(mut self) -> Result<RuntimeCore> {
-        let execution_budget = self.execution_budget.unwrap_or_else(|| {
-            let builder = ExecutionBudget::builder();
-            match &self.metrics_recorder {
-                Some(recorder) => builder.metrics_recorder(Arc::clone(recorder)),
-                None => builder,
-            }
-            .build()
-        });
-        self.metadata_lsm_policy.max_decoded_input_bytes_per_step =
-            execution_budget.max_merge_input_bytes();
+    fn open(self) -> Result<RuntimeCore> {
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
                 let kind = TraceStoreKind::from(config.kind());
@@ -414,7 +384,6 @@ impl CoreSettings {
                 max_read_content_bytes: self.max_read_content_bytes,
                 manifest_revalidation_interval_ms: self.manifest_revalidation_interval_ms,
                 metadata_lsm_policy,
-                execution_budget,
                 trace_mode: self.trace_mode,
                 trace_store_kind,
             },

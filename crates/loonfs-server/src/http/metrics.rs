@@ -12,6 +12,7 @@ pub(super) fn render(
     grep_steps: Option<GrepStepBudgetStats>,
     upload_permits: usize,
     download_permits: usize,
+    in_flight_requests: usize,
 ) -> String {
     let mut rendered = render_snapshot(&metrics.snapshot());
     render_scrape_gauges(
@@ -20,6 +21,7 @@ pub(super) fn render(
         grep_steps,
         upload_permits,
         download_permits,
+        in_flight_requests,
     );
     rendered
 }
@@ -106,6 +108,7 @@ fn render_scrape_gauges(
     grep_steps: Option<GrepStepBudgetStats>,
     upload_permits: usize,
     download_permits: usize,
+    in_flight_requests: usize,
 ) {
     // Omit local-cache metrics when this server has no local cache. Reporting
     // zeros would incorrectly suggest that an enabled cache is idle.
@@ -139,6 +142,11 @@ fn render_scrape_gauges(
         );
     }
     for (name, description, value) in [
+        (
+            "loonfs_server_in_flight_requests",
+            "Requests holding a request permit through response completion",
+            in_flight_requests,
+        ),
         (
             "loonfs_server_upload_permits_available",
             "Proxied-upload slots free right now",

@@ -7,7 +7,7 @@
         path = "/health",
         tag = "system",
         summary = "Check health",
-        description = "Returns `ok` when the server is running and can accept requests.",
+        description = "Returns `ok` when the server is running. Exempt from the request cap; a connection slot is still required.",
         security(()),
         responses(
             (status = 200, description = "Server health check", body = String),
@@ -30,7 +30,7 @@ fn get_health() {}
         description = "Returns `ready` while the server admits new work. Once shutdown \
                        begins and publisher admission closes, answers 503 `shutting_down` \
                        so load balancers can drain the instance. `/health` stays the \
-                       liveness probe: it only reports that the process is up.",
+                       liveness probe: it only reports that the process is up. Both probes are exempt from the request cap but still require a connection slot.",
         security(()),
         responses(
             (status = 200, description = "The server admits new work", body = String),

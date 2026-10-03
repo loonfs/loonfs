@@ -40,7 +40,7 @@
             }
           }
         },
-        "description": "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, writer-session admission, required maintenance, or invalid storage credentials. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
+        "description": "The server cannot complete the request now. Inspect `code` to determine whether the cause is a deadline, shutdown, load, writer-session admission, required maintenance, or invalid storage credentials. The reference server returns `server_busy` with `Retry-After: 1` before reading a body when its request cap is full; health and readiness probes are exempt. A mutation may still complete after a deadline or lost acknowledgment, so determine its outcome before retrying."
       }
     },
     "schemas": {
@@ -4535,7 +4535,7 @@
     },
     "securitySchemes": {
       "bearer_auth": {
-        "description": "The deployment's `auth_token`, sent as `Authorization: Bearer <token>`. A server configured without a token accepts every request; one configured with a token answers 401 `unauthorized` without it.",
+        "description": "The deployment's `auth_token`, sent as `Authorization: Bearer <token>`. A server configured without a token accepts every request; one configured with a token answers 401 `unauthorized` without it after request admission.",
         "scheme": "bearer",
         "type": "http"
       }
@@ -4554,7 +4554,7 @@
   "paths": {
     "/health": {
       "get": {
-        "description": "Returns `ok` when the server is running and can accept requests.",
+        "description": "Returns `ok` when the server is running. Exempt from the request cap; a connection slot is still required.",
         "operationId": "get_health",
         "responses": {
           "200": {
@@ -4621,7 +4621,7 @@
     },
     "/readiness": {
       "get": {
-        "description": "Returns `ready` while the server admits new work. Once shutdown begins and publisher admission closes, answers 503 `shutting_down` so load balancers can drain the instance. `/health` stays the liveness probe: it only reports that the process is up.",
+        "description": "Returns `ready` while the server admits new work. Once shutdown begins and publisher admission closes, answers 503 `shutting_down` so load balancers can drain the instance. `/health` stays the liveness probe: it only reports that the process is up. Both probes are exempt from the request cap but still require a connection slot.",
         "operationId": "get_readiness",
         "responses": {
           "200": {
