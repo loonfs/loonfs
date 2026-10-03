@@ -309,7 +309,7 @@ The full registry (`ErrorCode` in `loonfs-types`):
 | `outcome_unknown` | 503 | The outcome of a write other than a commit was not observed; the operation may or may not have taken effect. Read the resource before retrying. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `writer_session_closed` | 503 | This node holds no open writer session for the namespace. The request was not admitted; retry on the node the namespace is assigned to. |
-| `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
+| `server_busy` | 503 | The server is at its configured concurrency limit for requests, proxied upload bodies, or proxied content reads; back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
 | `content_not_materialized` | 503 | The file is committed, but a direct download requires a content object that this deployment cannot create. Read through the proxied content route, or retry after a fold writes the object. |
@@ -320,6 +320,20 @@ The full registry (`ErrorCode` in `loonfs-types`):
 | `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it; core filesystem state remains available. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | Unclassified internal failure. |
+
+The reference server admits at most `max_in_flight_requests` requests at
+once (default 256). It refuses excess requests before authentication, body
+extraction, or store access. A slot lasts until the response body finishes or
+is dropped. Uploads and downloads count against both this cap and their
+transfer cap. `GET` and `HEAD` on `/health` and `/readiness` are exempt; probe
+query parameters do not change the exemption. `/metrics` is subject to the cap.
+
+The reference server also limits accepted connections with `max_connections`
+(default 1,024). It waits before TCP accept when full. Pending connections
+stay in the OS backlog; a client can connect without receiving an HTTP
+response until a slot is available, or time out or fail if the backlog is
+full. TLS handshakes and idle keep-alive connections hold slots. Connection
+admission applies to every route, including probes.
 
 Automated retry is narrower than the HTTP status. Raw transport failures may
 be retried. Of the registered error codes, clients automatically retry only
@@ -912,8 +926,8 @@ bearer credential:
 Authorization: Bearer <auth_token>
 ```
 
-A request without it, or with the wrong value, answers 401 `unauthorized`.
-Authorization is checked before the request is otherwise parsed, so a
+After request admission, a request without it, or with the wrong value,
+answers 401 `unauthorized`. Authorization is checked before the request is otherwise parsed, so a
 malformed body from an unauthenticated caller still answers 401 rather than
 400. Two routes are exempt and always answer unauthenticated, because they
 are what a load balancer probes: `GET /health` and `GET /readiness`.

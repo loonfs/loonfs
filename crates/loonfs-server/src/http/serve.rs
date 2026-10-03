@@ -248,6 +248,10 @@ pub async fn app(
             .map_or(AuthPolicy::Unauthenticated, AuthPolicy::BearerToken),
     });
     let binding = BindingState {
+        request_limit: Some(loonfs_http::RequestLimit::new(
+            std::num::NonZeroUsize::new(config.max_in_flight_requests)
+                .expect("validated request limit should be nonzero"),
+        )),
         upload_permits: Arc::new(Semaphore::new(
             config.max_concurrent_uploads.min(Semaphore::MAX_PERMITS),
         )),
@@ -473,7 +477,13 @@ where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
     let shutdown_deadline_ms = config.shutdown_deadline_ms;
+    let max_connections = config.max_connections;
     let (router, state) = app(config, AppOptions::default()).await?;
+    let listener = super::connection_limit::ConnectionLimit::new(
+        listener,
+        max_connections,
+        state.binding.metrics.recorder().as_ref(),
+    );
     serve_and_settle(
         listener,
         router,

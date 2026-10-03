@@ -323,6 +323,8 @@ pub(crate) fn test_config(
         snapshot_max_ttl_ms: 86_400_000,
         snapshot_max_lifetime_ms: 604_800_000,
         snapshot_max_live_per_namespace: 16,
+        max_in_flight_requests: 256,
+        max_connections: 1024,
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: 8,
