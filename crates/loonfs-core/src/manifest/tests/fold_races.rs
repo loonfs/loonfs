@@ -39,6 +39,7 @@ impl Rival {
                         CompactorEpoch(0),
                         MetadataLsmPolicy::default(),
                         MetadataCompactionPolicy::CompactImmediately,
+                        Arc::default(),
                     )
                     .await
                     .expect("merge")

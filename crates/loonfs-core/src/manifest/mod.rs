@@ -51,6 +51,7 @@ pub use self::streaming_compaction::{
     MetadataCompactionCancellation, MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 
+pub(crate) use self::cache::read_working_memory;
 pub(crate) use self::compaction_step::compaction_step;
 pub use self::compaction_step::metadata_compaction_due;
 pub(crate) use self::compactor::claim_compactor;

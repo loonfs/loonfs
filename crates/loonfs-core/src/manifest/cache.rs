@@ -9,7 +9,6 @@
 //! cache of the same blocks in their encoded form; see
 //! [`stored_block_cache`](super::stored_block_cache).
 
-use super::block_load::DEFAULT_BLOCK_MEMO_BYTES;
 use super::runs::MetadataRunManifest;
 use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::block_cache::{
@@ -19,6 +18,7 @@ use crate::block_cache::{
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::state::NamespaceReadState;
+use crate::read_working_memory::ReadWorkingMemory;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use loonfs_types::format::manifest::MetadataRow;
@@ -65,10 +65,10 @@ pub(super) type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
     ),
 >;
 
-/// The block memo budget of a view or WAL fold that reads through
-/// `segment_cache`, or the default without one.
-pub(super) fn block_memo_bytes(segment_cache: Option<&MetadataSegmentCache>) -> usize {
-    segment_cache.map_or(DEFAULT_BLOCK_MEMO_BYTES, |cache| cache.max_block_memo_bytes)
+pub(crate) fn read_working_memory(
+    segment_cache: Option<&MetadataSegmentCache>,
+) -> Arc<ReadWorkingMemory> {
+    segment_cache.map_or_else(Arc::default, |cache| Arc::clone(&cache.read_working_memory))
 }
 
 /// Decoded segment blocks and manifests for every scope, under one byte
@@ -126,12 +126,12 @@ impl SharedSegmentBlocks {
     }
 }
 
-/// One runtime's view of shared segment blocks, with the runtime's own block
-/// memo budget and node-local encoded tier.
+/// One runtime's view of shared segment blocks, with the runtime's shared read
+/// working memory and node-local encoded tier.
 pub struct MetadataSegmentCache {
     blocks: Arc<SharedSegmentBlocks>,
     scope: CacheScope,
-    max_block_memo_bytes: usize,
+    read_working_memory: Arc<ReadWorkingMemory>,
     /// Optional node-local cache for encoded blocks. Keeping it with the
     /// decoded cache ensures callers use both cache tiers or neither tier.
     stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
@@ -142,7 +142,7 @@ impl std::fmt::Debug for MetadataSegmentCache {
         formatter
             .debug_struct("MetadataSegmentCache")
             .field("scope", &self.scope)
-            .field("max_block_memo_bytes", &self.max_block_memo_bytes)
+            .field("read_working_memory", &self.read_working_memory)
             .field("stored_block_cache", &self.stored_block_cache)
             .finish_non_exhaustive()
     }
@@ -152,13 +152,13 @@ impl MetadataSegmentCache {
     pub fn new(
         blocks: Arc<SharedSegmentBlocks>,
         scope: CacheScope,
-        max_block_memo_bytes: usize,
+        read_working_memory: Arc<ReadWorkingMemory>,
         stored_block_cache: Option<Arc<dyn StoredMetadataBlockCache>>,
     ) -> Self {
         Self {
             blocks,
             scope,
-            max_block_memo_bytes,
+            read_working_memory,
             stored_block_cache,
         }
     }
@@ -170,7 +170,7 @@ impl MetadataSegmentCache {
         Self::new(
             Arc::new(SharedSegmentBlocks::new(max_decoded_bytes, None)),
             CacheScope::new(0),
-            DEFAULT_BLOCK_MEMO_BYTES,
+            Arc::default(),
             None,
         )
     }
@@ -579,8 +579,14 @@ mod tests {
     #[tokio::test]
     async fn views_of_one_shared_store_read_only_their_own_blocks() {
         let shared = Arc::new(SharedSegmentBlocks::new(usize::MAX, None));
-        let view =
-            |scope| MetadataSegmentCache::new(Arc::clone(&shared), CacheScope::new(scope), 0, None);
+        let view = |scope| {
+            MetadataSegmentCache::new(
+                Arc::clone(&shared),
+                CacheScope::new(scope),
+                Arc::default(),
+                None,
+            )
+        };
         let (first, second) = (view(1), view(2));
         first.insert(key("a"), block(100));
         second.insert(key("a"), block(200));

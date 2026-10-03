@@ -297,6 +297,7 @@ async fn runtimes_sharing_a_budget_never_exceed_its_limits() {
         ExecutionBudgetStats {
             admitted_requests: 8,
             admitted_bytes: 0,
+            read_working_bytes: 0,
             publications_running: 2,
             publications_waiting: 6,
             folds_running: 2,

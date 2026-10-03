@@ -10,7 +10,9 @@ use super::error::ManifestLoadError;
 use super::scan::Readahead;
 #[cfg(test)]
 use super::validate::validate_manifest_row_seq_range;
-use bytes::Bytes;
+use crate::block_cache::DecodedBlock;
+use crate::heap_bytes::{arc_bytes, hash_map_table_bytes};
+use crate::read_working_memory::ReadWorkingMemory;
 #[cfg(test)]
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -24,11 +26,6 @@ use loonfs_types::format::sst_blocks::DecodedDataBlock;
 use loonfs_types::ChangeSeq;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-
-/// Default for the decoded and stored data-block bytes one view keeps.
-/// 64 MiB holds one page's working set plus read-ahead, and a runaway scan
-/// cannot hold gigabytes through the memo.
-pub(crate) const DEFAULT_BLOCK_MEMO_BYTES: usize = 64 * 1024 * 1024;
 
 /// The data blocks of one segment that can hold keys in
 /// `[lower_bound, upper_bound)`, shared straight from the decoded-block
@@ -81,45 +78,55 @@ impl SegmentKeyRangeBlocks {
 /// This memo stays separate because it uses FIFO eviction for one operation.
 #[derive(Debug)]
 pub(super) struct SessionBlockMemo {
-    max_data_bytes: usize,
+    pool: Arc<ReadWorkingMemory>,
     inner: Mutex<SessionBlockMemoInner>,
 }
 
 impl Default for SessionBlockMemo {
     fn default() -> Self {
-        Self::new(DEFAULT_BLOCK_MEMO_BYTES)
+        Self::new(Arc::default())
     }
 }
 
 #[derive(Debug, Default)]
 struct SessionBlockMemoInner {
     blocks: HashMap<Arc<MetadataSegmentCacheKey>, MemoBlock>,
-    data_insertion_order: VecDeque<Arc<MetadataSegmentCacheKey>>,
-    data_bytes: usize,
+    insertion_order: VecDeque<Arc<MetadataSegmentCacheKey>>,
+    entry_bytes: usize,
+    reserved_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
 enum MemoBlock {
     Decoded(DecodedMetadataSegmentBlock),
-    Stored(Bytes),
+    Stored(Arc<[u8]>),
 }
 
 impl MemoBlock {
-    fn data_bytes(&self) -> usize {
+    fn bytes(&self) -> usize {
         match self {
-            Self::Decoded(DecodedMetadataSegmentBlock::Data { decoded_bytes, .. }) => {
-                *decoded_bytes
-            }
-            Self::Decoded(_) => 0,
-            Self::Stored(bytes) => bytes.len(),
+            Self::Decoded(block) => block.weight(),
+            Self::Stored(bytes) => arc_bytes::<()>() + bytes.len(),
         }
     }
 }
 
+impl SessionBlockMemoInner {
+    fn bytes(&self) -> usize {
+        self.entry_bytes
+            + hash_map_table_bytes(&self.blocks)
+            + self.insertion_order.capacity() * std::mem::size_of::<Arc<MetadataSegmentCacheKey>>()
+    }
+}
+
+fn key_bytes(key: &MetadataSegmentCacheKey) -> usize {
+    arc_bytes::<MetadataSegmentCacheKey>() + key.identity.capacity()
+}
+
 impl SessionBlockMemo {
-    pub(super) fn new(max_data_bytes: usize) -> Self {
+    pub(super) fn new(pool: Arc<ReadWorkingMemory>) -> Self {
         Self {
-            max_data_bytes,
+            pool,
             inner: Mutex::default(),
         }
     }
@@ -139,7 +146,7 @@ impl SessionBlockMemo {
             })
     }
 
-    pub(super) fn stored(&self, cache_key: &MetadataSegmentCacheKey) -> Option<Bytes> {
+    pub(super) fn stored(&self, cache_key: &MetadataSegmentCacheKey) -> Option<Arc<[u8]>> {
         self.inner
             .lock()
             .expect("session block memo lock should not be poisoned")
@@ -152,7 +159,7 @@ impl SessionBlockMemo {
     }
 
     pub(super) fn record_stored(&self, cache_key: &MetadataSegmentCacheKey, bytes: &[u8]) {
-        self.record_block(cache_key, MemoBlock::Stored(Bytes::copy_from_slice(bytes)));
+        self.record_block(cache_key, MemoBlock::Stored(Arc::from(bytes)));
     }
 
     pub(super) fn record(
@@ -164,38 +171,53 @@ impl SessionBlockMemo {
     }
 
     fn record_block(&self, cache_key: &MetadataSegmentCacheKey, block: MemoBlock) {
-        let data_bytes = block.data_bytes();
-        let cache_key = Arc::new(cache_key.clone());
-        if data_bytes == 0 {
-            self.inner
-                .lock()
-                .expect("session block memo lock should not be poisoned")
-                .blocks
-                .insert(cache_key, block);
-            return;
-        }
         let mut inner = self
             .inner
             .lock()
             .expect("session block memo lock should not be poisoned");
-        let previous = inner.blocks.insert(Arc::clone(&cache_key), block);
-        if let Some(previous) = previous {
-            inner.data_bytes = inner.data_bytes.saturating_sub(previous.data_bytes());
+        inner.entry_bytes += block.bytes();
+        if let Some(previous) = inner.blocks.get_mut(cache_key) {
+            let previous = std::mem::replace(previous, block);
+            inner.entry_bytes -= previous.bytes();
         } else {
-            inner.data_insertion_order.push_back(cache_key);
+            let cache_key = Arc::new(cache_key.clone());
+            inner.entry_bytes += key_bytes(&cache_key);
+            inner.insertion_order.push_back(Arc::clone(&cache_key));
+            inner.blocks.insert(cache_key, block);
         }
-        inner.data_bytes = inner.data_bytes.saturating_add(data_bytes);
-        while inner.data_bytes > self.max_data_bytes {
+        loop {
+            let bytes = inner.bytes();
+            if bytes <= inner.reserved_bytes {
+                self.pool.release(inner.reserved_bytes - bytes);
+                inner.reserved_bytes = bytes;
+                break;
+            }
+            if self.pool.try_reserve(bytes - inner.reserved_bytes) {
+                inner.reserved_bytes = bytes;
+                break;
+            }
             let oldest = inner
-                .data_insertion_order
+                .insertion_order
                 .pop_front()
-                .expect("accounted data blocks should have an insertion-order entry");
+                .expect("accounted blocks should have an insertion-order entry");
             let evicted = inner
                 .blocks
                 .remove(&oldest)
                 .expect("session block memo queue and map should stay one-to-one");
-            inner.data_bytes = inner.data_bytes.saturating_sub(evicted.data_bytes());
+            inner.entry_bytes -= evicted.bytes() + key_bytes(&oldest);
+            inner.blocks.shrink_to_fit();
+            inner.insertion_order.shrink_to_fit();
         }
+    }
+}
+
+impl Drop for SessionBlockMemo {
+    fn drop(&mut self) {
+        let inner = self
+            .inner
+            .get_mut()
+            .expect("session block memo lock should not be poisoned");
+        self.pool.release(inner.reserved_bytes);
     }
 }
 
@@ -317,81 +339,43 @@ pub(super) async fn load_segment_blocks_with_readahead<S: ObjectStore + ?Sized>(
 mod tests {
     use super::super::cache::MetadataSegmentBlockKind;
     use super::*;
-    use loonfs_types::format::sst_blocks::{decode_filter_block, SegmentBlocksBuilder};
 
-    fn key(kind: MetadataSegmentBlockKind, offset: u64) -> MetadataSegmentCacheKey {
+    fn key(offset: u64) -> MetadataSegmentCacheKey {
         MetadataSegmentCacheKey {
-            identity: format!("memo-{offset}"),
-            block_kind: kind,
+            identity: "segment".to_owned(),
+            block_kind: MetadataSegmentBlockKind::Data,
             block_offset: offset,
         }
     }
 
-    fn data_block(decoded_bytes: usize) -> DecodedMetadataSegmentBlock {
-        DecodedMetadataSegmentBlock::Data {
-            block: Arc::new(DecodedDataBlock {
-                row_keys: Vec::new(),
-                rows: Vec::new(),
-            }),
-            decoded_bytes,
-        }
-    }
-
-    fn filter_block() -> DecodedMetadataSegmentBlock {
-        let mut builder = SegmentBlocksBuilder::default();
-        builder
-            .push("key", "key", &0_u8)
-            .expect("filter fixture row should encode");
-        let built = builder.finish().expect("filter fixture should finish");
-        let start = built.filter.offset as usize;
-        let end = start + built.filter.stored_bytes as usize;
-        let filter = decode_filter_block(&built.bytes[start..end], &built.filter)
-            .expect("filter fixture should decode");
-        DecodedMetadataSegmentBlock::Filter {
-            filter: Arc::new(filter),
-            decoded_bytes: 1,
-        }
-    }
-
-    fn manifest_block() -> DecodedMetadataSegmentBlock {
-        let manifest = loonfs_types::format::manifest::decode_namespace_manifest_json(
-            include_bytes!("../../../loonfs-types/tests/golden/manifest.v1.json"),
-        )
-        .expect("valid manifest fixture");
-        DecodedMetadataSegmentBlock::Manifest {
-            manifest: (Arc::new(manifest), Arc::new(Vec::new()), 0),
-            decoded_bytes: 1,
-        }
-    }
-
     #[test]
-    fn data_budget_evicts_oldest_data_and_preserves_metadata_entries() {
-        let memo = SessionBlockMemo::default();
-        let index_key = key(MetadataSegmentBlockKind::Index, 1);
-        let filter_key = key(MetadataSegmentBlockKind::Filter, 2);
-        let manifest_key = key(MetadataSegmentBlockKind::Manifest, 3);
-        memo.record(
-            &index_key,
-            &DecodedMetadataSegmentBlock::Index {
-                entries: Arc::new(Vec::new()),
-                decoded_bytes: 1,
-            },
-        );
-        memo.record(&filter_key, &filter_block());
-        memo.record(&manifest_key, &manifest_block());
-
-        let oldest_data_key = key(MetadataSegmentBlockKind::Data, 4);
-        let newer_data_key = key(MetadataSegmentBlockKind::Data, 5);
-        let newest_data_key = key(MetadataSegmentBlockKind::Data, 6);
-        memo.record(&oldest_data_key, &data_block(DEFAULT_BLOCK_MEMO_BYTES / 2));
-        memo.record(&newer_data_key, &data_block(DEFAULT_BLOCK_MEMO_BYTES / 2));
-        memo.record(&newest_data_key, &data_block(1));
-
-        assert!(memo.get(&oldest_data_key).is_none());
-        assert!(memo.get(&newer_data_key).is_some());
-        assert!(memo.get(&newest_data_key).is_some());
-        assert!(memo.get(&index_key).is_some());
-        assert!(memo.get(&filter_key).is_some());
-        assert!(memo.get(&manifest_key).is_some());
+    fn replacement_and_eviction_release_reservations_without_invalidating_borrows() {
+        let pool = Arc::new(ReadWorkingMemory::new(4096, None));
+        let memo = SessionBlockMemo::new(Arc::clone(&pool));
+        memo.record_stored(&key(1), &[1; 1024]);
+        let stored = memo.stored(&key(1)).expect("stored block");
+        let stored_bytes = pool.in_use();
+        let block = DecodedMetadataSegmentBlock::Data {
+            block: Arc::new(DecodedDataBlock {
+                rows: Vec::new(),
+                row_keys: Vec::new(),
+            }),
+            decoded_bytes: 2048,
+        };
+        memo.record(&key(1), &block);
+        assert_eq!(pool.in_use(), stored_bytes + 1024 - arc_bytes::<()>());
+        let borrowed = memo.get(&key(1)).expect("decoded block");
+        memo.record(&key(1), &block);
+        assert_eq!(pool.in_use(), stored_bytes + 1024 - arc_bytes::<()>());
+        memo.record(&key(2), &block);
+        assert!(memo.get(&key(1)).is_none());
+        assert!(memo.get(&key(2)).is_some());
+        assert!(pool.in_use() <= 4096);
+        memo.record_stored(&key(3), &[3; 4096]);
+        assert_eq!(pool.in_use(), 0);
+        assert_eq!(stored.as_ref(), &[1; 1024]);
+        assert_eq!(borrowed.weight(), 2048);
+        drop(memo);
+        assert_eq!(pool.in_use(), 0);
     }
 }

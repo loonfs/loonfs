@@ -68,7 +68,9 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             manifest: None,
             manifest_bytes: 0,
             scan_runs: Arc::new(scan_runs),
-            block_memo: SessionBlockMemo::default(),
+            block_memo: SessionBlockMemo::new(super::cache::read_working_memory(Some(
+                segment_cache,
+            ))),
             peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
         }
     }
