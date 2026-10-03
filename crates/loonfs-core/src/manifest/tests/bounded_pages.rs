@@ -3,6 +3,7 @@
 use super::super::block_load::load_manifest_segment_rows_in_key_range_with_cache;
 use super::super::build::write_manifest_segment;
 use super::*;
+use loonfs_test_support::stores::ConcurrencyWatchStore;
 
 const FAMILY: ApiMetadataRowFamily = ApiMetadataRowFamily::DirentryBinds;
 
@@ -160,6 +161,9 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
                 .scan_range_page_with_keys(FAMILY, &lower, None, limit)
                 .await
                 .expect("merged page");
+            let peak = view.peak_page_rows();
+            assert_eq!(peak, page.len());
+            assert!(peak <= limit, "owned scan rows must fit one page");
             if page.is_empty() {
                 break;
             }
@@ -172,6 +176,134 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
             "merged traversal with page limit {limit}"
         );
     }
+}
+
+#[tokio::test]
+async fn bounded_pages_open_and_refill_segments_in_concurrent_waves() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let mut runs = Vec::new();
+    let mut expected = Vec::new();
+    for sequence in 1..=20 {
+        let segment_rows = rows(0, 1024, sequence);
+        let descriptor = segment(&store, &segment_rows).await;
+        expected.extend(segment_rows);
+        runs.push(MetadataRunManifest {
+            run_no: RunNo(sequence),
+            run_seq: ChangeSeq(sequence),
+            tier: RunTier::Delta,
+            segments: vec![MetadataFamilySegments {
+                family: FAMILY,
+                segments: vec![descriptor],
+            }],
+        });
+    }
+    let limit = 20 * 33;
+    expected.sort_by_key(|row| row.row_key_for_family(FAMILY));
+
+    for warm_first_window in [false, true] {
+        let lower = if warm_first_window {
+            rows(512, 1, 1)[0].row_key_for_family(FAMILY)
+        } else {
+            String::new()
+        };
+        let cache = MetadataSegmentCache::unshared(64 * 1024 * 1024);
+        if warm_first_window {
+            for run in &runs {
+                load_manifest_segment_rows_in_key_range_with_cache(
+                    &store,
+                    Some(&cache),
+                    &load::SessionBlockMemo::default(),
+                    &run.segments[0].segments[0],
+                    run.run_seq,
+                    &lower,
+                    None,
+                    1,
+                    scan::Readahead::Enabled,
+                )
+                .await
+                .expect("warm the first read-ahead window");
+            }
+        }
+        let watched = ConcurrencyWatchStore::new(
+            BlockingStore::new(
+                LocalFsStore::new(temp.path()).expect("store"),
+                KeyPredicate::any(),
+                OperationClass::Read,
+            ),
+            KeyPredicate::any(),
+        );
+        watched.inner().arm();
+        let view = scan::VerifiedMetadataSegments::from_runs(&watched, &cache, runs.clone());
+        let mut page = std::pin::pin!(view.scan_range_page(FAMILY, &lower, None, limit));
+        // The watcher yields once before the request reaches the holding store.
+        assert!(futures::poll!(page.as_mut()).is_pending());
+        assert!(futures::poll!(page.as_mut()).is_pending());
+        let waiting = watched.reads();
+        assert_eq!(waiting.total, 16, "warm first window: {warm_first_window}");
+        assert_eq!(waiting.peak_in_flight, 16);
+        watched.inner().release();
+        let wanted: Vec<_> = expected
+            .iter()
+            .filter(|row| row.row_key_for_family(FAMILY) >= lower)
+            .take(limit)
+            .cloned()
+            .collect();
+        assert_eq!(page.await.expect("merged page"), wanted);
+        assert_eq!(view.peak_page_rows(), limit);
+        assert_eq!(watched.reads().peak_in_flight, 16);
+    }
+}
+
+#[tokio::test]
+async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
+    let temp = tempdir().expect("tempdir");
+    let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
+    let expected: Vec<_> = (1..=1024)
+        .flat_map(|sequence| rows(1, 1, sequence))
+        .collect();
+    let mut segment_rows = rows(0, 1, 1);
+    segment_rows.extend(expected.clone());
+    segment_rows.extend(rows(2, 2, 1));
+    let descriptor = segment(&store, &segment_rows).await;
+    let index = block_fetch::load_segment_index(
+        &store,
+        None,
+        &load::SessionBlockMemo::default(),
+        &descriptor,
+    )
+    .await
+    .expect("index");
+    let first = index[1].block;
+    let last = index[1025].block;
+    let data_range = (first.offset, last.offset + u64::from(last.stored_bytes));
+    let filter_offset = descriptor.filter_block.offset;
+    let object_key = metadata_segment_object_key(&descriptor);
+    let runs = vec![MetadataRunManifest {
+        run_no: RunNo(1),
+        run_seq: ChangeSeq(1024),
+        tier: RunTier::Delta,
+        segments: vec![MetadataFamilySegments {
+            family: FAMILY,
+            segments: vec![descriptor],
+        }],
+    }];
+    let cache = MetadataSegmentCache::unshared(1);
+    let view = scan::VerifiedMetadataSegments::from_runs(&store, &cache, runs);
+    let filter_probe = expected[0].filter_key_for_family(FAMILY);
+    let prefix = format!("{filter_probe}-");
+    store.reset();
+    let actual = view
+        .scan_prefix_for_lookup(FAMILY, &prefix, &filter_probe, scan::Readahead::Disabled)
+        .await
+        .expect("prefix scan");
+    assert_eq!(actual, expected);
+    let data_gets: Vec<_> = store
+        .take_gets()
+        .into_iter()
+        .filter(|(_, range)| range.is_none_or(|(start, _)| start < filter_offset))
+        .collect();
+    assert_eq!(data_gets, vec![(object_key, Some(data_range))]);
 }
 
 #[tokio::test]
