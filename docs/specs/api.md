@@ -888,7 +888,13 @@ first publish acquires the next writer epoch. A request that reaches a session
 after its close began fails with `writer_session_closed`.
 
 The reference server opens a namespace's session on the first request that
-writes to it and keeps it open, with no cap and no eviction. It stops holding
+writes to it. The maintenance sweep closes a caught-up session when its last
+open is older than `idle_session_close_after_ms`, 1800000 ms (30 minutes) by
+default, and no request holds a handle clone. Metadata and, where maintained,
+the grep index must be caught up with the session's published seq. Sessions
+that never published through this process close on the same idle rule;
+they have no published seq to catch up with. A later write opens a fresh
+session whose first publish acquires a new writer epoch. The server also stops holding
 the session when the namespace is deleted or when a request finds that the
 namespace does not exist. It also stops holding a fenced session. The
 request that finds the fence fails with `writer_fenced`. The server does not

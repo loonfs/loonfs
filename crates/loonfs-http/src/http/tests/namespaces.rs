@@ -399,3 +399,55 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
             .last_published_seq()
     );
 }
+
+#[tokio::test]
+async fn an_idle_close_rechecks_the_seq_and_counts_subject_scoped_handles() {
+    let (_directory, _router, state) = host("idle-close-host").await;
+    let namespace_id = namespace_id("idle-close-checks");
+    create_namespace(&state, &namespace_id).await;
+    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let namespaces = crate::Namespaces::new_with_timer(state.runtime.clone(), timer.clone());
+    let handle = namespaces.open(&namespace_id).await.expect("open");
+    let initial = handle
+        .put_file("/first", b"first", &loonfs_test_support::test_actor())
+        .await
+        .expect("publish");
+    let current = handle
+        .put_file("/second", b"second", &loonfs_test_support::test_actor())
+        .await
+        .expect("publish again");
+    let scoped = handle.with_subject(loonfs_types::Subject {
+        principal_scope: loonfs_types::PrincipalScope::parse("scope").expect("scope"),
+        subject_id: loonfs_types::SubjectId::parse("reader").expect("subject"),
+        principals: loonfs_types::PrincipalSet::new(std::collections::BTreeSet::from([
+            loonfs_types::PrincipalId::parse("reader").expect("principal"),
+        ]))
+        .expect("principals"),
+    });
+    drop(handle);
+    timer.advance_ms(2);
+    assert!(namespaces
+        .close_if_idle(&namespace_id, Some(current.committed_seq), 1)
+        .await
+        .expect("check scoped clone")
+        .is_none());
+    drop(scoped);
+    assert!(namespaces
+        .close_if_idle(&namespace_id, None, 1)
+        .await
+        .expect("check a publish after observing no seq")
+        .is_none());
+    assert!(namespaces
+        .close_if_idle(&namespace_id, Some(initial.committed_seq), 1)
+        .await
+        .expect("check stale seq")
+        .is_none());
+    let closed = namespaces
+        .close_if_idle(&namespace_id, Some(current.committed_seq), 1)
+        .await
+        .expect("close idle session")
+        .expect("session closed");
+    assert!(closed.was_open);
+    assert_eq!(closed.drained_commits, 0);
+    assert!(namespaces.held().is_empty());
+}

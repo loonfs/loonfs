@@ -36,6 +36,12 @@ impl SettableWallClock {
     }
 }
 
+impl loonfs_types::MonotonicTimer for SettableWallClock {
+    fn monotonic_now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 impl loonfs::WallClock for SettableWallClock {
     fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
         Ok(self.0.load(Ordering::SeqCst))
@@ -77,7 +83,7 @@ impl SweepServer {
             config,
             runtime.object_store(),
             maintenance.clone(),
-            Arc::new(Namespaces::new(runtime.clone())),
+            Arc::new(Namespaces::new_with_timer(runtime.clone(), clock.clone())),
             grep_worker.clone(),
             recorder.as_ref(),
         )

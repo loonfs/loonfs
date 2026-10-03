@@ -130,6 +130,16 @@ impl Namespace<Writable> {
         self.session().last_published_seq()
     }
 
+    /// Returns whether this is the only handle holding its writer session.
+    /// Hosts must prevent concurrent opens while using this check to close it.
+    pub fn is_exclusively_held(&self) -> bool {
+        Arc::strong_count(
+            self.session
+                .as_ref()
+                .expect("a writable namespace handle should hold its writer session"),
+        ) == 1
+    }
+
     /// Refuses new work, cancels the session's metadata compaction, drains
     /// admitted work, waits for the fold and the compaction, and ends the
     /// session.
