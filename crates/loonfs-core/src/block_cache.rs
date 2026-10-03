@@ -69,6 +69,29 @@ pub struct DecodedBlockCache<K, V> {
     in_flight: Mutex<HashMap<K, Arc<OnceCell<V>>>>,
 }
 
+struct LoadGuard<'a, K: Eq + Hash, V> {
+    in_flight: &'a Mutex<HashMap<K, Arc<OnceCell<V>>>>,
+    cache_key: &'a K,
+    cell: Option<Arc<OnceCell<V>>>,
+}
+
+impl<K: Eq + Hash, V> Drop for LoadGuard<'_, K, V> {
+    fn drop(&mut self) {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .expect("decoded block cache in-flight lock should not be poisoned");
+        // Release the reference under the lock so concurrent drops cannot both leave an entry.
+        drop(self.cell.take());
+        if in_flight
+            .get(self.cache_key)
+            .is_some_and(|cell| Arc::strong_count(cell) == 1)
+        {
+            in_flight.remove(self.cache_key);
+        }
+    }
+}
+
 impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for DecodedBlockCache<K, V> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -123,18 +146,25 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<V, E>>,
     {
-        let cell = {
+        let load = {
             let mut in_flight = self
                 .in_flight
                 .lock()
                 .expect("decoded block cache in-flight lock should not be poisoned");
-            Arc::clone(
+            let cell = Arc::clone(
                 in_flight
                     .entry(cache_key.clone())
                     .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
+            );
+            LoadGuard {
+                in_flight: &self.in_flight,
+                cache_key,
+                cell: Some(cell),
+            }
         };
-        let result = cell
+        load.cell
+            .as_ref()
+            .expect("in-flight load should hold its cell")
             .get_or_try_init(|| async {
                 if let Some(block) = self.get(cache_key) {
                     return Ok(block);
@@ -144,18 +174,15 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
                 Ok(block)
             })
             .await
-            .cloned();
-        let mut in_flight = self
-            .in_flight
+            .cloned()
+    }
+
+    #[cfg(test)]
+    fn in_flight_len(&self) -> usize {
+        self.in_flight
             .lock()
-            .expect("decoded block cache in-flight lock should not be poisoned");
-        if in_flight
-            .get(cache_key)
-            .is_some_and(|current| Arc::ptr_eq(current, &cell))
-        {
-            in_flight.remove(cache_key);
-        }
-        result
+            .expect("decoded block cache in-flight lock should not be poisoned")
+            .len()
     }
 
     pub fn stats(&self) -> DecodedBlockCacheStats {
@@ -422,6 +449,15 @@ fn wrong_kind(object_key: &str, message: &str) -> ManifestLoadError {
 #[cfg(test)]
 mod tests {
     use super::{DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig};
+    use bytes::Bytes;
+    use futures::poll;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::ObjectStore;
+    use loonfs_test_support::stores::{
+        BlockingStore, KeyPredicate, OperationClass, RecordingStore,
+    };
+    use loonfs_types::MetadataSegmentId;
+    use std::pin::pin;
 
     #[derive(Clone)]
     struct Block(usize);
@@ -429,6 +465,77 @@ mod tests {
     impl DecodedBlock for Block {
         fn weight(&self) -> usize {
             self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_loads_release_entries_after_the_last_waiter_leaves() {
+        for max_decoded_bytes in [0, 64] {
+            let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::with_max_decoded_bytes(
+                max_decoded_bytes,
+            ));
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let store = RecordingStore::new(
+                BlockingStore::new(
+                    LocalFsStore::new(directory.path()).expect("local store"),
+                    KeyPredicate::any(),
+                    OperationClass::Get,
+                ),
+                KeyPredicate::any(),
+            );
+            let keys: Vec<_> = (0..64)
+                .map(|index| {
+                    MetadataSegmentId::parse(format!("seg_{index:032x}")).expect("segment id")
+                })
+                .collect();
+            let mut loads = Vec::new();
+            for key in &keys {
+                store.inner().arm();
+                let mut load = Box::pin(cache.get_or_load(key, || async {
+                    store.get(key.as_str(), None).await.map(|_| Block(1))
+                }));
+                assert!(poll!(load.as_mut()).is_pending());
+                assert!(poll!(pin!(store.inner().wait_until_blocked())).is_ready());
+                loads.push(load);
+            }
+            assert_eq!(cache.in_flight_len(), keys.len());
+            drop(loads);
+            assert_eq!(cache.in_flight_len(), 0);
+
+            let key = &keys[0];
+            store
+                .put_overwrite(key.as_str(), Bytes::from_static(b"block"))
+                .await
+                .expect("write block");
+            let load = || {
+                cache.get_or_load(key, || async {
+                    store
+                        .get(key.as_str(), None)
+                        .await
+                        .map(|body| Block(body.expect("block should exist").len()))
+                })
+            };
+            let mut driver = Box::pin(load());
+            let mut waiter = Box::pin(load());
+            assert!(poll!(driver.as_mut()).is_pending());
+            assert!(poll!(waiter.as_mut()).is_pending());
+            drop(waiter);
+            assert_eq!(cache.in_flight_len(), 1);
+
+            let mut waiter = Box::pin(load());
+            assert!(poll!(waiter.as_mut()).is_pending());
+            drop(driver);
+            assert_eq!(cache.in_flight_len(), 1);
+            assert!(poll!(waiter.as_mut()).is_pending());
+            let mut newcomer = Box::pin(load());
+            assert!(poll!(newcomer.as_mut()).is_pending());
+
+            store.inner().release();
+            let (waiter, newcomer) = futures::join!(waiter, newcomer);
+            assert_eq!(waiter.expect("remaining waiter should finish").0, 5);
+            assert_eq!(newcomer.expect("new waiter should finish").0, 5);
+            assert_eq!(store.counts().gets, 1);
+            assert_eq!(cache.in_flight_len(), 0);
         }
     }
 
