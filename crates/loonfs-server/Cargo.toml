@@ -49,6 +49,7 @@ loonfs-core.workspace = true
 loonfs-test-support.workspace = true
 rcgen.workspace = true
 tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true, features = ["test-util"] }
 ureq.workspace = true
 
 [lints]

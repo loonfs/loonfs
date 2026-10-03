@@ -856,10 +856,10 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         .expect("claim the namespace before the races start");
 
     store.races_left.store(5, SeqCst);
-    maintenance
+    assert!(!maintenance
         .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
         .await
-        .expect("a lost race is an outcome, not an error");
+        .expect("a lost race is an outcome, not an error"));
     assert_eq!(
         store.races_run.load(SeqCst),
         3,
@@ -877,10 +877,10 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         .await
         .expect("another process claims the namespace");
     let fenced = current_manifest_payload(store.as_ref(), &namespace).await;
-    maintenance
+    assert!(!maintenance
         .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
         .await
-        .expect("a fenced step is an outcome, not an error");
+        .expect("a fenced step is an outcome, not an error"));
     assert_eq!(
         current_manifest_payload(store.as_ref(), &namespace).await,
         fenced,
@@ -919,10 +919,13 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         let before = current_manifest_payload(store.as_ref(), &namespace)
             .await
             .manifest_no;
-        maintenance
+        let caught_up = maintenance
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
             .await
             .expect("run the metadata loop");
+        if published.is_empty() {
+            assert!(!caught_up, "the unit cap cannot establish completion");
+        }
         let after = current_manifest_payload(store.as_ref(), &namespace)
             .await
             .manifest_no;
@@ -1027,6 +1030,15 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             .expect("collect what the setup left behind");
     }
 
+    store.reset();
+    let cancelled = crate::MaintenanceCancellation::new();
+    cancelled.cancel();
+    assert!(!maintenance
+        .maintain_metadata_while_due(&idle, &cancelled)
+        .await
+        .expect("cancellation is not completion"));
+    assert_eq!(requests(store.counts()), [0; 4]);
+
     // A read anchor costs five GETs and one HEAD, and a tombstone's costs two
     // GETs. Collection lists pins and manifests for its live set, then five
     // families, then a retired namespace's content.
@@ -1052,6 +1064,9 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         let metadata = maintenance
             .maintain_metadata_while_due(namespace, &crate::MaintenanceCancellation::new())
             .await;
+        if metadata_error.is_none() {
+            assert!(metadata.as_ref().expect("idle metadata is caught up"));
+        }
         assert_eq!(metadata.err().map(|error| error.code()), metadata_error);
         assert_eq!(
             requests(store.counts()),

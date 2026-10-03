@@ -1283,10 +1283,14 @@ not running can all delay complete reclamation. A deleted manifest refuses commi
 It does not revoke capabilities already issued. The retirement grace exceeds
 the presigned URL lifetime.
 
-The reference server's maintenance sweep lists every namespace in its store,
-deleted ones included, and runs GC for each one on every collection pass, so
-a deleted namespace is reclaimed within one collection interval after it
-becomes eligible, after a restart too. Nothing schedules GC when a
+The reference server's maintenance sweep visits held sessions whose published
+seq moved and collects their garbage on the collection interval. A full pass
+lists every namespace in its store, deleted ones included, and runs GC for
+each one at start and on its full sweep interval, 24 hours by default.
+Namespaces nobody writes to through this process, including forks and deleted
+namespaces, wait for the full pass. It also covers leftovers of a crashed
+process and garbage still inside a grace window. An idle namespace costs no
+request between full passes. Nothing schedules GC when a
 namespace is deleted, when an upload expires, or when a fork retires and its
 source has more to collect. A host
 without the sweep runs GC itself, with `POST .../runs` and body
