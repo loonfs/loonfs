@@ -1,53 +1,49 @@
-# Maintenance hosting and recovery
+# Maintenance hosting
 
-A writer session folds its own namespace's WAL tail and compacts its metadata. The host sweep finishes work for sessions this process wrote to and periodically visits every namespace in the store. Published seqs decide which sessions to visit. Each visit reads durable state to decide what work is due. A replacement host starts with a full pass.
+A writable session maintains its own namespace as it publishes. The host ticks the sessions it holds and runs a daily listing pass for the rest of the store. All scheduling facts are temporary. Durable state decides what each maintenance call can do.
 
-## The writer
+## Session state
 
-A writable session folds its WAL tail when the tail reaches the fold thresholds, or when a publish is refused at the write stop. After each fold it publishes, it runs `Maintenance::maintain_metadata_while_due` over its namespace: bounded compaction steps while compaction is due, and a streaming compaction when a step requires one. Its folds take fold permits and its merges take compaction permits from the runtime's execution budget. Closing the session or shutting the runtime down cancels the compaction, which stops at its next block.
+| State | Meaning | Leaves when |
+| --- | --- | --- |
+| Active | Commits are arriving. The publisher folds at the fold thresholds and compacts after a fold. | No commit for one tick. |
+| Settling | Metadata, index work, or collection remains due. | A tick finds nothing due. |
+| Quiet | Metadata is caught up, the maintained index is current, and collection is not due. Ticks cost no store requests. | A commit arrives, an index lifecycle changes, or collection becomes due. |
+| Closed | A Quiet session passed its idle threshold and no caller held its handle. | A later open creates a fresh session. |
 
-One call of `maintain_metadata_while_due` publishes at most 16 compaction units, bounded or streaming, and then returns. Both forms return `Result<bool>`. `true` means nothing is due now and nothing becomes due without another commit under the supplied options. The result comes from reads the call already made. The call returns `false` when it stops at the unit or lost-race limit, is fenced or cancelled, leaves a streaming compaction unfinished, or leaves a tail waiting for the idle fold age. The session's next fold starts compaction again. The sweep continues unfinished work even without another commit.
+The runtime records the last published seq and its monotonic time. A publish clears the metadata caught-up flag. The publisher sets it from the maintenance result after its fold, only if the published seq still matches. Its self-maintenance leaves a tail requiring a later idle fold unsettled. The host records metadata results with the same seq check, so a concurrent publish remains due.
 
-## The sweep
+Each held entry in `Namespaces` keeps the handle, last opened time, indexed seq, index-dirty flag, collected seq and time, and metadata retry time. Dropping the entry drops these facts. Visits retain the entry they started with, so a result cannot update a replacement after close. The ordered table releases its lock between entries. The sweep has no namespace progress maps. The HTTP enable and disable handlers hold a session and mark its entry dirty. The grep worker keeps no host lifecycle-change set.
 
-The reference server runs the sweep when its `maintenance` mode maintains. One loop serializes session and full passes:
+## Tick and daily pass
 
-- Every `maintenance_interval_ms`, 300000 ms by default, a session pass walks `Namespaces::held()`. It skips sessions that published nothing. It visits a session when its last published seq differs from the seq recorded at its last caught-up visit.
-- Every `gc_interval_ms`, 3600000 ms by default, the session pass also collects garbage for sessions whose seq moved since their last successful collection. Collection has its own recorded seq, so finishing metadata does not suppress collection.
-- At start and every `full_sweep_interval_ms`, 86400000 ms (24 hours) by default, a full pass visits every namespace in the store and collects garbage. This covers forks, deleted namespaces, leftovers of a crashed process, and garbage still inside a grace window. A namespace nobody writes to through this process waits for the full pass.
+Every `tick_interval_ms`, 5000 ms by default, `Sweep::tick` walks held ids without cloning handles. Once a session has gone one tick without a commit, it runs the first due step:
 
-A visit:
+1. Metadata: one `maintain_metadata_while_due` call while metadata is not caught up, including a tail waiting for its idle fold age. A call publishes at most 16 compaction units. If it remains unfinished or fails, the entry waits `maintenance_interval_ms`, 300000 ms by default, before another metadata call. Reaching the idle fold age permits one earlier attempt; an unsuccessful attempt after that age uses the retry delay.
+2. Index: when grep is maintained and the entry is dirty or its indexed seq is older than its published seq. A visit runs up to 16 build steps, then a reorganization step. Unfinished, failed, and cancelled builds leave the entry dirty, even without a published seq. An index change during a build also remains dirty.
+3. Collection: core GC and, when maintained, grep GC, when the published seq moved since the last successful collection and `gc_interval_ms`, 3600000 ms by default, has elapsed. A newly held entry starts this clock at open.
+4. Close: when the entry is Quiet, its last open is more than `idle_session_close_after_ms`, 1800000 ms by default, ago, and no caller holds its handle. Seq and exclusive ownership are checked together under the table lock. Opens wait through the drain and get a fresh session. They do not receive `writer_session_closed` from this close path.
 
-1. calls `maintain_metadata_while_due`, which folds a tail whose newest commit is past the idle fold age and compacts while compaction is due, at most 16 units;
-2. runs grep build steps while each one publishes, at most 16, and then one reorganize step once the index is up to date, when the server maintains the grep index;
-3. on a collection pass, calls `gc` and then grep garbage collection.
+The closing entry holds a shared close future. Only opens of that namespace wait for its drain. Opens of other namespaces continue. Table reads and updates keep a short synchronous lock, released before the drain. A cancelled close leaves the shared future held so the next open can finish it. Close completion removes only its original entry. A later session's first publish acquires a new writer epoch. Each held session retains its publisher, engine state, head position, and allocated queue capacities. Closing releases these after admitted work ends; shared caches keep their own limits.
 
-The sweep records the seq read before the visit only when metadata and, where maintained, the grep build are caught up. A commit during the visit therefore remains eligible for the next session pass. It records collection separately when core and grep collection succeed. It drops recorded seqs for sessions no longer held. A full pass can record progress for held sessions too.
+`Sweep::run_pass` keeps the listing pass. It runs at start and every `full_sweep_interval_ms`, 86400000 ms by default, alongside ticks. It visits every listed namespace, runs metadata and index maintenance, and collects garbage. This covers forks, deleted namespaces, work left by a crashed process, and garbage still inside its grace window. A namespace nobody writes to through this host receives no tick visits.
 
-A session pass closes a caught-up session when its last open is older than `idle_session_close_after_ms`, 1800000 ms (30 minutes) by default, and no request holds a clone. The setting must be positive. A session with unfinished metadata or index work stays open for that pass. Under the handle table lock, the close checks the elapsed monotonic time, the shared session's reference count, and the caught-up published seq. The sweep drops its own handle clones before that check. Closing drops the session's maintenance, collection, and index progress records. A later write opens a fresh session whose first publish acquires a new writer epoch.
+Both paths share `max_concurrent_maintenance` visit slots and a per-namespace visiting set. They never visit the same namespace at the same time. A busy namespace is left to its current visit. A full pass lists up to 1000 ids per page and requests the next page when a visit slot in that pass is free and no listed id is waiting. A listing failure starts no more visits; running visits finish before the pass returns the error. The next daily pass lists again.
 
-Each held session keeps its publisher, commit engine and writer epoch, head position, and the allocated capacities of its publication queue and in-flight map. These remain allocated while the session is idle. Runtime caches and execution limits are shared across sessions. Closing releases the session's retained memory after admitted work ends; it leaves the shared caches under their own limits.
+The tick and daily pass have independent loops. Streaming compaction holds one visit slot until it finishes. Other free slots can continue work. All maintenance from one runtime shares its compactor claim and execution budget. Shutdown cancels both loops, stops new visits, and lets streaming compaction stop at its next block, bounded by the server's shutdown deadline.
 
-Session and full passes share `max_concurrent_maintenance` visit slots. A full pass lists namespace ids with `loonfs_objectstore::layout::list_namespace_ids`, one page of up to 1,000 ids per list request. The sweep lists the next page when a slot is free and no listed id is waiting, so a slow visit does not delay later pages. A failed call is logged with the namespace id and call name, counted, and left for a later pass. A failed listing starts no new visit. Running visits finish, and the pass ends with the listing error. The next full pass lists again.
+## Store request costs
 
-Hosts can drive the passes directly through `run_pass`, `run_session_pass`, and `run_index_pass`. Public session and full pass calls are serialized with the scheduled maintenance passes. A full pass delays session passes until it ends. It does not delay the index pass.
+A Quiet session costs zero store requests across ticks. An idle close also costs zero. An unfinished metadata visit that finds another process holding the compactor costs 6 requests per metadata retry interval, rather than per tick. A waiting tail is retried on that interval and when it first reaches the idle fold age.
 
-A streaming compaction of a very large namespace is a single unit and can run for a long time. It holds one visit slot while it runs, the pass waits for it before it ends, and the next maintenance pass starts late. Other namespaces in the same pass are not held up.
-
-Every value from one runtime shares one compactor claim, so the writer's sessions, the sweep, and explicit maintenance requests never fence one another. The sweep's own limit bounds only how many namespaces it visits at once.
-
-When the server maintains the grep index, a separate loop runs an index pass every five seconds over the writer sessions the server holds. It compares each session's last published seq with the seq it last indexed through. The grep worker also records successful enable and disable changes in a shared set. Each index pass drains that set, forgets those namespaces' recorded seqs, and selects them for a build. Enabling an index through this process therefore starts building it on the next index pass, with or without a prior commit or a held session. After a build catches up, the pass records the held session's seq if it has one. Without a published seq, the namespace is not selected again until it publishes or its lifecycle changes again. A held session with no new commit or lifecycle change costs no store request, including when its index is disabled. The index pass can run while a session or full pass is running. The per-namespace grep claim prevents concurrent builds of the same index. Its build limits and failure handling are unchanged.
-
-## What one pass costs
-
-An idle namespace costs no request between full passes. A session still waiting for an idle fold or unfinished work is visited again. A full pass costs one list request per page of namespaces and a fixed number of requests for each namespace. The reference server's request-counting test pins the numbers for an idle namespace, one with nothing to fold, compact, or collect:
+A daily pass costs one namespace listing per page plus the following requests for a namespace with nothing to fold, compact, or collect:
 
 | Pass | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- | --- |
 | Does not collect | 6 GET or HEAD | 7 GET or HEAD | 26 GET or HEAD |
 | Collects | 12 GET or HEAD and 7 LIST | 20 GET or HEAD and 9 LIST | 38 GET or HEAD and 9 LIST |
 
-The core metadata visit remains 6 requests, and core collection remains 13 additional requests, for 19 total. At the former five-minute listing cadence, metadata alone cost 1,728 requests per idle namespace per day. Session passes now cost zero for a caught-up idle namespace. Closing an idle session also costs zero store requests; close only drains work already admitted. Each unreferenced object still inside its grace adds a request on a collection pass, and work that is due adds its own requests. A deleted namespace stays listed because its tombstone manifest is never collected; it costs a visit on each full pass.
+Objects still inside their grace windows and due work add requests. Deleted namespaces stay listed because their tombstone manifests remain durable.
 
 ## Recovery after a restart
 

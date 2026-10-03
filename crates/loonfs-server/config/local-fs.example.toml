@@ -70,12 +70,14 @@ writer_id = "loonfs-server-local"
 # How many namespaces the maintenance sweep visits at once. Defaults to 8.
 #max_concurrent_maintenance = 8
 
-# Milliseconds from the start of one session pass to the start of the next. A
-# pass that runs longer is followed at once. Defaults to 300000 (5 minutes).
+# Milliseconds between ticks of held sessions. Each tick runs the first due
+# step: metadata, index, collection, or close. Defaults to 5000 (5 seconds).
+#tick_interval_ms = 5000
+
+# Milliseconds before retrying unfinished metadata. Defaults to 300000 (5 minutes).
 #maintenance_interval_ms = 300000
 
-# Least milliseconds between session passes that collect garbage for sessions
-# whose published seq moved. Defaults to 3600000 (1 hour).
+# Least milliseconds between collections for sessions whose published seq moved. Defaults to 3600000 (1 hour).
 #gc_interval_ms = 3600000
 
 # Milliseconds between full passes over every namespace, with collection.

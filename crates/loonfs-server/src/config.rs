@@ -244,13 +244,13 @@ pub struct ServerConfig {
     /// merges also wait for the fold and compaction permits. Defaults to 8.
     #[serde(default = "default_max_concurrent_maintenance")]
     pub max_concurrent_maintenance: usize,
-    /// Milliseconds from the start of one session maintenance pass to the
-    /// start of the next. A pass that runs longer is followed at once.
-    /// Defaults to 300000 (5 minutes).
+    /// Milliseconds between ticks of held sessions. Defaults to 5000.
+    #[serde(default = "default_tick_interval_ms")]
+    pub tick_interval_ms: u64,
+    /// Milliseconds before retrying unfinished metadata. Defaults to 300000.
     #[serde(default = "default_maintenance_interval_ms")]
     pub maintenance_interval_ms: u64,
-    /// Least milliseconds between session passes that collect garbage for
-    /// sessions whose published seq moved. Defaults to 3600000 (1 hour).
+    /// Least milliseconds between collections for sessions whose seq moved. Defaults to 3600000 (1 hour).
     #[serde(default = "default_gc_interval_ms")]
     pub gc_interval_ms: u64,
     /// Milliseconds between full passes over every namespace, with collection.
@@ -369,6 +369,10 @@ fn default_max_concurrent_downloads() -> usize {
 
 fn default_max_concurrent_maintenance() -> usize {
     8
+}
+
+fn default_tick_interval_ms() -> u64 {
+    5_000
 }
 
 fn default_maintenance_interval_ms() -> u64 {
@@ -683,6 +687,7 @@ impl ServerConfig {
                 "max_concurrent_maintenance",
                 self.max_concurrent_maintenance as u64,
             ),
+            ("tick_interval_ms", self.tick_interval_ms),
             ("maintenance_interval_ms", self.maintenance_interval_ms),
             ("gc_interval_ms", self.gc_interval_ms),
             ("full_sweep_interval_ms", self.full_sweep_interval_ms),
@@ -1544,6 +1549,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.max_concurrent_uploads, 8);
         assert_eq!(config.max_concurrent_downloads, 16);
         assert_eq!(config.max_concurrent_maintenance, 8);
+        assert_eq!(config.tick_interval_ms, 5_000);
         assert_eq!(config.maintenance_interval_ms, 300_000);
         assert_eq!(config.gc_interval_ms, 3_600_000);
         assert_eq!(config.full_sweep_interval_ms, 86_400_000);
@@ -1556,6 +1562,7 @@ root = "/tmp/loonfs-server"
             "max_concurrent_uploads",
             "max_concurrent_downloads",
             "max_concurrent_maintenance",
+            "tick_interval_ms",
             "maintenance_interval_ms",
             "gc_interval_ms",
             "full_sweep_interval_ms",

@@ -864,8 +864,11 @@ open is older than `idle_session_close_after_ms`, 1800000 ms (30 minutes) by
 default, and no request holds a handle clone. Metadata and, where maintained,
 the grep index must be caught up with the session's published seq. Sessions
 that never published through this process close on the same idle rule;
-they have no published seq to catch up with. A later write opens a fresh
-session whose first publish acquires a new writer epoch. The server also stops holding
+they have no published seq to catch up with, but an enabled index must finish
+building. Collection must not be due. An open of the closing namespace waits
+for the drain and opens a fresh session. Opens of other namespaces do not wait
+for this close. Waiting opens do not fail with `writer_session_closed`
+from this path. The new session's first publish acquires a new writer epoch. The server also stops holding
 the session when the namespace is deleted or when a request finds that the
 namespace does not exist. It also stops holding a fenced session. The
 request that finds the fence fails with `writer_fenced`. The server does not

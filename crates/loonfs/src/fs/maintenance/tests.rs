@@ -1103,8 +1103,8 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     assert_eq!(fenced.compaction, CompactionStepOutcome::Fenced {});
     assert_eq!(
         requests(store.counts()),
-        [9, 1, 0, 0],
-        "an idle visit runs the step that reports a fence"
+        [5, 1, 0, 0],
+        "the observed anchor already reports the fence"
     );
 }
 

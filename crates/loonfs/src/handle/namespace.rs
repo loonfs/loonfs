@@ -130,6 +130,22 @@ impl Namespace<Writable> {
         self.session().last_published_seq()
     }
 
+    /// Reads the last publication time on the runtime's monotonic clock.
+    pub fn last_published_ms(&self) -> Option<u64> {
+        self.session().last_published_ms()
+    }
+
+    /// Reads whether metadata maintenance found nothing left due for this session.
+    pub fn metadata_caught_up(&self) -> bool {
+        self.session().metadata_caught_up()
+    }
+
+    /// Records a host's metadata result only if no newer commit has published.
+    pub fn record_metadata_maintenance(&self, expected_seq: Option<ChangeSeq>, caught_up: bool) {
+        self.session()
+            .record_metadata_maintenance(expected_seq, caught_up);
+    }
+
     /// Returns whether this is the only handle holding its writer session.
     /// Hosts must prevent concurrent opens while using this check to close it.
     pub fn is_exclusively_held(&self) -> bool {

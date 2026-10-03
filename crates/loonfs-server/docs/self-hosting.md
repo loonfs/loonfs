@@ -352,7 +352,7 @@ counted in any budget and sit on top.
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including the folds that maintenance requests, namespace deletes, and checkpoint, snapshot, and fork creation start | Concurrency |
 | Compactions | `max_concurrent_compactions` | 2 | Metadata merges running at once, bounded steps and streaming compactions alike, whether writer sessions, the maintenance sweep, or maintenance requests start them | Concurrency |
 | Sweep visits | `max_concurrent_maintenance` | 8 | Namespaces the maintenance sweep visits at once, including their grep indexing | Concurrency |
-| Grep steps | `[grep].max_concurrent_steps` | 2 | Grep build and reorganize steps that hold file content or index segments at once, across sweep visits and the index pass | Concurrency |
+| Grep steps | `[grep].max_concurrent_steps` | 2 | Grep build and reorganize steps that hold file content or index segments at once, across daily visits and session ticks | Concurrency |
 | Publications | `publication.max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
 A fold holds a block memo and its segment output, so it can use up to 96 MiB.
@@ -404,9 +404,8 @@ Reads have no concurrency limit, so their block memos have no total.
 Grep adds a 256 MiB block cache on a server that answers queries. The cache
 has no setting. A query reads up to 32 candidate files of at most 8 MiB each
 at once, so one query can hold up to 256 MiB. Queries have no concurrency
-limit. Index building runs in sweep visits and in the index pass over held
-sessions. A build step reads at most `max_content_bytes_per_step` of file
-content, 64 MiB by default, and a reorganize step merges at most 64 MiB of
+limit. Index building runs in daily sweep visits and session ticks. A build
+step reads at most `max_content_bytes_per_step` of file content, 64 MiB by default, and a reorganize step merges at most 64 MiB of
 decoded index blocks. A step that finds work waits for one of
 `[grep].max_concurrent_steps` permits before it reads either, and holds it
 until it publishes. Indexing therefore holds at most two steps of content at
@@ -637,92 +636,62 @@ that does not maintain leaves background work to another process. Long
 metadata compactions can log progress for an extended period. No action is
 required unless failures repeat.
 
-Background work has two parts. A writer session folds its own WAL tail at
-the fold thresholds, and it compacts its namespace's metadata after each fold
-it publishes, at most 16 compaction units each time. Its next fold continues
-the work. When a session stops folding with compaction still due, the next
-sweep pass continues it. The sweep does everything else on a cadence.
-The sweep records the last published seq it brought up to date for each held
-session, separately from the seq it last collected. Losing those records on a
-restart loses no work: the first pass after a start visits every namespace.
+A writer session folds its WAL tail at the fold thresholds and compacts its
+metadata after each fold it publishes, at most 16 compaction units each time.
+It records its last published seq, monotonic publication time, and whether
+metadata maintenance found nothing left due. A publish clears that last fact.
+The host keeps the remaining scheduling facts beside the held handle.
 
-A full sweep pass lists every namespace in the store, deleted ones included. It
-reads one page of up to 1,000 namespace ids per list request and visits up
-to `max_concurrent_maintenance` namespaces at once, 8 by default. The
-namespaces of every page share those visits: the sweep lists the next page
-when a visit slot is free and no listed namespace is waiting, so one slow
-visit does not delay the namespaces on later pages. A visit does this, in
-order:
+Every `tick_interval_ms`, 5000 ms (5 seconds) by default, the sweep walks held
+entries without cloning their handles. A session is Active until one tick has
+passed without a commit. It then becomes Settling while work remains due, or
+Quiet when metadata is caught up, its maintained grep index is current, and
+collection is not due. A Quiet tick costs zero store requests.
 
-1. Folds a WAL tail whose newest commit is `idle_fold_after_ms` old, then
-   compacts the namespace's metadata while compaction is due, at most 16
-   compaction units per visit. A large compaction runs as a streaming
-   compaction.
-2. When `[grep].mode` maintains the index, runs grep build steps while each
-   one publishes, at most 16, then one reorganize step once the index is up
-   to date. A step that finds work first waits for a grep step permit. See
-   [Resource sizing](#resource-sizing).
-3. On a collection pass, collects garbage, then grep garbage.
+A tick runs the first due step for each session, in this order:
 
-A session pass starts every `maintenance_interval_ms`, 300000 ms (5 minutes)
-by default. It walks the writer sessions this process holds and skips sessions
-that published nothing. It visits a session whose published seq differs from
-the seq recorded at its last caught-up visit. A visit records the seq read
-before it began, only when metadata and the maintained grep build are caught
-up. Work left after 16 units and tails waiting for their idle fold age remain
-eligible without another commit. Recorded seqs are dropped when a session is
-no longer held.
+1. Metadata, including a tail waiting for its idle fold age: one maintenance
+   call, at most 16 compaction units. If work remains or the call fails,
+   `maintenance_interval_ms`, 300000 ms (5 minutes) by default, is the retry
+   delay. Reaching the idle fold age permits one earlier attempt. A session
+   fenced by another compactor costs 6 requests per retry
+   interval, rather than every tick.
+2. Grep index, when maintained and dirty or behind the published seq: up to
+   16 build steps and then a reorganization step. Unfinished work stays dirty
+   for another tick. HTTP enable and disable hold a session and mark its entry
+   dirty, so a build continues even without a local commit.
+3. Collection, when the published seq moved since its last successful
+   collection and `gc_interval_ms`, 3600000 ms (1 hour) by default, has elapsed.
+   The first collection waits that interval from opening the held entry.
+4. Close, when Quiet, idle past `idle_session_close_after_ms`, 1800000 ms
+   (30 minutes) by default, and exclusively held. Last opened time, published
+   seq, and handle ownership are checked under the table lock. An open of the
+   closing namespace waits for the drain and gets a fresh session. Opens of
+   other namespaces do not wait for this close. The fresh session's first publish
+   acquires a new writer epoch. Close costs zero store requests.
 
-A caught-up session closes when its last open is older than
-`idle_session_close_after_ms`, 1800000 ms (30 minutes) by default, and no
-request holds a clone. This setting must be positive. Sessions with unfinished metadata or index
-work stay open for that pass. The close uses monotonic time and checks the
-shared handle count and published seq under the handle table lock. An idle
-close costs zero store requests and drops the sweep's progress records. A
-write after close opens a fresh session; its first publish acquires a new
-writer epoch. A request arriving while close drains can receive retryable
-`writer_session_closed`.
+Each held session retains its publisher, engine state, head position, and
+allocated queue capacities. Closing releases these after admitted work ends.
+Shared caches and execution limits keep their own lifetimes. A server whose
+maintenance mode does not maintain has no sweep to close idle sessions.
 
-Each held idle session keeps its publisher, commit engine and writer epoch,
-head position, and the allocated capacities of its publication queue and
-in-flight map. These are separate from the runtime's shared caches and
-execution limits. Closing releases that retained session memory after its
-admitted work ends. A server whose maintenance mode does not maintain has no
-sweep to close idle sessions.
+The daily pass runs at start and every `full_sweep_interval_ms`, 86400000 ms
+(24 hours) by default. It lists every namespace, runs metadata and index
+maintenance, and collects garbage. It covers namespaces this host does not
+write to, forks, deleted namespaces, work left by a crashed process, and
+garbage still inside a grace window. Losing the host's in-memory facts loses
+no durable progress.
 
-Every `gc_interval_ms`, 3600000 ms (1 hour) by default, the session pass also
-collects core and grep garbage for sessions whose seq moved since their last
-successful collection. A full pass runs at start and every
-`full_sweep_interval_ms`, 86400000 ms (24 hours) by default, and always collects.
-All three interval settings must be positive. One loop serializes session and
-full passes, using the same `max_concurrent_maintenance` visit slots. A full
-pass delays session passes until it ends. It does not delay the index pass.
+The daily pass and ticks run alongside each other. Both share
+`max_concurrent_maintenance` visit slots, 8 by default, and a per-namespace
+visiting set prevents overlap. A streaming compaction holds one slot while
+other free slots continue work. The daily pass lists up to 1000 namespace ids
+per page and requests another page when its visit slots allow it. Hosts can
+call `Sweep::run_pass` and `Sweep::tick` directly.
 
-A namespace nobody writes to through this process waits for the full pass.
-This covers forks, deleted namespaces, leftovers of a crashed process, and
-garbage still inside a grace window. Hosts that run passes themselves can use
-`Sweep::run_pass` for a full pass, `Sweep::run_session_pass` for held sessions,
-and `Sweep::run_index_pass` for indexing.
-
-A streaming compaction counts as one unit, and on a very large namespace it
-can run for a long time. It holds one visit slot while it runs, the pass
-waits for it before it ends, and the next maintenance pass starts late. The other
-namespaces in that pass are not held up.
-
-When `[grep].mode` maintains the index, a separate loop runs an index pass every
-5 seconds over the writer sessions this server holds, one at a time. It runs
-build steps for a session when it has committed since that pass last indexed it.
-It also builds namespaces whose index lifecycle changed through this process.
-Enabling an index therefore starts building it on the next index pass, with or
-without a prior commit or a held session. A namespace with no published seq is
-not selected again until it publishes or its lifecycle changes again. The index
-pass can run while a session or full pass is running. A held session with neither
-change costs no store request, including when its index is disabled. The
-per-namespace grep claim prevents concurrent builds of the same index. Commits
-made through another server or writer are indexed by the next full pass. A grep
-query stays correct while the index is behind: it scans the files committed
-after the index, and fails with `index_lagging` past its scan budget unless
-`allow_stale` is set.
+All interval and idle-close settings must be positive. The grep query path
+remains correct while its index is behind: it scans later commits and fails
+with `index_lagging` past its scan budget unless `allow_stale` is set.
 
 A failed call on one namespace is logged with the namespace id and the call
 name, counted in `loonfs.maintenance.sweep_visit_failures`, and tried again
@@ -772,10 +741,11 @@ maintenance response means a streaming compaction is due. The writer
 session or the next sweep visit runs it.
 
 A namespace that stops writing below the fold thresholds is folded by the
-first sweep pass after its newest commit is `idle_fold_after_ms` old. The
-period defaults to 900000 ms, which is 15 minutes, so at the default
-session interval a tail written through this process is folded within about
-20 minutes. After a restart or a write through another process, it waits for
+first eligible metadata tick after its newest commit is `idle_fold_after_ms` old. The
+period defaults to 900000 ms, which is 15 minutes. With a free visit slot,
+a held tail gets its first idle-fold attempt within one tick after that age,
+even when the metadata retry delay is longer. After a restart or a write
+through another process, it waits for
 a full pass after the age threshold. A namespace written more often than once
 per period is never folded this way; its writer folds it at the thresholds. Set
 `idle_fold_after_ms = 0` to turn the rule off. An explicit `metadata`
