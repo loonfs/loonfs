@@ -72,6 +72,52 @@ For S3 or Google Cloud Storage, configure the bucket to remove incomplete
 multipart uploads. Both providers call this action
 `AbortIncompleteMultipartUpload`.
 
+## Set one number
+
+Set top-level `memory_limit_bytes` to the pod's memory limit:
+
+```toml
+memory_limit_bytes = 4294967296
+```
+
+When absent on Linux, the server reads `/sys/fs/cgroup/memory.max` (v2),
+then `/sys/fs/cgroup/memory/memory.limit_in_bytes` (v1). Missing or unreadable
+files, `max`, invalid numbers, and values at least 1 EiB are ignored. Without
+a finite limit, all existing defaults remain and startup logs that the server
+is unsized.
+
+```text
+fixed = 128 MiB
+      + max_connections x 472 KiB
+      + (max_concurrent_uploads + max_concurrent_downloads) x 8 MiB
+headroom = 10% of memory_limit_bytes
+managed = memory_limit_bytes - fixed - headroom
+```
+
+The fixed terms cover process cost, transport retention, and transfer chunks.
+Headroom covers allocator retention. Startup fails when managed memory is
+below 256 MiB or the final pools plus fixed costs and headroom exceed the
+limit. The error names each term. Fractions round down to whole bytes.
+
+| Pool | Share of managed memory | Setting |
+| --- | ---: | --- |
+| Metadata segment cache | 40% | `metadata_cache.max_segment_bytes` |
+| Head state cache | 10% | `metadata_cache.max_head_state_bytes` |
+| Grep cache | 10% | `grep.max_cache_bytes`; added to the segment share when grep is not served |
+| Read working memory | 20% | `max_read_working_bytes` |
+| Admitted publication bytes | 10% | `publication.max_estimated_bytes` |
+| Merge input | 10% | `max_merge_input_bytes`, divided by `max_concurrent_compactions` |
+
+Individual settings remain as overrides. The sum check uses the final values,
+including one merge input allowance per concurrent compaction. Startup logs
+one line per term with its final value and whether it was derived or set.
+Without sizing, omitted pools are logged as defaults.
+
+Counts keep their defaults: 8 publications, 2 folds, 2 compactions, 64 reads,
+256 requests, 1,024 connections, 8 uploads, and 16 downloads. Explicit count
+settings remain in effect. The formula uses the final connection and transfer
+counts and divides merge input by the final compaction count.
+
 ## 2. Validate the config
 
 If the server binary is installed locally, run:
@@ -338,9 +384,8 @@ defaults, like metadata compaction. The accepted input limits are
 `request_deadline_ms` defaults to 60000 ms for metadata and query requests; streamed content and long-running operator work are exempt.
 
 `max_in_flight_requests` defaults to 256 and `max_connections` to 1,024.
-Both must be positive. Size them from pod memory left after runtime budgets,
-using measured peak memory per request and per connection, with room for
-allocator overhead and the pod's open-file limit.
+Both must be positive. The sizing formula uses the configured connection
+count. Keep the pod's open-file limit above that count.
 
 The request cap runs before authentication and body extraction. A request
 past it receives `503 server_busy` with `Retry-After: 1`, the usual error
@@ -371,20 +416,21 @@ a connection slot, so size the connection cap to leave room for them.
 
 Each cache, queue, and unit of work has its own memory budget. The values
 below are ceilings, not allocations. Memory grows toward a ceiling only as a
-cache fills or as work runs. Allocator overhead and HTTP buffers are not
-counted in any budget and sit on top.
+cache fills or as work runs. The sizing formula reserves fixed costs and
+headroom separately from the pools. It does not measure total process memory.
 
 | Budget | Setting | Default | What it bounds | Kind |
 | --- | --- | --- | --- | --- |
-| Metadata segment cache | `metadata_cache.max_segment_bytes` | 256 MiB | Decoded metadata blocks and manifests | Steady |
-| Head state | `metadata_cache.max_head_state_bytes` | 64 MiB | Cached namespace heads and WAL tails, for reads and for writer sessions, for any number of namespaces | Steady |
-| Publication queue | `publication.max_estimated_bytes` | 64 MiB | Estimated bytes of admitted commit requests | Steady |
+| Metadata segment cache | `metadata_cache.max_segment_bytes` | Derived: 40%, or 50% without grep; otherwise 256 MiB | Decoded metadata blocks and manifests | Steady |
+| Grep cache | `grep.max_cache_bytes` | Derived: 10%; otherwise 256 MiB | Decoded grep blocks and manifests when serving queries | Steady |
+| Head state | `metadata_cache.max_head_state_bytes` | Derived: 10%; otherwise 64 MiB | Cached namespace heads and WAL tails, for reads and for writer sessions, for any number of namespaces | Steady |
+| Publication queue | `publication.max_estimated_bytes` | Derived: 10%; otherwise 64 MiB | Estimated bytes of admitted commit requests | Steady |
 | HTTP requests | `max_in_flight_requests` | 256 | Requests through response completion, excluding health and readiness probes | Concurrency |
 | Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
-| Read working memory | `max_read_working_bytes` | 256 MiB | Blocks retained across read, publication, fold, and bounded compaction memos | Shared |
-| Merge input | `max_merge_input_bytes` | 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
+| Read working memory | `max_read_working_bytes` | Derived: 20%; otherwise 256 MiB | Blocks retained across read, publication, fold, and bounded compaction memos | Shared |
+| Merge input | `max_merge_input_bytes` | Derived: 10% / compaction count; otherwise 64 MiB | Decoded blocks one compaction or maintenance step merges | Per operation |
 | Segment output | None | 32 MiB | Encoded segments one fold, compaction, or maintenance step holds while it writes them | Per operation |
 | WAL folds | `max_concurrent_folds` | 2 | Folds running at once, including the folds that maintenance requests, namespace deletes, and checkpoint, snapshot, and fork creation start | Concurrency |
 | Compactions | `max_concurrent_compactions` | 2 | Metadata merges running at once, bounded steps and streaming compactions alike, whether writer sessions, the maintenance sweep, or maintenance requests start them | Concurrency |
@@ -400,7 +446,8 @@ read-ahead bytes, keys, reference counts, and memo containers. Zero disables
 retention. Blocks a caller already holds remain valid after eviction.
 
 A fold holds its segment output and draws its memo from the shared pool.
-A merge holds its merge input and its segment output, up to 96 MiB, and `max_concurrent_compactions` merges can use that much each. A
+A merge holds its merge input and its segment output. Without sizing or
+overrides, that is up to 96 MiB per concurrent compaction. A
 sweep visit that folds the WAL tail and then merges takes a fold permit for
 the fold and then a compaction permit for the merge, so the fold and
 compaction limits, not `max_concurrent_maintenance`, bound that memory.
@@ -423,8 +470,8 @@ compaction permits as every other fold and merge.
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied
 transfer. Both default to 256 MiB. They do not reserve memory.
 
-Without grep and without the local cache, the budgets that have a
-process-wide limit add up to 1,088 MiB by default:
+Without a memory limit, grep, local cache, or overrides, the budgets that
+have a process-wide limit add up to 1,088 MiB:
 
 | Budget | Ceiling |
 | --- | --- |
@@ -447,9 +494,9 @@ even when they refer to the same allocation. Public reads wait at
 memo retention, not all read memory. Embedded reads share the read limit but
 have no HTTP request cap.
 
-Grep adds a 256 MiB block cache on a server that answers queries. The cache
-has no setting. A query reads up to 32 candidate files of at most 8 MiB each
-at once, so one query can hold up to 256 MiB. Queries have no concurrency
+Grep uses `grep.max_cache_bytes` for its block cache when serving queries.
+It is derived by default with a memory limit, or 256 MiB without one. A query
+reads up to 32 candidate files of at most 8 MiB each at once, so one query can hold up to 256 MiB. Queries have no concurrency
 limit of their own; HTTP queries share the request cap. Index building runs
 in daily sweep visits and session ticks. A build step reads at most
 `max_content_bytes_per_step` of file content, 64 MiB by default, and a
@@ -474,48 +521,10 @@ The local cache adds `memory_bytes`, 64 MiB of write buffers for its disk
 tier, and up to 256 MiB of inserts waiting for the disk tier. The last two
 have no setting.
 
-This config for a 256 MiB container uses a 64 MiB segment cache, a 16 MiB
-head-state budget, an 8 MiB shared read working pool, an 8 MiB merge input, two running
-publications, one fold, one compaction, and one sweep visit at a time:
-
-```toml
-max_concurrent_folds = 1
-max_concurrent_compactions = 1
-max_concurrent_maintenance = 1
-max_in_flight_requests = 4
-max_connections = 32
-max_concurrent_uploads = 2
-max_concurrent_downloads = 2
-max_merge_input_bytes = 8388608
-max_read_working_bytes = 8388608
-
-[publication]
-max_estimated_bytes = 8388608
-max_concurrent_publications = 2
-
-[metadata_cache]
-max_segment_bytes = 67108864
-max_head_state_bytes = 16777216
-```
-
-| Budget | Ceiling |
-| --- | --- |
-| Metadata segment cache | 64 MiB |
-| Head state | 16 MiB |
-| Publication queue | 8 MiB |
-| 2 uploads at 8 MiB | 16 MiB |
-| 2 downloads at 8 MiB | 16 MiB |
-| Shared read working memory | 8 MiB |
-| 1 fold output | 32 MiB |
-| 1 compaction: 8 MiB merge input and 32 MiB segment output | 40 MiB |
-| Total | 200 MiB |
-
-64 + 16 + 8 + 16 + 16 + 8 + 32 + 40 = 200 MiB, which leaves 56 MiB of the
-256 MiB for allocator overhead, HTTP buffers, and other working memory.
-A namespace delete, checkpoint, snapshot, or fork that folds the WAL tail
-holds the one fold permit and draws from the same 8 MiB read working pool.
-Many concurrent reads can still exceed the container's memory because page
-results, temporary decoding, and borrowed blocks have no combined limit.
+A 256 MiB container cannot pass the sizing check because managed memory alone
+must have at least 256 MiB after fixed costs and headroom. With the default
+counts, 2 GiB leaves about 1,051 MiB of managed memory. Use the formula above
+when changing counts or overriding individual pools.
 
 The server keeps one writer session for each namespace it has written since
 it started. There is no cap and no eviction. One idle session holds about
@@ -580,8 +589,9 @@ max_estimated_bytes_per_namespace = 8388608
 max_concurrent_publications = 8
 ```
 
-These are the defaults; every value must be positive. The byte estimate counts
-request data, prepared proofs, and queue bookkeeping. It excludes allocator
+These are the defaults without a memory limit; `max_estimated_bytes` is
+derived by default when sized. Every value must be positive. The byte estimate
+counts request data, prepared proofs, and queue bookkeeping. It excludes allocator
 slack, HTTP request buffers, and the metadata/working copies a publication
 loads. Size process memory for those costs and the separate fold/cache limits
 too. Embedded hosts set the per-namespace limits with

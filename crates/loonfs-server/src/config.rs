@@ -95,8 +95,7 @@ impl InlineContentOverrides {
     }
 }
 
-/// The server's `[publication]` table. Omitted fields keep the runtime
-/// defaults.
+/// The server's `[publication]` table. Total bytes are derived when sized.
 ///
 /// `max_requests`, `max_estimated_bytes`, and `max_concurrent_publications`
 /// are limits of the server's execution budget. The two per-namespace fields
@@ -139,6 +138,7 @@ impl PublicationLimitsOverrides {
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind: String,
+    pub memory_limit_bytes: Option<usize>,
     pub auth_token: Option<SecretString>,
     /// Signs content tokens; unset or empty here falls back to
     /// `LOONFS_CONTENT_TOKEN_SECRET`.
@@ -270,15 +270,14 @@ pub struct ServerConfig {
     pub idle_session_close_after_ms: u64,
     /// Decoded metadata bytes one maintenance step may merge. A step merges
     /// inline only the runs that fit; a larger window runs as a streaming
-    /// compaction that holds at most this much at once. Defaults to 64 MiB.
-    #[serde(default = "default_max_merge_input_bytes")]
-    pub max_merge_input_bytes: usize,
+    /// compaction that holds at most this much at once. Derived when sized.
+    pub max_merge_input_bytes: Option<usize>,
     /// Minimum interval between checks for a successor to a cached manifest,
     /// in milliseconds. Zero checks on every read. Unset keeps the runtime
     /// default of 1000.
     pub manifest_revalidation_interval_ms: Option<u64>,
     /// Bytes retained by all read, publication, and fold memos. Zero keeps
-    /// none. Unset keeps the execution budget default of 256 MiB.
+    /// none. Derived when sized; otherwise defaults to 256 MiB.
     pub max_read_working_bytes: Option<usize>,
     /// How old a WAL tail's newest commit must be before maintenance folds
     /// a tail that is below the fold thresholds, in milliseconds. The
@@ -449,27 +448,12 @@ pub struct LocalCacheConfig {
 }
 
 /// The server's `[metadata_cache]` table: the limits of the one metadata
-/// cache the server builds at startup. Omitted fields keep the runtime
-/// defaults.
+/// cache the server builds at startup. Omitted fields are derived when sized.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataCacheOverrides {
     pub max_segment_bytes: Option<usize>,
     pub max_head_state_bytes: Option<usize>,
-}
-
-impl MetadataCacheOverrides {
-    /// Builds the cache these limits describe, reporting to `recorder`.
-    pub(crate) fn build(&self, recorder: Arc<dyn MetricsRecorder>) -> MetadataCache {
-        let mut builder = MetadataCache::builder().metrics_recorder(recorder);
-        if let Some(bytes) = self.max_segment_bytes {
-            builder = builder.max_segment_bytes(bytes);
-        }
-        if let Some(bytes) = self.max_head_state_bytes {
-            builder = builder.max_head_state_bytes(bytes);
-        }
-        builder.build()
-    }
 }
 
 /// What this server does about maintenance: serve the API group, run the
@@ -539,6 +523,7 @@ impl GrepMode {
 #[serde(deny_unknown_fields)]
 pub struct GrepConfig {
     pub mode: GrepMode,
+    pub max_cache_bytes: Option<usize>,
     /// Flattening preserves the existing `[grep]` keys while leaving the
     /// worker policy itself as their one in-memory owner.
     #[serde(flatten)]
@@ -549,6 +534,7 @@ impl Default for GrepConfig {
     fn default() -> Self {
         Self {
             mode: GrepMode::Disabled,
+            max_cache_bytes: None,
             worker: GrepWorkerConfig::default(),
         }
     }
@@ -632,7 +618,7 @@ impl ServerConfig {
         validate_socket_addr("bind", &self.bind)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), ServerConfigError> {
+    pub(crate) fn validate(&self) -> Result<MemorySizing, ServerConfigError> {
         let bind = self.bind_addr()?;
         require_non_empty("writer_id", &self.writer_id)?;
 
@@ -691,7 +677,11 @@ impl ServerConfig {
                 "max_concurrent_downloads",
                 self.max_concurrent_downloads as u64,
             ),
-            ("max_merge_input_bytes", self.max_merge_input_bytes as u64),
+            (
+                "max_merge_input_bytes",
+                self.max_merge_input_bytes
+                    .unwrap_or(default_max_merge_input_bytes()) as u64,
+            ),
         ] {
             require_positive(field, value, None)?;
         }
@@ -765,13 +755,25 @@ impl ServerConfig {
         require_non_empty("content_token_secret", self.content_token_secret.expose())?;
         self.store.validate()?;
 
-        Ok(())
+        let cgroup_limit = if self.memory_limit_bytes.is_none() && cfg!(target_os = "linux") {
+            read_cgroup_memory_limit(&[
+                Path::new("/sys/fs/cgroup/memory.max"),
+                Path::new("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+            ])
+        } else {
+            None
+        };
+        self.memory_sizing(cgroup_limit)
     }
 
     /// Builds the execution budget of the server's one runtime from its fold,
     /// compaction, and merge input limits and the totals of its
     /// `[publication]` table, reporting to `recorder`.
-    pub(crate) fn execution_budget(&self, recorder: Arc<dyn MetricsRecorder>) -> ExecutionBudget {
+    pub(crate) fn execution_budget(
+        &self,
+        memory: &MemorySizing,
+        recorder: Arc<dyn MetricsRecorder>,
+    ) -> ExecutionBudget {
         let positive = |value: usize| {
             std::num::NonZeroUsize::new(value).expect("validated budget limits should be nonzero")
         };
@@ -779,22 +781,246 @@ impl ServerConfig {
             .max_concurrent_reads(positive(self.max_concurrent_reads))
             .max_concurrent_folds(positive(self.max_concurrent_folds))
             .max_concurrent_compactions(positive(self.max_concurrent_compactions))
-            .max_merge_input_bytes(positive(self.max_merge_input_bytes))
+            .max_merge_input_bytes(positive(memory.merge_input.bytes))
+            .max_read_working_bytes(memory.read_working.bytes)
+            .max_admitted_bytes(positive(memory.publication.bytes))
             .metrics_recorder(recorder);
-        if let Some(bytes) = self.max_read_working_bytes {
-            builder = builder.max_read_working_bytes(bytes);
-        }
         if let Some(limit) = self.publication.max_requests {
             builder = builder.max_admitted_requests(limit);
-        }
-        if let Some(limit) = self.publication.max_estimated_bytes {
-            builder = builder.max_admitted_bytes(limit);
         }
         if let Some(limit) = self.publication.max_concurrent_publications {
             builder = builder.max_concurrent_publications(limit);
         }
         builder.build()
     }
+}
+
+const MIB: usize = 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct MemoryTerm {
+    name: &'static str,
+    pub(crate) bytes: usize,
+    source: &'static str,
+}
+
+impl MemoryTerm {
+    fn new(
+        name: &'static str,
+        explicit: Option<usize>,
+        derived: Option<usize>,
+        default: usize,
+    ) -> Self {
+        let (bytes, source) = match (explicit, derived) {
+            (Some(bytes), _) => (bytes, "set"),
+            (None, Some(bytes)) => (bytes, "derived"),
+            (None, None) => (default, "default"),
+        };
+        Self {
+            name,
+            bytes,
+            source,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct MemorySizing {
+    limit: Option<MemoryTerm>,
+    fixed: [(&'static str, u128); 3],
+    headroom: usize,
+    managed: usize,
+    segment: MemoryTerm,
+    head_state: MemoryTerm,
+    pub(crate) grep: MemoryTerm,
+    read_working: MemoryTerm,
+    publication: MemoryTerm,
+    merge_input: MemoryTerm,
+    compactions: usize,
+    serves_grep: bool,
+}
+
+impl MemorySizing {
+    fn terms(&self) -> [(&MemoryTerm, usize); 6] {
+        [
+            (&self.segment, 1),
+            (&self.head_state, 1),
+            (&self.grep, usize::from(self.serves_grep)),
+            (&self.read_working, 1),
+            (&self.publication, 1),
+            (&self.merge_input, self.compactions),
+        ]
+    }
+
+    pub(crate) fn metadata_cache(&self, recorder: Arc<dyn MetricsRecorder>) -> MetadataCache {
+        MetadataCache::builder()
+            .max_segment_bytes(self.segment.bytes)
+            .max_head_state_bytes(self.head_state.bytes)
+            .metrics_recorder(recorder)
+            .build()
+    }
+
+    pub(crate) fn log(&self) {
+        if let Some(limit) = &self.limit {
+            tracing::info!(
+                term = limit.name,
+                bytes = limit.bytes,
+                source = limit.source,
+                "server memory"
+            );
+            for (term, bytes) in self.fixed.into_iter().chain([
+                ("headroom", self.headroom as u128),
+                ("managed", self.managed as u128),
+            ]) {
+                tracing::info!(term, bytes = %bytes, source = "derived", "server memory");
+            }
+        } else {
+            tracing::info!("server memory is unsized; no memory limit was configured or found");
+        }
+        for (term, count) in self.terms() {
+            tracing::info!(
+                term = term.name,
+                bytes = term.bytes,
+                source = term.source,
+                count,
+                "server memory"
+            );
+        }
+    }
+
+    fn validate(&self) -> Result<(), ServerConfigError> {
+        let Some(limit) = &self.limit else {
+            return Ok(());
+        };
+        let fixed: u128 = self.fixed.iter().map(|(_, bytes)| bytes).sum();
+        let pools = self.terms().iter().fold(0u128, |total, (term, count)| {
+            total.saturating_add(term.bytes as u128 * *count as u128)
+        });
+        let total = fixed
+            .saturating_add(self.headroom as u128)
+            .saturating_add(pools);
+        if self.managed >= 256 * MIB && total <= limit.bytes as u128 {
+            return Ok(());
+        }
+        let mut terms: Vec<String> = self
+            .fixed
+            .iter()
+            .map(|(name, bytes)| format!("{name} = {bytes}"))
+            .collect();
+        terms.extend(
+            self.terms()
+                .map(|(term, count)| format!("`{}` = {} x {count}", term.name, term.bytes)),
+        );
+        Err(ServerConfigError::InvalidField {
+            field: "memory_limit_bytes",
+            reason: format!(
+                "memory terms must fit the limit and managed memory must be at least {} bytes; limit = {}, headroom = {}, managed = {}, total = {}; {}",
+                256 * MIB, limit.bytes, self.headroom, self.managed, total, terms.join(", ")
+            ),
+        })
+    }
+}
+
+impl ServerConfig {
+    fn memory_sizing(
+        &self,
+        cgroup_limit: Option<usize>,
+    ) -> Result<MemorySizing, ServerConfigError> {
+        let limit = self.memory_limit_bytes.or(cgroup_limit);
+        let fixed = [
+            ("process", (128 * MIB) as u128),
+            (
+                "connections (`max_connections` x 472 KiB)",
+                self.max_connections as u128 * 472 * 1024,
+            ),
+            (
+                "transfers ((`max_concurrent_uploads` + `max_concurrent_downloads`) x 8 MiB)",
+                (self.max_concurrent_uploads as u128 + self.max_concurrent_downloads as u128)
+                    * (8 * MIB) as u128,
+            ),
+        ];
+        let headroom = limit.unwrap_or(0) / 10;
+        let fixed_bytes: u128 = fixed.iter().map(|(_, bytes)| bytes).sum();
+        let managed =
+            (limit.unwrap_or(0) as u128).saturating_sub(fixed_bytes + headroom as u128) as usize;
+        let share =
+            |percent: usize| limit.map(|_| (managed as u128 * percent as u128 / 100) as usize);
+        let serves_grep = self.grep.mode.serves_grep();
+        require_positive(
+            "max_concurrent_compactions",
+            self.max_concurrent_compactions as u64,
+            None,
+        )?;
+        let memory = MemorySizing {
+            limit: limit.map(|bytes| {
+                MemoryTerm::new(
+                    "memory_limit_bytes",
+                    self.memory_limit_bytes,
+                    Some(bytes),
+                    0,
+                )
+            }),
+            fixed,
+            headroom,
+            managed,
+            segment: MemoryTerm::new(
+                "metadata_cache.max_segment_bytes",
+                self.metadata_cache.max_segment_bytes,
+                share(if serves_grep { 40 } else { 50 }),
+                loonfs::DEFAULT_MAX_SEGMENT_BYTES,
+            ),
+            head_state: MemoryTerm::new(
+                "metadata_cache.max_head_state_bytes",
+                self.metadata_cache.max_head_state_bytes,
+                share(10),
+                loonfs::DEFAULT_MAX_HEAD_STATE_BYTES,
+            ),
+            grep: MemoryTerm::new(
+                "grep.max_cache_bytes",
+                self.grep.max_cache_bytes,
+                share(if serves_grep { 10 } else { 0 }),
+                loonfs_grep::DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+            ),
+            read_working: MemoryTerm::new(
+                "max_read_working_bytes",
+                self.max_read_working_bytes,
+                share(20),
+                loonfs::DEFAULT_MAX_READ_WORKING_BYTES,
+            ),
+            publication: MemoryTerm::new(
+                "publication.max_estimated_bytes",
+                self.publication
+                    .max_estimated_bytes
+                    .map(std::num::NonZeroUsize::get),
+                share(10),
+                64 * MIB,
+            ),
+            merge_input: MemoryTerm::new(
+                "max_merge_input_bytes",
+                self.max_merge_input_bytes,
+                share(10).map(|bytes| bytes / self.max_concurrent_compactions),
+                default_max_merge_input_bytes(),
+            ),
+            compactions: self.max_concurrent_compactions,
+            serves_grep,
+        };
+        memory.validate()?;
+        require_positive(
+            "max_merge_input_bytes",
+            memory.merge_input.bytes as u64,
+            None,
+        )?;
+        Ok(memory)
+    }
+}
+
+fn read_cgroup_memory_limit(paths: &[&Path]) -> Option<usize> {
+    paths.iter().find_map(|path| {
+        let bytes = fs::read_to_string(path).ok()?.trim().parse::<u64>().ok()?;
+        (bytes < 1 << 60)
+            .then(|| usize::try_from(bytes).ok())
+            .flatten()
+    })
 }
 
 impl From<StoreConfigError> for ServerConfigError {
@@ -900,6 +1126,211 @@ mod tests {
 
     const AZURITE_ACCOUNT_KEY: &str =
         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+
+    fn memory_config(settings: &str) -> super::ServerConfig {
+        toml::from_str(&format!(
+            r#"
+bind = "127.0.0.1:9400"
+writer_id = "memory-test"
+content_token_secret = "test-secret"
+{settings}
+[store]
+kind = "local-fs"
+root = "unused"
+"#
+        ))
+        .expect("parse memory config")
+    }
+
+    #[test]
+    fn four_gib_derives_each_pool_and_folds_unused_grep_into_segments() {
+        let mut config = memory_config("memory_limit_bytes = 4294967296");
+        for mode in [
+            super::GrepMode::ServeOnly,
+            super::GrepMode::Disabled,
+            super::GrepMode::MaintainOnly,
+        ] {
+            config.grep.mode = mode;
+            let memory = config.memory_sizing(Some(1)).expect("explicit limit wins");
+            assert_eq!(
+                memory.fixed.map(|(_, bytes)| bytes),
+                [134_217_728, 494_927_872, 201_326_592]
+            );
+            assert_eq!(memory.headroom, 429_496_729);
+            assert_eq!(memory.managed, 3_034_998_375);
+            assert_eq!(
+                memory.segment.bytes,
+                if mode.serves_grep() {
+                    1_213_999_350
+                } else {
+                    1_517_499_187
+                }
+            );
+            assert_eq!(memory.head_state.bytes, 303_499_837);
+            assert_eq!(
+                memory.grep.bytes,
+                if mode.serves_grep() { 303_499_837 } else { 0 }
+            );
+            assert_eq!(memory.read_working.bytes, 606_999_675);
+            assert_eq!(memory.publication.bytes, 303_499_837);
+            assert_eq!(memory.merge_input.bytes, 151_749_918);
+            for (term, _) in memory.terms() {
+                assert_eq!(term.source, "derived");
+            }
+        }
+        assert_eq!(config.max_concurrent_reads, 64);
+        assert_eq!(config.max_concurrent_folds, 2);
+        assert_eq!(config.max_concurrent_compactions, 2);
+        assert_eq!(config.max_in_flight_requests, 256);
+        assert_eq!(config.max_connections, 1024);
+        assert_eq!(config.max_concurrent_uploads, 8);
+        assert_eq!(config.max_concurrent_downloads, 16);
+        assert_eq!(config.publication.max_concurrent_publications, None);
+    }
+
+    #[test]
+    fn explicit_memory_limits_survive_derivation_and_still_must_fit() {
+        let mut config = memory_config(
+            r#"
+memory_limit_bytes = 4294967296
+[metadata_cache]
+max_segment_bytes = 67108864
+"#,
+        );
+        let memory = config.validate().expect("smaller segment cache fits");
+        assert_eq!(memory.segment.bytes, 67_108_864);
+        assert_eq!(memory.segment.source, "set");
+        assert_eq!(memory.head_state.bytes, 303_499_837);
+        config.metadata_cache.max_segment_bytes = Some(4 * 1024 * super::MIB);
+        let error = config.validate().expect_err("overrides must fit");
+        assert!(error
+            .to_string()
+            .contains("`metadata_cache.max_segment_bytes` = 4294967296"));
+        assert_invalid_field(error, "memory_limit_bytes");
+
+        let mut config = memory_config(
+            r#"
+memory_limit_bytes = 4294967296
+max_connections = 512
+max_concurrent_uploads = 4
+max_concurrent_downloads = 4
+max_concurrent_compactions = 4
+max_read_working_bytes = 0
+max_merge_input_bytes = 67108864
+[metadata_cache]
+max_segment_bytes = 67108864
+max_head_state_bytes = 0
+[publication]
+max_estimated_bytes = 8388608
+[grep]
+mode = "serve_only"
+max_cache_bytes = 0
+"#,
+        );
+        let memory = config.validate().expect("explicit pools fit");
+        assert_eq!(
+            memory.fixed.map(|(_, bytes)| bytes),
+            [134_217_728, 247_463_936, 67_108_864]
+        );
+        assert_eq!(
+            memory.terms().map(|(term, count)| (term.bytes, count)),
+            [
+                (67_108_864, 1),
+                (0, 1),
+                (0, 1),
+                (0, 1),
+                (8_388_608, 1),
+                (67_108_864, 4)
+            ]
+        );
+        assert!(memory.terms().iter().all(|(term, _)| term.source == "set"));
+        config.max_merge_input_bytes = Some(1024 * super::MIB);
+        assert_invalid_field(
+            config.validate().expect_err("all four merges must fit"),
+            "memory_limit_bytes",
+        );
+    }
+
+    #[test]
+    fn insufficient_memory_names_every_term_before_startup() {
+        for limit in [512 * super::MIB, 1024 * super::MIB] {
+            let config = memory_config(&format!("memory_limit_bytes = {limit}"));
+            let error = config
+                .validate()
+                .expect_err("managed memory is below 256 MiB");
+            let message = error.to_string();
+            for term in [
+                "memory_limit_bytes",
+                "process",
+                "max_connections",
+                "max_concurrent_uploads",
+                "max_concurrent_downloads",
+                "headroom",
+                "managed",
+                "268435456",
+                "metadata_cache.max_segment_bytes",
+                "metadata_cache.max_head_state_bytes",
+                "grep.max_cache_bytes",
+                "max_read_working_bytes",
+                "publication.max_estimated_bytes",
+                "max_merge_input_bytes",
+            ] {
+                assert!(message.contains(term), "missing {term}: {message}");
+            }
+            assert_invalid_field(error, "memory_limit_bytes");
+        }
+    }
+
+    #[test]
+    fn no_limit_or_cgroup_file_keeps_the_unsized_defaults() {
+        let directory = tempdir().expect("tempdir");
+        let missing = directory.path().join("memory.max");
+        let config = memory_config("");
+        let memory = config
+            .memory_sizing(super::read_cgroup_memory_limit(&[&missing]))
+            .expect("unsized config");
+        assert!(memory.limit.is_none());
+        assert_eq!(memory.segment.bytes, 268_435_456);
+        assert_eq!(memory.head_state.bytes, 67_108_864);
+        assert_eq!(memory.grep.bytes, 268_435_456);
+        assert_eq!(memory.read_working.bytes, 268_435_456);
+        assert_eq!(memory.publication.bytes, 67_108_864);
+        assert_eq!(memory.merge_input.bytes, 67_108_864);
+        assert!(memory
+            .terms()
+            .iter()
+            .all(|(term, _)| term.source == "default"));
+    }
+
+    #[test]
+    fn cgroup_limits_accept_finite_numbers_and_skip_absent_or_unlimited_files() {
+        let directory = tempdir().expect("tempdir");
+        let v2 = directory.path().join("memory.max");
+        let v1 = directory.path().join("memory.limit_in_bytes");
+        assert_eq!(super::read_cgroup_memory_limit(&[&v2, &v1]), None);
+        fs::write(&v1, "2147483648\n").expect("write v1 limit");
+        for value in [
+            "max\n",
+            "9223372036854771712",
+            "1152921504606846976",
+            "invalid",
+        ] {
+            fs::write(&v2, value).expect("write v2 limit");
+            assert_eq!(super::read_cgroup_memory_limit(&[&v2]), None);
+            assert_eq!(
+                super::read_cgroup_memory_limit(&[&v2, &v1]),
+                Some(2_147_483_648)
+            );
+        }
+        fs::write(&v2, "4294967296\n").expect("write finite v2 limit");
+        let limit = super::read_cgroup_memory_limit(&[&v2, &v1]);
+        assert_eq!(limit, Some(4_294_967_296));
+        let memory = memory_config("")
+            .memory_sizing(limit)
+            .expect("cgroup sizes config");
+        assert_eq!(memory.managed, 3_034_998_375);
+        assert_eq!(memory.limit.expect("cgroup limit").source, "derived");
+    }
 
     #[test]
     fn ambient_credential_sources_survive_loading_with_environment_credentials_set() {
