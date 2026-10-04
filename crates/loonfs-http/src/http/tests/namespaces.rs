@@ -268,7 +268,7 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
     .await;
     assert_eq!(state.namespaces.fenced_sessions_dropped(), 1);
     assert_eq!(writer_epoch(&state, &fenced).await, winning_epoch);
-    assert_eq!(state.namespaces.held().len(), 1);
+    assert_eq!(state.namespaces.held_ids().len(), 1);
     assert!(!state.namespaces.forget_if_fenced(&kept, &errors[0]));
     assert!(!state.namespaces.forget_if_fenced(&fenced, &errors[0]));
 
@@ -367,12 +367,12 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
     let error: loonfs_types::ApiError = serde_json::from_slice(&bytes).expect("fenced error");
     assert_eq!(error.code, ErrorCode::WriterFenced.as_str());
     assert_eq!(state.namespaces.fenced_sessions_dropped(), 1);
-    assert!(state.namespaces.held().is_empty());
+    assert!(state.namespaces.held_ids().is_empty());
     let (status, bytes) = send(&router, Method::POST, &uri, body.clone()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let error: loonfs_types::ApiError = serde_json::from_slice(&bytes).expect("closing error");
     assert_eq!(error.code, ErrorCode::WriterSessionClosed.as_str());
-    assert!(state.namespaces.held().is_empty());
+    assert!(state.namespaces.held_ids().is_empty());
 
     blocking.release();
     state.runtime.drain().await.expect("old work ends");
@@ -427,27 +427,130 @@ async fn an_idle_close_rechecks_the_seq_and_counts_subject_scoped_handles() {
     drop(handle);
     timer.advance_ms(2);
     assert!(namespaces
-        .close_if_idle(&namespace_id, Some(current.committed_seq), 1)
+        .close_if_idle(&namespace_id, Some(current.committed_seq), 1, |_| true)
         .await
         .expect("check scoped clone")
         .is_none());
     drop(scoped);
     assert!(namespaces
-        .close_if_idle(&namespace_id, None, 1)
+        .close_if_idle(&namespace_id, None, 1, |_| true)
         .await
         .expect("check a publish after observing no seq")
         .is_none());
     assert!(namespaces
-        .close_if_idle(&namespace_id, Some(initial.committed_seq), 1)
+        .close_if_idle(&namespace_id, Some(initial.committed_seq), 1, |_| true)
         .await
         .expect("check stale seq")
         .is_none());
+    namespaces.mark_index_dirty(&namespace_id);
+    assert!(namespaces
+        .close_if_idle(&namespace_id, Some(current.committed_seq), 1, |held| !held
+            .index_dirty)
+        .await
+        .expect("recheck quiet under the table lock")
+        .is_none());
     let closed = namespaces
-        .close_if_idle(&namespace_id, Some(current.committed_seq), 1)
+        .close_if_idle(&namespace_id, Some(current.committed_seq), 1, |_| true)
         .await
         .expect("close idle session")
         .expect("session closed");
     assert!(closed.was_open);
     assert_eq!(closed.drained_commits, 0);
-    assert!(namespaces.held().is_empty());
+    assert!(namespaces.held_ids().is_empty());
+}
+
+#[tokio::test]
+async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
+    for (idle, cancel) in [(false, false), (false, true), (true, false), (true, true)] {
+        let directory = tempdir().expect("tempdir");
+        let other = namespace_id("other");
+        let namespace_id = namespace_id("closing");
+        let store = Arc::new(BlockingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::manifest(&namespace_id),
+            OperationClass::PutCreateIfAbsent,
+        ));
+        let mut options = test_options(directory.path(), "closing-host");
+        options.binding.inline_content.inline_content_fold_at_bytes = 1;
+        let (_, mut state) = test_app(options, options_with_store(store.clone()))
+            .await
+            .expect("host");
+        let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+        state.namespaces = Arc::new(crate::Namespaces::new_with_timer(
+            state.runtime.clone(),
+            timer.clone(),
+        ));
+        create_namespace(&state, &namespace_id).await;
+        create_namespace(&state, &other).await;
+        let old = state.namespaces.open(&namespace_id).await.expect("open");
+        old.create_directory("/first", &loonfs_test_support::test_actor())
+            .await
+            .expect("first publish");
+        let epoch = writer_epoch(&state, &namespace_id).await;
+        store.block_next();
+        old.put_file("/fold", b"body", &loonfs_test_support::test_actor())
+            .await
+            .expect("publish");
+        store.wait_until_blocked().await;
+        let seq = old.last_published_seq();
+        let old_entry = state.namespaces.entry(&namespace_id).expect("held entry");
+        drop(old);
+        timer.advance_ms(2);
+        let mut closing = Box::pin(async {
+            if idle {
+                state
+                    .namespaces
+                    .close_if_idle(&namespace_id, seq, 1, |_| true)
+                    .await
+            } else {
+                state.namespaces.close(&namespace_id).await
+            }
+        });
+        assert!(futures::poll!(closing.as_mut()).is_pending());
+        let mut opening = Box::pin(state.namespaces.open(&namespace_id));
+        assert!(futures::poll!(opening.as_mut()).is_pending());
+        let mut also_opening = Box::pin(state.namespaces.open(&namespace_id));
+        assert!(futures::poll!(also_opening.as_mut()).is_pending());
+        let other_handle = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.namespaces.open(&other),
+        )
+        .await
+        .expect("another namespace opens while the drain is parked")
+        .expect("open other namespace");
+        assert!(matches!(
+            futures::poll!(Box::pin(state.namespaces.open(&other))),
+            std::task::Poll::Ready(Ok(_))
+        ));
+        other_handle
+            .create_directory("/during-close", &loonfs_test_support::test_actor())
+            .await
+            .expect("publish while the other namespace drains");
+        assert!(futures::poll!(closing.as_mut()).is_pending());
+        assert!(futures::poll!(opening.as_mut()).is_pending());
+        let fresh = if cancel {
+            drop(closing);
+            assert!(futures::poll!(opening.as_mut()).is_pending());
+            store.release();
+            opening.await.expect("open waits without an error")
+        } else {
+            store.release();
+            let fresh = opening.await.expect("open finishes the drain");
+            assert!(closing.await.expect("close").is_some());
+            fresh
+        };
+        assert_eq!(fresh.last_published_seq(), None);
+        assert_eq!(
+            old_entry.lock().expect("entry").handle.session_state(),
+            NamespaceSessionState::Closed
+        );
+        fresh
+            .create_directory("/fresh", &loonfs_test_support::test_actor())
+            .await
+            .expect("publish with fresh session");
+        assert_eq!(writer_epoch(&state, &namespace_id).await, epoch + 1);
+        let also_fresh = also_opening.await.expect("all waiting opens finish");
+        assert_eq!(also_fresh.last_published_seq(), fresh.last_published_seq());
+        state.runtime.shutdown().await.expect("shutdown");
+    }
 }

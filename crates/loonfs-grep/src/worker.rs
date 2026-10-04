@@ -39,9 +39,9 @@ use loonfs_types::{
     ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId,
     RevisionNo, RunNo,
 };
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 /// Lifetime of the checkpoint used by one grep backfill attempt.
 ///
@@ -171,7 +171,6 @@ pub struct GrepWorker<S> {
     reader: LoonFs<ReadOnly>,
     pub(crate) maintenance: Maintenance,
     step_budget: GrepStepBudget,
-    lifecycle_changes: Arc<Mutex<HashSet<NamespaceId>>>,
 }
 
 /// The runtime and its maintenance carry no debug representation — they are
@@ -201,23 +200,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             reader,
             maintenance,
             step_budget,
-            lifecycle_changes: Arc::default(),
         }
     }
 
     /// The budget this worker's build and reorganize steps draw from.
     pub fn step_budget(&self) -> &GrepStepBudget {
         &self.step_budget
-    }
-
-    /// A host drains changes shared by this worker's clones to retry idle
-    /// namespaces without polling the store.
-    pub fn drain_lifecycle_changes(&self) -> Vec<NamespaceId> {
-        self.lifecycle_changes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .drain()
-            .collect()
     }
 
     /// This worker's filesystem reads for one namespace.
@@ -269,15 +257,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let published =
             publish_grep_manifest(&self.store, current.as_ref(), &next, &deadline).await;
         match published {
-            Ok(published) => {
-                self.lifecycle_changes
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(namespace_id.clone());
-                Ok(GrepEnableOutcome::Enabled {
-                    state: published.manifest_state().status().clone(),
-                })
-            }
+            Ok(published) => Ok(GrepEnableOutcome::Enabled {
+                state: published.manifest_state().status().clone(),
+            }),
             Err(GrepError::PublicationConflict { .. }) => {
                 self.delete_pin_if_present(namespace_id, &checkpoint.checkpoint_id)
                     .await;
@@ -323,10 +305,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         .map_err(|error| core_state_error(namespace_id, error))?;
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => {
-                self.lifecycle_changes
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(namespace_id.clone());
                 if let Some(checkpoint_id) = checkpoint_id {
                     self.delete_pin_if_present(namespace_id, &checkpoint_id)
                         .await;

@@ -235,7 +235,21 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         "{:?}",
         enabled.lifecycle
     );
-    sweep(&server).await;
+    assert_eq!(
+        server.binding.namespaces.with_held(&namespace_id, |held| (
+            held.handle.last_published_seq(),
+            held.index_dirty
+        )),
+        Some((None, true))
+    );
+    server.sweep.as_ref().expect("sweep").tick().await;
+    assert_eq!(
+        server
+            .binding
+            .namespaces
+            .with_held(&namespace_id, |held| held.index_dirty),
+        Some(false)
+    );
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
     let active = index_status(&router, &namespace_id).await;
     assert_eq!(
@@ -301,6 +315,13 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
 
     // Disabling is one durable compare-and-swap; the sweep reads it.
     let disabled_response = disable_grep(&router, &namespace_id).await;
+    assert_eq!(
+        server
+            .binding
+            .namespaces
+            .with_held(&namespace_id, |held| held.index_dirty),
+        Some(true)
+    );
     assert_eq!(disabled_response.lifecycle, GrepIndexLifecycle::Disabled);
     assert!(!disabled_response.reorganize_pending);
     let disabled = load_current_grep_manifest(&*store, &namespace_id, observation())
@@ -761,6 +782,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_concurrent_uploads: 2,
         max_concurrent_downloads: 2,
         max_concurrent_maintenance: 2,
+        tick_interval_ms: 5_000,
         maintenance_interval_ms: 300_000,
         gc_interval_ms: 3_600_000,
         full_sweep_interval_ms: 86_400_000,

@@ -842,6 +842,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: 8,
+        tick_interval_ms: 5_000,
         maintenance_interval_ms: 300_000,
         gc_interval_ms: 3_600_000,
         full_sweep_interval_ms: 86_400_000,
