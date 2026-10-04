@@ -13,7 +13,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::store_waves::STORE_READ_WAVE;
 use futures::{stream, StreamExt};
 use loonfs_objectstore::keys::wal_object;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalObjectEnvelope};
 use loonfs_types::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
 
@@ -68,6 +68,18 @@ pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
         object_key,
         envelope,
     }
+}
+
+/// Checks for the WAL object at `wal_no` with a HEAD, without reading it.
+pub(crate) async fn wal_object_exists<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    wal_no: WalNo,
+) -> Result<bool, ObjectStoreError> {
+    Ok(store
+        .head(&wal_object(namespace_id, &wal_no))
+        .await?
+        .is_some())
 }
 
 /// Reads consecutive numbered objects after a position, each validated as
