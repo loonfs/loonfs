@@ -36,6 +36,7 @@ async fn build_handles_installs_jsonl_object_store_metrics_recorder() {
     {
         let (runtime, _maintenance) = build_handles(
             &config,
+            &config.validate().expect("valid config"),
             store,
             &HttpMetrics::new(),
             Some(metrics_path.clone().into_os_string()),
@@ -369,7 +370,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
     ));
     let mut config = test_config(temp_dir.path(), "sweep-shutdown-server");
     // No run fits a one-byte merge, so the due compaction streams.
-    config.max_merge_input_bytes = 1;
+    config.max_merge_input_bytes = Some(1);
     config.max_concurrent_maintenance = 1;
     let (router, state) = app(config, options_with_store(store.clone()))
         .await
@@ -814,6 +815,7 @@ fn options_with_store(store: SharedObjectStore) -> AppOptions {
 fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
+        memory_limit_bytes: None,
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: writer_id.to_owned(),
@@ -847,7 +849,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         gc_interval_ms: 3_600_000,
         full_sweep_interval_ms: 86_400_000,
         idle_session_close_after_ms: 1_800_000,
-        max_merge_input_bytes: loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+        max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,
         max_read_working_bytes: None,
         idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
