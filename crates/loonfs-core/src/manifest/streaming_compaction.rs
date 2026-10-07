@@ -585,7 +585,9 @@ pub(super) struct RetentionCluster {
 const BINDINGS_CLUSTERS: [RetentionCluster; 2] = [
     RetentionCluster {
         families: &[MetadataRowFamily::DirentryBinds],
-        locality: LocalityGrouping::LeadingKeyComponents(2),
+        // A slot's rows sort by child before position, so positions run
+        // oldest first only within one slot and child.
+        locality: LocalityGrouping::LeadingKeyComponents(3),
         rule: RetentionRule::Bindings,
     },
     RetentionCluster {
@@ -878,7 +880,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             let row = iterators[next].take_head();
             self.result.rows_read += 1;
             self.report_progress();
-            if let Some(kept) = operator.take_floor_value_before(&row, floor_seq) {
+            if let Some(kept) = operator.take_floor_value_before(&row, floor_seq)? {
                 self.write_row(kept, &mut writers, puts).await?;
             }
             let kept = operator.push(family, row, floor_seq)?;

@@ -303,7 +303,7 @@ fn merge_rows_with_retention(
                 }
                 locality = Some(row_locality.to_owned());
             }
-            if let Some((family, row)) = operator.take_floor_value_before(&row, floor_seq) {
+            if let Some((family, row)) = operator.take_floor_value_before(&row, floor_seq)? {
                 kept.entry(family).or_default().push(row);
             }
             let survivor = operator.push(family, row, floor_seq)?;

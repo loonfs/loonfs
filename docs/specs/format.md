@@ -857,7 +857,7 @@ The following rules apply only when the selected inputs include the group's olde
 | Family | Rows retained or removed |
 | --- | --- |
 | `inodes` | Retain all inode rows. |
-| `direntry_binds`, `direntry_child_binds` | For each slot or child, retain all versions above the floor and the newest version at or below it. Drop that floor version too if it is unbound. |
+| `direntry_binds`, `direntry_child_binds` | For each slot and child in `direntry_binds`, and for each child in `direntry_child_binds`, retain all versions above the floor and the newest version at or below it. Drop that floor version too if it is unbound. |
 | `revisions` | Retain every file revision, including revisions of deleted files. |
 | `tombstones` | Retain all set and revoke events. |
 | `active_deletions` | Retain listed deletions until revoked. Remove a cancelled `listed`/`removed` pair together. The floor does not expire a recoverable deletion. |
@@ -1301,7 +1301,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | Family | Row key |
 | --- | --- |
 | `inodes` | `inode-{inode_id:020}` |
-| `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{committed_seq:020}-{delta_index:010}` |
+| `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{child_inode_id:020}-{committed_seq:020}-{delta_index:010}` |
 | `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{committed_seq:020}-{delta_index:010}-{parent_inode_id:020}-{name_key_hex}` |
 | `revisions` | `revision-{inode_id:020}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `tombstones` | `tombstone-{root_inode_id:020}-{committed_seq:020}-{delta_index:010}` |
@@ -1312,7 +1312,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
-Within one slot or one child, binding keys sort positions oldest first. A read selects the greatest visible position. While compaction scans one slot or child, it holds at most one candidate floor row.
+The slot index sorts a slot's rows by child and then by position, oldest first. The child index sorts a child's rows by position, oldest first. A read selects the greatest visible position among a slot's rows or a child's rows. Compaction groups the slot index by slot and child, and the child index by child. While it scans one group, it holds at most one candidate floor row. In the slot index it also carries one flag across the groups of a slot. The flag records that an earlier child is bound in the slot at the floor. A second child bound in the slot at the floor is corruption, and compaction refuses it.
 
 Ascending byte order scans an inode's file revisions, attributes, and access rows newest-first. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry. The stored widths are still ten digits.
 

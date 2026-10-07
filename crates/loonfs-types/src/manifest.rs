@@ -629,6 +629,7 @@ impl MetadataRow {
                 MetadataRowFamily::DirentryBinds => Some(lookup_keys::direntry_bind_row_key(
                     record.parent_inode_id,
                     record.name_key.as_str(),
+                    record.child_inode_id,
                     record.committed_seq,
                     record.delta_index,
                 )),
@@ -803,16 +804,18 @@ pub mod lookup_keys {
         format!("{}-", direntry_bind_probe(parent_inode_id, name_key))
     }
 
-    /// Builds a row key for one parent/name slot version.
+    /// Builds a row key for one version of a child's binding in a parent/name slot.
     pub fn direntry_bind_row_key(
         parent_inode_id: InodeId,
         name_key: &str,
+        child_inode_id: InodeId,
         committed_seq: ChangeSeq,
         delta_index: u32,
     ) -> String {
         format!(
-            "{}{:020}-{delta_index:010}",
+            "{}{:020}-{:020}-{delta_index:010}",
             direntry_bind_prefix(parent_inode_id, name_key),
+            child_inode_id.0,
             committed_seq.0
         )
     }
@@ -1675,7 +1678,7 @@ mod tests {
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
-            "direntry-bind-00000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
+            "direntry-bind-00000000000000000009-7265706f72742e747874-00000000000000000042-00000000000000000017-0000000003"
         );
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryChildBinds),
@@ -1701,7 +1704,7 @@ mod tests {
 
         assert_eq!(
             row.row_key_for_family(MetadataRowFamily::DirentryBinds),
-            "direntry-bind-00000000000000000009-7265706f72742d32303234-00000000000000000017-0000000003"
+            "direntry-bind-00000000000000000009-7265706f72742d32303234-00000000000000000042-00000000000000000017-0000000003"
         );
     }
 

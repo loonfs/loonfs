@@ -23,7 +23,7 @@ pub(super) const ITERATOR_FETCH_TARGET_BYTES: usize = 2 * 1024 * 1024;
 /// Defines which adjacent rows a retention rule processes together.
 ///
 /// Groups use the shortest shared row-key prefix required by the rule: a
-/// slot, child, deletion identity, inode, or single row.
+/// slot and child, a child, a deletion identity, an inode, or a single row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalityGrouping {
     /// Every row is judged on its own.
@@ -422,38 +422,46 @@ mod tests {
         })
     }
 
-    const SLOT: LocalityGrouping = LocalityGrouping::LeadingKeyComponents(2);
+    const SLOT_AND_CHILD: LocalityGrouping = LocalityGrouping::LeadingKeyComponents(3);
 
     #[test]
-    fn changes_to_one_slot_share_a_locality_group() {
+    fn changes_to_one_slot_and_child_share_a_locality_group() {
         let bound = bind(7, "report.txt", 11);
         let retired = unbind(7, "report.txt", 11);
         let bind_key = bound.row_key_for_family(MetadataRowFamily::DirentryBinds);
         let unbind_key = retired.row_key_for_family(MetadataRowFamily::DirentryBinds);
 
         assert_eq!(
-            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, SLOT),
-            locality_of(MetadataRowFamily::DirentryBinds, &unbind_key, SLOT),
+            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, SLOT_AND_CHILD),
+            locality_of(
+                MetadataRowFamily::DirentryBinds,
+                &unbind_key,
+                SLOT_AND_CHILD
+            ),
         );
         let regenerated =
             bind(7, "report.txt", 12).row_key_for_family(MetadataRowFamily::DirentryBinds);
         assert_eq!(
-            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, SLOT),
-            locality_of(MetadataRowFamily::DirentryBinds, &regenerated, SLOT),
+            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, SLOT_AND_CHILD),
+            locality_of(
+                MetadataRowFamily::DirentryBinds,
+                &regenerated,
+                SLOT_AND_CHILD
+            ),
         );
         // Another name under the same parent is a different group: the rules
         // read one binding, not one directory.
         let other = bind(7, "other.txt", 11).row_key_for_family(MetadataRowFamily::DirentryBinds);
         assert_ne!(
-            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, SLOT),
-            locality_of(MetadataRowFamily::DirentryBinds, &other, SLOT),
+            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, SLOT_AND_CHILD),
+            locality_of(MetadataRowFamily::DirentryBinds, &other, SLOT_AND_CHILD),
         );
         // And so is the same name under another parent.
         let elsewhere =
             bind(8, "report.txt", 11).row_key_for_family(MetadataRowFamily::DirentryBinds);
         assert_ne!(
-            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, SLOT),
-            locality_of(MetadataRowFamily::DirentryBinds, &elsewhere, SLOT),
+            locality_of(MetadataRowFamily::DirentryBinds, &bind_key, SLOT_AND_CHILD),
+            locality_of(MetadataRowFamily::DirentryBinds, &elsewhere, SLOT_AND_CHILD),
         );
     }
 
@@ -471,7 +479,7 @@ mod tests {
 
         let localities: Vec<&str> = keys
             .iter()
-            .map(|key| locality_of(MetadataRowFamily::DirentryBinds, key, SLOT))
+            .map(|key| locality_of(MetadataRowFamily::DirentryBinds, key, SLOT_AND_CHILD))
             .collect();
         let mut runs = localities.clone();
         runs.dedup();
