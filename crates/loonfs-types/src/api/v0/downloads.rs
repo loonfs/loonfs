@@ -32,6 +32,7 @@ pub struct CreateDownloadResponse {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
     /// Absolute path as rendered from stored display names.
+    #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
     /// Revision the capability reads, resolved from the request.
     pub revision_no: RevisionNo,

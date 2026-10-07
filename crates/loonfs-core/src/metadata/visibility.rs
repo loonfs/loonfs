@@ -353,7 +353,7 @@ where
             .await?
             .ok_or(VisiblePathError::RootMissing)?;
         return Ok(ResolvedVisiblePath {
-            absolute_path: "/".to_owned(),
+            absolute_path: AbsolutePath::root(),
             inode_id: root_inode_id,
             inode_kind: root.inode_kind,
             created_by: root.committed_by,
@@ -366,7 +366,7 @@ where
 
     let mut current_inode_id = root_inode_id;
     let mut current_inode_kind = InodeKind::Directory;
-    let mut current_absolute_path = "/".to_owned();
+    let mut current_absolute_path = AbsolutePath::root();
     let mut current_parent_inode_id = None;
     let mut current_display_name = String::new();
     let mut current_binding_version = None;
@@ -374,28 +374,25 @@ where
     for component in absolute_path.components() {
         if current_inode_kind != InodeKind::Directory {
             return Err(VisiblePathError::PathComponentNotDirectory {
-                absolute_path: current_absolute_path,
+                absolute_path: current_absolute_path.to_string(),
                 inode_id: current_inode_id,
                 inode_kind: current_inode_kind,
             }
             .into());
         }
 
-        let requested_absolute_path = join_display_path(&current_absolute_path, component.as_str());
         let display_name = component.to_display_name();
+        let not_found = || VisiblePathError::PathNotFound {
+            absolute_path: current_absolute_path.join(&display_name).to_string(),
+        };
         let name_key = NameKey::for_display_name(&display_name);
         let direntry = reads
             .active_child_binding(current_inode_id, &name_key)
             .await?
-            .ok_or_else(|| VisiblePathError::PathNotFound {
-                absolute_path: requested_absolute_path.clone(),
-            })?;
-        let direntry =
-            visible_page_child(reads, direntry)
-                .await?
-                .ok_or(VisiblePathError::PathNotFound {
-                    absolute_path: requested_absolute_path,
-                })?;
+            .ok_or_else(not_found)?;
+        let direntry = visible_page_child(reads, direntry)
+            .await?
+            .ok_or_else(not_found)?;
 
         current_inode_id = direntry.child_inode_id;
         current_inode_kind = direntry.child_kind;
@@ -403,8 +400,7 @@ where
         let bound_display_name = direntry
             .display_name()
             .expect("visible binding should be bound");
-        current_absolute_path =
-            join_display_path(&current_absolute_path, bound_display_name.as_str());
+        current_absolute_path = current_absolute_path.join(bound_display_name);
         current_display_name = bound_display_name.to_string();
         current_binding_version = Some(direntry.position());
     }
@@ -413,7 +409,7 @@ where
         .visible_inode(current_inode_id)
         .await?
         .ok_or_else(|| VisiblePathError::PathNotFound {
-            absolute_path: current_absolute_path.clone(),
+            absolute_path: current_absolute_path.to_string(),
         })?;
     Ok(ResolvedVisiblePath {
         absolute_path: current_absolute_path,
@@ -425,14 +421,6 @@ where
         display_name: current_display_name,
         binding_version: current_binding_version,
     })
-}
-
-fn join_display_path(base: &str, component: &str) -> String {
-    if base == "/" {
-        format!("/{component}")
-    } else {
-        format!("{base}/{component}")
-    }
 }
 
 /// Drives a visibility future built over in-memory reads to completion

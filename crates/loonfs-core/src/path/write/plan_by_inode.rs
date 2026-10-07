@@ -3,7 +3,7 @@
 use super::plan_delete::plan_delete;
 use super::plan_transfer::plan_move;
 use super::publish_path_planning::{
-    check_binding_version, child_display_path, classify_replace_destination, resolve_visible_child,
+    check_binding_version, classify_replace_destination, resolve_visible_child,
     resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Replacement};
@@ -36,13 +36,13 @@ pub(super) async fn plan_create_by_inode<S: ObjectStore + ?Sized>(
     .await?;
     if parent.inode_kind != InodeKind::Directory {
         return Err(CoreError::ExpectedDirectory {
-            target: parent.absolute_path,
+            target: parent.absolute_path.to_string(),
             kind: parent.inode_kind,
         });
     }
     if let Some(existing) = resolve_visible_child(view, parent_inode_id, display_name).await? {
         return Err(CoreError::DestinationExists {
-            path: child_display_path(&parent.absolute_path, display_name),
+            path: parent.absolute_path.join(display_name).to_string(),
             existing_display_name: Some(existing.display_name),
         });
     }
@@ -78,7 +78,7 @@ pub(super) async fn plan_put_file_revision_by_inode<S: ObjectStore + ?Sized>(
     .await?;
     if target.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
-            target: target.absolute_path,
+            target: target.absolute_path.to_string(),
             kind: target.inode_kind,
         });
     }
@@ -118,11 +118,14 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
         )
         .await?;
         return Err(CoreError::ExpectedDirectory {
-            target: target_parent.absolute_path,
+            target: target_parent.absolute_path.to_string(),
             kind: target_parent.inode_kind,
         });
     }
-    let destination_path = child_display_path(&target_parent.absolute_path, to_display_name);
+    let destination_path = target_parent
+        .absolute_path
+        .join(to_display_name)
+        .to_string();
     let occupant = resolve_visible_child(view, to_parent_inode_id, to_display_name).await?;
     view.authorize_destination(
         occupant.as_ref(),

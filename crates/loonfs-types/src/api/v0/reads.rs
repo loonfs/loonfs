@@ -16,6 +16,7 @@ pub struct PathEntry {
     /// Namespace that was read.
     pub namespace_id: NamespaceId,
     /// Absolute path as rendered from stored display names.
+    #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
     /// Stable inode identity for this item.
     #[serde(with = "crate::public_inode_id")]
@@ -319,6 +320,28 @@ mod tests {
                     "binding_version": binding_version()
                 }]
             })
+        );
+    }
+
+    #[test]
+    fn a_path_entry_decodes_a_derived_path_over_the_request_limits() {
+        let name = DisplayName::parse("d").expect("display name");
+        let mut derived = entry("/d", Some(InodeId(1)), Some("d"));
+        derived.path =
+            (0..=crate::MAX_PATH_DEPTH).fold(AbsolutePath::root(), |path, _| path.join(&name));
+        let mut wire = serde_json::to_value(&derived).expect("serialize entry");
+        assert_eq!(
+            serde_json::from_value::<PathEntry>(wire.clone()).expect("decode the derived path"),
+            derived
+        );
+        assert!(
+            serde_json::from_value::<AbsolutePath>(wire["path"].clone()).is_err(),
+            "a request path keeps the limits"
+        );
+        wire["path"] = serde_json::json!("d/d");
+        assert!(
+            serde_json::from_value::<PathEntry>(wire).is_err(),
+            "a derived path keeps the grammar"
         );
     }
 

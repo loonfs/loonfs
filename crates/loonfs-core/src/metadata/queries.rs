@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedVisiblePath {
-    pub absolute_path: String,
+    pub absolute_path: AbsolutePath,
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
     pub created_by: ActorId,

@@ -1857,6 +1857,8 @@ The namespace root is nameless, so its entry omits `parent_inode_id`, `display_n
 
 The inode route accepts `snapshot_id` and returns the same entry shape, including
 the `path` at the selected sequence.
+The path limits in [format: names and paths](format.md#14-names-and-paths) bound
+request paths; a derived `path` may exceed them, and inode-addressed reads still serve it.
 Renaming an entry changes its path and name but not its inode id or metadata.
 An unknown or hidden inode returns `inode_not_found`. The root inode returns
 `/`. `include_attributes` behaves the same as it does for the path entry route.
