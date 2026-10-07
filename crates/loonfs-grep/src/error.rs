@@ -25,6 +25,26 @@ pub enum GrepError {
         "feature `query.grep` is enabled but its backfill has not completed on this namespace"
     )]
     Backfilling,
+    /// The pattern does not parse, or a page size is outside the pagination
+    /// contract.
+    #[error("invalid search query: {0}")]
+    InvalidQuery(String),
+    /// The pattern has no run of literal bytes for the trigram index, and the
+    /// query cannot search without the index: `allow_scan` is off, or the
+    /// scan would pass its file budget.
+    #[error("the pattern requires no literal bytes and cannot use the index: {0}")]
+    QueryUnindexable(String),
+    /// The commits the index has not reached change more files than one
+    /// query scans, and the query did not set `allow_stale`.
+    #[error(
+        "the grep index trails the head by {behind_commits} commits, past the \
+         exhaustive-scan budget; run maintenance or set allow_stale"
+    )]
+    IndexLagging {
+        /// Commits between the position the index was built through and the
+        /// head the query reads.
+        behind_commits: u64,
+    },
     /// The backing provider could not serve grep-owned state.
     #[error("object-store operation failed for grep state `{object_key}`: {message}")]
     StoreUnavailable {
@@ -54,8 +74,8 @@ pub enum GrepError {
 }
 
 /// Grep names the runtime's own error vocabulary for the conditions it
-/// shares with every other reader — an invalid query, an unusable cursor, a
-/// lost basis — so one code means one thing whoever produced it.
+/// shares with every other reader — an unusable cursor, a lost basis — so
+/// one code means one thing whoever produced it.
 impl From<CoreError> for GrepError {
     fn from(error: CoreError) -> Self {
         Self::Runtime(loonfs::Error::Core(error))
@@ -96,6 +116,9 @@ impl GrepError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::NotEnabled | Self::Backfilling => ErrorCode::NotSupported,
+            Self::InvalidQuery(_) => ErrorCode::InvalidRequest,
+            Self::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
+            Self::IndexLagging { .. } => ErrorCode::IndexLagging,
             Self::StoreUnavailable { class, .. } => match class {
                 StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
                 _ => ErrorCode::ServerError,
