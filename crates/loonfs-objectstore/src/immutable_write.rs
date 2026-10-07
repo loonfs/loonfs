@@ -7,7 +7,7 @@ use crate::{
     PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use bytes::Bytes;
-use loonfs_types::OperationDeadline;
+use loonfs_types::{ChecksumAlgorithm, OperationDeadline};
 use thiserror::Error;
 
 /// Failure to verify that an immutable key contains the requested bytes.
@@ -144,9 +144,11 @@ pub(crate) async fn readback<S: ObjectStore + ?Sized>(
 
 /// Compares what `key` holds with `expected` without writing.
 ///
-/// A stored checksum decides without a download. Without one, the object is
-/// read, but never more than one byte past the length of `expected`. An
-/// identical object reports only its size.
+/// A stored size or checksum that differs decides without a download, and so
+/// does a matching stored SHA-256. A CRC never confirms identity on its own,
+/// because different bytes can share a CRC. After a matching CRC, or when the
+/// store keeps no checksum, the object is read, but never more than one byte
+/// past the length of `expected`. An identical object reports only its size.
 async fn compare_existing<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
@@ -155,8 +157,14 @@ async fn compare_existing<S: ObjectStore + ?Sized>(
     let size_bytes = expected.len() as u64;
     let identical = match store.head_stored_checksum(key).await {
         Ok(None) => return Ok(ImmutableReadback::Missing),
-        Ok(Some(stored)) => stored.size_bytes == size_bytes && stored.checksum.matches(expected),
-        Err(ObjectStoreError::StoredChecksumMissing { .. } | ObjectStoreError::Unsupported(_)) => {
+        Ok(Some(stored))
+            if stored.size_bytes != size_bytes || !stored.checksum.matches(expected) =>
+        {
+            false
+        }
+        Ok(Some(stored)) if stored.checksum.algorithm == ChecksumAlgorithm::Sha256 => true,
+        Ok(Some(_))
+        | Err(ObjectStoreError::StoredChecksumMissing { .. } | ObjectStoreError::Unsupported(_)) => {
             // The extra byte tells a longer object apart from this payload.
             let range = ByteRange {
                 start_inclusive: 0,

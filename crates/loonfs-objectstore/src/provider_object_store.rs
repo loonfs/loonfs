@@ -1365,7 +1365,7 @@ mod tests {
     };
     use crate::test_support::{aws_environment_lock, isolated_aws_environment, SteppingTimer};
     use futures::{StreamExt, TryStreamExt};
-    use loonfs_types::transport_retry_backoff;
+    use loonfs_types::{transport_retry_backoff, ChecksumAlgorithm};
     use object_store::client::CredentialProvider;
     use object_store::memory::InMemory;
     use provider_store::list::PaginatedListResult;
@@ -2646,22 +2646,25 @@ mod tests {
         );
     }
 
-    /// Reports the SHA-256 of what the in-memory provider holds, the way a
-    /// provider attests to its own bytes. It reads the in-memory provider
-    /// directly, not through the counted transport, because a stored
-    /// checksum costs the client no download.
-    struct ProviderChecksums(Arc<FlakyStore>);
+    /// Reports the `algorithm` checksum of what the in-memory provider
+    /// holds, the way a provider attests to its own bytes. It reads the
+    /// in-memory provider directly, not through the counted transport,
+    /// because a stored checksum costs the client no download.
+    struct ProviderChecksums {
+        flaky: Arc<FlakyStore>,
+        algorithm: ChecksumAlgorithm,
+    }
 
     #[async_trait]
     impl StoredChecksumReader for ProviderChecksums {
         async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
             let path = Path::from(format!("tenant-a/{key}"));
-            match self.0.inner.get(&path).await {
+            match self.flaky.inner.get(&path).await {
                 Ok(result) => {
                     let bytes = result.bytes().await.expect("in-memory read");
                     Ok(Some(StoredObjectChecksum {
                         size_bytes: bytes.len() as u64,
-                        checksum: Checksum::sha256(&bytes),
+                        checksum: Checksum::compute(self.algorithm, &bytes),
                     }))
                 }
                 Err(err) if provider_not_found(&err) => Ok(None),
@@ -2670,21 +2673,68 @@ mod tests {
         }
     }
 
-    /// A store whose provider reports stored checksums and one whose
+    fn checksum_reporting_store(
+        flaky: &Arc<FlakyStore>,
+        algorithm: ChecksumAlgorithm,
+    ) -> ProviderObjectStore {
+        retrying_store(Arc::clone(flaky)).checksum_reader(Arc::new(ProviderChecksums {
+            flaky: Arc::clone(flaky),
+            algorithm,
+        }))
+    }
+
+    /// A store whose provider reports stored SHA-256 checksums and one whose
     /// provider reports none, each with the reads it needs to compare an
     /// object already at the key.
-    fn checksum_and_checksumless_stores() -> [(Arc<FlakyStore>, ProviderObjectStore, usize); 2] {
+    fn sha256_and_checksumless_stores() -> [(Arc<FlakyStore>, ProviderObjectStore, usize); 2] {
         let reporting = Arc::new(FlakyStore::default());
         let silent = Arc::new(FlakyStore::default());
         [
             (
                 Arc::clone(&reporting),
-                retrying_store(Arc::clone(&reporting))
-                    .checksum_reader(Arc::new(ProviderChecksums(reporting))),
+                checksum_reporting_store(&reporting, ChecksumAlgorithm::Sha256),
                 0,
             ),
             (Arc::clone(&silent), retrying_store(silent), 1),
         ]
+    }
+
+    /// Rewrites the last four bytes of `bytes` so that its CRC-32C equals
+    /// the CRC-32C of `other`. Four bytes always suffice because a CRC is
+    /// linear: running the CRC backwards from the target fixes the table
+    /// entry that each of the last four bytes must select.
+    fn match_crc32c(bytes: &mut [u8], other: &[u8]) {
+        const REFLECTED_POLYNOMIAL: u32 = 0x82f6_3b78;
+        let table: Vec<u32> = (0..256)
+            .map(|entry| {
+                (0..8).fold(entry, |crc, _| {
+                    if crc & 1 == 1 {
+                        (crc >> 1) ^ REFLECTED_POLYNOMIAL
+                    } else {
+                        crc >> 1
+                    }
+                })
+            })
+            .collect();
+        let crc32c = |bytes: &[u8]| {
+            u32::from_str_radix(&Checksum::crc32c(bytes).value, 16)
+                .expect("a CRC-32C should be hex")
+        };
+        let (prefix, tail) = bytes.split_at_mut(bytes.len() - 4);
+        let mut entries = [0; 4];
+        let mut register = !crc32c(other);
+        for entry in entries.iter_mut().rev() {
+            *entry = table
+                .iter()
+                .position(|value| value >> 24 == register >> 24)
+                .expect("every high byte should appear in the CRC-32C table");
+            register = (register ^ table[*entry]) << 8;
+        }
+        let mut register = !crc32c(prefix);
+        for (byte, entry) in tail.iter_mut().zip(entries) {
+            *byte = (register as u8) ^ (entry as u8);
+            register = (register >> 8) ^ table[entry];
+        }
     }
 
     #[tokio::test]
@@ -2698,7 +2748,7 @@ mod tests {
         one_byte_longer.push(0);
 
         for theirs in [last_byte_differs, one_byte_longer].map(Bytes::from) {
-            for (flaky, store, reads) in checksum_and_checksumless_stores() {
+            for (flaky, store, reads) in sha256_and_checksumless_stores() {
                 seed_scoped_object(&flaky, MULTIPART_KEY, theirs.clone()).await;
 
                 let error = store
@@ -2728,7 +2778,7 @@ mod tests {
             usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"),
         ));
 
-        for (flaky, store, reads) in checksum_and_checksumless_stores() {
+        for (flaky, store, reads) in sha256_and_checksumless_stores() {
             seed_scoped_object(&flaky, MULTIPART_KEY, payload.clone()).await;
 
             let metadata = store
@@ -2741,6 +2791,43 @@ mod tests {
             assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
             assert_eq!(flaky.gets.load(Ordering::SeqCst), reads);
         }
+    }
+
+    #[tokio::test]
+    async fn immutable_large_write_refuses_different_bytes_that_share_the_payload_crc32c() {
+        let payload =
+            multipart_payload(usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"));
+        let mut theirs = payload.clone();
+        theirs[0] ^= 1;
+        match_crc32c(&mut theirs, &payload);
+        assert!(theirs != payload, "the payloads should differ");
+        assert_eq!(Checksum::crc32c(&theirs), Checksum::crc32c(&payload));
+        let theirs = Bytes::from(theirs);
+        let flaky = Arc::new(FlakyStore::default());
+        let store = checksum_reporting_store(&flaky, ChecksumAlgorithm::Crc32c);
+        seed_scoped_object(&flaky, MULTIPART_KEY, theirs.clone()).await;
+
+        let error = store
+            .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload))
+            .await
+            .expect_err("different bytes behind a matching CRC-32C are refused");
+
+        assert!(matches!(
+            error,
+            crate::ImmutableWriteError::DifferentObject { object_key }
+                if object_key == MULTIPART_KEY
+        ));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            flaky.gets.load(Ordering::SeqCst),
+            1,
+            "a matching CRC-32C is settled by one bounded read"
+        );
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(theirs)
+        );
     }
 
     #[tokio::test]

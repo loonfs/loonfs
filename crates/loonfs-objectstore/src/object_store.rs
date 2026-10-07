@@ -552,8 +552,11 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Payloads below [`crate::PROVIDER_MULTIPART_THRESHOLD_BYTES`] use
     /// create-if-absent. Payloads at or above that threshold use the store's
     /// multipart-capable overwrite path, which cannot refuse an occupied key,
-    /// so each attempt first compares the key's stored checksum, or its bytes
-    /// when the store keeps no checksum, and writes only to an absent key.
+    /// so each attempt first compares the object at the key and writes only
+    /// to an absent key. A stored SHA-256 decides that comparison without a
+    /// download. A stored CRC never confirms identity on its own, because
+    /// different bytes can share a CRC. After a matching CRC, or when the
+    /// store keeps no checksum, the comparison reads the object's bytes.
     /// Transport retries, and writers racing that comparison, are safe only
     /// because every writer allowed to name this immutable key must supply
     /// identical bytes. Mutable keys must use [`Self::put`] and own their
