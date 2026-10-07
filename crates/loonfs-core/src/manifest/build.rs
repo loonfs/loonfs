@@ -357,7 +357,19 @@ mod tests {
             }
             let next_descriptor = descriptor(&namespace_id);
             let mut next = Box::pin(puts.put(&next_descriptor, Bytes::from(vec![0; next_size])));
-            assert!(next.as_mut().now_or_never().is_none());
+            // A put of 8 MiB or more compares its key before it writes, so it
+            // reaches the store only while `next` drives the pending puts.
+            let earlier_puts_arrive = async {
+                while concurrency.puts().total < initial_sizes.len() {
+                    tokio::task::yield_now().await;
+                }
+            };
+            let next_waited = tokio::select! {
+                biased;
+                _ = &mut next => false,
+                () = earlier_puts_arrive => true,
+            };
+            assert!(next_waited, "the next put should wait for capacity");
             assert_eq!(concurrency.puts().total, initial_sizes.len());
             assert_eq!(
                 store.peaks().peak_live_bytes,

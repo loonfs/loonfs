@@ -2635,11 +2635,112 @@ mod tests {
         assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 2);
         assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            flaky.gets.load(Ordering::SeqCst),
+            3,
+            "one key check per attempt and one completion read-back"
+        );
         assert_eq!(
             store.get(MULTIPART_KEY, None).await.expect("get"),
             Some(Bytes::from(payload))
         );
+    }
+
+    /// Reports the SHA-256 of what the in-memory provider holds, the way a
+    /// provider attests to its own bytes. It reads the in-memory provider
+    /// directly, not through the counted transport, because a stored
+    /// checksum costs the client no download.
+    struct ProviderChecksums(Arc<FlakyStore>);
+
+    #[async_trait]
+    impl StoredChecksumReader for ProviderChecksums {
+        async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+            let path = Path::from(format!("tenant-a/{key}"));
+            match self.0.inner.get(&path).await {
+                Ok(result) => {
+                    let bytes = result.bytes().await.expect("in-memory read");
+                    Ok(Some(StoredObjectChecksum {
+                        size_bytes: bytes.len() as u64,
+                        checksum: Checksum::sha256(&bytes),
+                    }))
+                }
+                Err(err) if provider_not_found(&err) => Ok(None),
+                Err(err) => Err(map_provider_error(key, err)),
+            }
+        }
+    }
+
+    /// A store whose provider reports stored checksums and one whose
+    /// provider reports none, each with the reads it needs to compare an
+    /// object already at the key.
+    fn checksum_and_checksumless_stores() -> [(Arc<FlakyStore>, ProviderObjectStore, usize); 2] {
+        let reporting = Arc::new(FlakyStore::default());
+        let silent = Arc::new(FlakyStore::default());
+        [
+            (
+                Arc::clone(&reporting),
+                retrying_store(Arc::clone(&reporting))
+                    .checksum_reader(Arc::new(ProviderChecksums(reporting))),
+                0,
+            ),
+            (Arc::clone(&silent), retrying_store(silent), 1),
+        ]
+    }
+
+    #[tokio::test]
+    async fn immutable_large_write_refuses_different_bytes_at_key_and_keeps_them() {
+        let payload = Bytes::from(multipart_payload(
+            usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"),
+        ));
+        let mut last_byte_differs = payload.to_vec();
+        *last_byte_differs.last_mut().expect("nonempty payload") ^= 1;
+        let mut one_byte_longer = payload.to_vec();
+        one_byte_longer.push(0);
+
+        for theirs in [last_byte_differs, one_byte_longer].map(Bytes::from) {
+            for (flaky, store, reads) in checksum_and_checksumless_stores() {
+                seed_scoped_object(&flaky, MULTIPART_KEY, theirs.clone()).await;
+
+                let error = store
+                    .put_immutable_verified(MULTIPART_KEY, payload.clone())
+                    .await
+                    .expect_err("different bytes at the key are refused");
+
+                assert!(matches!(
+                    error,
+                    crate::ImmutableWriteError::DifferentObject { object_key }
+                        if object_key == MULTIPART_KEY
+                ));
+                assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
+                assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+                assert_eq!(flaky.gets.load(Ordering::SeqCst), reads);
+                assert_eq!(
+                    store.get(MULTIPART_KEY, None).await.expect("get"),
+                    Some(theirs.clone())
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn immutable_large_write_accepts_identical_bytes_at_key_without_rewrite() {
+        let payload = Bytes::from(multipart_payload(
+            usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"),
+        ));
+
+        for (flaky, store, reads) in checksum_and_checksumless_stores() {
+            seed_scoped_object(&flaky, MULTIPART_KEY, payload.clone()).await;
+
+            let metadata = store
+                .put_immutable_verified(MULTIPART_KEY, payload.clone())
+                .await
+                .expect("identical bytes at the key are accepted");
+
+            assert_eq!(metadata.size_bytes, payload.len() as u64);
+            assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
+            assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+            assert_eq!(flaky.gets.load(Ordering::SeqCst), reads);
+        }
     }
 
     #[tokio::test]
