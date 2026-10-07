@@ -1,7 +1,8 @@
 //! Request preconditions against the candidate pre-state.
 
 use super::publish_path_planning::{
-    check_binding_version, is_missing_visible_path, resolve_visible_inode, PublishPathPlanningView,
+    check_binding_version, hidden_inode_binding_error, is_missing_visible_path,
+    resolve_visible_inode, PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Authorizer, CommitAuthority};
 use crate::commit::CommitValidationError;
@@ -11,7 +12,7 @@ use crate::namespace::state::NamespaceReadState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingVersion, CommitPrecondition,
-    InodeId, InodeKind,
+    InodeId, InodeKind, NameKey,
 };
 
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
@@ -81,6 +82,29 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 )
                 .await?;
             }
+            CommitPrecondition::InodeBinding {
+                inode_id,
+                expected_binding_version,
+            } => {
+                view.authorize(
+                    *inode_id,
+                    AccessRights::from_iter([AccessRight::Read]),
+                    Absence::Inode,
+                )
+                .await?;
+                let checked = match resolve_visible_inode(&view, *inode_id).await {
+                    Ok(resolved) => {
+                        check_binding_version(&view, &resolved, expected_binding_version)
+                    }
+                    Err(CoreError::InodeNotFound(_)) => Err(hidden_inode_binding_error(
+                        &view,
+                        *inode_id,
+                        expected_binding_version,
+                    )),
+                    Err(error) => return Err(error),
+                };
+                checked.map_err(|error| at_precondition(error, precondition_index))?;
+            }
             CommitPrecondition::PathAbsence { path } => {
                 let parent_path = path.parent().unwrap_or_else(AbsolutePath::root);
                 match view.view.resolve_visible_path(&parent_path).await {
@@ -111,6 +135,36 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                     Err(error) => return Err(error),
                 }
                 evaluate_binding(&view, path, None, None, precondition_index).await?;
+            }
+            CommitPrecondition::NameAbsence {
+                parent_inode_id,
+                display_name,
+            } => {
+                match resolve_visible_inode(&view, *parent_inode_id).await {
+                    Ok(parent) => {
+                        view.authorize(
+                            *parent_inode_id,
+                            AccessRights::from_iter([AccessRight::Read]),
+                            Absence::Inode,
+                        )
+                        .await?;
+                        if parent.inode_kind != InodeKind::Directory {
+                            continue;
+                        }
+                    }
+                    Err(CoreError::InodeNotFound(_)) => continue,
+                    Err(error) => return Err(error),
+                }
+                let name_key = NameKey::for_display_name(display_name);
+                if let Some(binding) = view.view.visible_child(*parent_inode_id, &name_key).await? {
+                    return Err(CommitValidationError::BindingPreconditionMismatch {
+                        target: format!("name `{name_key}` under parent inode `{parent_inode_id}`"),
+                        expected_inode_id: None,
+                        actual_inode_id: Some(binding.child_inode_id),
+                        precondition_index,
+                    }
+                    .into());
+                }
             }
             CommitPrecondition::AttributesRevision {
                 inode_id,
@@ -219,25 +273,30 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
         .into());
     }
     if let (Some(binding), Some(expected)) = (actual, expected_binding_version) {
-        check_binding_version(view, &binding, expected).map_err(|error| match error {
-            CoreError::BindingVersionMismatch {
-                inode_id,
-                expected_binding_version,
-                actual_binding_version,
-                ..
-            } => CoreError::BindingVersionMismatch {
-                inode_id,
-                expected_binding_version,
-                actual_binding_version,
-                precondition_index,
-            },
-            CoreError::InvalidCommitField { field, message, .. } => CoreError::InvalidCommitField {
-                field,
-                message,
-                precondition_index,
-            },
-            error => error,
-        })?;
+        check_binding_version(view, &binding, expected)
+            .map_err(|error| at_precondition(error, precondition_index))?;
     }
     Ok(())
+}
+
+fn at_precondition(error: CoreError, precondition_index: Option<u32>) -> CoreError {
+    match error {
+        CoreError::BindingVersionMismatch {
+            inode_id,
+            expected_binding_version,
+            actual_binding_version,
+            ..
+        } => CoreError::BindingVersionMismatch {
+            inode_id,
+            expected_binding_version,
+            actual_binding_version,
+            precondition_index,
+        },
+        CoreError::InvalidCommitField { field, message, .. } => CoreError::InvalidCommitField {
+            field,
+            message,
+            precondition_index,
+        },
+        error => error,
+    }
 }

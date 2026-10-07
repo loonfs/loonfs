@@ -67,6 +67,8 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         crate::http::handlers_filesystem::list_file_revisions,
         crate::http::handlers_inodes::get_inode,
         crate::http::handlers_inodes::list_inode_children,
+        crate::http::handlers_inodes::get_file_bytes_by_inode,
+        crate::http::handlers_downloads::create_current_download_by_inode,
         crate::http::handlers_inodes::list_file_revisions_by_inode,
         crate::http::handlers_inodes::get_file_revision_bytes_by_inode,
         crate::http::handlers_downloads::create_download_by_inode,

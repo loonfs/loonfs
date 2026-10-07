@@ -1,11 +1,13 @@
 //! The publish plan for one access update.
 
 use super::ensure_expected_inode;
-use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
+use super::publish_path_planning::{
+    resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
+};
 use crate::authorize::Absence;
 use crate::commit::{CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
-use crate::metadata::VisiblePathError;
+use crate::metadata::{AccessRevisionRecord, ResolvedVisiblePath, VisiblePathError};
 use crate::path::mutation_path::final_component;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
@@ -58,21 +60,7 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
     )
     .await?;
     let target = resolved?;
-    if target.inode_id != ROOT_INODE_ID
-        && grants
-            .iter()
-            .any(|(_, rights)| rights.contains(AccessRight::Admin))
-    {
-        return Err(CoreError::InvalidCommitRequest(
-            "admin is valid only on the root inode".to_owned(),
-        ));
-    }
-    if boundary && target.inode_kind == InodeKind::File {
-        return Err(CoreError::InvalidCommitRequest(
-            "a boundary applies only to a directory".to_owned(),
-        ));
-    }
-
+    validate_access_target(&target, boundary, grants)?;
     if absolute_path.is_root() {
         if let Some(expected) = expected_inode_id {
             if target.inode_id != expected {
@@ -88,15 +76,85 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
     } else {
         ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
     }
+    Ok(update_access(
+        target.inode_id,
+        current,
+        boundary,
+        grants,
+        expected_access_revision_no,
+    ))
+}
+
+pub(super) async fn plan_update_access_by_inode<S: ObjectStore + ?Sized>(
+    inode_id: InodeId,
+    boundary: bool,
+    grants: &AccessGrants,
+    expected_access_revision_no: Option<AccessRevisionNo>,
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+) -> Result<CompiledFilesystemOperation> {
+    if view.access.is_unrestricted() {
+        return Err(CoreError::NamespaceUnrestricted {
+            namespace_id: view.namespace_id.clone(),
+        });
+    }
+    let target = resolve_visible_inode(view, inode_id).await?;
+    let current = view.view.latest_access_revision(inode_id).await?;
+    let empty = AccessGrants::default();
+    view.authorize_access_update(
+        inode_id,
+        current
+            .as_ref()
+            .map_or((false, &empty), |row| (row.boundary, &row.grants)),
+        (boundary, grants),
+        Absence::Inode,
+    )
+    .await?;
+    validate_access_target(&target, boundary, grants)?;
+    Ok(update_access(
+        inode_id,
+        current,
+        boundary,
+        grants,
+        expected_access_revision_no,
+    ))
+}
+
+fn validate_access_target(
+    target: &ResolvedVisiblePath,
+    boundary: bool,
+    grants: &AccessGrants,
+) -> Result<()> {
+    if target.inode_id != ROOT_INODE_ID
+        && grants
+            .iter()
+            .any(|(_, rights)| rights.contains(AccessRight::Admin))
+    {
+        return Err(CoreError::InvalidCommitRequest(
+            "admin is valid only on the root inode".to_owned(),
+        ));
+    }
+    if boundary && target.inode_kind == InodeKind::File {
+        return Err(CoreError::InvalidCommitRequest(
+            "a boundary applies only to a directory".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn update_access(
+    inode_id: InodeId,
+    current: Option<AccessRevisionRecord>,
+    boundary: bool,
+    grants: &AccessGrants,
+    expected_access_revision_no: Option<AccessRevisionNo>,
+) -> CompiledFilesystemOperation {
     let current_revision_no =
         current.map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
     let base_access_revision_no = expected_access_revision_no.unwrap_or(current_revision_no);
-    Ok(CompiledFilesystemOperation::new(vec![
-        CommitOp::UpdateAccess {
-            inode_id: target.inode_id,
-            base_access_revision_no,
-            boundary,
-            grants: grants.clone(),
-        },
-    ]))
+    CompiledFilesystemOperation::new(vec![CommitOp::UpdateAccess {
+        inode_id,
+        base_access_revision_no,
+        boundary,
+        grants: grants.clone(),
+    }])
 }

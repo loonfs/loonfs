@@ -88,6 +88,15 @@ pub struct UpdateAttributesOptions {
     pub expected_attributes_revision_no: Option<AttributesRevisionNo>,
 }
 
+/// Options for writing and removing a visible inode's attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateAttributesByInodeOptions {
+    /// Commit ID, message, and preconditions.
+    pub commit: CommitOptions,
+    /// The attribute revision that must still be current.
+    pub expected_attributes_revision_no: Option<AttributesRevisionNo>,
+}
+
 /// An inode's complete direct access: the state an access update writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessState {
@@ -105,6 +114,15 @@ pub struct UpdateAccessOptions {
     /// The inode that the path must still resolve to before the update.
     pub expected_inode_id: Option<InodeId>,
     /// With an inode precondition, the access revision that must still be current.
+    pub expected_access_revision_no: Option<AccessRevisionNo>,
+}
+
+/// Options for replacing a visible inode's access row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateAccessByInodeOptions {
+    /// Commit ID, message, and preconditions.
+    pub commit: CommitOptions,
+    /// The access revision that must still be current.
     pub expected_access_revision_no: Option<AccessRevisionNo>,
 }
 

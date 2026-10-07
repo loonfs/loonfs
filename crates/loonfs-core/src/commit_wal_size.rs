@@ -217,19 +217,22 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
             CREATE_INODE_BYTES + BIND_BYTES + NAMES_BYTES + REVISION_BYTES
         }
         FilesystemOperation::PutFileRevisionByInode { .. }
-        | FilesystemOperation::RestoreRevision { .. } => REVISION_BYTES,
+        | FilesystemOperation::RestoreRevision { .. }
+        | FilesystemOperation::RestoreRevisionByInode { .. } => REVISION_BYTES,
         FilesystemOperation::DeletePath { .. } | FilesystemOperation::DeleteByInode { .. } => {
             DELETE_BYTES
         }
         FilesystemOperation::MovePath { .. } | FilesystemOperation::MoveByInode { .. } => {
             DELETE_BYTES + UNBIND_BYTES + BIND_BYTES + NAMES_BYTES
         }
-        FilesystemOperation::CopyPath { .. } => {
+        FilesystemOperation::CopyPath { .. } | FilesystemOperation::CopyByInode { .. } => {
             CREATE_INODE_BYTES + BIND_BYTES + NAMES_BYTES + REVISION_BYTES + ATTRIBUTES_BYTES
         }
         FilesystemOperation::Undelete { .. } => REVOKE_BYTES + BIND_BYTES + NAMES_BYTES,
-        FilesystemOperation::UpdateAttributes { .. } => ATTRIBUTES_BYTES,
-        FilesystemOperation::UpdateAccess { .. } => ACCESS_BYTES,
+        FilesystemOperation::UpdateAttributes { .. }
+        | FilesystemOperation::UpdateAttributesByInode { .. } => ATTRIBUTES_BYTES,
+        FilesystemOperation::UpdateAccess { .. }
+        | FilesystemOperation::UpdateAccessByInode { .. } => ACCESS_BYTES,
     }
 }
 

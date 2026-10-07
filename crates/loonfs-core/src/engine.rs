@@ -615,11 +615,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         .await?)
     }
 
-    /// Streams one retained inode revision without requiring a visible path.
-    pub async fn read_file_revision_stream_by_inode(
+    /// Streams inode content: one retained revision without requiring a
+    /// visible path, or the current revision of a visible file.
+    pub async fn read_file_stream_by_inode(
         &self,
         inode_id: InodeId,
-        revision_no: RevisionNo,
+        revision_no: Option<RevisionNo>,
         context: &RuntimeReadContext,
     ) -> Result<FileContentStream<S>>
     where
@@ -628,10 +629,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        let content_ref = view
-            .authorized_revision_for_inode(inode_id, revision_no, &access)
-            .await?
-            .content_ref;
+        let content_ref = match revision_no {
+            Some(revision_no) => {
+                view.authorized_revision_for_inode(inode_id, revision_no, &access)
+                    .await?
+            }
+            None => view.current_revision_for_inode(inode_id, &access).await?,
+        }
+        .content_ref;
         Ok(FileContentStream::open_inner(
             self.store.clone(),
             view.resolve_content_location(&content_ref)?,
@@ -658,11 +663,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .await
     }
 
-    /// Prepares a retained inode revision's content object for a direct download.
+    /// Prepares inode content for a direct download: a retained revision, or
+    /// the current revision of a visible file when `revision_no` is absent.
     pub async fn direct_download_target_by_inode(
         &self,
         inode_id: InodeId,
-        revision_no: RevisionNo,
+        revision_no: Option<RevisionNo>,
         context: &RuntimeReadContext,
     ) -> Result<DirectDownloadByInodeTarget> {
         let head_view = self.authorization_head_view().await?;

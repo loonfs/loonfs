@@ -616,6 +616,8 @@ fn undelete_rejects_deletions_from_the_same_commit() {
                         destination_path: Some(
                             parse_mutation_path("/resurrected.txt").expect("valid mutation path"),
                         ),
+                        destination_parent_inode_id: None,
+                        destination_display_name: None,
                     },
                 ],
             },

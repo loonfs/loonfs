@@ -351,6 +351,7 @@ pub(crate) async fn run_filesystem_grep(
         pattern: args.pattern.clone(),
         case_insensitive: args.ignore_case,
         path_prefix,
+        inode_id: None,
         cursor: args.pagination.cursor.clone(),
         allow_stale: args.allow_stale,
         allow_scan: args.allow_scan,

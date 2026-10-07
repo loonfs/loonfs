@@ -1007,8 +1007,9 @@ impl<M> Namespace<M> {
             .await
     }
 
-    /// Resolves retained inode content for a direct download without
-    /// requiring a current path.
+    /// Resolves inode content for a direct download: the current revision of
+    /// a visible file when `revision_no` is absent, or a retained revision
+    /// without requiring a current path.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.create_download_by_inode",
@@ -1024,7 +1025,7 @@ impl<M> Namespace<M> {
     pub async fn create_download_by_inode(
         &self,
         inode_id: InodeId,
-        revision_no: RevisionNo,
+        revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadByInodeTarget> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
@@ -1356,6 +1357,35 @@ impl<M> Namespace<M> {
             .await
     }
 
+    /// Streams the current content of a visible file inode, wherever it is
+    /// bound. Complete verification requires consuming the stream to its end.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.read_file_stream_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "read_file_stream_by_inode",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn read_file_stream_by_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.core.record_trace_context(&tracing::Span::current());
+        self.core
+            .read(&self.namespace_id, |engine, context| async move {
+                Ok(engine
+                    .read_file_stream_by_inode(inode_id, None, &context)
+                    .await?)
+            })
+            .await
+    }
+
     /// Streams a retained inode revision, including content without a visible path.
     /// Complete verification requires consuming the stream to its end.
     #[tracing::instrument(
@@ -1380,7 +1410,7 @@ impl<M> Namespace<M> {
         self.core
             .read(&self.namespace_id, |engine, context| async move {
                 Ok(engine
-                    .read_file_revision_stream_by_inode(inode_id, revision_no, &context)
+                    .read_file_stream_by_inode(inode_id, Some(revision_no), &context)
                     .await?)
             })
             .await

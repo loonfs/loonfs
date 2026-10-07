@@ -104,7 +104,7 @@ async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
         recording.reset();
         let object_key = if by_inode {
             namespace
-                .create_download_by_inode(inode_id, RevisionNo(1))
+                .create_download_by_inode(inode_id, Some(RevisionNo(1)))
                 .await
                 .expect("inode download")
                 .object_key

@@ -41,6 +41,7 @@ var expectedCases = []string{
 	"download",
 	"end_to_end",
 	"error_contract",
+	"inode_addressing",
 	"inode_mutations",
 	"pagination",
 	"proxy",
@@ -91,6 +92,8 @@ func TestSDKConformance(t *testing.T) {
 			switch testCase.Name {
 			case "children_by_inode":
 				runChildrenByInode(t, h, testCase)
+			case "inode_addressing":
+				runInodeAddressing(t, h, testCase)
 			case "inode_mutations":
 				runInodeMutations(t, h, testCase)
 			case "snapshots":
@@ -1421,6 +1424,303 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	}, request.ActorID)
 	if int64(deleted.CommittedSeq) != expected.DeletedCommittedSeq {
 		t.Errorf("delete committed_seq = %d, want %d", deleted.CommittedSeq, expected.DeletedCommittedSeq)
+	}
+}
+
+type inodeAddressingRequest struct {
+	NamespaceID       string         `json:"namespace_id"`
+	Directory         string         `json:"directory"`
+	ActorID           loonfs.ActorID `json:"actor_id"`
+	SourceFileName    string         `json:"source_file_name"`
+	RenamedFileName   string         `json:"renamed_file_name"`
+	CopyFileName      string         `json:"copy_file_name"`
+	RestoredFileName  string         `json:"restored_file_name"`
+	FirstContentUTF8  string         `json:"first_content_utf8"`
+	SecondContentUTF8 string         `json:"second_content_utf8"`
+	AttributeKey      string         `json:"attribute_key"`
+	AttributeValue    string         `json:"attribute_value"`
+}
+
+type inodeAddressingExpected struct {
+	CurrentRevisionNo    int64               `json:"current_revision_no"`
+	CopiedCommittedSeq   int64               `json:"copied_committed_seq"`
+	RestoredRevisionNo   int64               `json:"restored_revision_no"`
+	AttributesRevisionNo int64               `json:"attributes_revision_no"`
+	EntryNames           []string            `json:"entry_names"`
+	StaleBindingVersion  errorStatusExpected `json:"stale_binding_version"`
+	OccupiedName         errorStatusExpected `json:"occupied_name"`
+	UnrestrictedAccess   errorStatusExpected `json:"unrestricted_access"`
+	DeletedContent       errorStatusExpected `json:"deleted_content"`
+}
+
+func runInodeAddressing(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[inodeAddressingRequest, inodeAddressingExpected](t, testCase)
+	ctx := context.Background()
+	actor := option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}})
+	childPath := func(name string) string { return request.Directory + "/" + name }
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
+	applyCreateDirectory(
+		t,
+		h.client,
+		request.NamespaceID,
+		"conf-inode-addressing-directory",
+		request.ActorID,
+		request.Directory,
+	)
+	if _, err := h.client.Files.Upload(ctx, files.UploadInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(childPath(request.SourceFileName)),
+		Content:     []byte(request.FirstContentUTF8),
+		CommitID:    loonfs.CommitID("conf-inode-addressing-first"),
+	}, actor); err != nil {
+		t.Fatalf("put first revision: %v", err)
+	}
+	if _, err := h.client.Files.Upload(ctx, files.UploadInput{
+		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
+		Path:        loonfs.AbsolutePath(childPath(request.SourceFileName)),
+		Content:     []byte(request.SecondContentUTF8),
+		CommitID:    loonfs.CommitID("conf-inode-addressing-second"),
+		Behavior:    loonfs.DestinationBehaviorReplace,
+	}, actor); err != nil {
+		t.Fatalf("put second revision: %v", err)
+	}
+	parentInodeID := identityOf(statPath(t, h.client, request.NamespaceID, request.Directory)).inodeID
+	source := identityOf(statPath(t, h.client, request.NamespaceID, childPath(request.SourceFileName)))
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		CommitID:    loonfs.CommitID("conf-inode-addressing-rename"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				MovePath: &loonfs.FilesystemOperationMovePath{
+					SourcePath:      loonfs.AbsolutePath(childPath(request.SourceFileName)),
+					DestinationPath: loonfs.AbsolutePath(childPath(request.RenamedFileName)),
+				},
+			},
+		},
+	}, request.ActorID)
+	renamed := requireFileProjection(t, statPath(t, h.client, request.NamespaceID, childPath(request.RenamedFileName)))
+	freshVersion := optionalString(renamed.BindingVersion)
+
+	readCurrent := func(label string) ([]byte, error) {
+		reader, err := h.client.Inodes.CurrentContent(ctx, &loonfs.GetFileBytesByInodeRequest{
+			NamespaceID: request.NamespaceID,
+			InodeID:     source.inodeID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		content, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		return content, nil
+	}
+	current, err := readCurrent("read current content by inode")
+	if err != nil {
+		t.Fatalf("read current content by inode: %v", err)
+	}
+	if !bytes.Equal(current, []byte(request.SecondContentUTF8)) {
+		t.Error("current content by inode did not match the second revision")
+	}
+	grant, err := h.client.Inodes.CreateCurrentDownload(ctx, &loonfs.CreateCurrentDownloadByInodeRequest{
+		NamespaceID: request.NamespaceID,
+		InodeID:     source.inodeID,
+	})
+	if err != nil {
+		t.Fatalf("grant current content by inode: %v", err)
+	}
+	if grant.InodeID != source.inodeID || int64(grant.RevisionNo) != expected.CurrentRevisionNo {
+		t.Errorf("current grant = %s revision %d, want %s revision %d", grant.InodeID, grant.RevisionNo, source.inodeID, expected.CurrentRevisionNo)
+	}
+	assertContentRefEqual(t, grant.ContentRef, renamed.ContentRef)
+
+	copyByInode := func(commitID string, preconditions []*loonfs.CommitPrecondition) *loonfs.CommitRequest {
+		return &loonfs.CommitRequest{
+			NamespaceID:   request.NamespaceID,
+			CommitID:      loonfs.CommitID(commitID),
+			Preconditions: preconditions,
+			Operations: []*loonfs.FilesystemOperation{
+				{
+					CopyByInode: &loonfs.FilesystemOperationCopyByInode{
+						InodeID:                  source.inodeID,
+						DestinationParentInodeID: parentInodeID,
+						DestinationDisplayName:   request.CopyFileName,
+					},
+				},
+			},
+		}
+	}
+	binding := func(version string) *loonfs.CommitPrecondition {
+		return &loonfs.CommitPrecondition{
+			InodeBinding: &loonfs.CommitPreconditionInodeBinding{
+				InodeID:                source.inodeID,
+				ExpectedBindingVersion: version,
+			},
+		}
+	}
+	absence := func(name string) *loonfs.CommitPrecondition {
+		return &loonfs.CommitPrecondition{
+			NameAbsence: &loonfs.CommitPreconditionNameAbsence{
+				ParentInodeID: parentInodeID,
+				DisplayName:   name,
+			},
+		}
+	}
+	assertConflict := func(label string, err error, expected errorStatusExpected) {
+		t.Helper()
+		var conflict *loonfs.ConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("%s: expected ConflictError, found %T: %v", label, err, err)
+		}
+		if conflict.StatusCode != expected.Status || conflict.Body == nil || conflict.Body.Code != expected.Code {
+			t.Errorf("%s: error = %#v, want %#v", label, conflict, expected)
+		}
+	}
+	_, err = h.client.Commits.Create(
+		ctx,
+		copyByInode("conf-inode-addressing-stale-copy", []*loonfs.CommitPrecondition{binding(source.bindingVersion)}),
+		actor,
+	)
+	assertConflict("stale binding precondition", err, expected.StaleBindingVersion)
+	_, err = h.client.Commits.Create(
+		ctx,
+		copyByInode(
+			"conf-inode-addressing-occupied-copy",
+			[]*loonfs.CommitPrecondition{binding(freshVersion), absence(request.RenamedFileName)},
+		),
+		actor,
+	)
+	assertConflict("occupied name precondition", err, expected.OccupiedName)
+	copied := applyCommit(
+		t,
+		h.client,
+		copyByInode(
+			"conf-inode-addressing-copy",
+			[]*loonfs.CommitPrecondition{binding(freshVersion), absence(request.CopyFileName)},
+		),
+		request.ActorID,
+	)
+	if int64(copied.CommittedSeq) != expected.CopiedCommittedSeq {
+		t.Errorf("copy committed_seq = %d, want %d", copied.CommittedSeq, expected.CopiedCommittedSeq)
+	}
+	copyEntry := identityOf(statPath(t, h.client, request.NamespaceID, childPath(request.CopyFileName)))
+	if copyEntry.inodeID == source.inodeID {
+		t.Error("copy by inode reused the source inode")
+	}
+
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		CommitID:    loonfs.CommitID("conf-inode-addressing-restore"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				RestoreRevisionByInode: &loonfs.FilesystemOperationRestoreRevisionByInode{
+					InodeID:          source.inodeID,
+					SourceRevisionNo: 1,
+				},
+			},
+		},
+	}, request.ActorID)
+	restored := requireFileProjection(t, statPath(t, h.client, request.NamespaceID, childPath(request.RenamedFileName)))
+	if int64(restored.RevisionNo) != expected.RestoredRevisionNo {
+		t.Errorf("restored revision_no = %d, want %d", restored.RevisionNo, expected.RestoredRevisionNo)
+	}
+	current, err = readCurrent("read restored content by inode")
+	if err != nil {
+		t.Fatalf("read restored content by inode: %v", err)
+	}
+	if !bytes.Equal(current, []byte(request.FirstContentUTF8)) {
+		t.Error("restored content by inode did not match the first revision")
+	}
+
+	unchanged := int64(0)
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		CommitID:    loonfs.CommitID("conf-inode-addressing-attributes"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				UpdateAttributesByInode: &loonfs.FilesystemOperationUpdateAttributesByInode{
+					InodeID:                      copyEntry.inodeID,
+					Set:                          map[string]loonfs.AttributeValue{request.AttributeKey: request.AttributeValue},
+					ExpectedAttributesRevisionNo: &unchanged,
+				},
+			},
+		},
+	}, request.ActorID)
+	labeled := requireFileProjection(t, statPath(t, h.client, request.NamespaceID, childPath(request.CopyFileName)))
+	if labeled.AttributesRevisionNo == nil || int64(*labeled.AttributesRevisionNo) != expected.AttributesRevisionNo {
+		t.Errorf("attributes_revision_no = %v, want %d", labeled.AttributesRevisionNo, expected.AttributesRevisionNo)
+	}
+	if labeled.Attributes == nil || (*labeled.Attributes)[request.AttributeKey] != request.AttributeValue {
+		t.Errorf("attributes = %v, want %s=%s", labeled.Attributes, request.AttributeKey, request.AttributeValue)
+	}
+
+	_, err = h.client.Commits.Create(ctx, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		CommitID:    loonfs.CommitID("conf-inode-addressing-access"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				UpdateAccessByInode: &loonfs.FilesystemOperationUpdateAccessByInode{
+					InodeID:  "ino_1",
+					Boundary: false,
+					Grants:   loonfs.AccessGrants{},
+				},
+			},
+		},
+	}, actor)
+	assertConflict("access update in an unrestricted namespace", err, expected.UnrestrictedAccess)
+
+	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
+	deletion := applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		CommitID:    loonfs.CommitID("conf-inode-addressing-delete-copy"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				DeletePath: &loonfs.FilesystemOperationDeletePath{
+					Behavior: &nonRecursive,
+					Path:     loonfs.AbsolutePath(childPath(request.CopyFileName)),
+				},
+			},
+		},
+	}, request.ActorID)
+	restoredName := request.RestoredFileName
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		CommitID:    loonfs.CommitID("conf-inode-addressing-undelete"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				Undelete: &loonfs.FilesystemOperationUndelete{
+					InodeID:                  copyEntry.inodeID,
+					DeletionSeq:              deletion.CommittedSeq,
+					DestinationParentInodeID: &parentInodeID,
+					DestinationDisplayName:   &restoredName,
+				},
+			},
+		},
+	}, request.ActorID)
+	undeleted := identityOf(statPath(t, h.client, request.NamespaceID, childPath(request.RestoredFileName)))
+	if undeleted.inodeID != copyEntry.inodeID {
+		t.Errorf("undeleted inode_id = %q, want %q", undeleted.inodeID, copyEntry.inodeID)
+	}
+
+	applyCommit(t, h.client, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		CommitID:    loonfs.CommitID("conf-inode-addressing-delete-source"),
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				DeletePath: &loonfs.FilesystemOperationDeletePath{
+					Behavior: &nonRecursive,
+					Path:     loonfs.AbsolutePath(childPath(request.RenamedFileName)),
+				},
+			},
+		},
+	}, request.ActorID)
+	_, err = readCurrent("read deleted content by inode")
+	assertNotFoundError(t, err, expected.DeletedContent)
+
+	names := listedNames(t, listPathEntries(t, h.client, request.NamespaceID, request.Directory))
+	if !equalStrings(names, expected.EntryNames) {
+		t.Errorf("listed names = %v, want %v", names, expected.EntryNames)
 	}
 }
 

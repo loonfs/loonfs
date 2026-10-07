@@ -131,7 +131,7 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                     };
                     let mut stream = if method == "inode_stream" {
                         engine
-                            .read_file_revision_stream_by_inode(inode_id, RevisionNo(1), &context)
+                            .read_file_stream_by_inode(inode_id, Some(RevisionNo(1)), &context)
                             .await
                             .expect("inode stream")
                     } else {
@@ -387,7 +387,7 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
         .entry
         .inode_id;
     let inode_target = engine
-        .direct_download_target_by_inode(inode_id, RevisionNo(1), &context)
+        .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), &context)
         .await
         .expect("inode download");
     assert_eq!(path_target.object_key, stored.object_key());
@@ -428,7 +428,7 @@ async fn direct_downloads_materialize_once_and_do_not_write_after_a_fold() {
                 .await
                 .expect("path download");
             let inode_target = engine
-                .direct_download_target_by_inode(inode_id, RevisionNo(1), &context)
+                .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), &context)
                 .await
                 .expect("inode download");
             assert_eq!(target.object_key, key);
@@ -485,7 +485,7 @@ async fn refused_materialization_leaves_proxied_content_readable() {
             .await
             .expect_err("write denied"),
         engine
-            .direct_download_target_by_inode(inode_id, RevisionNo(1), &context)
+            .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), &context)
             .await
             .expect_err("write denied"),
     ];

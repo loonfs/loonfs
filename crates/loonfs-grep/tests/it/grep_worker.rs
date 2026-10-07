@@ -45,6 +45,7 @@ fn request(pattern: &str) -> GrepRequest {
         pattern: pattern.to_owned(),
         case_insensitive: false,
         path_prefix: None,
+        inode_id: None,
         cursor: None,
         allow_stale: false,
         allow_scan: false,
@@ -1937,6 +1938,34 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         .await
         .expect_err("a missing scope must remain a missing path");
     assert_eq!(error.code(), ErrorCode::PathNotFound);
+
+    let docs_inode_id = namespace.stat("/docs").await.expect("stat docs").inode_id;
+    let mut inode_scope = request("needle");
+    inode_scope.inode_id = Some(docs_inode_id);
+    let mut path_scope = request("needle");
+    path_scope.path_prefix = Some(AbsolutePath::parse("/docs").expect("scope path"));
+    let scoped_by_inode = new_query(&store, &namespace_id, &inode_scope)
+        .await
+        .expect("inode scope query");
+    assert_eq!(scoped_by_inode.matches.len(), 12);
+    assert_eq!(
+        scoped_by_inode.matches,
+        new_query(&store, &namespace_id, &path_scope)
+            .await
+            .expect("path scope query")
+            .matches
+    );
+    let mut both_scopes = inode_scope.clone();
+    both_scopes.path_prefix = path_scope.path_prefix.clone();
+    let error = new_query(&store, &namespace_id, &both_scopes)
+        .await
+        .expect_err("a request names at most one scope");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    inode_scope.inode_id = Some(loonfs_types::InodeId(MAX_PUBLIC_INTEGER));
+    let error = new_query(&store, &namespace_id, &inode_scope)
+        .await
+        .expect_err("a missing inode scope must remain a missing inode");
+    assert_eq!(error.code(), ErrorCode::InodeNotFound);
 
     let mut page_request = request("shared needle");
     let mut found_matches = BTreeSet::new();

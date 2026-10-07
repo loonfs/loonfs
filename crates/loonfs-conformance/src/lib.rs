@@ -32,6 +32,7 @@ const EXPECTED_CASES: &[&str] = &[
     "download",
     "end_to_end",
     "error_contract",
+    "inode_addressing",
     "inode_mutations",
     "pagination",
     "proxy",

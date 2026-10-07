@@ -183,6 +183,13 @@ impl GrepService {
             }
             .into());
         }
+        if request.path_prefix.is_some() && request.inode_id.is_some() {
+            return Err(loonfs::Error::InvalidRequest {
+                message: "`path_prefix` cannot be combined with `inode_id`".to_owned(),
+                param: "inode_id",
+            }
+            .into());
+        }
         let mut reads = namespace_reads.read_view().await?;
         let snapshot = self
             .load_index_snapshot(store, reads.namespace_id())
@@ -219,9 +226,10 @@ impl GrepService {
             .multi_line(true)
             .build()
             .map_err(|error| GrepError::InvalidQuery(error.to_string()))?;
-        let scope = match &request.path_prefix {
-            Some(prefix) => Some(reads.resolve_path(prefix).await?),
-            None => None,
+        let scope = match (&request.path_prefix, request.inode_id) {
+            (Some(prefix), _) => Some(reads.resolve_path(prefix).await?),
+            (None, Some(inode_id)) => Some(reads.resolve_inode(inode_id).await?),
+            (None, None) => None,
         };
         let mut candidates = GrepCandidates::default();
         let tail_resume = match plan_pattern(&request.pattern, request.case_insensitive)

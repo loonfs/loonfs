@@ -14,7 +14,11 @@ pub struct GrepRequest {
     /// Whether matching ignores case.
     pub case_insensitive: bool,
     /// The absolute directory path that limits matching to its descendants.
+    /// Cannot be combined with `inode_id`.
     pub path_prefix: Option<AbsolutePath>,
+    /// The inode that limits matching to its descendants. Cannot be combined
+    /// with `path_prefix`.
+    pub inode_id: Option<InodeId>,
     /// The cursor from the previous page, bound to that request and evaluated against
     /// the current namespace head.
     pub cursor: Option<String>,
@@ -37,6 +41,10 @@ impl GrepRequest {
                 .as_ref()
                 .map_or("", AbsolutePath::as_str)
                 .as_bytes(),
+            seed,
+        );
+        seed = xxh64(
+            &self.inode_id.map_or(0, |inode_id| inode_id.0).to_le_bytes(),
             seed,
         );
         let flags = [

@@ -206,6 +206,8 @@ impl VisibilityHarness {
             inode_id,
             deletion_seq,
             destination_path: Some(AbsolutePath::parse(path).expect("valid path")),
+            destination_parent_inode_id: None,
+            destination_display_name: None,
         })
         .await
     }

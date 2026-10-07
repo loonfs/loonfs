@@ -28,6 +28,7 @@ const EXPECTED_CASES = [
     "download",
     "end_to_end",
     "error_contract",
+    "inode_addressing",
     "inode_mutations",
     "pagination",
     "proxy",
@@ -127,6 +128,32 @@ interface InodeMutationsExpected {
     deleted_committed_seq: number;
     stale_binding_version: ErrorStatusExpected;
     malformed_binding_version: ErrorStatusExpected;
+}
+
+interface InodeAddressingRequest {
+    namespace_id: string;
+    directory: string;
+    actor_id: LoonFS.ActorId;
+    source_file_name: string;
+    renamed_file_name: string;
+    copy_file_name: string;
+    restored_file_name: string;
+    first_content_utf8: string;
+    second_content_utf8: string;
+    attribute_key: string;
+    attribute_value: string;
+}
+
+interface InodeAddressingExpected {
+    current_revision_no: number;
+    copied_committed_seq: number;
+    restored_revision_no: number;
+    attributes_revision_no: number;
+    entry_names: string[];
+    stale_binding_version: ErrorStatusExpected;
+    occupied_name: ErrorStatusExpected;
+    unrestricted_access: ErrorStatusExpected;
+    deleted_content: ErrorStatusExpected;
 }
 
 interface SnapshotsRequest {
@@ -421,6 +448,30 @@ const INODE_MUTATIONS_EXPECTED_FIELDS = [
     "stale_binding_version",
     "malformed_binding_version",
 ] as const;
+const INODE_ADDRESSING_REQUEST_FIELDS = [
+    "namespace_id",
+    "directory",
+    "actor_id",
+    "source_file_name",
+    "renamed_file_name",
+    "copy_file_name",
+    "restored_file_name",
+    "first_content_utf8",
+    "second_content_utf8",
+    "attribute_key",
+    "attribute_value",
+] as const;
+const INODE_ADDRESSING_EXPECTED_FIELDS = [
+    "current_revision_no",
+    "copied_committed_seq",
+    "restored_revision_no",
+    "attributes_revision_no",
+    "entry_names",
+    "stale_binding_version",
+    "occupied_name",
+    "unrestricted_access",
+    "deleted_content",
+] as const;
 const SNAPSHOTS_REQUEST_FIELDS = [
     "namespace_id",
     "directory",
@@ -592,6 +643,17 @@ function decodeInodeMutations(
     return [
         testCase.request as unknown as InodeMutationsRequest,
         testCase.expected as unknown as InodeMutationsExpected,
+    ];
+}
+
+function decodeInodeAddressing(
+    testCase: ConformanceCase,
+): [InodeAddressingRequest, InodeAddressingExpected] {
+    strictObject(testCase.request, INODE_ADDRESSING_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(testCase.expected, INODE_ADDRESSING_EXPECTED_FIELDS, `${testCase.name} expected`);
+    return [
+        testCase.request as unknown as InodeAddressingRequest,
+        testCase.expected as unknown as InodeAddressingExpected,
     ];
 }
 
@@ -1768,6 +1830,226 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     assert.equal(deleted.committed_seq, expected.deleted_committed_seq);
+});
+
+conformanceTest("inode_addressing", async (activeHarness, testCase) => {
+    const [request, expected] = decodeInodeAddressing(testCase);
+    const client = activeHarness.client;
+    const namespaceId = request.namespace_id;
+    const actorHeaders = { headers: { "Loonfs-Actor": request.actor_id } };
+    const childPath = (name: string): string => `${request.directory}/${name}`;
+    const readCurrent = async (inodeId: string): Promise<Uint8Array> => {
+        const response = await client.inodes.currentContent({
+            namespace_id: namespaceId,
+            inode_id: inodeId,
+        });
+        return new Uint8Array(await response.arrayBuffer());
+    };
+    const commit = (
+        commitId: string,
+        operation: LoonFS.FilesystemOperation,
+        preconditions?: LoonFS.CommitPrecondition[],
+    ): Promise<LoonFS.Commit> => {
+        const commitRequest: LoonFS.CommitRequest = {
+            namespace_id: namespaceId,
+            commit_id: commitId,
+            operations: [operation],
+        };
+        if (preconditions !== undefined) {
+            commitRequest.preconditions = preconditions;
+        }
+        return client.commits.create(commitRequest, actorHeaders);
+    };
+    const assertError =
+        (errorType: typeof LoonFS.ConflictError | typeof LoonFS.NotFoundError, status: ErrorStatusExpected) =>
+        (error: unknown): boolean => {
+            assert.ok(error instanceof errorType);
+            assert.equal(error.statusCode, status.status);
+            assert.equal(error.body.code, status.code);
+            return true;
+        };
+
+    await client.namespaces.create({ namespace_id: namespaceId }, actorHeaders);
+    await client.commits.create(
+        directoryCommit(namespaceId, "conf-inode-addressing-directory", request.directory),
+        actorHeaders,
+    );
+    await client.files.upload(
+        {
+            namespace_id: namespaceId,
+            path: childPath(request.source_file_name),
+            content: new TextEncoder().encode(request.first_content_utf8),
+            commit_id: "conf-inode-addressing-first",
+        },
+        actorHeaders,
+    );
+    await client.files.upload(
+        {
+            namespace_id: namespaceId,
+            path: childPath(request.source_file_name),
+            content: new TextEncoder().encode(request.second_content_utf8),
+            commit_id: "conf-inode-addressing-second",
+            behavior: "replace",
+        },
+        actorHeaders,
+    );
+    const parent = await client.files.retrieve({
+        namespace_id: namespaceId,
+        path: request.directory,
+    });
+    const source = fileEntry(
+        await client.files.retrieve({
+            namespace_id: namespaceId,
+            path: childPath(request.source_file_name),
+        }),
+    );
+    await client.commits.create(
+        moveCommit(
+            namespaceId,
+            "conf-inode-addressing-rename",
+            childPath(request.source_file_name),
+            childPath(request.renamed_file_name),
+        ),
+        actorHeaders,
+    );
+    const renamed = fileEntry(
+        await client.files.retrieve({
+            namespace_id: namespaceId,
+            path: childPath(request.renamed_file_name),
+        }),
+    );
+    assert.ok(source.binding_version != null, "source entry has no binding_version");
+    assert.ok(renamed.binding_version != null, "renamed entry has no binding_version");
+
+    assert.deepEqual(
+        await readCurrent(source.inode_id),
+        new TextEncoder().encode(request.second_content_utf8),
+    );
+    const grant = await client.inodes.createCurrentDownload({
+        namespace_id: namespaceId,
+        inode_id: source.inode_id,
+    });
+    assert.equal(grant.inode_id, source.inode_id);
+    assert.equal(grant.revision_no, expected.current_revision_no);
+    assert.deepEqual(grant.content_ref, renamed.content_ref);
+
+    const copyByInode: LoonFS.FilesystemOperation = {
+        kind: "copy_by_inode",
+        inode_id: source.inode_id,
+        destination_parent_inode_id: parent.inode_id,
+        destination_display_name: request.copy_file_name,
+    };
+    const binding = (version: string): LoonFS.CommitPrecondition => ({
+        kind: "inode_binding",
+        inode_id: source.inode_id,
+        expected_binding_version: version,
+    });
+    const absence = (name: string): LoonFS.CommitPrecondition => ({
+        kind: "name_absence",
+        parent_inode_id: parent.inode_id,
+        display_name: name,
+    });
+    await assert.rejects(
+        commit("conf-inode-addressing-stale-copy", copyByInode, [binding(source.binding_version)]),
+        assertError(LoonFS.ConflictError, expected.stale_binding_version),
+    );
+    await assert.rejects(
+        commit("conf-inode-addressing-occupied-copy", copyByInode, [
+            binding(renamed.binding_version),
+            absence(request.renamed_file_name),
+        ]),
+        assertError(LoonFS.ConflictError, expected.occupied_name),
+    );
+    const copied = await commit("conf-inode-addressing-copy", copyByInode, [
+        binding(renamed.binding_version),
+        absence(request.copy_file_name),
+    ]);
+    assert.equal(copied.committed_seq, expected.copied_committed_seq);
+    const copyEntry = fileEntry(
+        await client.files.retrieve({
+            namespace_id: namespaceId,
+            path: childPath(request.copy_file_name),
+        }),
+    );
+    assert.notEqual(copyEntry.inode_id, source.inode_id);
+
+    await commit("conf-inode-addressing-restore", {
+        kind: "restore_revision_by_inode",
+        inode_id: source.inode_id,
+        source_revision_no: 1,
+    });
+    const restored = fileEntry(
+        await client.files.retrieve({
+            namespace_id: namespaceId,
+            path: childPath(request.renamed_file_name),
+        }),
+    );
+    assert.equal(restored.revision_no, expected.restored_revision_no);
+    assert.deepEqual(
+        await readCurrent(source.inode_id),
+        new TextEncoder().encode(request.first_content_utf8),
+    );
+
+    await commit("conf-inode-addressing-attributes", {
+        kind: "update_attributes_by_inode",
+        inode_id: copyEntry.inode_id,
+        set: { [request.attribute_key]: request.attribute_value },
+        expected_attributes_revision_no: 0,
+    });
+    const labeled = fileEntry(
+        await client.files.retrieve({
+            namespace_id: namespaceId,
+            path: childPath(request.copy_file_name),
+        }),
+    );
+    assert.equal(labeled.attributes_revision_no, expected.attributes_revision_no);
+    assert.deepEqual(labeled.attributes, { [request.attribute_key]: request.attribute_value });
+
+    await assert.rejects(
+        commit("conf-inode-addressing-access", {
+            kind: "update_access_by_inode",
+            inode_id: "ino_1",
+            boundary: false,
+            grants: {},
+        }),
+        assertError(LoonFS.ConflictError, expected.unrestricted_access),
+    );
+
+    const deletion = await client.commits.create(
+        deleteCommit(namespaceId, "conf-inode-addressing-delete-copy", childPath(request.copy_file_name)),
+        actorHeaders,
+    );
+    await commit("conf-inode-addressing-undelete", {
+        kind: "undelete",
+        inode_id: copyEntry.inode_id,
+        deletion_seq: deletion.committed_seq,
+        destination_parent_inode_id: parent.inode_id,
+        destination_display_name: request.restored_file_name,
+    });
+    const undeleted = await client.files.retrieve({
+        namespace_id: namespaceId,
+        path: childPath(request.restored_file_name),
+    });
+    assert.equal(undeleted.inode_id, copyEntry.inode_id);
+
+    await client.commits.create(
+        deleteCommit(
+            namespaceId,
+            "conf-inode-addressing-delete-source",
+            childPath(request.renamed_file_name),
+        ),
+        actorHeaders,
+    );
+    await assert.rejects(
+        readCurrent(source.inode_id),
+        assertError(LoonFS.NotFoundError, expected.deleted_content),
+    );
+
+    const listing = await client.files.list({
+        namespace_id: namespaceId,
+        path: request.directory,
+    });
+    assert.deepEqual(listedNames(listing.data), expected.entry_names);
 });
 
 conformanceTest("snapshots", async (activeHarness, testCase) => {

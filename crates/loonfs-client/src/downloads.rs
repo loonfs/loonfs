@@ -150,18 +150,25 @@ impl Client {
         .await
     }
 
-    /// Requests direct access to one retained inode revision.
+    /// Requests direct access to inode content: the current revision of a
+    /// visible file when `revision_no` is absent, or one retained revision.
     pub async fn create_download_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        revision_no: RevisionNo,
+        revision_no: Option<RevisionNo>,
     ) -> Result<CreateDownloadByInodeResponse> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
-            self.base_url
-        );
+        let url = match revision_no {
+            Some(revision_no) => format!(
+                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+                self.base_url
+            ),
+            None => format!(
+                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+                self.base_url
+            ),
+        };
         self.request_json::<(), CreateDownloadByInodeResponse>(
             self.post(&url),
             None,

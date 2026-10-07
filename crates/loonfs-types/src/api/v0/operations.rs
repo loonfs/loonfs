@@ -656,7 +656,25 @@ pub enum FilesystemOperation {
         #[serde(flatten)]
         precondition: DestinationPrecondition,
     },
+    /// Copy a file inode to a name under a parent inode.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationCopyByInode"))]
+    CopyByInode {
+        /// File to copy.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// Destination directory.
+        #[serde(with = "crate::public_inode_id")]
+        destination_parent_inode_id: InodeId,
+        /// Name of the copy.
+        destination_display_name: DisplayName,
+        /// Replacement behavior and optional destination state.
+        #[serde(flatten)]
+        precondition: DestinationPrecondition,
+    },
     /// Restore the deletion identified by `inode_id` and `deletion_seq`.
+    /// Name the destination with `destination_path`, or with
+    /// `destination_parent_inode_id` and `destination_display_name`; omit
+    /// both to use the recorded binding.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUndelete"))]
     Undelete {
         /// Deleted inode to make reachable again.
@@ -664,10 +682,22 @@ pub enum FilesystemOperation {
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer tombstone sequence.
         deletion_seq: ChangeSeq,
-        /// The restore destination. Omit it to use the recorded binding.
+        /// Absolute restore destination; cannot be combined with a parent inode destination.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         destination_path: Option<AbsolutePath>,
+        /// Directory to restore into; requires `destination_display_name`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        destination_parent_inode_id: Option<InodeId>,
+        /// Name to restore under `destination_parent_inode_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        destination_display_name: Option<DisplayName>,
     },
     /// Restore an older revision as the current revision for a path.
     #[cfg_attr(
@@ -677,6 +707,18 @@ pub enum FilesystemOperation {
     RestoreRevision {
         /// Absolute path that must resolve to a visible file.
         path: AbsolutePath,
+        /// Existing historical revision whose content will be copied into a new current revision.
+        source_revision_no: RevisionNo,
+    },
+    /// Restore an older revision as the current revision of a file inode.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationRestoreRevisionByInode")
+    )]
+    RestoreRevisionByInode {
+        /// Visible file to restore.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
         /// Existing historical revision whose content will be copied into a new current revision.
         source_revision_no: RevisionNo,
     },
@@ -708,6 +750,27 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_attributes_revision_no: Option<AttributesRevisionNo>,
     },
+    /// Write and remove attributes on a visible inode.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationUpdateAttributesByInode")
+    )]
+    UpdateAttributesByInode {
+        /// Visible file or directory to update.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// The attributes to write, replacing values for matching keys and leaving
+        /// other keys unchanged.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        set: BTreeMap<AttributeKey, AttributeValue>,
+        /// The attribute keys to remove, including duplicates that validation must reject.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remove: Vec<AttributeKey>,
+        /// The attribute revision that must still be current.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_attributes_revision_no: Option<AttributesRevisionNo>,
+    },
     /// Replace the access row of the inode one path resolves to. The root
     /// path is a valid target.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUpdateAccess"))]
@@ -731,6 +794,25 @@ pub enum FilesystemOperation {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_access_revision_no: Option<AccessRevisionNo>,
     },
+    /// Replace the access row of a visible inode. The root inode is a valid
+    /// target.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationUpdateAccessByInode")
+    )]
+    UpdateAccessByInode {
+        /// Visible file or directory to update.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// Whether the directory stops inheritance from its ancestors.
+        boundary: bool,
+        /// The inode's complete direct grants after this update.
+        grants: AccessGrants,
+        /// The access revision that must still be current.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_access_revision_no: Option<AccessRevisionNo>,
+    },
 }
 
 impl FilesystemOperation {
@@ -747,10 +829,14 @@ impl FilesystemOperation {
             | Self::MovePath { .. }
             | Self::MoveByInode { .. }
             | Self::CopyPath { .. }
+            | Self::CopyByInode { .. }
             | Self::Undelete { .. }
             | Self::RestoreRevision { .. }
+            | Self::RestoreRevisionByInode { .. }
             | Self::UpdateAttributes { .. }
-            | Self::UpdateAccess { .. } => None,
+            | Self::UpdateAttributesByInode { .. }
+            | Self::UpdateAccess { .. }
+            | Self::UpdateAccessByInode { .. } => None,
         }
     }
 }
@@ -790,6 +876,15 @@ pub enum CommitPrecondition {
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         expected_binding_version: Option<BindingVersion>,
     },
+    /// Requires a visible inode to retain the binding the caller read.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionInodeBinding"))]
+    InodeBinding {
+        /// Inode whose binding the caller read.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// Binding version observed by the caller.
+        expected_binding_version: BindingVersion,
+    },
     /// Requires a visible inode with the attribute revision the caller read.
     #[cfg_attr(
         feature = "openapi",
@@ -819,6 +914,15 @@ pub enum CommitPrecondition {
     PathAbsence {
         /// Absolute path to check, including the root.
         path: AbsolutePath,
+    },
+    /// Requires no visible entry with the name under the parent inode.
+    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionNameAbsence"))]
+    NameAbsence {
+        /// Directory to check.
+        #[serde(with = "crate::public_inode_id")]
+        parent_inode_id: InodeId,
+        /// Name to check.
+        display_name: DisplayName,
     },
 }
 
@@ -2043,6 +2147,8 @@ mod tests {
                     inode_id: InodeId(7),
                     deletion_seq: ChangeSeq(8),
                     destination_path: Some(path("/docs/restored")),
+                    destination_parent_inode_id: None,
+                    destination_display_name: None,
                 },
                 serde_json::json!({
                     "kind": "undelete",

@@ -556,6 +556,20 @@ impl Client {
         query.finish()
     }
 
+    /// Returns the current bytes of a visible file inode, wherever it is bound.
+    pub async fn read_file_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<Vec<u8>> {
+        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+            self.base_url
+        );
+        self.request_bytes(&url).await
+    }
+
     /// Reads and verifies one retained file revision by inode identity.
     pub async fn read_file_revision_by_inode(
         &self,

@@ -4,7 +4,7 @@ use super::*;
 use crate::transport::SendPolicy;
 use crate::uploads::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
 use loonfs_types::options::{AccessState, AttributeChanges};
-use loonfs_types::ActorId;
+use loonfs_types::{ActorId, DisplayName};
 
 fn commit_id_or_generated(commit: &CommitOptions) -> CommitId {
     commit.commit_id.clone().unwrap_or_else(CommitId::generate)
@@ -392,6 +392,50 @@ impl Client {
         .await
     }
 
+    /// Writes and removes attributes on a visible inode.
+    pub async fn update_attributes_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        actor: &ActorId,
+        changes: AttributeChanges,
+    ) -> Result<Commit> {
+        self.update_attributes_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            actor,
+            changes,
+            &UpdateAttributesByInodeOptions::default(),
+        )
+        .await
+    }
+
+    /// Writes and removes attributes on a visible file or directory inode,
+    /// under an optional attribute revision precondition.
+    pub async fn update_attributes_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        actor: &ActorId,
+        changes: AttributeChanges,
+        options: &UpdateAttributesByInodeOptions,
+    ) -> Result<Commit> {
+        self.commit(
+            namespace_id,
+            actor,
+            &single_operation(
+                &options.commit,
+                FilesystemOperation::UpdateAttributesByInode {
+                    inode_id,
+                    set: changes.set,
+                    remove: changes.remove,
+                    expected_attributes_revision_no: options.expected_attributes_revision_no,
+                },
+            ),
+        )
+        .await
+    }
+
     /// Replaces a visible inode's access row, including the root.
     pub async fn update_access(
         &self,
@@ -421,6 +465,50 @@ impl Client {
                     boundary: access.boundary,
                     grants: access.grants,
                     expected_inode_id: options.expected_inode_id,
+                    expected_access_revision_no: options.expected_access_revision_no,
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Replaces a visible inode's access row, including the root's.
+    pub async fn update_access_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        actor: &ActorId,
+        access: AccessState,
+    ) -> Result<Commit> {
+        self.update_access_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            actor,
+            access,
+            &UpdateAccessByInodeOptions::default(),
+        )
+        .await
+    }
+
+    /// Replaces a visible inode's access row, including the root's, under an
+    /// optional access revision precondition.
+    pub async fn update_access_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        actor: &ActorId,
+        access: AccessState,
+        options: &UpdateAccessByInodeOptions,
+    ) -> Result<Commit> {
+        self.commit(
+            namespace_id,
+            actor,
+            &single_operation(
+                &options.commit,
+                FilesystemOperation::UpdateAccessByInode {
+                    inode_id,
+                    boundary: access.boundary,
+                    grants: access.grants,
                     expected_access_revision_no: options.expected_access_revision_no,
                 },
             ),
@@ -528,6 +616,57 @@ impl Client {
         .await
     }
 
+    /// Copies a file inode to a name under a parent inode, refusing to
+    /// replace an existing entry.
+    pub async fn copy_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: &DisplayName,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.copy_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            destination_parent_inode_id,
+            destination_display_name,
+            actor,
+            &CopyOptions::default(),
+        )
+        .await
+    }
+
+    /// Copies a file inode to a name under a parent inode.
+    pub async fn copy_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: &DisplayName,
+        actor: &ActorId,
+        options: &CopyOptions,
+    ) -> Result<Commit> {
+        self.commit(
+            namespace_id,
+            actor,
+            &single_operation(
+                &options.commit,
+                FilesystemOperation::CopyByInode {
+                    inode_id,
+                    destination_parent_inode_id,
+                    destination_display_name: destination_display_name.clone(),
+                    precondition: loonfs_types::DestinationPrecondition {
+                        behavior: options.behavior,
+                        expected_inode_id: options.expected_destination_inode_id,
+                        expected_revision_no: options.expected_destination_revision_no,
+                    },
+                },
+            ),
+        )
+        .await
+    }
+
     /// Restores a deleted file or subtree, optionally at a new path.
     pub async fn undelete(
         &self,
@@ -570,6 +709,63 @@ impl Client {
                     inode_id,
                     deletion_seq,
                     destination_path: destination_path.cloned(),
+                    destination_parent_inode_id: None,
+                    destination_display_name: None,
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Restores a deleted file or subtree to a name under a parent inode.
+    pub async fn undelete_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        deletion_seq: ChangeSeq,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: &DisplayName,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.undelete_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            deletion_seq,
+            destination_parent_inode_id,
+            destination_display_name,
+            actor,
+            &CommitOptions::default(),
+        )
+        .await
+    }
+
+    /// Restores a deleted file or subtree to a name under a parent inode,
+    /// under the given commit settings.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the client takes the namespace beside the runtime handle's inputs"
+    )]
+    pub async fn undelete_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        deletion_seq: ChangeSeq,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: &DisplayName,
+        actor: &ActorId,
+        options: &CommitOptions,
+    ) -> Result<Commit> {
+        self.commit(
+            namespace_id,
+            actor,
+            &single_operation(
+                options,
+                FilesystemOperation::Undelete {
+                    inode_id,
+                    deletion_seq,
+                    destination_path: None,
+                    destination_parent_inode_id: Some(destination_parent_inode_id),
+                    destination_display_name: Some(destination_display_name.clone()),
                 },
             ),
         )
@@ -608,6 +804,48 @@ impl Client {
                 options,
                 FilesystemOperation::RestoreRevision {
                     path: spec.absolute_path().clone(),
+                    source_revision_no,
+                },
+            ),
+        )
+        .await
+    }
+
+    /// Makes an earlier revision of a file inode the current revision.
+    pub async fn restore_revision_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.restore_revision_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            source_revision_no,
+            actor,
+            &CommitOptions::default(),
+        )
+        .await
+    }
+
+    /// Makes an earlier revision of a file inode the current revision, under
+    /// the given commit settings.
+    pub async fn restore_revision_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        actor: &ActorId,
+        options: &CommitOptions,
+    ) -> Result<Commit> {
+        self.commit(
+            namespace_id,
+            actor,
+            &single_operation(
+                options,
+                FilesystemOperation::RestoreRevisionByInode {
+                    inode_id,
                     source_revision_no,
                 },
             ),

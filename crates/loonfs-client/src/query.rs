@@ -23,6 +23,9 @@ impl Client {
         if let Some(path_prefix) = &request.path_prefix {
             query.push("path_prefix", path_prefix.as_str());
         }
+        if let Some(inode_id) = request.inode_id {
+            query.push("inode_id", loonfs_types::public_inode_id::encode(inode_id));
+        }
         query.push("allow_scan", request.allow_scan);
         query.push("allow_stale", request.allow_stale);
         query.pagination(limit, request.cursor.as_deref());

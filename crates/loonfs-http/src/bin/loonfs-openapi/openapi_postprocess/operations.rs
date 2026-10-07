@@ -39,6 +39,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "create_current_download_by_inode",
+        SdkName {
+            group: &["inodes"],
+            method: "createCurrentDownload",
+            request: Some("CreateCurrentDownloadByInodeRequest"),
+        },
+    ),
+    (
         "create_download",
         SdkName {
             group: &["files"],
@@ -148,6 +156,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
             group: &["files"],
             method: "content",
             request: Some("GetFileBytesRequest"),
+        },
+    ),
+    (
+        "get_file_bytes_by_inode",
+        SdkName {
+            group: &["inodes"],
+            method: "currentContent",
+            request: Some("GetFileBytesByInodeRequest"),
         },
     ),
     (

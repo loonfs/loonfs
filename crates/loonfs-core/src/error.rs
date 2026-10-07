@@ -125,7 +125,8 @@ pub enum CoreError {
     BindingVersionMismatch {
         inode_id: InodeId,
         expected_binding_version: BindingVersion,
-        actual_binding_version: BindingVersion,
+        /// Absent when the inode is not visible.
+        actual_binding_version: Option<BindingVersion>,
         precondition_index: Option<u32>,
     },
     #[error("commit id conflict for `{commit_id}`")]
@@ -583,7 +584,7 @@ impl CoreError {
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 expected_binding_version: Some(expected_binding_version.clone()),
-                actual_binding_version: Some(actual_binding_version.clone()),
+                actual_binding_version: actual_binding_version.clone(),
                 precondition_index: *precondition_index,
                 ..ErrorDetails::default()
             }),

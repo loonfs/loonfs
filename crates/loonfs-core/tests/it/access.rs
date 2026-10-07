@@ -623,6 +623,8 @@ async fn moves_are_authorized_as_the_equivalent_grant() {
         inode_id: recover.inode_id,
         deletion_seq: deletion.committed_seq,
         destination_path: Some(AbsolutePath::parse("/team/recovered").expect("path")),
+        destination_parent_inode_id: None,
+        destination_display_name: None,
     };
     for (principal, operation, expected) in [
         ("editor", move_path("/team/rename", "/team/renamed"), None),
@@ -1035,16 +1037,32 @@ async fn reads_require_read_and_absence_hides_the_inode() {
             .await
             .map(|entry| entry.inode_id)
             .map_err(|error| error.code());
+        let current_content_result = reader
+            .read_file_stream_by_inode(inode_id, None, &context)
+            .await
+            .map(|_| inode_id)
+            .map_err(|error| error.code());
+        let current_download_result = reader
+            .direct_download_target_by_inode(inode_id, None, &context)
+            .await
+            .map(|target| target.inode_id)
+            .map_err(|error| error.code());
         assert_eq!(
             path_result,
             path_error.map_or(Ok(inode_id), Err),
             "{principal}: {path}"
         );
-        assert_eq!(
+        for result in [
             inode_result,
-            inode_error.map_or(Ok(inode_id), Err),
-            "{principal}: {inode_id}"
-        );
+            current_content_result,
+            current_download_result,
+        ] {
+            assert_eq!(
+                result,
+                inode_error.map_or(Ok(inode_id), Err),
+                "{principal}: {inode_id}"
+            );
+        }
     }
     let stranger = read_engine(&store, &namespace_id, "stranger");
     assert_eq!(
@@ -1129,7 +1147,7 @@ async fn history_needs_the_history_right() {
             );
             assert_eq!(
                 engine
-                    .direct_download_target_by_inode(inode_id, revision, &context)
+                    .direct_download_target_by_inode(inode_id, Some(revision), &context)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.code()),
@@ -1695,6 +1713,8 @@ async fn undelete_authorizes_state_and_destination_before_errors() {
                 inode_id,
                 deletion_seq,
                 destination_path: None,
+                destination_parent_inode_id: None,
+                destination_display_name: None,
             },
         )
         .await
@@ -1712,6 +1732,8 @@ async fn undelete_authorizes_state_and_destination_before_errors() {
                 inode_id: visible_file.inode_id,
                 deletion_seq: visible_deletion.committed_seq,
                 destination_path: Some(AbsolutePath::parse(destination_path).expect("path")),
+                destination_parent_inode_id: None,
+                destination_display_name: None,
             },
         )
         .await
@@ -1741,5 +1763,135 @@ async fn path_absence_preconditions_hide_an_unreadable_parent_kind() {
             .await
             .expect_err("unreadable precondition parent");
         assert_eq!(error.code(), ErrorCode::PathNotFound, "{precondition_path}");
+    }
+}
+
+#[tokio::test]
+async fn inode_forms_require_the_rights_of_their_path_forms() {
+    use AccessRight::{Read, Write};
+    let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    let entry = |path: &'static str| {
+        let store = &store;
+        let namespace_id = &namespace_id;
+        async move { resolve_path(store, namespace_id, path).await.expect(path) }
+    };
+    let team = entry("/team").await;
+    let inbox = entry("/inbox").await;
+    let file = entry("/team/file").await;
+    let kept = entry("/team/kept").await;
+    let deletion_seq = commit_as(
+        &store,
+        &namespace_id,
+        &context,
+        subject("root", &["prn_root"]),
+        delete("/team/kept"),
+    )
+    .await
+    .expect("delete kept")
+    .committed_seq;
+    let copy = |name: &str| FilesystemOperation::CopyByInode {
+        inode_id: file.inode_id,
+        destination_parent_inode_id: team.inode_id,
+        destination_display_name: DisplayName::parse(name).expect("name"),
+        precondition: loonfs_types::DestinationPrecondition::default(),
+    };
+    let restore = FilesystemOperation::RestoreRevisionByInode {
+        inode_id: file.inode_id,
+        source_revision_no: RevisionNo(1),
+    };
+    let label = FilesystemOperation::UpdateAttributesByInode {
+        inode_id: file.inode_id,
+        set: std::collections::BTreeMap::from([(
+            loonfs_types::AttributeKey::parse("owner").expect("key"),
+            loonfs_types::AttributeValue::parse("ada").expect("value"),
+        )]),
+        remove: Vec::new(),
+        expected_attributes_revision_no: None,
+    };
+    let share = FilesystemOperation::UpdateAccessByInode {
+        inode_id: file.inode_id,
+        boundary: false,
+        grants: grants("viewer", &[Read, Write]),
+        expected_access_revision_no: None,
+    };
+    let undelete_under = |parent_inode_id, name: &str| FilesystemOperation::Undelete {
+        inode_id: kept.inode_id,
+        deletion_seq,
+        destination_path: None,
+        destination_parent_inode_id: Some(parent_inode_id),
+        destination_display_name: Some(DisplayName::parse(name).expect("name")),
+    };
+    for (principal, operation, expected) in [
+        ("stranger", copy("copy"), Some(ErrorCode::InodeNotFound)),
+        ("viewer", copy("copy"), Some(ErrorCode::Forbidden)),
+        ("team", copy("copy"), None),
+        ("stranger", restore.clone(), Some(ErrorCode::InodeNotFound)),
+        ("team", restore.clone(), Some(ErrorCode::Forbidden)),
+        ("historian", restore.clone(), Some(ErrorCode::Forbidden)),
+        ("prn_root", restore, None),
+        ("stranger", label.clone(), Some(ErrorCode::InodeNotFound)),
+        ("viewer", label.clone(), Some(ErrorCode::Forbidden)),
+        ("writer", label, None),
+        ("stranger", share.clone(), Some(ErrorCode::InodeNotFound)),
+        ("viewer", share, Some(ErrorCode::Forbidden)),
+        (
+            "uploader",
+            undelete_under(inbox.inode_id, "kept"),
+            Some(ErrorCode::InodeNotFound),
+        ),
+        (
+            "team",
+            undelete_under(inbox.inode_id, "kept"),
+            Some(ErrorCode::InodeNotFound),
+        ),
+        ("team", undelete_under(team.inode_id, "restored"), None),
+    ] {
+        let result = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject(principal, &[principal]),
+            operation,
+        )
+        .await;
+        assert_eq!(
+            result.map(|_| ()).map_err(|error| error.code()),
+            expected.map_or(Ok(()), Err),
+            "{principal}"
+        );
+    }
+
+    let binding = CommitPrecondition::InodeBinding {
+        inode_id: file.inode_id,
+        expected_binding_version: file.binding_version.clone().expect("binding"),
+    };
+    let inbox_name = CommitPrecondition::NameAbsence {
+        parent_inode_id: inbox.inode_id,
+        display_name: DisplayName::parse("free").expect("name"),
+    };
+    for (principal, precondition, expected) in [
+        ("stranger", binding.clone(), Some(ErrorCode::InodeNotFound)),
+        ("team", inbox_name, Some(ErrorCode::InodeNotFound)),
+        ("team", binding, None),
+    ] {
+        let result = submit_commit(
+            &store,
+            &namespace_id,
+            CommitRequest::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                create_directory("/team/guarded"),
+            )
+            .with_subject(subject(principal, &[principal]))
+            .preconditions(vec![precondition]),
+            &context,
+        )
+        .await;
+        assert_eq!(
+            result.map(|_| ()).map_err(|error| error.code()),
+            expected.map_or(Ok(()), Err),
+            "{principal}"
+        );
     }
 }

@@ -596,7 +596,7 @@ Standard requests operate on paths or inode IDs. They create directories, write 
 
 The default destination behavior for puts, moves, and copies is `no_replace`. Deletes default to `non_recursive`, directory creation defaults to `parents: false`, and attribute `set` and `remove` collections default to empty. Optional preconditions have no implied value.
 
-A replacing move deletes the destination file and rebinds the source within the same logical commit. Only a file destination can be replaced; moving a path onto itself is not a replacement. An undelete can use the deleted binding's original parent and name or the caller's replacement path, subject to normal validation.
+A replacing move deletes the destination file and rebinds the source within the same logical commit. Only a file destination can be replaced; moving a path onto itself is not a replacement. An undelete can use the deleted binding's original parent and name, the caller's replacement path, or the caller's parent inode and name, subject to normal validation.
 
 The WAL stores the resulting metadata changes, not the original request bodies or validation inputs. The delta kinds are `create_inode`, `bind_direntry`, `unbind_direntry`, `append_file_revision`, `tombstone_subtree`, `revoke_subtree_tombstone`, `append_attributes_revision`, and `append_access_revision`.
 
@@ -1482,10 +1482,17 @@ Every operation begins with `kind`, followed by the fields in the order below. E
 | `delete_path` | `path`, `behavior`, `expected_inode_id` |
 | `move_path` | `source_path`, `destination_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
 | `copy_path` | `source_path`, `destination_path`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
+| `copy_by_inode` | `inode_id`, `destination_parent_inode_id`, `destination_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
 | `restore_revision` | `path`, `source_revision_no` |
+| `restore_revision_by_inode` | `inode_id`, `source_revision_no` |
 | `undelete` | `inode_id`, `deletion_seq`, `destination_path` |
+| `undelete` naming a parent inode or name | `inode_id`, `deletion_seq`, `destination_path`, `destination_parent_inode_id`, `destination_display_name` |
 | `update_attributes` | `path`, `set`, `remove`, `expected_inode_id`, `expected_attributes_revision_no` |
+| `update_attributes_by_inode` | `inode_id`, `set`, `remove`, `expected_attributes_revision_no` |
 | `update_access` | `path`, `boundary`, `grants`, `expected_inode_id`, `expected_access_revision_no` |
+| `update_access_by_inode` | `inode_id`, `boundary`, `grants`, `expected_access_revision_no` |
+
+An `undelete` that supplies neither `destination_parent_inode_id` nor `destination_display_name` uses the first `undelete` row. One that supplies either uses the second row.
 
 Paths use their validated canonical absolute form. Display-name fields contain one validated component. Inode IDs in these operation shapes use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers. Binding versions retain their opaque string representation.
 
@@ -1522,11 +1529,13 @@ The precondition list appears after `message` and retains caller order without s
 | `attributes_revision` | `inode_id`, `expected_attributes_revision_no` |
 | `access_revision` | `inode_id`, `expected_access_revision_no` |
 | `path_binding` | `path`, `expected_inode_id`, `expected_binding_version` |
+| `inode_binding` | `inode_id`, `expected_binding_version` |
 | `path_absence` | `path` |
+| `name_absence` | `parent_inode_id`, `display_name` |
 
 Precondition inode IDs use their numeric storage representation, not public `ino_` strings. Every listed field is written. Optional fields are `null` when absent.
 
-Precondition sequence and revision values are JSON integers. Paths use validated absolute spelling, and binding versions remain opaque strings. Preconditions affect request identity and validation; they add no separate WAL field or replay delta.
+Precondition sequence and revision values are JSON integers. Paths use validated absolute spelling, display names use one validated component, and binding versions remain opaque strings. Preconditions affect request identity and validation; they add no separate WAL field or replay delta.
 
 ### B.4 Strings, integers, and example bytes
 

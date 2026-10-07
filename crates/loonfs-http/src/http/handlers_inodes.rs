@@ -225,6 +225,56 @@ pub(super) async fn list_file_revisions_by_inode(
     feature = "openapi",
     utoipa::path(
         get,
+        operation_id = "get_file_bytes_by_inode",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+        tag = "inodes",
+        summary = "Read file by inode",
+        description = "Reads and verifies the current revision of a visible file inode, wherever it is bound. Unknown or hidden inodes answer `inode_not_found`.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
+        ),
+        responses(
+            (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
+            (status = 400, description = "Invalid inode ID", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or visible inode not found", body = ApiError),
+            (status = 409, description = "Inode is not a file", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ApiError),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn get_file_bytes_by_inode(
+    State(state): State<BindingState>,
+    SubjectHeaders(subject): SubjectHeaders,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(path): AppPath<InodePathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
+) -> Result<Response, ApiResponseError> {
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let namespace = runtime.namespace(&namespace_id);
+    let inode_id = parse_inode_id(&path.inode_id)?;
+    let permit = acquire_download_permit(&state)?;
+    let stream = namespace
+        .read_file_stream_by_inode(inode_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    streamed_download_response(
+        stream,
+        permit,
+        state.options.max_download_bytes,
+        &namespace_id,
+    )
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
         operation_id = "get_file_revision_bytes_by_inode",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",

@@ -1,0 +1,42 @@
+{
+  "name": "inode_addressing",
+  "intent": "Checks reads, copies, restores, attribute and access updates, and undeletes addressed by inode, and the inode binding and name absence preconditions.",
+  "request": {
+    "namespace_id": "conf-inode-addressing",
+    "directory": "/tree",
+    "actor_id": "conformance-inode-addressing",
+    "source_file_name": "source",
+    "renamed_file_name": "renamed",
+    "copy_file_name": "copy",
+    "restored_file_name": "restored",
+    "first_content_utf8": "inode addressing, first",
+    "second_content_utf8": "inode addressing, second",
+    "attribute_key": "stage",
+    "attribute_value": "review"
+  },
+  "expected": {
+    "current_revision_no": 2,
+    "copied_committed_seq": 5,
+    "restored_revision_no": 3,
+    "attributes_revision_no": 1,
+    "entry_names": [
+      "restored"
+    ],
+    "stale_binding_version": {
+      "status": 409,
+      "code": "binding_version_mismatch"
+    },
+    "occupied_name": {
+      "status": 409,
+      "code": "path_conflict"
+    },
+    "unrestricted_access": {
+      "status": 409,
+      "code": "namespace_unrestricted"
+    },
+    "deleted_content": {
+      "status": 404,
+      "code": "inode_not_found"
+    }
+  }
+}

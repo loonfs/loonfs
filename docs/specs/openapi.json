@@ -391,6 +391,8 @@
             "access_revision": "#/components/schemas/CommitPreconditionAccessRevision",
             "attributes_revision": "#/components/schemas/CommitPreconditionAttributesRevision",
             "file_revision": "#/components/schemas/CommitPreconditionFileRevision",
+            "inode_binding": "#/components/schemas/CommitPreconditionInodeBinding",
+            "name_absence": "#/components/schemas/CommitPreconditionNameAbsence",
             "namespace_head": "#/components/schemas/CommitPreconditionNamespaceHead",
             "path_absence": "#/components/schemas/CommitPreconditionPathAbsence",
             "path_binding": "#/components/schemas/CommitPreconditionPathBinding"
@@ -408,6 +410,9 @@
             "$ref": "#/components/schemas/CommitPreconditionPathBinding"
           },
           {
+            "$ref": "#/components/schemas/CommitPreconditionInodeBinding"
+          },
+          {
             "$ref": "#/components/schemas/CommitPreconditionAttributesRevision"
           },
           {
@@ -415,6 +420,9 @@
           },
           {
             "$ref": "#/components/schemas/CommitPreconditionPathAbsence"
+          },
+          {
+            "$ref": "#/components/schemas/CommitPreconditionNameAbsence"
           }
         ]
       },
@@ -489,6 +497,56 @@
         "required": [
           "inode_id",
           "expected_revision_no",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "CommitPreconditionInodeBinding": {
+        "description": "Requires a visible inode to retain the binding the caller read.",
+        "properties": {
+          "expected_binding_version": {
+            "$ref": "#/components/schemas/BindingVersion",
+            "description": "Binding version observed by the caller."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Inode whose binding the caller read."
+          },
+          "kind": {
+            "enum": [
+              "inode_binding"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inode_id",
+          "expected_binding_version",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "CommitPreconditionNameAbsence": {
+        "description": "Requires no visible entry with the name under the parent inode.",
+        "properties": {
+          "display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Name to check."
+          },
+          "kind": {
+            "enum": [
+              "name_absence"
+            ],
+            "type": "string"
+          },
+          "parent_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Directory to check."
+          }
+        },
+        "required": [
+          "parent_inode_id",
+          "display_name",
           "kind"
         ],
         "type": "object"
@@ -1830,6 +1888,7 @@
         "description": "One filesystem operation.\n\nUnknown fields are rejected, and fieldless variants require empty objects.",
         "discriminator": {
           "mapping": {
+            "copy_by_inode": "#/components/schemas/FilesystemOperationCopyByInode",
             "copy_path": "#/components/schemas/FilesystemOperationCopyPath",
             "create_directory": "#/components/schemas/FilesystemOperationCreateDirectory",
             "create_directory_by_inode": "#/components/schemas/FilesystemOperationCreateDirectoryByInode",
@@ -1841,9 +1900,12 @@
             "put_file": "#/components/schemas/FilesystemOperationPutFile",
             "put_file_revision_by_inode": "#/components/schemas/FilesystemOperationPutFileRevisionByInode",
             "restore_revision": "#/components/schemas/FilesystemOperationRestoreRevision",
+            "restore_revision_by_inode": "#/components/schemas/FilesystemOperationRestoreRevisionByInode",
             "undelete": "#/components/schemas/FilesystemOperationUndelete",
             "update_access": "#/components/schemas/FilesystemOperationUpdateAccess",
-            "update_attributes": "#/components/schemas/FilesystemOperationUpdateAttributes"
+            "update_access_by_inode": "#/components/schemas/FilesystemOperationUpdateAccessByInode",
+            "update_attributes": "#/components/schemas/FilesystemOperationUpdateAttributes",
+            "update_attributes_by_inode": "#/components/schemas/FilesystemOperationUpdateAttributesByInode"
           },
           "propertyName": "kind"
         },
@@ -1879,18 +1941,72 @@
             "$ref": "#/components/schemas/FilesystemOperationCopyPath"
           },
           {
+            "$ref": "#/components/schemas/FilesystemOperationCopyByInode"
+          },
+          {
             "$ref": "#/components/schemas/FilesystemOperationUndelete"
           },
           {
             "$ref": "#/components/schemas/FilesystemOperationRestoreRevision"
           },
           {
+            "$ref": "#/components/schemas/FilesystemOperationRestoreRevisionByInode"
+          },
+          {
             "$ref": "#/components/schemas/FilesystemOperationUpdateAttributes"
           },
           {
+            "$ref": "#/components/schemas/FilesystemOperationUpdateAttributesByInode"
+          },
+          {
             "$ref": "#/components/schemas/FilesystemOperationUpdateAccess"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemOperationUpdateAccessByInode"
           }
         ]
+      },
+      "FilesystemOperationCopyByInode": {
+        "description": "Copy a file inode to a name under a parent inode.",
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/DestinationBehavior",
+            "description": "Whether an existing destination file may be replaced."
+          },
+          "destination_display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Name of the copy."
+          },
+          "destination_parent_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Destination directory."
+          },
+          "expected_destination_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "With `replace` behavior, the destination inode required by the request."
+          },
+          "expected_destination_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "With `replace` behavior and an inode precondition, the required content revision."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "File to copy."
+          },
+          "kind": {
+            "enum": [
+              "copy_by_inode"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inode_id",
+          "destination_parent_inode_id",
+          "destination_display_name",
+          "kind"
+        ],
+        "type": "object"
       },
       "FilesystemOperationCopyPath": {
         "description": "Copy one file path to another path.",
@@ -2253,16 +2369,49 @@
         ],
         "type": "object"
       },
+      "FilesystemOperationRestoreRevisionByInode": {
+        "description": "Restore an older revision as the current revision of a file inode.",
+        "properties": {
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Visible file to restore."
+          },
+          "kind": {
+            "enum": [
+              "restore_revision_by_inode"
+            ],
+            "type": "string"
+          },
+          "source_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Existing historical revision whose content will be copied into a new current revision."
+          }
+        },
+        "required": [
+          "inode_id",
+          "source_revision_no",
+          "kind"
+        ],
+        "type": "object"
+      },
       "FilesystemOperationUndelete": {
-        "description": "Restore the deletion identified by `inode_id` and `deletion_seq`.",
+        "description": "Restore the deletion identified by `inode_id` and `deletion_seq`.\nName the destination with `destination_path`, or with\n`destination_parent_inode_id` and `destination_display_name`; omit\nboth to use the recorded binding.",
         "properties": {
           "deletion_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Observed deletion sequence, which prevents cancelling a newer tombstone sequence."
           },
+          "destination_display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "Name to restore under `destination_parent_inode_id`."
+          },
+          "destination_parent_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Directory to restore into; requires `destination_display_name`."
+          },
           "destination_path": {
             "$ref": "#/components/schemas/AbsolutePath",
-            "description": "The restore destination. Omit it to use the recorded binding."
+            "description": "Absolute restore destination; cannot be combined with a parent inode destination."
           },
           "inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -2320,6 +2469,40 @@
         ],
         "type": "object"
       },
+      "FilesystemOperationUpdateAccessByInode": {
+        "description": "Replace the access row of a visible inode. The root inode is a valid\ntarget.",
+        "properties": {
+          "boundary": {
+            "description": "Whether the directory stops inheritance from its ancestors.",
+            "type": "boolean"
+          },
+          "expected_access_revision_no": {
+            "$ref": "#/components/schemas/AccessRevisionNo",
+            "description": "The access revision that must still be current."
+          },
+          "grants": {
+            "$ref": "#/components/schemas/AccessGrants",
+            "description": "The inode's complete direct grants after this update."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Visible file or directory to update."
+          },
+          "kind": {
+            "enum": [
+              "update_access_by_inode"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inode_id",
+          "boundary",
+          "grants",
+          "kind"
+        ],
+        "type": "object"
+      },
       "FilesystemOperationUpdateAttributes": {
         "description": "Write and remove attributes on the inode one path resolves to.",
         "properties": {
@@ -2363,6 +2546,49 @@
         },
         "required": [
           "path",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "FilesystemOperationUpdateAttributesByInode": {
+        "description": "Write and remove attributes on a visible inode.",
+        "properties": {
+          "expected_attributes_revision_no": {
+            "$ref": "#/components/schemas/AttributesRevisionNo",
+            "description": "The attribute revision that must still be current."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Visible file or directory to update."
+          },
+          "kind": {
+            "enum": [
+              "update_attributes_by_inode"
+            ],
+            "type": "string"
+          },
+          "remove": {
+            "description": "The attribute keys to remove, including duplicates that validation must reject.",
+            "items": {
+              "$ref": "#/components/schemas/AttributeKey"
+            },
+            "type": "array"
+          },
+          "set": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AttributeValue"
+            },
+            "description": "The attributes to write, replacing values for matching keys and leaving\nother keys unchanged.",
+            "propertyNames": {
+              "description": "A validated inode attribute name from 1 to 128 UTF-8 bytes without control characters.\n\nNames are byte-exact; writes reject the reserved `loonfs.` prefix even though\nthe type accepts it.",
+              "example": "owner",
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "inode_id",
           "kind"
         ],
         "type": "object"
@@ -6932,11 +7158,22 @@
             }
           },
           {
-            "description": "Complete absolute path used to restrict matches.",
+            "description": "Complete absolute path used to restrict matches. Cannot be combined with `inode_id`.",
             "in": "query",
             "name": "path_prefix",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inode whose descendants restrict matches. Cannot be combined with `path_prefix`.",
+            "example": "ino_123",
+            "in": "query",
+            "name": "inode_id",
+            "required": false,
+            "schema": {
+              "pattern": "^ino_[1-9][0-9]*$",
               "type": "string"
             }
           },
@@ -7002,7 +7239,7 @@
                 }
               }
             },
-            "description": "Invalid pattern, cursor, or an unindexable pattern without allow_scan"
+            "description": "Invalid pattern, cursor, or scope, both scopes, or an unindexable pattern without allow_scan"
           },
           "401": {
             "content": {
@@ -7022,7 +7259,7 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace, scope path, or scope inode not found"
           },
           "410": {
             "content": {
@@ -7333,6 +7570,237 @@
           "inodes"
         ],
         "x-fern-sdk-method-name": "listChildren",
+        "x-loonfs-retry": "idempotent"
+      }
+    },
+    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content": {
+      "get": {
+        "description": "Reads and verifies the current revision of a visible file inode, wherever it is bound. Unknown or hidden inodes answer `inode_not_found`.",
+        "operationId": "get_file_bytes_by_inode",
+        "parameters": [
+          {
+            "description": "Namespace id",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "File inode ID",
+            "example": "ino_123",
+            "in": "path",
+            "name": "inode_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ino_[1-9][0-9]*$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "items": {
+                    "format": "int32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "File bytes"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid inode ID"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace or visible inode not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Inode is not a file"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Read file by inode",
+        "tags": [
+          "inodes"
+        ],
+        "x-fern-request-name": "GetFileBytesByInodeRequest",
+        "x-fern-sdk-group-name": [
+          "inodes"
+        ],
+        "x-fern-sdk-method-name": "currentContent",
+        "x-loonfs-retry": "idempotent"
+      }
+    },
+    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads": {
+      "post": {
+        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound. The request has no body and the response does not include a path.",
+        "operationId": "create_current_download_by_inode",
+        "parameters": [
+          {
+            "description": "Namespace id",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "File inode ID",
+            "example": "ino_123",
+            "in": "path",
+            "name": "inode_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ino_[1-9][0-9]*$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateDownloadByInodeResponse"
+                }
+              }
+            },
+            "description": "Download authorized"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid inode ID"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace or visible inode not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Inode is not a file"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Direct download is unsupported"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Begin current download by inode",
+        "tags": [
+          "inodes"
+        ],
+        "x-fern-request-name": "CreateCurrentDownloadByInodeRequest",
+        "x-fern-sdk-group-name": [
+          "inodes"
+        ],
+        "x-fern-sdk-method-name": "createCurrentDownload",
         "x-loonfs-retry": "idempotent"
       }
     },

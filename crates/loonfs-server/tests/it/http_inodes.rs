@@ -112,6 +112,14 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
             .await
             .expect("stat renamed path")
     );
+    assert_eq!(
+        harness
+            .client
+            .read_file_by_inode(&namespace, inode_id)
+            .await
+            .expect("read current content after rename"),
+        b"two"
+    );
     let revisions = harness
         .client
         .list_file_revisions_by_inode(&namespace, inode_id)
@@ -147,6 +155,14 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         .expect("delete file");
     assert_api_code(
         harness.client.stat_by_inode(&namespace, inode_id).await,
+        404,
+        ErrorCode::InodeNotFound,
+    );
+    assert_api_code(
+        harness
+            .client
+            .read_file_by_inode(&namespace, inode_id)
+            .await,
         404,
         ErrorCode::InodeNotFound,
     );
@@ -223,6 +239,14 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         409,
         ErrorCode::PathConflict,
     );
+    assert_api_code(
+        harness
+            .client
+            .read_file_by_inode(&namespace, directory_id)
+            .await,
+        409,
+        ErrorCode::PathConflict,
+    );
     for result in [
         harness
             .client
@@ -286,7 +310,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     assert_api_code(
         harness
             .client
-            .create_download_by_inode(&namespace, file_id, RevisionNo(1))
+            .create_download_by_inode(&namespace, file_id, Some(RevisionNo(1)))
             .await,
         501,
         ErrorCode::NotSupported,
@@ -571,7 +595,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
             .inode_id,
         InodeId(27)
     );
-    for suffix in ["", "/revisions", "/revisions/1/content"] {
+    for suffix in ["", "/content", "/revisions", "/revisions/1/content"] {
         raw_agent()
             .get(&format!(
                 "{}/v0/namespaces/demo/inodes/ino_27{suffix}",
@@ -588,6 +612,8 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
         ("GET", "/revisions"),
         ("GET", "/revisions/1/content"),
         ("POST", "/revisions/1/downloads"),
+        ("GET", "/content"),
+        ("POST", "/downloads"),
     ];
     for malformed in ["27", "ino_027", "ino_0", "INO_27"] {
         for (method, suffix) in routes {
