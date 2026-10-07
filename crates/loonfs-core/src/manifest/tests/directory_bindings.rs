@@ -184,7 +184,7 @@ async fn assert_names<S: ObjectStore + ?Sized>(
             .collect::<Vec<_>>(),
         expected
     );
-    for name in ["/a", "/b"] {
+    for name in ["/a", "/b", "/c"] {
         let entry = view
             .resolve_path(name, AttributeInclusion::Omit, &access)
             .await;
@@ -332,6 +332,83 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         .expect("pinned manifest");
         assert_names(&pinned, &[(path, inode_id)]).await;
     }
+}
+
+#[tokio::test]
+async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("slot-reuse").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    for path in ["/b", "/c"] {
+        write_file_bytes(&store, &namespace_id, path, b"body", &context, None)
+            .await
+            .expect("create");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the creates");
+    let created = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("created view");
+    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let mut inode_ids = Vec::new();
+    for path in ["/b", "/c"] {
+        let entry = created
+            .resolve_path(path, AttributeInclusion::Omit, &access)
+            .await
+            .expect("created path");
+        inode_ids.push(entry.inode_id);
+    }
+    let (moved, replaced) = (inode_ids[0], inode_ids[1]);
+    assert!(
+        moved < replaced,
+        "the moved child must sort before the slot's earlier child"
+    );
+
+    delete_path(&store, &namespace_id, "/c", &context, None)
+        .await
+        .expect("delete c");
+    move_path(&store, &namespace_id, "/b", "/c", &context, None)
+        .await
+        .expect("move b to c");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the move");
+    advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect("floor at the move");
+    let (manifest_no, _) = drain_compaction(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
+    )
+    .await;
+
+    let rebuilt = load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
+        .await
+        .expect("index row counts and digests agree");
+    let forward =
+        manifest_rows_for_family(&rebuilt.metadata_state, ApiMetadataRowFamily::DirentryBinds);
+    let reverse = manifest_rows_for_family(
+        &rebuilt.metadata_state,
+        ApiMetadataRowFamily::DirentryChildBinds,
+    );
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.len(), 1, "{forward:?}");
+    assert!(
+        matches!(&forward[0], MetadataRow::DirentryBinding(binding) if binding.is_bound() && binding.name_key.as_str() == "c" && binding.child_inode_id == moved)
+    );
+    let compacted = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("compacted view");
+    assert_names(&compacted, &[("/c", moved)]).await;
 }
 
 #[tokio::test]

@@ -52,9 +52,9 @@ Output uses fresh IDs under `namespaces/{namespace_id}/segments/`. Published des
 
 ## Binding retention
 
-The slot and child indexes each hold bound and unbound versions. A compaction that includes the oldest run groups rows by slot or child. It keeps every version above the floor, and it keeps the newest version at or below the floor when that version is bound. An unbound version is a tombstone. Only this kind of compaction can remove it, together with the older versions it hides. A compaction above the oldest run keeps every row.
+The slot and child indexes each hold bound and unbound versions. A compaction that includes the oldest run groups the slot index by slot and child, and the child index by child. In each group it keeps every version above the floor, and it keeps the newest version at or below the floor when that version is bound. An unbound version is a tombstone. Only this kind of compaction can remove it, together with the older versions it hides. A compaction above the oldest run keeps every row.
 
-Binding keys sort positions oldest first. The retention operator holds at most one floor version until its slot or child ends or a row above the floor arrives. Both execution paths read each index as a separate sorted stream and apply the same rule to each.
+Within a group, binding keys sort positions oldest first. The retention operator holds at most one floor version until its group ends or a row above the floor arrives. In the slot index it also carries one flag across the groups of a slot and refuses a second child bound in the slot at the floor. Both execution paths read each index as a separate sorted stream and apply the same rule to each.
 
 ## Validating a merge
 

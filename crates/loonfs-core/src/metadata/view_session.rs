@@ -76,6 +76,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 row_key: lookup_keys::direntry_bind_row_key(
                     record.parent_inode_id,
                     record.name_key.as_str(),
+                    record.child_inode_id,
                     record.committed_seq,
                     record.delta_index,
                 ),

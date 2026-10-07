@@ -10,10 +10,10 @@ A `direntry_binding` row contains `parent_inode_id`, `name_key`, `child_inode_id
 
 | Family | Order | Filter key |
 | --- | --- | --- |
-| `direntry_binds` | Parent, name, committed sequence, delta index | Parent and name |
+| `direntry_binds` | Parent, name, child, committed sequence, delta index | Parent and name |
 | `direntry_child_binds` | Child, committed sequence, delta index, parent, name | Child |
 
-The two indexes contain the same records. Within a slot or child, positions sort oldest first. Each bind and each unbind writes one record to each index. The unbind delta in the WAL names the exact bind it removes. Commit validation checks that reference before materialization, so the unbound row needs to store only its own position.
+The two indexes contain the same records. Within a slot and child, or within a child in the child index, positions sort oldest first. Each bind and each unbind writes one record to each index. The unbind delta in the WAL names the exact bind it removes. Commit validation checks that reference before materialization, so the unbound row needs to store only its own position.
 
 ## Reads
 
@@ -27,7 +27,7 @@ A path lookup reads the slot index once per component. A listing scans the paren
 
 An unbound value is a tombstone for older values of its slot or child. It must remain while an excluded run may still hold those older values. A compaction that excludes the group's oldest run keeps every row.
 
-A bottom-anchored compaction includes the oldest run. It keeps every version above the floor and the newest version at or below the floor. If that floor value is unbound, the compaction removes it together with every older version it hides. Because the input is sorted, the compaction buffers at most one floor value per slot or child.
+A bottom-anchored compaction includes the oldest run. It groups the slot index by slot and child, and the child index by child. In each group it keeps every version above the floor and the newest version at or below the floor. If that floor value is unbound, the compaction removes it together with every older version of the group. A child that left a slot by the floor has an unbind as its newest floor value there, so the compaction removes all of that group's rows at or below the floor. Because the input is sorted, the compaction buffers at most one floor value per group. In the slot index it also carries one flag across the groups of a slot, and it refuses a second child bound in the slot at the floor as corruption.
 
 For example, suppose inode 7 moves from `/a` to `/b` at sequence 20 and the floor is at 20. A bottom-anchored compaction produces:
 
@@ -37,7 +37,7 @@ For example, suppose inode 7 moves from `/a` to `/b` at sequence 20 and the floo
 | Slot `/b` | Bound to inode 7 | The bound value |
 | Child 7 | Bound at `/b` | The same bound value |
 
-Every event above the floor stays in both indexes. At the floor, a bound value is current in both indexes or in neither, because replacing a child or moving it requires an unbind. Both indexes therefore keep the same set of events. The row-count and digest checks verify that agreement.
+Every event above the floor stays in both indexes. At the floor, a bind is the newest value of its slot and child exactly when it is the newest value of its child, because replacing a child or moving it requires an unbind. Both indexes therefore keep the same set of events. The row-count and digest checks verify that agreement.
 
 Attribute and access revisions keep a cleared floor value, because the next update needs its revision number. A binding position comes from the event that published it, so a later bind does not depend on a retained unbound value.
 

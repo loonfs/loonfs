@@ -2,7 +2,7 @@
 
 use crate::error::{CoreError, Result};
 use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_types::{ChangeSeq, InodeId};
+use loonfs_types::{ChangeSeq, InodeId, NameKey};
 
 /// One row a retention operator kept, and the family it belongs to.
 pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
@@ -19,7 +19,8 @@ pub(super) enum RetentionRule {
     WholeState,
     /// Retain active deletions and remove completed deletion pairs.
     ActiveDeletions,
-    /// Retains slot or child values above the floor and its bound value at the floor.
+    /// Per slot and child, or per child in the child index, retains the
+    /// values above the floor and the bound value at the floor.
     Bindings,
 }
 
@@ -70,14 +71,14 @@ impl RetentionOperator {
         &mut self,
         row: &MetadataRow,
         floor_seq: ChangeSeq,
-    ) -> Option<KeptRow> {
+    ) -> Result<Option<KeptRow>> {
         match (self, row) {
             (Self::Bindings(state), MetadataRow::DirentryBinding(binding))
                 if binding.committed_seq > floor_seq =>
             {
                 state.close_group()
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 
@@ -93,7 +94,7 @@ impl RetentionOperator {
                 state.close_group();
                 Ok(None)
             }
-            Self::Bindings(state) => Ok(state.close_group()),
+            Self::Bindings(state) => state.close_group(),
         }
     }
 
@@ -232,6 +233,10 @@ impl ActiveDeletionRetention {
 #[derive(Debug, Default)]
 pub(super) struct BindingRetention {
     at_floor: Option<KeptRow>,
+    /// The parent, name, and child of the last bound floor value the slot
+    /// index kept. One slot's children are adjacent in that index, so a
+    /// second child bound in the same slot is always compared with this one.
+    bound_in_slot: Option<(InodeId, NameKey, InodeId)>,
 }
 
 impl BindingRetention {
@@ -259,8 +264,28 @@ impl BindingRetention {
         Ok(None)
     }
 
-    fn close_group(&mut self) -> Option<KeptRow> {
-        self.at_floor.take()
+    fn close_group(&mut self) -> Result<Option<KeptRow>> {
+        let Some(kept) = self.at_floor.take() else {
+            return Ok(None);
+        };
+        if let (MetadataRowFamily::DirentryBinds, MetadataRow::DirentryBinding(binding)) = &kept {
+            if let Some((parent_inode_id, name_key, child_inode_id)) = &self.bound_in_slot {
+                if *parent_inode_id == binding.parent_inode_id && *name_key == binding.name_key {
+                    return Err(CoreError::NamespaceCorrupt(format!(
+                        "parent `{parent_inode_id}` binds name `{name_key}` to children \
+                         `{child_inode_id}` and `{}` at or below the retention floor; refusing \
+                         to drop rows",
+                        binding.child_inode_id
+                    )));
+                }
+            }
+            self.bound_in_slot = Some((
+                binding.parent_inode_id,
+                binding.name_key.clone(),
+                binding.child_inode_id,
+            ));
+        }
+        Ok(Some(kept))
     }
 }
 
@@ -307,14 +332,14 @@ mod tests {
         }
     }
 
-    fn bind_row(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
+    fn bind_row(parent: u64, name: &str, child: u64, bind_seq: u64) -> MetadataRow {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
             state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
             },
-            child_inode_id: InodeId(42),
+            child_inode_id: InodeId(child),
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
@@ -439,7 +464,7 @@ mod tests {
             operator
                 .push(
                     MetadataRowFamily::DirentryBinds,
-                    bind_row(7, "hot.txt", position * 2 - 1),
+                    bind_row(7, "hot.txt", 42, position * 2 - 1),
                     ChangeSeq(200_000),
                 )
                 .expect("push");
@@ -466,7 +491,7 @@ mod tests {
         operator
             .push(
                 MetadataRowFamily::DirentryBinds,
-                bind_row(7, "a.txt", 10),
+                bind_row(7, "a.txt", 42, 10),
                 floor(),
             )
             .expect("push");
@@ -481,7 +506,7 @@ mod tests {
         operator
             .push(
                 MetadataRowFamily::DirentryBinds,
-                bind_row(7, "b.txt", 11),
+                bind_row(7, "b.txt", 42, 11),
                 floor(),
             )
             .expect("push");
@@ -489,7 +514,7 @@ mod tests {
         let error = operator
             .push(
                 MetadataRowFamily::DirentryBinds,
-                bind_row(7, "b.txt", 12),
+                bind_row(7, "b.txt", 42, 12),
                 floor(),
             )
             .expect_err("a superseded bind with no unbind is refused");
@@ -498,5 +523,34 @@ mod tests {
             "the error must name the bind that was superseded, got: {error}"
         );
         assert!(error.to_string().contains("superseded at or below"));
+    }
+
+    #[test]
+    fn two_children_bound_in_one_slot_at_the_floor_are_refused() {
+        let mut operator = RetentionRule::Bindings.operator();
+        operator
+            .push(
+                MetadataRowFamily::DirentryBinds,
+                bind_row(7, "a.txt", 2, 20),
+                floor(),
+            )
+            .expect("push");
+        assert!(operator.close_group(floor()).expect("close").is_some());
+        operator
+            .push(
+                MetadataRowFamily::DirentryBinds,
+                bind_row(7, "a.txt", 3, 10),
+                floor(),
+            )
+            .expect("push");
+
+        let error = operator
+            .close_group(floor())
+            .expect_err("a second child bound in the slot at the floor is refused");
+        assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+        assert!(
+            error.to_string().contains("children `2` and `3`"),
+            "the error must name both children, got: {error}"
+        );
     }
 }
