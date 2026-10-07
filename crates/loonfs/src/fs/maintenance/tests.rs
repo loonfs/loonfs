@@ -785,6 +785,8 @@ struct RivalFoldStore {
 impl ObjectStore for RivalFoldStore {
     loonfs_test_support::delegate_object_store!(self => self.inner; except put);
 
+    // `fetch_update` is deprecated since Rust 1.99 for `try_update`, which the 1.88 MSRV lacks.
+    #[allow(deprecated)]
     async fn put(
         &self,
         key: &str,
