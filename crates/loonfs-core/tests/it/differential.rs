@@ -1,20 +1,32 @@
 //! Differential checks between core metadata and the `loonfs-model` oracle.
+//!
+//! Each scenario replays the same WAL deltas through both and compares their
+//! rows. It also asks both the same visibility questions: after every commit
+//! at the new head, where core reads its indexes, and at every earlier
+//! sequence once the scenario ends, where core scans its rows.
 
 use loonfs_core::metadata::{
-    MetadataState as CoreMetadataState, TombstoneRowAction as CoreTombstoneAction,
+    DirentryBindingRecord as CoreBindingRecord, InodeRecord as CoreInodeRecord,
+    MetadataState as CoreMetadataState, ResolvedVisiblePath,
+    TombstoneRowAction as CoreTombstoneAction, VisiblePathError,
 };
 use loonfs_model::metadata::{
-    MetadataState as ModelMetadataState, SubtreeTombstoneAction as ModelTombstoneAction,
+    DirentryBindingRecord as ModelBindingRecord, DirentryBindingState as ModelBindingState,
+    InodeRecord as ModelInodeRecord, MetadataState as ModelMetadataState,
+    SubtreeTombstoneAction as ModelTombstoneAction,
 };
+use loonfs_model::visibility::PathLookup;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition};
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
-    AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue, Attributes,
-    AttributesRevisionNo, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName, InodeId,
-    InodeKind, NameKey, RevisionNo,
+    AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
+    Attributes, AttributesRevisionNo, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName,
+    InodeId, InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
 };
+use std::collections::BTreeSet;
 
-type NormalizedInodes = Vec<(u64, &'static str, u64, CommitId, ActorId, u64)>;
+type NormalizedInode = (u64, &'static str, u64, CommitId, ActorId, u64);
+type NormalizedInodes = Vec<NormalizedInode>;
 type NormalizedDirentryBinds = Vec<NormalizedDirectoryBinding>;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -100,8 +112,84 @@ struct NormalizedBinding {
     display_name: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ListingEntry {
+    binding: NormalizedDirectoryBinding,
+    child_kind: InodeKind,
+}
+
+/// A path lookup outcome in the shape of core's answer.
+#[derive(Debug, PartialEq, Eq)]
+enum PathAnswer {
+    Found {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+        created_by: ActorId,
+        created_at_ms: u64,
+        parent_inode_id: Option<InodeId>,
+        display_name: String,
+        binding_version: Option<DeltaPosition>,
+    },
+    NotFound {
+        absolute_path: String,
+    },
+    NotADirectory {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+    RootMissing,
+}
+
+/// What both sides answer at each compared sequence: every inode and every
+/// directory the scenario creates, and the root plus every path it names.
+struct Questions {
+    inodes: Vec<InodeId>,
+    directories: Vec<InodeId>,
+    paths: Vec<AbsolutePath>,
+}
+
+impl Questions {
+    fn new(paths: &[&str], commits: &[Vec<WalDelta>]) -> Self {
+        let mut questions = Self {
+            inodes: vec![ROOT_INODE_ID],
+            directories: vec![ROOT_INODE_ID],
+            paths: std::iter::once("/")
+                .chain(paths.iter().copied())
+                .map(|path| AbsolutePath::parse(path).expect("valid path"))
+                .collect(),
+        };
+        for delta in commits.iter().flatten() {
+            if let WalDelta::CreateInode {
+                inode_id,
+                inode_kind,
+                ..
+            } = delta
+            {
+                questions.inodes.push(*inode_id);
+                if *inode_kind == InodeKind::Directory {
+                    questions.directories.push(*inode_id);
+                }
+            }
+        }
+        questions
+    }
+}
+
 fn content_ref(seed: &str) -> ContentRef {
     loonfs_test_support::ids::content_ref(seed.as_bytes())
+}
+
+fn position(seq: u64, delta_index: u32) -> DeltaPosition {
+    DeltaPosition {
+        seq: ChangeSeq(seq),
+        delta_index,
+    }
+}
+
+fn name_key(display_name: &str) -> NameKey {
+    NameKey::parse(loonfs_types::name_key_for_display_name(display_name)).expect("derived name key")
 }
 
 fn create_directory(
@@ -116,17 +204,13 @@ fn create_directory(
             inode_id,
             inode_kind: InodeKind::Directory,
         },
-        WalDelta::BindDirentry {
-            delta_index: delta_index.saturating_add(1),
+        bind(
+            delta_index.saturating_add(1),
+            inode_id,
+            InodeKind::Directory,
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(display_name))
-                .expect("derived name key"),
-            display_name: DisplayName::parse(display_name).expect("valid display name"),
-            child_inode_id: inode_id,
-            child_kind: loonfs_types::InodeKind::Directory,
-            child_created_by: loonfs_types::ActorId::loonfs(),
-            child_created_at_ms: 4_200,
-        },
+            display_name,
+        ),
     ]
 }
 
@@ -143,17 +227,13 @@ fn create_file(
             inode_id,
             inode_kind: InodeKind::File,
         },
-        WalDelta::BindDirentry {
-            delta_index: delta_index.saturating_add(1),
+        bind(
+            delta_index.saturating_add(1),
+            inode_id,
+            InodeKind::File,
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(display_name))
-                .expect("derived name key"),
-            display_name: DisplayName::parse(display_name).expect("valid display name"),
-            child_inode_id: inode_id,
-            child_kind: loonfs_types::InodeKind::File,
-            child_created_by: loonfs_types::ActorId::loonfs(),
-            child_created_at_ms: 4_200,
-        },
+            display_name,
+        ),
         WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),
             inode_id,
@@ -180,39 +260,74 @@ fn append_revision(
 fn bind(
     delta_index: u32,
     inode_id: InodeId,
+    kind: InodeKind,
     parent_inode_id: InodeId,
     display_name: &str,
-) -> Vec<WalDelta> {
-    vec![WalDelta::BindDirentry {
+) -> WalDelta {
+    WalDelta::BindDirentry {
         delta_index,
         parent_inode_id,
-        name_key: NameKey::parse(loonfs_types::name_key_for_display_name(display_name))
-            .expect("derived name key"),
+        name_key: name_key(display_name),
         display_name: DisplayName::parse(display_name).expect("valid display name"),
         child_inode_id: inode_id,
-        child_kind: loonfs_types::InodeKind::File,
-        child_created_by: loonfs_types::ActorId::loonfs(),
+        child_kind: kind,
+        child_created_by: ActorId::loonfs(),
         child_created_at_ms: 4_200,
-    }]
+    }
 }
 
-/// A delete by path, which records the binding it removed.
-fn tombstone(
+/// Retires the bind recorded at `bound_at`, the first delta of a rename or a
+/// delete.
+fn unbind(
     delta_index: u32,
-    root_inode_id: InodeId,
+    inode_id: InodeId,
+    kind: InodeKind,
     parent_inode_id: InodeId,
     display_name: &str,
-) -> Vec<WalDelta> {
-    vec![WalDelta::TombstoneSubtree {
+    bound_at: DeltaPosition,
+) -> WalDelta {
+    WalDelta::UnbindDirentry {
         delta_index,
-        root_inode_id,
-        deleted_binding: DeletedBinding {
+        parent_inode_id,
+        name_key: name_key(display_name),
+        display_name: DisplayName::parse(display_name).expect("valid display name"),
+        child_inode_id: inode_id,
+        child_kind: kind,
+        child_created_by: ActorId::loonfs(),
+        child_created_at_ms: 4_200,
+        target: bound_at,
+    }
+}
+
+/// A delete by path as the commit path materializes it: retire the binding,
+/// then record a tombstone that keeps the binding it removed.
+fn delete(
+    delta_index: u32,
+    inode_id: InodeId,
+    kind: InodeKind,
+    parent_inode_id: InodeId,
+    display_name: &str,
+    bound_at: DeltaPosition,
+) -> Vec<WalDelta> {
+    vec![
+        unbind(
+            delta_index,
+            inode_id,
+            kind,
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(display_name))
-                .expect("derived name key"),
-            display_name: DisplayName::parse(display_name).expect("valid display name"),
+            display_name,
+            bound_at,
+        ),
+        WalDelta::TombstoneSubtree {
+            delta_index: delta_index.saturating_add(1),
+            root_inode_id: inode_id,
+            deleted_binding: DeletedBinding {
+                parent_inode_id,
+                name_key: name_key(display_name),
+                display_name: DisplayName::parse(display_name).expect("valid display name"),
+            },
         },
-    }]
+    ]
 }
 
 fn attribute_map(entries: &[(&str, &str)]) -> Attributes {
@@ -264,83 +379,114 @@ fn update_access(
 fn undelete(
     delta_index: u32,
     inode_id: InodeId,
+    kind: InodeKind,
     parent_inode_id: InodeId,
     display_name: &str,
     target: DeltaPosition,
 ) -> Vec<WalDelta> {
-    let mut deltas = vec![WalDelta::RevokeSubtreeTombstone {
-        delta_index,
-        root_inode_id: inode_id,
-        target,
-    }];
-    deltas.extend(bind(
-        delta_index.saturating_add(1),
-        inode_id,
-        parent_inode_id,
-        display_name,
-    ));
-    deltas
+    vec![
+        WalDelta::RevokeSubtreeTombstone {
+            delta_index,
+            root_inode_id: inode_id,
+            target,
+        },
+        bind(
+            delta_index.saturating_add(1),
+            inode_id,
+            kind,
+            parent_inode_id,
+            display_name,
+        ),
+    ]
 }
 
 #[test]
 fn metadata_apply_matches_model_for_basic_commit_sequence() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt",
-            content_ref("content-1"),
-        ),
-        append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
-    ]);
+    assert_core_matches_model(
+        // The last two paths fold to the stored name and look inside a file.
+        &[
+            "/docs",
+            "/docs/readme.txt",
+            "/DOCS/README.TXT",
+            "/docs/readme.txt/notes",
+        ],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "docs"),
+            create_file(
+                0,
+                InodeId(3),
+                InodeId(2),
+                "readme.txt",
+                content_ref("content-1"),
+            ),
+            append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
+        ],
+    );
 }
 
 #[test]
 fn metadata_apply_matches_model_for_rename() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt",
-            content_ref("content-1"),
-        ),
-        bind(0, InodeId(3), InodeId(1), "README.txt"),
-    ]);
+    assert_core_matches_model(
+        &["/docs", "/docs/readme.txt", "/README.txt", "/readme.txt"],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "docs"),
+            create_file(
+                0,
+                InodeId(3),
+                InodeId(2),
+                "readme.txt",
+                content_ref("content-1"),
+            ),
+            vec![
+                unbind(
+                    0,
+                    InodeId(3),
+                    InodeKind::File,
+                    InodeId(2),
+                    "readme.txt",
+                    position(2, 1),
+                ),
+                bind(1, InodeId(3), InodeKind::File, InodeId(1), "README.txt"),
+            ],
+        ],
+    );
 }
 
 #[test]
 fn metadata_apply_matches_model_for_restore_revision() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt",
-            content_ref("content-1"),
-        ),
-        append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
-        append_revision(0, InodeId(3), RevisionNo(3), content_ref("content-1")),
-    ]);
+    assert_core_matches_model(
+        &["/docs", "/docs/readme.txt"],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "docs"),
+            create_file(
+                0,
+                InodeId(3),
+                InodeId(2),
+                "readme.txt",
+                content_ref("content-1"),
+            ),
+            append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
+            append_revision(0, InodeId(3), RevisionNo(3), content_ref("content-1")),
+        ],
+    );
 }
 
 #[test]
 fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt",
-            content_ref("content-1"),
-        ),
-        append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-1")),
-    ]);
+    assert_core_matches_model(
+        &["/docs", "/docs/readme.txt"],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "docs"),
+            create_file(
+                0,
+                InodeId(3),
+                InodeId(2),
+                "readme.txt",
+                content_ref("content-1"),
+            ),
+            append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-1")),
+        ],
+    );
 }
 
 // The deleted names below are spelled with capitals on purpose: their
@@ -349,93 +495,124 @@ fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
 
 #[test]
 fn metadata_apply_matches_model_for_delete_file() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "Readme.TXT",
-            content_ref("content-1"),
-        ),
-        tombstone(0, InodeId(3), InodeId(2), "Readme.TXT"),
-    ]);
+    assert_core_matches_model(
+        &["/docs", "/docs/Readme.TXT"],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "docs"),
+            create_file(
+                0,
+                InodeId(3),
+                InodeId(2),
+                "Readme.TXT",
+                content_ref("content-1"),
+            ),
+            delete(
+                0,
+                InodeId(3),
+                InodeKind::File,
+                InodeId(2),
+                "Readme.TXT",
+                position(2, 1),
+            ),
+        ],
+    );
 }
 
 #[test]
 fn metadata_apply_matches_model_for_delete_subtree() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "Docs"),
-        create_directory(0, InodeId(3), InodeId(2), "nested"),
-        tombstone(0, InodeId(2), InodeId(1), "Docs"),
-    ]);
+    assert_core_matches_model(
+        &["/Docs", "/Docs/nested"],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "Docs"),
+            create_directory(0, InodeId(3), InodeId(2), "nested"),
+            delete(
+                0,
+                InodeId(2),
+                InodeKind::Directory,
+                InodeId(1),
+                "Docs",
+                position(1, 1),
+            ),
+        ],
+    );
 }
 
 #[test]
 fn metadata_apply_matches_model_for_undelete() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "Readme.TXT",
-            content_ref("content-1"),
-        ),
-        tombstone(1, InodeId(3), InodeId(2), "Readme.TXT"),
-        // The revoke names the delete's own position — the third commit,
-        // second delta — which differs from where the revoke itself lands.
-        undelete(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "Readme.TXT",
-            DeltaPosition {
-                seq: ChangeSeq(3),
-                delta_index: 1,
-            },
-        ),
-    ]);
+    assert_core_matches_model(
+        &["/docs", "/docs/Readme.TXT"],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "docs"),
+            create_file(
+                0,
+                InodeId(3),
+                InodeId(2),
+                "Readme.TXT",
+                content_ref("content-1"),
+            ),
+            delete(
+                0,
+                InodeId(3),
+                InodeKind::File,
+                InodeId(2),
+                "Readme.TXT",
+                position(2, 1),
+            ),
+            // The revoke names the delete's own position — the third commit,
+            // second delta — which differs from where the revoke itself lands.
+            undelete(
+                0,
+                InodeId(3),
+                InodeKind::File,
+                InodeId(2),
+                "Readme.TXT",
+                position(3, 1),
+            ),
+        ],
+    );
 }
 
 #[test]
 fn metadata_apply_matches_model_for_attribute_writes_and_removals() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt",
-            content_ref("content-1"),
-        ),
-        // Set, then overwrite one key while adding another, then remove one:
-        // each delta carries the whole resulting map.
-        update_attributes(
-            0,
-            InodeId(3),
-            1,
-            attribute_map(&[("owner", "ada"), ("tags", "draft,review")]),
-        ),
-        update_attributes(
-            0,
-            InodeId(3),
-            2,
-            attribute_map(&[
-                ("owner", "grace"),
-                ("tags", "draft,review"),
-                ("stage", "final"),
-            ]),
-        ),
-        update_attributes(
-            0,
-            InodeId(3),
-            3,
-            attribute_map(&[("owner", "grace"), ("stage", "final")]),
-        ),
-        // A directory carries attributes too.
-        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "hopper")])),
-    ]);
+    assert_core_matches_model(
+        &["/docs", "/docs/readme.txt"],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "docs"),
+            create_file(
+                0,
+                InodeId(3),
+                InodeId(2),
+                "readme.txt",
+                content_ref("content-1"),
+            ),
+            // Set, then overwrite one key while adding another, then remove one:
+            // each delta carries the whole resulting map.
+            update_attributes(
+                0,
+                InodeId(3),
+                1,
+                attribute_map(&[("owner", "ada"), ("tags", "draft,review")]),
+            ),
+            update_attributes(
+                0,
+                InodeId(3),
+                2,
+                attribute_map(&[
+                    ("owner", "grace"),
+                    ("tags", "draft,review"),
+                    ("stage", "final"),
+                ]),
+            ),
+            update_attributes(
+                0,
+                InodeId(3),
+                3,
+                attribute_map(&[("owner", "grace"), ("stage", "final")]),
+            ),
+            // A directory carries attributes too.
+            update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "hopper")])),
+        ],
+    );
 }
 
 #[test]
@@ -444,77 +621,223 @@ fn metadata_apply_matches_model_for_access_updates() {
         serde_json::from_value(serde_json::json!({"prn_ada": ["read", "write"]})).expect("grants");
     let second = serde_json::from_value(serde_json::json!({"prn_team": ["read", "history"]}))
         .expect("grants");
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        create_directory(0, InodeId(3), InodeId(1), "other"),
-        update_access(0, InodeId(2), 1, true, first),
-        update_access(0, InodeId(2), 2, false, second),
-        update_access(0, InodeId(3), 1, false, AccessGrants::default()),
-    ]);
+    assert_core_matches_model(
+        &["/docs", "/other"],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "docs"),
+            create_directory(0, InodeId(3), InodeId(1), "other"),
+            update_access(0, InodeId(2), 1, true, first),
+            update_access(0, InodeId(2), 2, false, second),
+            update_access(0, InodeId(3), 1, false, AccessGrants::default()),
+        ],
+    );
 }
 
 #[test]
 fn metadata_apply_matches_model_for_a_cleared_attribute_map() {
-    assert_states_match(&[
-        create_directory(0, InodeId(2), InodeId(1), "docs"),
-        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
-        update_attributes(0, InodeId(2), 2, Attributes::default()),
-    ]);
+    assert_core_matches_model(
+        &["/docs"],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "docs"),
+            update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
+            update_attributes(0, InodeId(2), 2, Attributes::default()),
+        ],
+    );
 }
 
 #[test]
 fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
-    assert_states_match(&[
-        create_file(
-            0,
-            InodeId(2),
-            InodeId(1),
-            "source.txt",
-            content_ref("content-1"),
-        ),
-        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
-        {
-            let mut deltas = create_file(
+    assert_core_matches_model(
+        &["/source.txt", "/copy.txt"],
+        &[
+            create_file(
                 0,
-                InodeId(3),
+                InodeId(2),
                 InodeId(1),
-                "copy.txt",
+                "source.txt",
                 content_ref("content-1"),
-            );
-            deltas.extend(update_attributes(
-                3,
-                InodeId(3),
-                1,
-                attribute_map(&[("owner", "ada")]),
-            ));
-            deltas
-        },
-    ]);
+            ),
+            update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
+            {
+                let mut deltas = create_file(
+                    0,
+                    InodeId(3),
+                    InodeId(1),
+                    "copy.txt",
+                    content_ref("content-1"),
+                );
+                deltas.extend(update_attributes(
+                    3,
+                    InodeId(3),
+                    1,
+                    attribute_map(&[("owner", "ada")]),
+                ));
+                deltas
+            },
+        ],
+    );
 }
 
 #[test]
 fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
-    assert_states_match(&[
-        create_file(
-            0,
-            InodeId(2),
-            InodeId(1),
-            "Readme.TXT",
-            content_ref("content-1"),
-        ),
-        update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
-        tombstone(1, InodeId(2), InodeId(1), "Readme.TXT"),
-        undelete(
-            0,
-            InodeId(2),
-            InodeId(1),
-            "Readme.TXT",
-            DeltaPosition {
-                seq: ChangeSeq(3),
-                delta_index: 1,
-            },
-        ),
-    ]);
+    assert_core_matches_model(
+        &["/Readme.TXT"],
+        &[
+            create_file(
+                0,
+                InodeId(2),
+                InodeId(1),
+                "Readme.TXT",
+                content_ref("content-1"),
+            ),
+            update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
+            delete(
+                0,
+                InodeId(2),
+                InodeKind::File,
+                InodeId(1),
+                "Readme.TXT",
+                position(1, 1),
+            ),
+            undelete(
+                0,
+                InodeId(2),
+                InodeKind::File,
+                InodeId(1),
+                "Readme.TXT",
+                position(3, 1),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelete() {
+    let file = InodeKind::File;
+    let docs = InodeId(2);
+    let model = assert_core_matches_model(
+        &[
+            "/docs",
+            "/docs/report.txt",
+            "/docs/draft.txt",
+            "/docs/final.txt",
+            "/docs/FINAL.TXT",
+            "/docs/old.txt",
+        ],
+        &[
+            create_directory(0, docs, InodeId(1), "docs"),
+            create_file(0, InodeId(3), docs, "report.txt", content_ref("content-1")),
+            vec![
+                unbind(0, InodeId(3), file, docs, "report.txt", position(2, 1)),
+                bind(1, InodeId(3), file, docs, "draft.txt"),
+            ],
+            vec![
+                unbind(0, InodeId(3), file, docs, "draft.txt", position(3, 1)),
+                bind(1, InodeId(3), file, docs, "final.txt"),
+            ],
+            delete(0, InodeId(3), file, docs, "final.txt", position(4, 1)),
+            // A new file takes the freed slot under a spelling with the same
+            // name key.
+            create_file(0, InodeId(4), docs, "Final.TXT", content_ref("content-2")),
+            // The undelete takes the slot the first rename freed.
+            undelete(0, InodeId(3), file, docs, "report.txt", position(5, 1)),
+            // One commit unbinds `final.txt` and binds it again; the later
+            // delta wins.
+            vec![
+                unbind(0, InodeId(4), file, docs, "Final.TXT", position(6, 1)),
+                bind(1, InodeId(4), file, docs, "old.txt"),
+                unbind(2, InodeId(3), file, docs, "report.txt", position(7, 1)),
+                bind(3, InodeId(3), file, docs, "final.txt"),
+            ],
+        ],
+    );
+
+    let resolved = |path: &str, seq: u64| {
+        let path = AbsolutePath::parse(path).expect("valid path");
+        match model
+            .resolve_path(&path, ChangeSeq(seq))
+            .expect("the model should answer for a state it accepted")
+        {
+            PathLookup::Found { inode, .. } => Some(inode.inode_id),
+            PathLookup::NotFound { .. } | PathLookup::NotADirectory { .. } => None,
+        }
+    };
+    assert_eq!(resolved("/docs/final.txt", 4), Some(InodeId(3)));
+    assert_eq!(resolved("/docs/final.txt", 5), None);
+    assert_eq!(resolved("/docs/final.txt", 6), Some(InodeId(4)));
+    assert_eq!(resolved("/docs/report.txt", 7), Some(InodeId(3)));
+    assert_eq!(resolved("/docs/final.txt", 8), Some(InodeId(3)));
+    assert_eq!(resolved("/docs/old.txt", 8), Some(InodeId(4)));
+}
+
+#[test]
+fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
+    let directory = InodeKind::Directory;
+    let notes = InodeId(4);
+    let model = assert_core_matches_model(
+        &[
+            "/projects",
+            "/projects/alpha",
+            "/projects/alpha/notes.txt",
+            "/archive",
+            "/archive/alpha",
+            "/archive/alpha/notes.txt",
+        ],
+        &[
+            create_directory(0, InodeId(2), InodeId(1), "projects"),
+            create_directory(0, InodeId(3), InodeId(2), "alpha"),
+            create_file(0, notes, InodeId(3), "notes.txt", content_ref("content-1")),
+            delete(
+                0,
+                InodeId(2),
+                directory,
+                InodeId(1),
+                "projects",
+                position(1, 1),
+            ),
+            create_directory(0, InodeId(5), InodeId(1), "projects"),
+            undelete(
+                0,
+                InodeId(2),
+                directory,
+                InodeId(1),
+                "archive",
+                position(4, 1),
+            ),
+        ],
+    );
+
+    // The descendant keeps its binding under the deleted root, so only the
+    // tombstone on its ancestor hides it.
+    for seq in [ChangeSeq(4), ChangeSeq(5)] {
+        let hidden = model
+            .visible_inode(notes, seq)
+            .expect("the model should answer for a state it accepted");
+        assert_eq!(hidden, None, "inode `{notes}` at seq {seq}");
+        assert_eq!(
+            model
+                .parent_binding(notes, seq)
+                .map(|binding| binding.parent_inode_id),
+            Some(InodeId(3)),
+            "parent of inode `{notes}` at seq {seq}"
+        );
+        let listing = model
+            .list_directory(InodeId(3), seq)
+            .expect("the model should answer for a state it accepted");
+        assert!(listing.is_empty(), "listing of inode `3` at seq {seq}");
+    }
+    let restored = model
+        .visible_inode(notes, ChangeSeq(6))
+        .expect("the model should answer for a state it accepted");
+    assert_eq!(restored.map(|inode| inode.inode_id), Some(notes));
+}
+
+#[test]
+fn repeated_content_in_one_commit_emits_one_publication() {
+    let content = content_ref("shared content");
+    let mut deltas = create_file(0, InodeId(2), InodeId(1), "one", content.clone());
+    deltas.extend(create_file(3, InodeId(3), InodeId(1), "two", content));
+    assert_core_matches_model(&["/one", "/two"], &[deltas]);
 }
 
 fn core_bootstrap_state() -> CoreMetadataState {
@@ -535,11 +858,14 @@ fn model_bootstrap_state() -> ModelMetadataState {
     loonfs_model::bootstrap_metadata_state(4_000)
 }
 
-fn assert_states_match(sequences: &[Vec<WalDelta>]) {
+/// Replays `commits` through core and the model, compares their visibility
+/// answers and their rows, and returns the model's final state.
+fn assert_core_matches_model(paths: &[&str], commits: &[Vec<WalDelta>]) -> ModelMetadataState {
+    let questions = Questions::new(paths, commits);
     let mut core_state = core_bootstrap_state();
     let mut model_state = model_bootstrap_state();
 
-    for (index, deltas) in sequences.iter().enumerate() {
+    for (index, deltas) in commits.iter().enumerate() {
         let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
         let actor = ActorId::parse(format!("scenario-actor-{index}")).expect("valid actor id");
         let committed_at_ms = 4_200 + u64::try_from(index).expect("timestamp offset");
@@ -547,16 +873,16 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
             CommitId::parse(format!("c_differential_{index}")).expect("valid commit id");
         core_state =
             core_state.apply_committed_wal_deltas(seq, &commit_id, &actor, committed_at_ms, deltas);
-        model_state = model_state.apply_committed_wal_deltas(
-            seq,
-            &commit_id,
-            &actor,
-            committed_at_ms,
-            deltas,
-        );
+        model_state = model_state
+            .apply_committed_wal_deltas(seq, &commit_id, &actor, committed_at_ms, deltas)
+            .expect("the scenario should keep the model's binding rules");
+        assert_answers_match(&core_state, &model_state, &questions, seq);
+    }
+    for seq in 0..u64::try_from(commits.len()).expect("seq") {
+        assert_answers_match(&core_state, &model_state, &questions, ChangeSeq(seq));
     }
 
-    let published: std::collections::BTreeSet<_> = core_state
+    let published: BTreeSet<_> = core_state
         .revisions()
         .iter()
         .map(|row| (&row.content_ref.content_id, row.committed_seq))
@@ -575,35 +901,214 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
             .map(|row| (&row.content_id, row.committed_seq, row.delta_index))
             .collect::<Vec<_>>()
     );
+    model_state
+}
+
+/// Asks core and the model every question at `seq` and requires the same
+/// answers.
+fn assert_answers_match(
+    core: &CoreMetadataState,
+    model: &ModelMetadataState,
+    questions: &Questions,
+    seq: ChangeSeq,
+) {
+    const ACCEPTED: &str = "the model should answer for a state it accepted";
+    for &inode_id in &questions.inodes {
+        assert_eq!(
+            core.visible_inode(inode_id, seq).as_ref().map(core_inode),
+            model
+                .visible_inode(inode_id, seq)
+                .expect(ACCEPTED)
+                .map(model_inode),
+            "visible inode `{inode_id}` at seq {seq}"
+        );
+        assert_eq!(
+            core.current_parent_binding_for_child(inode_id, seq)
+                .as_ref()
+                .map(core_binding),
+            model.parent_binding(inode_id, seq).map(model_binding),
+            "parent binding of inode `{inode_id}` at seq {seq}"
+        );
+    }
+    for path in &questions.paths {
+        assert_eq!(
+            core_path_answer(core.resolve_visible_path(path, seq)),
+            model_path_answer(model.resolve_path(path, seq).expect(ACCEPTED)),
+            "path `{path}` at seq {seq}"
+        );
+    }
+    for &directory in &questions.directories {
+        assert_eq!(
+            core_listing(core, directory, seq),
+            model_listing(model, directory, seq),
+            "listing of inode `{directory}` at seq {seq}"
+        );
+        for &new_parent in &questions.directories {
+            assert_eq!(
+                core.would_create_directory_cycle(directory, new_parent, seq),
+                model
+                    .would_create_cycle(directory, new_parent, seq)
+                    .expect(ACCEPTED),
+                "moving inode `{directory}` under inode `{new_parent}` at seq {seq}"
+            );
+        }
+    }
+}
+
+/// Core's in-memory state has no listing call, so its listing is the visible
+/// child of every name ever bound under the parent, in name key order.
+fn core_listing(
+    core: &CoreMetadataState,
+    parent_inode_id: InodeId,
+    seq: ChangeSeq,
+) -> Vec<ListingEntry> {
+    let name_keys: BTreeSet<&NameKey> = core
+        .direntry_binds()
+        .iter()
+        .filter(|row| row.parent_inode_id == parent_inode_id)
+        .map(|row| &row.name_key)
+        .collect();
+    name_keys
+        .into_iter()
+        .filter_map(|name_key| core.visible_child(parent_inode_id, name_key, seq))
+        .map(|binding| ListingEntry {
+            binding: core_binding(&binding),
+            child_kind: binding.child_kind,
+        })
+        .collect()
+}
+
+fn model_listing(
+    model: &ModelMetadataState,
+    parent_inode_id: InodeId,
+    seq: ChangeSeq,
+) -> Vec<ListingEntry> {
+    model
+        .list_directory(parent_inode_id, seq)
+        .expect("the model should answer for a state it accepted")
+        .into_iter()
+        .map(|entry| ListingEntry {
+            binding: model_binding(entry.binding),
+            child_kind: entry.child.inode_kind,
+        })
+        .collect()
+}
+
+fn core_path_answer(answer: Result<ResolvedVisiblePath, VisiblePathError>) -> PathAnswer {
+    match answer {
+        Ok(resolved) => PathAnswer::Found {
+            absolute_path: resolved.absolute_path.to_string(),
+            inode_id: resolved.inode_id,
+            inode_kind: resolved.inode_kind,
+            created_by: resolved.created_by,
+            created_at_ms: resolved.created_at_ms,
+            parent_inode_id: resolved.parent_inode_id,
+            display_name: resolved.display_name,
+            binding_version: resolved.binding_version,
+        },
+        Err(VisiblePathError::PathNotFound { absolute_path }) => {
+            PathAnswer::NotFound { absolute_path }
+        }
+        Err(VisiblePathError::PathComponentNotDirectory {
+            absolute_path,
+            inode_id,
+            inode_kind,
+        }) => PathAnswer::NotADirectory {
+            absolute_path,
+            inode_id,
+            inode_kind,
+        },
+        Err(VisiblePathError::RootMissing) => PathAnswer::RootMissing,
+    }
+}
+
+fn model_path_answer(lookup: PathLookup<'_>) -> PathAnswer {
+    match lookup {
+        PathLookup::Found {
+            absolute_path,
+            inode,
+            binding,
+        } => {
+            let binding = binding.map(model_binding);
+            PathAnswer::Found {
+                absolute_path,
+                inode_id: inode.inode_id,
+                inode_kind: inode.inode_kind,
+                created_by: inode.committed_by.clone(),
+                created_at_ms: inode.committed_at_ms,
+                parent_inode_id: binding.as_ref().map(|binding| binding.parent_inode_id),
+                display_name: binding
+                    .as_ref()
+                    .and_then(|binding| binding.display_name.as_ref())
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                binding_version: binding.map(|binding| binding.position),
+            }
+        }
+        PathLookup::NotFound { absolute_path } => PathAnswer::NotFound { absolute_path },
+        PathLookup::NotADirectory {
+            absolute_path,
+            inode,
+        } => PathAnswer::NotADirectory {
+            absolute_path,
+            inode_id: inode.inode_id,
+            inode_kind: inode.inode_kind,
+        },
+    }
+}
+
+fn core_inode(inode: &CoreInodeRecord) -> NormalizedInode {
+    normalize_inode(
+        inode.inode_id.0,
+        inode.inode_kind,
+        inode.committed_seq.0,
+        inode.commit_id.clone(),
+        inode.committed_by.clone(),
+        inode.committed_at_ms,
+    )
+}
+
+fn model_inode(inode: &ModelInodeRecord) -> NormalizedInode {
+    normalize_inode(
+        inode.inode_id.0,
+        inode.inode_kind,
+        inode.committed_seq.0,
+        inode.commit_id.clone(),
+        inode.committed_by.clone(),
+        inode.committed_at_ms,
+    )
+}
+
+fn core_binding(direntry: &CoreBindingRecord) -> NormalizedDirectoryBinding {
+    NormalizedDirectoryBinding {
+        parent_inode_id: direntry.parent_inode_id,
+        name_key: direntry.name_key.clone(),
+        child_inode_id: direntry.child_inode_id,
+        position: direntry.position(),
+        display_name: direntry.display_name().cloned(),
+    }
+}
+
+fn model_binding(direntry: &ModelBindingRecord) -> NormalizedDirectoryBinding {
+    NormalizedDirectoryBinding {
+        parent_inode_id: direntry.parent_inode_id,
+        name_key: direntry.name_key.clone(),
+        child_inode_id: direntry.child_inode_id,
+        position: DeltaPosition {
+            seq: direntry.committed_seq,
+            delta_index: direntry.delta_index,
+        },
+        display_name: match &direntry.state {
+            ModelBindingState::Bound { display_name } => Some(display_name.clone()),
+            ModelBindingState::Unbound => None,
+        },
+    }
 }
 
 fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
     (
-        state
-            .inodes()
-            .iter()
-            .map(|inode| {
-                normalize_inode(
-                    inode.inode_id.0,
-                    inode.inode_kind,
-                    inode.committed_seq.0,
-                    inode.commit_id.clone(),
-                    inode.committed_by.clone(),
-                    inode.committed_at_ms,
-                )
-            })
-            .collect(),
-        state
-            .direntry_binds()
-            .iter()
-            .map(|direntry| NormalizedDirectoryBinding {
-                parent_inode_id: direntry.parent_inode_id,
-                name_key: direntry.name_key.clone(),
-                child_inode_id: direntry.child_inode_id,
-                position: direntry.position(),
-                display_name: direntry.display_name().cloned(),
-            })
-            .collect(),
+        state.inodes().iter().map(core_inode).collect(),
+        state.direntry_binds().iter().map(core_binding).collect(),
         state
             .revisions()
             .iter()
@@ -705,37 +1210,8 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
         ..
     } = state;
     (
-        inodes
-            .iter()
-            .map(|inode| {
-                normalize_inode(
-                    inode.inode_id.0,
-                    inode.inode_kind,
-                    inode.committed_seq.0,
-                    inode.commit_id.clone(),
-                    inode.committed_by.clone(),
-                    inode.committed_at_ms,
-                )
-            })
-            .collect(),
-        direntry_binds
-            .iter()
-            .map(|direntry| NormalizedDirectoryBinding {
-                parent_inode_id: direntry.parent_inode_id,
-                name_key: direntry.name_key.clone(),
-                child_inode_id: direntry.child_inode_id,
-                position: DeltaPosition {
-                    seq: direntry.committed_seq,
-                    delta_index: direntry.delta_index,
-                },
-                display_name: match &direntry.state {
-                    loonfs_model::metadata::DirentryBindingState::Bound { display_name } => {
-                        Some(display_name.clone())
-                    }
-                    loonfs_model::metadata::DirentryBindingState::Unbound => None,
-                },
-            })
-            .collect(),
+        inodes.iter().map(model_inode).collect(),
+        direntry_binds.iter().map(model_binding).collect(),
         revisions
             .iter()
             .map(|revision| {
@@ -823,7 +1299,7 @@ fn normalize_inode(
     commit_id: CommitId,
     committed_by: ActorId,
     committed_at_ms: u64,
-) -> (u64, &'static str, u64, CommitId, ActorId, u64) {
+) -> NormalizedInode {
     (
         inode_id,
         match inode_kind {
@@ -835,12 +1311,4 @@ fn normalize_inode(
         committed_by,
         committed_at_ms,
     )
-}
-
-#[test]
-fn repeated_content_in_one_commit_emits_one_publication() {
-    let content = content_ref("shared content");
-    let mut deltas = create_file(0, InodeId(2), InodeId(1), "one", content.clone());
-    deltas.extend(create_file(3, InodeId(3), InodeId(1), "two", content));
-    assert_states_match(&[deltas]);
 }

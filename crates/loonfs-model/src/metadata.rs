@@ -1,16 +1,14 @@
-//! Independent reference implementation of metadata visibility.
-//!
-//! This module intentionally does not share code with
-//! `loonfs-core::metadata::visibility`. Differential tests replay the same
-//! commits through both implementations and compare their results. Merging
-//! the implementations would remove the independence those tests require.
+//! The model's metadata rows and the application of committed WAL deltas to
+//! them.
 //!
 //! Inodes, file revisions, tombstones, and stored attribute and access revisions copy
 //! the commit ID, actor, and timestamp from the WAL. Directory bindings do
-//! not store attribution. The initial root inode uses
+//! not copy the child's kind or attribution; the model reads both from the
+//! child's inode row. The initial root inode uses
 //! `ActorId::loonfs()`, and the initial empty attribute state has no
 //! actor or timestamp because it is not stored as a revision.
 
+use crate::Result;
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{ActorId, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
 
@@ -132,9 +130,9 @@ pub struct GrantEntry {
     pub rights: Vec<String>,
 }
 
-/// Commit position of a deletion event. A revoke uses this value to identify
-/// the exact deletion it cancels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Commit position of a binding or deletion event. A revoke uses this value
+/// to identify the exact deletion it cancels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DeltaPosition {
     pub seq: ChangeSeq,
     pub delta_index: u32,
@@ -159,6 +157,8 @@ pub enum SubtreeTombstoneAction {
 }
 
 impl MetadataState {
+    /// Appends the rows of one commit, then checks the binding rules at its
+    /// sequence.
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
@@ -166,7 +166,7 @@ impl MetadataState {
         actor: &ActorId,
         committed_at_ms: u64,
         deltas: &[WalDelta],
-    ) -> MetadataState {
+    ) -> Result<MetadataState> {
         let mut metadata_state = self.clone();
 
         for delta in deltas {
@@ -350,7 +350,8 @@ impl MetadataState {
             }
         }
 
-        metadata_state
+        metadata_state.check_bindings(committed_seq)?;
+        Ok(metadata_state)
     }
 }
 
@@ -366,23 +367,25 @@ mod tests {
 
     #[test]
     fn bind_direntry_replay_uses_persisted_name_key() {
-        let applied = MetadataState::default().apply_committed_wal_deltas(
-            ChangeSeq(1),
-            &commit_id(),
-            &ActorId::loonfs(),
-            4_200,
-            &[WalDelta::BindDirentry {
-                delta_index: 7,
-                parent_inode_id: InodeId(1),
-                name_key: NameKey::parse("persisted-key").expect("valid name key"),
-                display_name: loonfs_types::DisplayName::parse("Report.TXT")
-                    .expect("valid display name"),
-                child_inode_id: InodeId(2),
-                child_kind: loonfs_types::InodeKind::File,
-                child_created_by: loonfs_types::ActorId::loonfs(),
-                child_created_at_ms: 4_200,
-            }],
-        );
+        let applied = MetadataState::default()
+            .apply_committed_wal_deltas(
+                ChangeSeq(1),
+                &commit_id(),
+                &ActorId::loonfs(),
+                4_200,
+                &[WalDelta::BindDirentry {
+                    delta_index: 7,
+                    parent_inode_id: InodeId(1),
+                    name_key: NameKey::parse("persisted-key").expect("valid name key"),
+                    display_name: loonfs_types::DisplayName::parse("Report.TXT")
+                        .expect("valid display name"),
+                    child_inode_id: InodeId(2),
+                    child_kind: loonfs_types::InodeKind::File,
+                    child_created_by: loonfs_types::ActorId::loonfs(),
+                    child_created_at_ms: 4_200,
+                }],
+            )
+            .expect("a single bind should keep the bindings consistent");
 
         assert_eq!(applied.direntry_binds.len(), 1);
         assert_eq!(applied.direntry_binds[0].name_key.as_str(), "persisted-key");
@@ -390,32 +393,34 @@ mod tests {
 
     #[test]
     fn tombstone_replay_restates_the_deleted_binding_and_the_revoked_position() {
-        let applied = MetadataState::default().apply_committed_wal_deltas(
-            ChangeSeq(9),
-            &commit_id(),
-            &ActorId::loonfs(),
-            4_200,
-            &[
-                WalDelta::TombstoneSubtree {
-                    delta_index: 1,
-                    root_inode_id: InodeId(2),
-                    deleted_binding: loonfs_types::format::manifest::DeletedBinding {
-                        parent_inode_id: InodeId(1),
-                        name_key: NameKey::parse("report.txt").expect("valid name key"),
-                        display_name: loonfs_types::DisplayName::parse("Report.TXT")
-                            .expect("valid display name"),
+        let applied = MetadataState::default()
+            .apply_committed_wal_deltas(
+                ChangeSeq(9),
+                &commit_id(),
+                &ActorId::loonfs(),
+                4_200,
+                &[
+                    WalDelta::TombstoneSubtree {
+                        delta_index: 1,
+                        root_inode_id: InodeId(2),
+                        deleted_binding: loonfs_types::format::manifest::DeletedBinding {
+                            parent_inode_id: InodeId(1),
+                            name_key: NameKey::parse("report.txt").expect("valid name key"),
+                            display_name: loonfs_types::DisplayName::parse("Report.TXT")
+                                .expect("valid display name"),
+                        },
                     },
-                },
-                WalDelta::RevokeSubtreeTombstone {
-                    delta_index: 2,
-                    root_inode_id: InodeId(2),
-                    target: DeltaPosition {
-                        seq: ChangeSeq(4),
-                        delta_index: 3,
+                    WalDelta::RevokeSubtreeTombstone {
+                        delta_index: 2,
+                        root_inode_id: InodeId(2),
+                        target: DeltaPosition {
+                            seq: ChangeSeq(4),
+                            delta_index: 3,
+                        },
                     },
-                },
-            ],
-        );
+                ],
+            )
+            .expect("tombstone events should not touch the bindings");
 
         assert_eq!(
             applied
