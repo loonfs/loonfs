@@ -1780,6 +1780,107 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     writer.shutdown().await.expect("shutdown");
 }
 
+#[tokio::test]
+async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
+    use loonfs::publish::{CommitRequest, FilesystemOperation};
+    use loonfs::{CommitId, FilesystemChange};
+    use loonfs_types::{DisplayName, MAX_PATH_BYTES, ROOT_INODE_ID};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("deep-scan").expect("namespace id");
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id("deep-scan-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let commit = |operation| {
+        CommitRequest::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            operation,
+        )
+    };
+
+    let name = |level: usize| format!("{level:02}{}", "n".repeat(253));
+    let mut directory = ROOT_INODE_ID;
+    let mut directory_path = String::new();
+    for level in 0..20 {
+        let created = namespace
+            .commit(commit(FilesystemOperation::CreateDirectoryByInode {
+                parent_inode_id: directory,
+                display_name: DisplayName::parse(name(level)).expect("display name"),
+            }))
+            .await
+            .expect("create a directory by inode");
+        directory = match created.events.as_slice() {
+            [FilesystemChange::DirectoryCreated { inode_id, .. }] => *inode_id,
+            other => panic!("expected one created directory, got {other:?}"),
+        };
+        directory_path = format!("{directory_path}/{}", name(level));
+    }
+    assert!(directory_path.len() > MAX_PATH_BYTES);
+    let content = namespace
+        .prepare_content(b"a tree\n")
+        .await
+        .expect("prepare content");
+    namespace
+        .commit_prepared(
+            commit(FilesystemOperation::CreateFileByInode {
+                parent_inode_id: directory,
+                display_name: DisplayName::parse("leaf.txt").expect("display name"),
+                content_ref: Some(content.content_ref().clone()),
+                inline_content: None,
+            }),
+            vec![content],
+        )
+        .await
+        .expect("create a file by inode");
+    let host = GrepHost::new(&store, "deep-scan").await;
+    host.enable_grep_index(&namespace_id).await.expect("enable");
+
+    // "ee" has no trigram, so it scans the directory tree; "tree" uses the index.
+    let mut unscoped_scan = request("ee");
+    unscoped_scan.allow_scan = true;
+    let mut inode_scan = unscoped_scan.clone();
+    inode_scan.inode_id = Some(directory);
+    let mut path_scan = unscoped_scan.clone();
+    path_scan.path_prefix = Some(AbsolutePath::parse(format!("/{}", name(0))).expect("scope path"));
+    let file_path = format!("{directory_path}/leaf.txt");
+    for (case, grep_request) in [
+        ("unscoped scan", unscoped_scan),
+        ("inode-scoped scan", inode_scan),
+        ("path-scoped scan", path_scan),
+        ("indexed query", request("tree")),
+    ] {
+        let response = host
+            .grep(&namespace_id, &grep_request, default_page_limit())
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert_eq!(
+            response
+                .matches
+                .iter()
+                .map(|found| found.path.as_str())
+                .collect::<Vec<_>>(),
+            [file_path.as_str()],
+            "{case}"
+        );
+    }
+
+    writer.shutdown().await.expect("shutdown");
+}
+
 fn assert_not_enabled_error(case: &str, result: loonfs_grep::Result<GrepResponse>) {
     match result {
         Err(error @ GrepError::NotEnabled) => {

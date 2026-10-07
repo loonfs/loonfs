@@ -29,7 +29,7 @@ use loonfs_types::format::sst_blocks::{
 use loonfs_types::{
     decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EffectiveLimit, ErrorCode, GrepMatch,
     GrepPageCursor, GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId, PathEntry,
-    RevisionNo,
+    RevisionNo, ROOT_INODE_ID,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -715,9 +715,9 @@ struct GrepContentCandidate {
 
 /// What one candidate's content fetch produced.
 enum CandidateContent {
-    /// The candidate's current path no longer names it at the view's head:
-    /// the derived path and the forward resolution disagree. Treated as a
-    /// rejection, never as a match.
+    /// A second read of the candidate's inode at the view's head disagrees
+    /// with its derived path or revision. Treated as a rejection, never as a
+    /// match.
     Superseded,
     /// The declared content size exceeds the index eligibility cap, so no
     /// read was issued: the file could never pass the post-read text check,
@@ -728,25 +728,24 @@ enum CandidateContent {
     Fetched(Result<Vec<u8>>),
 }
 
-/// Resolves the candidate's current path forward — proving it still names
-/// this inode at this revision — and reads the bytes that path publishes.
+/// Reads the candidate's inode again, then the bytes its revision publishes.
 ///
-/// The forward resolution is what the derived path owes verification: a
-/// path walked up from an inode is only a match's path if walking back down
-/// reaches the same inode. It also supplies the content reference, so the
-/// oversized skip stays a decision on declared size, before any fetch.
+/// The second read proves the inode still has the candidate's path and
+/// revision. It is by inode because a derived path may exceed the request
+/// path limits. It also supplies the content reference, so the oversized
+/// skip stays a decision on declared size, before any fetch.
 async fn candidate_content(
     reads: &NamespaceReadView<'_>,
     candidate: &GrepContentCandidate,
 ) -> CandidateContent {
-    let entry = match reads.resolve_path(&candidate.path).await {
+    let entry = match reads.resolve_inode(candidate.inode_id).await {
         Ok(entry) => entry,
-        Err(error) if error.code() == ErrorCode::PathNotFound => {
+        Err(error) if error.code() == ErrorCode::InodeNotFound => {
             return CandidateContent::Superseded
         }
         Err(error) => return CandidateContent::Fetched(Err(error)),
     };
-    if entry.inode_id != candidate.inode_id || entry.revision_no() != Some(candidate.revision_no) {
+    if entry.path != candidate.path || entry.revision_no() != Some(candidate.revision_no) {
         return CandidateContent::Superseded;
     }
     let Some(content_ref) = entry.content_ref() else {
@@ -977,9 +976,10 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
 
 /// Collects visible files in the query scope for a full scan.
 ///
-/// The bounded walk starts at the requested path, or at the namespace root
-/// when no path is given. The directory limit bounds the work and prevents a
-/// binding cycle from running forever.
+/// The bounded walk starts at the scope's inode, or at the root inode when
+/// the request names no scope. It lists directories by inode because a
+/// derived path may exceed the request path limits. The directory limit
+/// bounds the work and prevents a binding cycle from running forever.
 async fn scan_candidate_inodes(
     reads: &NamespaceReadView<'_>,
     scope: Option<&PathEntry>,
@@ -991,8 +991,8 @@ async fn scan_candidate_inodes(
             inodes.insert(entry.inode_id);
             return Ok(inodes);
         }
-        Some(entry) => entry.path.clone(),
-        None => AbsolutePath::root(),
+        Some(entry) => entry.inode_id,
+        None => ROOT_INODE_ID,
     };
     let mut directories = vec![root];
     let mut walked_directories = 0usize;
@@ -1001,12 +1001,15 @@ async fn scan_candidate_inodes(
         let mut cursor = None;
         loop {
             let page = match reads
-                .list_path_page(&directory, cursor, SCAN_DIRECTORY_PAGE_ENTRIES)
+                .list_inode_children_page(directory, cursor, SCAN_DIRECTORY_PAGE_ENTRIES)
                 .await
             {
                 Ok(page) => page,
                 Err(error)
-                    if matches!(error.code(), ErrorCode::PathNotFound | ErrorCode::Forbidden) =>
+                    if matches!(
+                        error.code(),
+                        ErrorCode::InodeNotFound | ErrorCode::Forbidden
+                    ) =>
                 {
                     break;
                 }
@@ -1014,7 +1017,7 @@ async fn scan_candidate_inodes(
             };
             for entry in page.items {
                 match entry.inode_kind() {
-                    InodeKind::Directory => directories.push(entry.path),
+                    InodeKind::Directory => directories.push(entry.inode_id),
                     InodeKind::File => {
                         inodes.insert(entry.inode_id);
                     }

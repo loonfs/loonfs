@@ -193,16 +193,16 @@ impl NamespaceReadView<'_> {
             .await?)
     }
 
-    /// Lists one directory page against the read view.
-    pub(crate) async fn list_path_page(
+    /// Lists one page of a directory inode's children against the read view.
+    pub(crate) async fn list_inode_children_page(
         &self,
-        absolute_path: &AbsolutePath,
+        inode_id: InodeId,
         cursor: Option<String>,
         limit: usize,
     ) -> Result<Page<PathEntry, String>> {
         let page = self
             .view
-            .list(absolute_path.as_str())
+            .list_by_inode(inode_id)
             .page(page_request(cursor, limit)?)
             .await?;
         Ok(Page {
