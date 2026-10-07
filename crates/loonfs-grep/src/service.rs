@@ -218,14 +218,14 @@ impl GrepService {
             .case_insensitive(request.case_insensitive)
             .multi_line(true)
             .build()
-            .map_err(|error| CoreError::InvalidQuery(error.to_string()))?;
+            .map_err(|error| GrepError::InvalidQuery(error.to_string()))?;
         let scope = match &request.path_prefix {
             Some(prefix) => Some(reads.resolve_path(prefix).await?),
             None => None,
         };
         let mut candidates = GrepCandidates::default();
         let tail_resume = match plan_pattern(&request.pattern, request.case_insensitive)
-            .map_err(CoreError::InvalidQuery)?
+            .map_err(GrepError::InvalidQuery)?
         {
             GramPlanOutcome::Indexable(plan) => {
                 candidates.indexed = indexed_candidates(
@@ -240,11 +240,10 @@ impl GrepService {
             }
             GramPlanOutcome::Unindexable => {
                 if !request.allow_scan {
-                    return Err(CoreError::QueryUnindexable(
+                    return Err(GrepError::QueryUnindexable(
                         "the pattern has no run of at least 3 literal bytes for the trigram index; set allow_scan to search without it"
                             .to_owned(),
-                    )
-                    .into());
+                    ));
                 }
                 candidates.unfiltered = scan_candidate_inodes(&reads, scope.as_ref()).await?;
                 None
@@ -258,12 +257,11 @@ impl GrepService {
                     tail_scanned = false;
                 }
                 TailScan::OverBudget => {
-                    return Err(CoreError::IndexLagging {
+                    return Err(GrepError::IndexLagging {
                         behind_commits: head_seq
                             .0
                             .saturating_sub(snapshot.resume.built_through_seq().0),
-                    }
-                    .into());
+                    });
                 }
             }
         }
@@ -1017,12 +1015,11 @@ async fn scan_candidate_inodes(
             if inodes.len() + directories.len() > MAX_GREP_SCAN_FILES
                 || walked_directories > MAX_GREP_SCAN_FILES
             {
-                return Err(CoreError::QueryUnindexable(format!(
+                return Err(GrepError::QueryUnindexable(format!(
                     "the namespace exceeds the {MAX_GREP_SCAN_FILES}-file scan budget; \
                      give the pattern a run of at least 3 literal bytes so the \
                      trigram index can narrow candidates"
-                ))
-                .into());
+                )));
             }
             cursor = page.next_cursor;
             if cursor.is_none() {

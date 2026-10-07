@@ -275,7 +275,7 @@ fn page_limit(limit: usize) -> std::result::Result<EffectiveLimit, LimitError> {
 }
 
 fn invalid_page_limit(error: LimitError) -> GrepError {
-    CoreError::InvalidQuery(error.to_string()).into()
+    GrepError::InvalidQuery(error.to_string())
 }
 
 #[cfg(test)]

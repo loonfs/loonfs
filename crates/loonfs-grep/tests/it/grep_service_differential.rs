@@ -6,12 +6,12 @@
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
-    CommitId, CoreError, DestinationBehavior, LoonFs, Maintenance, MetadataMaintenanceOptions,
-    NamespaceId, PutFileOptions, ReadOnly, SharedObjectStore, Writable,
+    CommitId, DestinationBehavior, LoonFs, Maintenance, MetadataMaintenanceOptions, NamespaceId,
+    PutFileOptions, ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_grep::manifest::load_current_grep_manifest;
 use loonfs_grep::GramIndexBuildPolicy;
-use loonfs_grep::{GrepBuildOutcome, GrepReorganizeOutcome, GrepService, GrepWorker};
+use loonfs_grep::{GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_types::{AbsolutePath, EffectiveLimit, GrepRequest, GrepResponse};
@@ -80,7 +80,7 @@ impl ServiceHarness {
             .unwrap_or_else(|error| panic!("expected success for {case}, got {error:?}"))
     }
 
-    async fn error(&self, case: &str, grep_request: &GrepRequest, expected: &CoreError) {
+    async fn error(&self, case: &str, grep_request: &GrepRequest, expected: &GrepError) {
         let error = match self.result(grep_request).await {
             Err(error) => error,
             Ok(response) => panic!("expected error for {case}, got {response:?}"),
@@ -506,7 +506,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         .error(
             "allow_scan off",
             &scan_off,
-            &CoreError::QueryUnindexable(
+            &GrepError::QueryUnindexable(
                 "the pattern has no run of at least 3 literal bytes for the trigram index; set \
                  allow_scan to search without it"
                     .to_owned(),
@@ -626,7 +626,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         .error(
             "allow_stale off over tail budget",
             &stale_request,
-            &CoreError::IndexLagging {
+            &GrepError::IndexLagging {
                 behind_commits: 530,
             },
         )

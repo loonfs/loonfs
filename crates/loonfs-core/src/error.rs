@@ -177,15 +177,6 @@ pub enum CoreError {
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error("invalid gc configuration: {0}")]
     InvalidGcOptions(String),
-    #[error("invalid search query: {0}")]
-    InvalidQuery(String),
-    #[error("the pattern requires no literal bytes and cannot use the index: {0}")]
-    QueryUnindexable(String),
-    #[error(
-        "the grep index trails the head by {behind_commits} commits, past the \
-         exhaustive-scan budget; run maintenance or set allow_stale"
-    )]
-    IndexLagging { behind_commits: u64 },
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: UploadId },
     #[error("upload session `{upload_id}` is already completed")]
@@ -391,7 +382,6 @@ impl CoreError {
             | CoreError::InvalidCommitField { .. }
             | CoreError::InvalidCheckpointRequest(_)
             | CoreError::InvalidGcOptions(_)
-            | CoreError::InvalidQuery(_)
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
             | CoreError::BatchTooLarge { .. }
@@ -428,8 +418,6 @@ impl CoreError {
             | CoreError::MetadataPublicationBudgetExceeded { .. } => {
                 ErrorCode::CheckpointUnavailable
             }
-            CoreError::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
-            CoreError::IndexLagging { .. } => ErrorCode::IndexLagging,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
@@ -518,9 +506,6 @@ impl CoreError {
             | CoreError::SnapshotQuotaExceeded { .. }
             | CoreError::MetadataPublicationBudgetExceeded { .. }
             | CoreError::InvalidGcOptions(_)
-            | CoreError::InvalidQuery(_)
-            | CoreError::QueryUnindexable(_)
-            | CoreError::IndexLagging { .. }
             | CoreError::UploadNotFound { .. }
             | CoreError::UploadAlreadyCompleted { .. }
             | CoreError::UploadContentConflict { .. }
