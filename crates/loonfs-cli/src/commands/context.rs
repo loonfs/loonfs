@@ -175,7 +175,7 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
                     error,
                 )
             };
-            let actor = resolve_actor(profile, None).map_err(&attribute)?;
+            let actor = resolve_actor(profile, None).map_err(attribute)?;
             resolve_subject(
                 profile,
                 &actor,
@@ -239,7 +239,7 @@ async fn resolve_command_context_with_actor(
     let mode = resolved_target.mode_str().to_owned();
     let attribute = |error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error);
     let actor = resolve_actor(profile, actor.and_then(|actor| actor.actor_id.as_deref()))
-        .map_err(&attribute)?;
+        .map_err(attribute)?;
     let subject = resolve_subject(
         profile,
         &actor,
@@ -247,7 +247,7 @@ async fn resolve_command_context_with_actor(
         target.subject.principal_scope.as_deref(),
         target.subject.principals.as_deref(),
     )
-    .map_err(&attribute)?;
+    .map_err(attribute)?;
     if let Some(subject) = &subject {
         resolved_target.scope_to_subject(subject);
     }

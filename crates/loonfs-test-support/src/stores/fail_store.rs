@@ -156,6 +156,8 @@ impl Interceptor for FailInterceptor {
             return Intercept::Continue;
         }
         self.attempts.fetch_add(1, Ordering::SeqCst);
+        // `fetch_update` is deprecated since Rust 1.99 for `try_update`, which the 1.88 MSRV lacks.
+        #[allow(deprecated)]
         let fail = self.fail_all.load(Ordering::SeqCst)
             || self
                 .remaining

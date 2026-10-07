@@ -72,6 +72,8 @@ impl RuntimeCore {
         }
         // Saturate instead of wrapping: at exhaustion reads simply stop
         // sharing, since no later validation number can exceed the observed one.
+        // `fetch_update` is deprecated since Rust 1.99 for `try_update`, which the 1.88 MSRV lacks.
+        #[allow(deprecated)]
         let validation_no = validation
             .started
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))

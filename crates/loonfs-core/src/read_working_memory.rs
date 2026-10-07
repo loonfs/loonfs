@@ -44,6 +44,8 @@ impl ReadWorkingMemory {
     }
 
     pub fn try_reserve(&self, bytes: usize) -> bool {
+        // `fetch_update` is deprecated since Rust 1.99 for `try_update`, which the 1.88 MSRV lacks.
+        #[allow(deprecated)]
         let reserved = self
             .in_use
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |in_use| {
