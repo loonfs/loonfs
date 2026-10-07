@@ -55,6 +55,32 @@ fn every_family_belongs_to_exactly_one_compaction_group() {
     );
 }
 
+#[test]
+fn retention_clusters_partition_their_group_families() {
+    for group in MetadataFamilyGroup::ALL {
+        let clusters = retention_clusters(group);
+        for family in group.families() {
+            let holding = clusters
+                .iter()
+                .filter(|cluster| cluster.families.contains(family))
+                .count();
+            assert_eq!(
+                holding,
+                1,
+                "`{family:?}` is in {holding} retention clusters of group `{}`",
+                group.as_str()
+            );
+        }
+        for family in clusters.iter().flat_map(|cluster| cluster.families) {
+            assert!(
+                group.families().contains(family),
+                "a cluster of group `{}` lists `{family:?}`, which the group does not hold",
+                group.as_str()
+            );
+        }
+    }
+}
+
 // -------------------------------------------------------------------------
 // Workloads
 // -------------------------------------------------------------------------

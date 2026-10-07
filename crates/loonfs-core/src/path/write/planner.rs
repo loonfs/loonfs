@@ -331,14 +331,19 @@ mod tests {
     use crate::test_support::ops::create;
     use crate::test_support::ops::{delete_path, put_file};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_types::api::v0::FilesystemChange;
     use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
     use loonfs_types::{
-        AbsolutePath, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+        AbsolutePath, AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue,
+        CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+        NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo, Subject, SubjectId,
     };
+    use std::collections::BTreeMap;
     use tempfile::tempdir;
 
     #[derive(Debug)]
     struct TestPreparedCommit {
+        assigned_seq: ChangeSeq,
         deltas: Vec<WalCommitDelta>,
         allocation: CandidateAllocation,
     }
@@ -363,6 +368,50 @@ mod tests {
         FilesystemOperation::CreateDirectory {
             path: AbsolutePath::parse(path).expect("path"),
             parents: false,
+        }
+    }
+
+    fn put(
+        path: &str,
+        content_ref: &ContentRef,
+        behavior: DestinationBehavior,
+    ) -> FilesystemOperation {
+        FilesystemOperation::PutFile {
+            path: AbsolutePath::parse(path).expect("path"),
+            content_ref: Some(content_ref.clone()),
+            inline_content: None,
+            behavior,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        }
+    }
+
+    fn move_to(
+        source: &str,
+        destination: &str,
+        behavior: DestinationBehavior,
+    ) -> FilesystemOperation {
+        FilesystemOperation::MovePath {
+            source_path: AbsolutePath::parse(source).expect("path"),
+            destination_path: AbsolutePath::parse(destination).expect("path"),
+            precondition: DestinationPrecondition {
+                behavior,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+        }
+    }
+
+    fn set_owner(path: &str, owner: &str) -> FilesystemOperation {
+        FilesystemOperation::UpdateAttributes {
+            path: AbsolutePath::parse(path).expect("path"),
+            set: BTreeMap::from([(
+                AttributeKey::parse("owner").expect("attribute key"),
+                AttributeValue::parse(owner).expect("attribute value"),
+            )]),
+            remove: Vec::new(),
+            expected_inode_id: None,
+            expected_attributes_revision_no: None,
         }
     }
 
@@ -459,6 +508,7 @@ mod tests {
         )
         .await?;
         Ok(TestPreparedCommit {
+            assigned_seq: validated.assigned_seq,
             deltas: validated.deltas,
             allocation,
         })
@@ -752,5 +802,284 @@ mod tests {
                 .operation_index,
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn the_change_feed_maps_every_operation_the_planner_emits() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        for (path, body, behavior) in [
+            ("/docs/a.txt", "first", DestinationBehavior::NoReplace),
+            ("/docs/a.txt", "second", DestinationBehavior::Replace),
+            ("/docs/b.txt", "occupant", DestinationBehavior::NoReplace),
+            ("/docs/gone.txt", "gone", DestinationBehavior::NoReplace),
+        ] {
+            put_file(
+                &store,
+                &namespace_id,
+                path,
+                body.as_bytes(),
+                behavior,
+                &context,
+                None,
+            )
+            .await
+            .expect("seed file");
+        }
+        crate::commit_engine::publish_namespace_commits_batch(
+            &store,
+            &namespace_id,
+            vec![CommitCandidate::new(CommitRequest::single(
+                CommitId::parse("seed-owner").expect("valid commit id"),
+                loonfs_test_support::test_actor(),
+                None,
+                set_owner("/docs/a.txt", "ada"),
+            ))],
+            &context,
+        )
+        .await
+        .pop()
+        .expect("one result")
+        .expect("seed attributes");
+        let deletion = delete_path(&store, &namespace_id, "/docs/gone.txt", &context, None)
+            .await
+            .expect("seed deletion");
+        let deleted_inode_id = deletion
+            .events
+            .iter()
+            .find_map(|event| match event {
+                FilesystemChange::Deleted { inode_id, .. } => Some(*inode_id),
+                _ => None,
+            })
+            .expect("the delete names its inode");
+        let undelete = |destination: Option<&str>| FilesystemOperation::Undelete {
+            inode_id: deleted_inode_id,
+            deletion_seq: deletion.committed_seq,
+            destination_path: destination.map(|path| AbsolutePath::parse(path).expect("path")),
+        };
+        let staged = store_bytes_as_content(&store, &namespace_id, b"staged")
+            .await
+            .expect("stage")
+            .into_content_ref();
+        let inline = crate::storage::content_admission::PreparedContent::inline(
+            namespace_id.clone(),
+            bytes::Bytes::from_static(b"inline"),
+        )
+        .content_ref()
+        .clone();
+
+        // Access rows exist only in a restricted namespace.
+        let restricted = NamespaceId::parse("restricted").expect("valid namespace id");
+        let principal_scope = PrincipalScope::parse("org_demo").expect("principal scope");
+        let administrator = PrincipalId::parse("prn_root").expect("principal id");
+        crate::namespace::bootstrap::bootstrap_namespace(
+            &store,
+            &restricted,
+            &context,
+            &loonfs_test_support::test_actor(),
+            &NamespaceAccess::Acl {
+                principal_scope: principal_scope.clone(),
+                root_grants: AccessGrants::new(BTreeMap::from([(
+                    administrator.clone(),
+                    AccessRights::ADMIN,
+                )]))
+                .expect("root grants"),
+            },
+            false,
+        )
+        .await
+        .expect("bootstrap a restricted namespace");
+        let update_access = request(FilesystemOperation::UpdateAccess {
+            path: AbsolutePath::root(),
+            boundary: false,
+            grants: AccessGrants::new(BTreeMap::from([
+                (administrator.clone(), AccessRights::ADMIN),
+                (
+                    PrincipalId::parse("prn_team").expect("principal id"),
+                    AccessRights::from_iter([AccessRight::Read]),
+                ),
+            ]))
+            .expect("grants"),
+            expected_inode_id: None,
+            expected_access_revision_no: None,
+        })
+        .with_subject(Subject {
+            principal_scope,
+            subject_id: SubjectId::parse("root").expect("subject id"),
+            principals: PrincipalSet::new(BTreeSet::from([administrator])).expect("principals"),
+        });
+
+        let rows: Vec<(&str, &NamespaceId, CommitRequest, &[&str])> = vec![
+            (
+                "create a directory",
+                &namespace_id,
+                request(create_dir("/new")),
+                &["directory_created"],
+            ),
+            (
+                "create a file from staged content",
+                &namespace_id,
+                request(put(
+                    "/docs/staged.txt",
+                    &staged,
+                    DestinationBehavior::NoReplace,
+                )),
+                &["file_created"],
+            ),
+            (
+                "create a file from inline content",
+                &namespace_id,
+                request(put(
+                    "/docs/inline.txt",
+                    &inline,
+                    DestinationBehavior::NoReplace,
+                )),
+                &["file_created"],
+            ),
+            (
+                "create a file under a missing directory",
+                &namespace_id,
+                request(put(
+                    "/fresh/staged.txt",
+                    &staged,
+                    DestinationBehavior::NoReplace,
+                )),
+                &["directory_created", "file_created"],
+            ),
+            (
+                "replace a file",
+                &namespace_id,
+                request(put("/docs/a.txt", &staged, DestinationBehavior::Replace)),
+                &["content_changed"],
+            ),
+            (
+                "delete a file",
+                &namespace_id,
+                request(FilesystemOperation::DeletePath {
+                    path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                    expected_inode_id: None,
+                }),
+                &["deleted"],
+            ),
+            (
+                "delete a subtree",
+                &namespace_id,
+                request(FilesystemOperation::DeletePath {
+                    path: AbsolutePath::parse("/docs").expect("path"),
+                    behavior: DeleteDirectoryBehavior::Recursive,
+                    expected_inode_id: None,
+                }),
+                &["deleted"],
+            ),
+            (
+                "move to another directory",
+                &namespace_id,
+                request(move_to(
+                    "/docs/a.txt",
+                    "/a.txt",
+                    DestinationBehavior::NoReplace,
+                )),
+                &["moved"],
+            ),
+            (
+                "move over an existing file",
+                &namespace_id,
+                request(move_to(
+                    "/docs/a.txt",
+                    "/docs/b.txt",
+                    DestinationBehavior::Replace,
+                )),
+                &["deleted", "moved"],
+            ),
+            (
+                "rename",
+                &namespace_id,
+                request(move_to(
+                    "/docs/a.txt",
+                    "/docs/renamed.txt",
+                    DestinationBehavior::NoReplace,
+                )),
+                &["moved"],
+            ),
+            (
+                "rename by case only",
+                &namespace_id,
+                request(move_to(
+                    "/docs/a.txt",
+                    "/docs/A.txt",
+                    DestinationBehavior::NoReplace,
+                )),
+                &["moved"],
+            ),
+            (
+                "copy a file with attributes",
+                &namespace_id,
+                request(FilesystemOperation::CopyPath {
+                    source_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    destination_path: AbsolutePath::parse("/docs/copy.txt").expect("path"),
+                    precondition: DestinationPrecondition {
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
+                }),
+                &["file_created", "attributes_changed"],
+            ),
+            (
+                "restore a revision",
+                &namespace_id,
+                request(FilesystemOperation::RestoreRevision {
+                    path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    source_revision_no: RevisionNo(1),
+                }),
+                &["content_changed"],
+            ),
+            (
+                "undelete in place",
+                &namespace_id,
+                request(undelete(None)),
+                &["undeleted"],
+            ),
+            (
+                "undelete to a destination",
+                &namespace_id,
+                request(undelete(Some("/docs/found.txt"))),
+                &["undeleted"],
+            ),
+            (
+                "update attributes",
+                &namespace_id,
+                request(set_owner("/docs/a.txt", "grace")),
+                &["attributes_changed"],
+            ),
+            (
+                "update access",
+                &restricted,
+                update_access,
+                &["access_changed"],
+            ),
+        ];
+
+        for (label, namespace_id, commit_request, expected) in rows {
+            let planned = try_plan_against_current_state(&store, namespace_id, &commit_request)
+                .await
+                .expect(label);
+            let events = crate::protocol::events_from_wal_deltas(
+                namespace_id,
+                planned.assigned_seq,
+                &planned.deltas,
+            )
+            .expect(label);
+            let kinds: Vec<String> = events
+                .iter()
+                .map(|event| {
+                    serde_json::to_value(event).expect("serialize event")["kind"]
+                        .as_str()
+                        .expect("an event is tagged with its kind")
+                        .to_owned()
+                })
+                .collect();
+            assert_eq!(kinds, expected, "{label}");
+        }
     }
 }

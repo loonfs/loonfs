@@ -13,6 +13,8 @@ mod uploads;
 pub(crate) use self::batch::{
     publish_namespace_commits_batch_against_publish_view, PublicationClock, PublishViewEffect,
 };
+#[cfg(test)]
+pub(crate) use self::changes::events_from_wal_deltas;
 pub(crate) use self::changes::list_changes_after;
 pub(crate) use self::publish_view::{
     load_publish_metadata_view, PublishTailPosition, PublishTailProjection,
