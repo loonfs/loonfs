@@ -18,6 +18,7 @@ mod commit_retry;
 mod common;
 mod content_ref_import_access;
 mod content_request_accounting;
+mod derived_paths;
 mod direct_put;
 mod directory_page_reads;
 mod handles;

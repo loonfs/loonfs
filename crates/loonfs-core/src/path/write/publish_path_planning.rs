@@ -101,14 +101,6 @@ pub(super) async fn resolve_visible_child<S: ObjectStore + ?Sized>(
         .map(Some)
 }
 
-pub(super) fn child_display_path(parent_path: &str, display_name: &DisplayName) -> String {
-    AbsolutePath::parse(parent_path)
-        .expect("resolved parent path should be absolute")
-        .join(display_name)
-        .as_str()
-        .to_owned()
-}
-
 /// Requires the binding version supplied by the caller to still be current.
 pub(super) fn check_binding_version<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
@@ -148,9 +140,9 @@ pub(super) async fn source_binding<S: ObjectStore + ?Sized>(
         .view
         .current_parent_binding_for_child(resolved.inode_id)
         .await?
-        .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.clone()))?;
+        .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.to_string()))?;
     if binding.parent_inode_id != parent_inode_id {
-        return Err(CoreError::PathNotFound(resolved.absolute_path.clone()));
+        return Err(CoreError::PathNotFound(resolved.absolute_path.to_string()));
     }
     Ok(ResolvedBinding {
         parent_inode_id,

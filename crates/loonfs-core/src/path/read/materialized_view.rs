@@ -19,7 +19,7 @@ use crate::namespace::basis::MetadataBasis;
 #[cfg(test)]
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
-use crate::path::mutation_path::{map_path_error_to_core, parse_absolute_path_for_core};
+use crate::path::mutation_path::parse_absolute_path_for_core;
 use crate::storage::content::ContentLocation;
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
@@ -783,7 +783,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await?;
         if resolved.inode_kind != InodeKind::Directory {
             return Err(CoreError::ExpectedDirectory {
-                target: resolved.absolute_path.clone(),
+                target: resolved.absolute_path.to_string(),
                 kind: resolved.inode_kind,
             });
         }
@@ -927,7 +927,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 let revision = session
                     .latest_revision_head_of_visible(resolved.inode_id)
                     .await?
-                    .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.clone()))?;
+                    .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.to_string()))?;
                 PathEntryKind::File {
                     revision_no: revision.revision_no,
                     size_bytes: revision.content_ref.size_bytes,
@@ -951,12 +951,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
             AttributeInclusion::Omit => None,
         };
-        let absolute_path = AbsolutePath::parse(&resolved.absolute_path).map_err(|error| {
-            CoreError::NamespaceCorrupt(format!(
-                "resolved visible path `{}` is not a valid absolute path: {error}",
-                resolved.absolute_path
-            ))
-        })?;
         let display_name = resolved
             .parent_inode_id
             .map(|_| {
@@ -973,7 +967,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .map(|position| crate::binding_version::encode(position, &self.namespace_id));
         Ok(PathEntry {
             namespace_id: self.namespace_id.clone(),
-            path: absolute_path,
+            path: resolved.absolute_path.clone(),
             inode_id: resolved.inode_id,
             created_by: resolved.created_by.clone(),
             created_at_ms: resolved.created_at_ms,
@@ -993,18 +987,16 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         child: VisibleChildEntry,
         attributes: AttributeInclusion,
     ) -> Result<PathEntry> {
-        let child_path = AbsolutePath::parse(&resolved_dir.absolute_path)
-            .map_err(map_path_error_to_core)?
-            .join(
-                child
-                    .binding
-                    .display_name()
-                    .expect("visible binding should be bound"),
-            );
+        let child_path = resolved_dir.absolute_path.join(
+            child
+                .binding
+                .display_name()
+                .expect("visible binding should be bound"),
+        );
         self.build_authoritative_path_entry_with_session(
             session,
             &ResolvedVisiblePath {
-                absolute_path: child_path.as_str().to_owned(),
+                absolute_path: child_path,
                 inode_id: child.binding.child_inode_id,
                 inode_kind: child.binding.child_kind,
                 created_by: child.binding.child_created_by.clone(),

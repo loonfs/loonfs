@@ -37,12 +37,12 @@ string_id! {
 /// as given.
 pub const MAX_DISPLAY_NAME_BYTES: usize = 255;
 
-/// Largest canonical absolute path, in UTF-8 bytes. Bounded so every real
-/// filesystem, archive format, and sync client can materialize any stored
-/// tree; per-component limits alone allowed paths no target could hold.
+/// Largest absolute path a request may name, in UTF-8 bytes. A path derived
+/// from stored names may be longer.
 pub const MAX_PATH_BYTES: usize = 4_096;
 
-/// Deepest directory nesting one path may express.
+/// Most components a request path may hold. A path derived from stored names
+/// may hold more.
 pub const MAX_PATH_DEPTH: usize = 128;
 
 /// Describes why caller-supplied path or display-name text is not admissible.
@@ -148,9 +148,15 @@ impl AbsolutePath {
     ///
     /// Empty and relative paths, repeated or trailing separators, explicit `.`
     /// or `..` components, and components outside the [`DisplayName`] grammar
-    /// are rejected.
+    /// are rejected. So is a path over [`MAX_PATH_BYTES`] or [`MAX_PATH_DEPTH`].
     pub fn parse(value: impl AsRef<str>) -> Result<Self, PathError> {
         let value = value.as_ref();
+        let path = Self::parse_without_request_limits(value)?;
+        validate_path_bounds(value.len(), path.components.len())?;
+        Ok(path)
+    }
+
+    fn parse_without_request_limits(value: &str) -> Result<Self, PathError> {
         if value.is_empty() {
             return Err(PathError::EmptyPath);
         }
@@ -184,7 +190,6 @@ impl AbsolutePath {
             validate_display_name(component)?;
             components.push(PathComponent(component.to_owned()));
         }
-        validate_path_bounds(value.len(), components.len())?;
 
         Ok(Self::from_components(components))
     }
@@ -232,6 +237,9 @@ impl AbsolutePath {
     }
 
     /// Appends an already-validated display name without changing existing component spelling.
+    ///
+    /// The result is not checked against [`MAX_PATH_BYTES`] or
+    /// [`MAX_PATH_DEPTH`], which bound request paths only.
     pub fn join(&self, display_name: &DisplayName) -> Self {
         let mut components = self.components.clone();
         components.push(PathComponent(display_name.as_str().to_owned()));
@@ -310,6 +318,16 @@ impl<'de> Deserialize<'de> for AbsolutePath {
         let value = String::deserialize(deserializer)?;
         Self::parse(value).map_err(serde::de::Error::custom)
     }
+}
+
+/// Decodes a response path that a server derived from stored names. Such a
+/// path may exceed the request limits, so decoding checks only the grammar.
+pub(crate) fn deserialize_derived_path<'de, D>(deserializer: D) -> Result<AbsolutePath, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    AbsolutePath::parse_without_request_limits(&value).map_err(serde::de::Error::custom)
 }
 
 fn normalized_path(components: &[PathComponent]) -> String {

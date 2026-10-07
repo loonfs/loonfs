@@ -53,6 +53,7 @@ impl GrepRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepMatch {
     /// The file's absolute path, derived at the snapshot.
+    #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
     /// Durable identity of the matched file.
     #[serde(with = "crate::public_inode_id")]

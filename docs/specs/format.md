@@ -97,7 +97,7 @@ Both normalization and folding use Unicode 17.0.0 data. There is no per-namespac
 
 For example, `Report.txt` and `report.txt` have the same name key, so they cannot be separate siblings. The chosen display spelling is still preserved. The [name-folding fixtures][name-vectors] cover normalization and case-folding cases beyond ASCII.
 
-An absolute path starts with exactly one `/`. It has no empty components, repeated separators, or trailing `/`, except for the root path `/`. A canonical path is limited to 4,096 UTF-8 bytes and 128 components. Noncanonical input is rejected rather than rewritten. These are limits on canonical paths; they do not establish universal compatibility with external filesystem path limits.
+An absolute path starts with exactly one `/`. It has no empty components, repeated separators, or trailing `/`, except for the root path `/`. A canonical path is limited to 4,096 UTF-8 bytes and 128 components. Noncanonical input is rejected rather than rewritten. These are limits on canonical paths; they do not establish universal compatibility with external filesystem path limits. They bound request paths; a path derived from stored names may exceed them, and inode-addressed reads still serve it.
 
 A change to any name-key mapping changes the format semantics, even if the serialized fields stay the same. Implementations must preserve the Unicode behavior specified here; lowercase conversion alone is insufficient.
 

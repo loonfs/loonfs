@@ -84,14 +84,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
         visible: true,
         readable: true,
         current_revision_no,
-        current_path: Some(
-            AbsolutePath::parse(&resolved.absolute_path).map_err(|error| {
-                CoreError::NamespaceCorrupt(format!(
-                    "resolved inode `{inode_id}` to invalid path `{}`: {error}",
-                    resolved.absolute_path
-                ))
-            })?,
-        ),
+        current_path: Some(resolved.absolute_path),
     })
 }
 
@@ -116,7 +109,7 @@ pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
         Some(binding)
     };
     Ok(Some(ResolvedVisiblePath {
-        absolute_path: current_path.to_string(),
+        absolute_path: current_path,
         inode_id,
         inode_kind: inode.inode_kind,
         created_by: inode.committed_by,
