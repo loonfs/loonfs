@@ -4,12 +4,11 @@ use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
 use loonfs_types::PageRequest;
 
-/// Selects a retained revision or snapshot for a file read. Set at most one.
+/// Options for a read of a file's content by path or by inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadFileOptions {
-    /// Read one retained revision instead of the current file.
-    pub revision_no: Option<RevisionNo>,
-    /// Read the file revision captured by this snapshot.
+    /// Read the file revision captured by this snapshot instead of the
+    /// current one.
     pub snapshot_id: Option<PinId>,
 }
 
@@ -510,14 +509,24 @@ impl Client {
             .await
     }
 
-    /// Returns a file's bytes: the current revision by default, or a retained
-    /// revision or snapshot when the options name one.
+    /// Returns a file's bytes: the current revision, or the revision a
+    /// snapshot captured when the options name one.
     pub async fn read_file_with_options(
         &self,
         spec: &NamespacePath,
         options: &ReadFileOptions,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.file_content_url(spec, options))
+        self.request_bytes(&self.file_content_url(spec, None, options.snapshot_id.as_ref()))
+            .await
+    }
+
+    /// Returns the bytes of one retained revision of a file.
+    pub async fn read_file_revision(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>> {
+        self.request_bytes(&self.file_content_url(spec, Some(revision_no), None))
             .await
     }
 
@@ -536,21 +545,46 @@ impl Client {
         spec: &NamespacePath,
         options: &ReadFileOptions,
     ) -> Result<PayloadStream> {
-        self.call_for_response_stream(&self.get(&self.file_content_url(spec, options)))
-            .await
+        self.call_for_response_stream(&self.get(&self.file_content_url(
+            spec,
+            None,
+            options.snapshot_id.as_ref(),
+        )))
+        .await
     }
 
-    fn file_content_url(&self, spec: &NamespacePath, options: &ReadFileOptions) -> String {
+    /// Streams one retained revision of a file through the server. See
+    /// [`Self::read_file_stream_with_options`] for when the bytes are
+    /// verified.
+    pub async fn read_file_revision_stream(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<PayloadStream> {
+        self.call_for_response_stream(&self.get(&self.file_content_url(
+            spec,
+            Some(revision_no),
+            None,
+        )))
+        .await
+    }
+
+    fn file_content_url(
+        &self,
+        spec: &NamespacePath,
+        revision_no: Option<RevisionNo>,
+        snapshot_id: Option<&PinId>,
+    ) -> String {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{}/filesystem/content",
             self.base_url,
             spec.namespace().as_str()
         ));
         query.push("path", spec.absolute_path().as_str());
-        if let Some(revision_no) = options.revision_no {
+        if let Some(revision_no) = revision_no {
             query.push("revision_no", revision_no.0);
         }
-        if let Some(snapshot_id) = &options.snapshot_id {
+        if let Some(snapshot_id) = snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
         query.finish()
@@ -562,8 +596,25 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.inode_content_url(namespace_id, inode_id, None))
+        self.read_file_by_inode_with_options(namespace_id, inode_id, &ReadFileOptions::default())
             .await
+    }
+
+    /// Returns the bytes of a visible file inode, wherever it is bound: the
+    /// current revision, or the revision a snapshot captured when the options
+    /// name one.
+    pub async fn read_file_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &ReadFileOptions,
+    ) -> Result<Vec<u8>> {
+        self.request_bytes(&self.inode_content_url(
+            namespace_id,
+            inode_id,
+            options.snapshot_id.as_ref(),
+        ))
+        .await
     }
 
     /// Streams the current content of a visible file inode through the
@@ -574,10 +625,29 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> Result<PayloadStream> {
+        self.read_file_stream_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            &ReadFileOptions::default(),
+        )
+        .await
+    }
+
+    /// Streams the content of a visible file inode through the server,
+    /// wherever it is bound: the current revision, or the revision a snapshot
+    /// captured when the options name one. See
+    /// [`Self::read_file_stream_with_options`] for when the bytes are
+    /// verified.
+    pub async fn read_file_stream_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &ReadFileOptions,
+    ) -> Result<PayloadStream> {
         self.call_for_response_stream(&self.get(&self.inode_content_url(
             namespace_id,
             inode_id,
-            None,
+            options.snapshot_id.as_ref(),
         )))
         .await
     }
@@ -589,7 +659,7 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        self.request_bytes(&self.inode_content_url(namespace_id, inode_id, Some(revision_no)))
+        self.request_bytes(&self.inode_revision_content_url(namespace_id, inode_id, revision_no))
             .await
     }
 
@@ -602,10 +672,10 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<PayloadStream> {
-        self.call_for_response_stream(&self.get(&self.inode_content_url(
+        self.call_for_response_stream(&self.get(&self.inode_revision_content_url(
             namespace_id,
             inode_id,
-            Some(revision_no),
+            revision_no,
         )))
         .await
     }
@@ -614,18 +684,29 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        revision_no: Option<RevisionNo>,
+        snapshot_id: Option<&PinId>,
     ) -> String {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        match revision_no {
-            Some(revision_no) => format!(
-                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
-                self.base_url
-            ),
-            None => format!(
-                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
-                self.base_url
-            ),
+        let mut query = QueryBuilder::new(format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+            self.base_url
+        ));
+        if let Some(snapshot_id) = snapshot_id {
+            query.push("snapshot_id", snapshot_id.as_str());
         }
+        query.finish()
+    }
+
+    fn inode_revision_content_url(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> String {
+        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+            self.base_url
+        )
     }
 }

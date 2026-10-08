@@ -169,7 +169,7 @@ hoc.
 | `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | Advertised when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, upload content before committing. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider must report a durable whole-object checksum after the write. The key is present only on an endpoint the live conformance suite has run against. Independent of `filesystem.uploads.direct_multipart`: a provider may offer this and no multipart API at all. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It needs an S3-style multipart API on top of the signing the other keys need, so a provider without one advertises this key alone as absent. |
-| `filesystem.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads` and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.service_proxied.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
+| `filesystem.downloads.direct_get` | Taking path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write advertises this too, because one that lets a client create an object larger than `download.service_proxied.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | The serving half of a data-dependent capability: the request also requires a materialized active grep manifest, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `maintenance/v0`'s only feature key is `maintenance.grep.index`; the rest of that API group
@@ -1003,10 +1003,10 @@ The table below lists the retry class for every v0 operation.
 | List file revisions by path | `list_file_revisions` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | List file revisions by inode | `list_file_revisions_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
 | Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&snapshot_id=...` (`revision_no` and `snapshot_id` are optional and mutually exclusive) |
-| Read current file content by inode | `get_file_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/content` |
+| Read current file content by inode | `get_file_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/content?snapshot_id=...` (`snapshot_id` is optional) |
 | Read prior file content by inode | `get_file_revision_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
 | Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` with body `path`, optional `revision_no`, and optional `snapshot_id` (`snapshot_id` cannot be combined with `revision_no`) |
-| Start a current download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` with no body |
+| Start a current download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads?snapshot_id=...` with no body (`snapshot_id` is optional) |
 | Start a revision download by inode | `create_revision_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with no body |
 | List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits`; requires the `Loonfs-Actor` header |
@@ -1208,9 +1208,12 @@ In an ACL namespace, creating, listing, extending, and deleting snapshots requir
 
 These operations manage the snapshot lifetime. Path stat, inode stat, path directory listing,
 inode children listing, file content, download, and change-feed requests accept an optional
-`snapshot_id`; the download request carries it in its body. File content and download requests cannot combine `snapshot_id`
-with `revision_no`; the snapshot selects the revision. A snapshot change feed
-ends at the captured sequence, and `after_seq` cannot exceed that sequence.
+`snapshot_id`. The path download request carries it in its body; the inode download request
+carries it as a query parameter. File content and download requests cannot combine `snapshot_id`
+with `revision_no`; the snapshot selects the revision. The inode revision routes name their
+revision in the route, so they refuse `snapshot_id` with the same `invalid_request` error.
+A snapshot change feed ends at the captured sequence, and `after_seq` cannot exceed that
+sequence.
 
 When an embedded read sets `snapshot_id` in its options, the read takes a
 read view of that snapshot, as the HTTP request does. A read view of a
@@ -2032,7 +2035,8 @@ an unknown inode returns `inode_not_found`, and an unknown revision returns
 inode wherever it is bound, streamed and verified like the path route. Like
 the path route without `revision_no`, it needs only `read`. A deleted or
 unknown inode returns `inode_not_found`, and a directory returns
-`path_conflict`.
+`path_conflict`. With `snapshot_id`, it reads the revision that snapshot
+captured and, like every snapshot read, also needs `history`.
 
 Embedded by-reference reads require administrator access to the reading
 namespace. The namespace's read view must contain a publication for the
@@ -2883,7 +2887,8 @@ The request has no body and its response does not include a path:
 
 `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current
 revision of a visible file inode and returns the same response. It has no
-body.
+body. Its optional `snapshot_id` query parameter grants the revision that
+snapshot captured instead.
 
 The download routes use the same provider support check and access format.
 The inode revision route remains available after a rename or deletion while

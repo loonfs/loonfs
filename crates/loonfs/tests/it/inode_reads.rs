@@ -1,10 +1,13 @@
-//! Current metadata and revision reads by inode id.
+//! Reads and mutations addressed by inode id.
 
-use crate::common::{open_runtime_async, store};
+use crate::common::{open_runtime_async, store, TestRuntime};
 use loonfs::{
-    ErrorCode, InodeId, LoonFs, PageRequest, PaginationPolicy, PutFileOptions, RevisionNo,
+    CommitId, CommitOptions, DeleteByInodeOptions, DeleteDirectoryBehavior, DisplayName, ErrorCode,
+    InodeId, InodeKind, LoonFs, Namespace, PageRequest, PaginationPolicy, PutFileOptions,
+    RevisionNo, Writable,
 };
 use loonfs_test_support::ids::namespace_id;
+use std::path::Path;
 use tempfile::tempdir;
 
 fn page_request() -> PageRequest<String> {
@@ -14,6 +17,26 @@ fn page_request() -> PageRequest<String> {
             .expect("default page limit"),
         cursor: None,
     }
+}
+
+fn display_name(value: &str) -> DisplayName {
+    DisplayName::parse(value).expect("valid display name")
+}
+
+/// A runtime with one empty namespace and the writable handle a host holds
+/// for it.
+async fn writable_namespace(root: &Path, writer_id: &str) -> (TestRuntime, Namespace<Writable>) {
+    let fs = open_runtime_async(store(root), writer_id).await;
+    let namespace_id = namespace_id("demo");
+    fs.writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    (fs, namespace)
 }
 
 #[tokio::test]
@@ -262,4 +285,235 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
         path_gets.len(),
         "identity stat must remain a point lookup: path={path_gets:#?}, inode={inode_gets:#?}"
     );
+}
+
+#[tokio::test]
+async fn create_directory_by_inode_binds_a_new_name_under_the_parent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (_fs, namespace) = writable_namespace(temp_dir.path(), "inode-mkdir-test").await;
+    let actor = loonfs_test_support::test_actor();
+    namespace
+        .create_directory("/docs", &actor)
+        .await
+        .expect("create parent");
+    let docs = namespace.stat("/docs").await.expect("stat parent").inode_id;
+    let commit_id = CommitId::parse("mkdir-archive").expect("valid commit id");
+
+    let commit = namespace
+        .create_directory_by_inode_with_options(
+            docs,
+            &display_name("archive"),
+            &actor,
+            &CommitOptions {
+                commit_id: Some(commit_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create directory by inode");
+    assert_eq!(commit.commit_id, commit_id);
+    let created = namespace
+        .stat("/docs/archive")
+        .await
+        .expect("stat created directory");
+    assert_eq!(created.inode_kind(), InodeKind::Directory);
+    assert_eq!(created.parent_inode_id, Some(docs));
+
+    let error = namespace
+        .create_directory_by_inode(docs, &display_name("archive"), &actor)
+        .await
+        .expect_err("a bound name is refused");
+    assert_eq!(error.code(), ErrorCode::PathConflict);
+}
+
+#[tokio::test]
+async fn create_file_by_inode_writes_a_new_name_under_the_parent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (_fs, namespace) = writable_namespace(temp_dir.path(), "inode-create-file-test").await;
+    let actor = loonfs_test_support::test_actor();
+    namespace
+        .create_directory("/docs", &actor)
+        .await
+        .expect("create parent");
+    let docs = namespace.stat("/docs").await.expect("stat parent").inode_id;
+
+    namespace
+        .create_file_by_inode(docs, &display_name("report.txt"), b"first", &actor)
+        .await
+        .expect("create file by inode");
+    let created = namespace
+        .read_file("/docs/report.txt")
+        .await
+        .expect("read created file");
+    assert_eq!(created.bytes, b"first");
+    assert_eq!(created.entry.parent_inode_id, Some(docs));
+
+    let error = namespace
+        .create_file_by_inode(docs, &display_name("report.txt"), b"second", &actor)
+        .await
+        .expect_err("a bound name is refused");
+    assert_eq!(error.code(), ErrorCode::PathConflict);
+    assert_eq!(
+        namespace
+            .read_file("/docs/report.txt")
+            .await
+            .expect("read unchanged file")
+            .bytes,
+        b"first"
+    );
+}
+
+#[tokio::test]
+async fn put_file_by_inode_follows_a_move_and_requires_the_current_revision() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (_fs, namespace) = writable_namespace(temp_dir.path(), "inode-put-file-test").await;
+    let actor = loonfs_test_support::test_actor();
+    namespace
+        .put_file("/draft.txt", b"one", &actor)
+        .await
+        .expect("put first revision");
+    let inode_id = namespace
+        .stat("/draft.txt")
+        .await
+        .expect("stat file")
+        .inode_id;
+    namespace
+        .move_path("/draft.txt", "/final.txt", &actor)
+        .await
+        .expect("rename file");
+
+    namespace
+        .put_file_by_inode(inode_id, RevisionNo(1), b"two", &actor)
+        .await
+        .expect("put the next revision by inode");
+    let current = namespace
+        .read_file("/final.txt")
+        .await
+        .expect("read renamed file");
+    assert_eq!(current.bytes, b"two");
+    assert_eq!(current.entry.inode_id, inode_id);
+    assert_eq!(current.entry.revision_no(), Some(RevisionNo(2)));
+
+    let error = namespace
+        .put_file_by_inode(inode_id, RevisionNo(1), b"three", &actor)
+        .await
+        .expect_err("a stale revision is refused");
+    assert_eq!(error.code(), ErrorCode::StaleRevision);
+}
+
+#[tokio::test]
+async fn delete_by_inode_requires_the_current_binding_version() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (_fs, namespace) = writable_namespace(temp_dir.path(), "inode-delete-test").await;
+    let actor = loonfs_test_support::test_actor();
+    namespace
+        .put_file("/drafts/notes.txt", b"body", &actor)
+        .await
+        .expect("put child");
+    let stale = namespace.stat("/drafts").await.expect("stat directory");
+    namespace
+        .move_path("/drafts", "/archive", &actor)
+        .await
+        .expect("rename directory");
+    let current = namespace
+        .stat("/archive")
+        .await
+        .expect("stat renamed directory");
+    let current_version = current
+        .binding_version
+        .expect("a named entry has a binding version");
+
+    let error = namespace
+        .delete_by_inode(
+            stale.inode_id,
+            &stale
+                .binding_version
+                .expect("a named entry has a binding version"),
+            &actor,
+        )
+        .await
+        .expect_err("a stale binding version is refused");
+    assert_eq!(error.code(), ErrorCode::BindingVersionMismatch);
+    let error = namespace
+        .delete_by_inode(current.inode_id, &current_version, &actor)
+        .await
+        .expect_err("a non-empty directory needs a recursive delete");
+    assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
+
+    namespace
+        .delete_by_inode_with_options(
+            current.inode_id,
+            &current_version,
+            &actor,
+            &DeleteByInodeOptions {
+                behavior: DeleteDirectoryBehavior::Recursive,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("delete the directory by inode");
+    assert_eq!(
+        namespace
+            .stat_by_inode(current.inode_id)
+            .await
+            .expect_err("a deleted inode is not visible")
+            .code(),
+        ErrorCode::InodeNotFound
+    );
+}
+
+#[tokio::test]
+async fn move_by_inode_rebinds_under_a_parent_inode_at_the_current_binding_version() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (_fs, namespace) = writable_namespace(temp_dir.path(), "inode-move-test").await;
+    let actor = loonfs_test_support::test_actor();
+    namespace
+        .put_file("/inbox/report.txt", b"body", &actor)
+        .await
+        .expect("put file");
+    namespace
+        .create_directory("/archive", &actor)
+        .await
+        .expect("create destination");
+    let archive = namespace
+        .stat("/archive")
+        .await
+        .expect("stat destination")
+        .inode_id;
+    let report = namespace
+        .stat("/inbox/report.txt")
+        .await
+        .expect("stat file");
+    let version = report
+        .binding_version
+        .expect("a named entry has a binding version");
+
+    namespace
+        .move_by_inode(
+            report.inode_id,
+            &version,
+            archive,
+            &display_name("2026.txt"),
+            &actor,
+        )
+        .await
+        .expect("move by inode");
+    let moved = namespace
+        .stat("/archive/2026.txt")
+        .await
+        .expect("stat moved file");
+    assert_eq!(moved.inode_id, report.inode_id);
+    assert_ne!(moved.binding_version, Some(version.clone()));
+
+    let error = namespace
+        .move_by_inode(
+            report.inode_id,
+            &version,
+            archive,
+            &display_name("2027.txt"),
+            &actor,
+        )
+        .await
+        .expect_err("a stale binding version is refused");
+    assert_eq!(error.code(), ErrorCode::BindingVersionMismatch);
 }

@@ -2,8 +2,12 @@
 
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
-use super::handlers_filesystem::{read_target, reject_snapshot_with_revision};
-use super::handlers_inodes::{parse_inode_id, InodePathParams, InodeRevisionPathParams};
+use super::handlers_filesystem::{
+    parse_optional_snapshot_id, read_target, reject_snapshot_with_revision,
+};
+use super::handlers_inodes::{
+    parse_inode_id, InodeContentQuery, InodePathParams, InodeRevisionPathParams,
+};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::query_params::parse_revision_no;
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
@@ -89,18 +93,19 @@ pub(super) async fn create_download(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
-        description = "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound. The request has no body and the response does not include a path.",
+        description = "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound, or of the revision a live snapshot captured. The request has no body and the response does not include a path.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
+            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the file revision captured by this snapshot")
         ),
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode ID", body = ApiError),
+            (status = 400, description = "Invalid inode ID, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or visible inode not found", body = ApiError),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
             (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
             (status = 501, description = "Direct download is unsupported", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
@@ -111,18 +116,19 @@ pub(super) async fn create_download_by_inode(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
-    AppQuery(_): AppQuery<NoQuery>,
+    AppQuery(query): AppQuery<InodeContentQuery>,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let issuer = direct_get_issuer(&state)?;
-    let target = runtime
-        .namespace(&namespace_id)
+    let download = target
         .create_download_by_inode(inode_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    inode_download_response(issuer, namespace_id, target).await
+    inode_download_response(issuer, namespace_id, download).await
 }
 
 /// Authorizes a direct read of one retained inode revision.
@@ -143,7 +149,7 @@ pub(super) async fn create_download_by_inode(
         ),
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode ID or revision number", body = ApiError),
+            (status = 400, description = "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
             (status = 409, description = "Inode is not a file", body = ApiError),
@@ -158,12 +164,14 @@ pub(super) async fn create_revision_download_by_inode(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
-    AppQuery(_): AppQuery<NoQuery>,
+    AppQuery(query): AppQuery<InodeContentQuery>,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no))?;
     let issuer = direct_get_issuer(&state)?;
     let target = runtime
         .namespace(&namespace_id)

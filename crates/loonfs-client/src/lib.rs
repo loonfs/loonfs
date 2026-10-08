@@ -74,9 +74,10 @@ pub use ClientError as Error;
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
 pub use loonfs_types::options::{
     AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateDirectoryOptions,
-    DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions,
-    PutFileOptions, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
-    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions,
+    ListOptions, MoveOptions, PutFileOptions, StatOptions, UndeleteDestination, UndeleteOptions,
+    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.

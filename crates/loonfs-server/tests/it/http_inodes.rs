@@ -1,20 +1,23 @@
-//! HTTP stat, revision history, and content reads by inode ID.
+//! HTTP stat, revision history, content reads, and mutations by inode ID.
 
 #![allow(clippy::panic)]
 
 use crate::common::http_split_support::{replace_file_options, test_config};
-use crate::common::start_server;
+use crate::common::{start_server, TestServer};
 use futures::StreamExt;
 use loonfs_client::AttributeChanges;
-use loonfs_client::{ClientError, DeleteOptions, NamespacePath};
+use loonfs_client::{ClientError, DeleteByInodeOptions, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{
     attribute_key, attribute_text, first_page, namespace_id, page_limit,
 };
 use loonfs_types::PageRequest;
-use loonfs_types::{ApiError, DeleteDirectoryBehavior, ErrorCode, InodeId, RevisionNo};
+use loonfs_types::{
+    ApiError, DeleteDirectoryBehavior, DisplayName, ErrorCode, InodeId, InodeKind, RevisionNo,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::path::Path;
 use tempfile::tempdir;
 
 async fn drain(mut stream: loonfs_client::PayloadStream) -> Vec<u8> {
@@ -23,6 +26,29 @@ async fn drain(mut stream: loonfs_client::PayloadStream) -> Vec<u8> {
         bytes.extend_from_slice(&chunk.expect("content chunk"));
     }
     bytes
+}
+
+fn display_name(value: &str) -> DisplayName {
+    DisplayName::parse(value).expect("valid display name")
+}
+
+fn demo_path(path: &str) -> NamespacePath {
+    NamespacePath::parse("demo", path).expect("valid namespace path")
+}
+
+/// A server with one empty, unrestricted namespace named `demo`.
+async fn server_with_namespace(root: &Path, writer_id: &str) -> TestServer {
+    let harness = start_server(test_config(root.join("store"), writer_id, writer_id)).await;
+    harness
+        .client
+        .create_namespace(
+            &namespace_id("demo"),
+            &loonfs_test_support::test_actor(),
+            loonfs_types::NamespaceAccess::unrestricted(),
+        )
+        .await
+        .expect("create namespace");
+    harness
 }
 
 fn assert_api_code<T: std::fmt::Debug>(
@@ -698,6 +724,299 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
             assert_eq!(error.code, ErrorCode::Unauthorized.as_str());
         }
     }
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_create_directory_by_inode_binds_a_new_name_under_the_parent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = server_with_namespace(temp_dir.path(), "http-inode-mkdir").await;
+    let namespace = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    harness
+        .client
+        .create_directory(&demo_path("/docs"), &actor)
+        .await
+        .expect("create parent");
+    let docs = harness
+        .client
+        .stat(&demo_path("/docs"))
+        .await
+        .expect("stat parent")
+        .inode_id;
+
+    harness
+        .client
+        .create_directory_by_inode(&namespace, docs, &display_name("archive"), &actor)
+        .await
+        .expect("create directory by inode");
+    let created = harness
+        .client
+        .stat(&demo_path("/docs/archive"))
+        .await
+        .expect("stat created directory");
+    assert_eq!(created.inode_kind(), InodeKind::Directory);
+    assert_eq!(created.parent_inode_id, Some(docs));
+    assert_api_code(
+        harness
+            .client
+            .create_directory_by_inode(&namespace, docs, &display_name("archive"), &actor)
+            .await,
+        409,
+        ErrorCode::PathConflict,
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_create_file_by_inode_writes_a_new_name_under_the_parent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = server_with_namespace(temp_dir.path(), "http-inode-create-file").await;
+    let namespace = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    harness
+        .client
+        .create_directory(&demo_path("/docs"), &actor)
+        .await
+        .expect("create parent");
+    let docs = harness
+        .client
+        .stat(&demo_path("/docs"))
+        .await
+        .expect("stat parent")
+        .inode_id;
+
+    harness
+        .client
+        .create_file_by_inode(
+            &namespace,
+            docs,
+            &display_name("report.txt"),
+            b"first",
+            &actor,
+        )
+        .await
+        .expect("create file by inode");
+    assert_eq!(
+        harness
+            .client
+            .read_file(&demo_path("/docs/report.txt"))
+            .await
+            .expect("read created file"),
+        b"first"
+    );
+    assert_api_code(
+        harness
+            .client
+            .create_file_by_inode(
+                &namespace,
+                docs,
+                &display_name("report.txt"),
+                b"second",
+                &actor,
+            )
+            .await,
+        409,
+        ErrorCode::PathConflict,
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_put_file_by_inode_follows_a_move_and_requires_the_current_revision() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = server_with_namespace(temp_dir.path(), "http-inode-put-file").await;
+    let namespace = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    harness
+        .client
+        .put_file(&demo_path("/draft.txt"), b"one", &actor)
+        .await
+        .expect("put first revision");
+    let inode_id = harness
+        .client
+        .stat(&demo_path("/draft.txt"))
+        .await
+        .expect("stat file")
+        .inode_id;
+    harness
+        .client
+        .move_path(&demo_path("/draft.txt"), &demo_path("/final.txt"), &actor)
+        .await
+        .expect("rename file");
+
+    harness
+        .client
+        .put_file_by_inode(&namespace, inode_id, RevisionNo(1), b"two", &actor)
+        .await
+        .expect("put the next revision by inode");
+    let current = harness
+        .client
+        .stat(&demo_path("/final.txt"))
+        .await
+        .expect("stat renamed file");
+    assert_eq!(current.inode_id, inode_id);
+    assert_eq!(current.revision_no(), Some(RevisionNo(2)));
+    assert_eq!(
+        harness
+            .client
+            .read_file(&demo_path("/final.txt"))
+            .await
+            .expect("read renamed file"),
+        b"two"
+    );
+    assert_api_code(
+        harness
+            .client
+            .put_file_by_inode(&namespace, inode_id, RevisionNo(1), b"three", &actor)
+            .await,
+        409,
+        ErrorCode::StaleRevision,
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_delete_by_inode_requires_the_current_binding_version() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = server_with_namespace(temp_dir.path(), "http-inode-delete").await;
+    let namespace = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    harness
+        .client
+        .put_file(&demo_path("/drafts/notes.txt"), b"body", &actor)
+        .await
+        .expect("put child");
+    let stale = harness
+        .client
+        .stat(&demo_path("/drafts"))
+        .await
+        .expect("stat directory");
+    harness
+        .client
+        .move_path(&demo_path("/drafts"), &demo_path("/archive"), &actor)
+        .await
+        .expect("rename directory");
+    let current = harness
+        .client
+        .stat(&demo_path("/archive"))
+        .await
+        .expect("stat renamed directory");
+
+    assert_api_code(
+        harness
+            .client
+            .delete_by_inode(
+                &namespace,
+                stale.inode_id,
+                &stale
+                    .binding_version
+                    .expect("a named entry has a binding version"),
+                &actor,
+            )
+            .await,
+        409,
+        ErrorCode::BindingVersionMismatch,
+    );
+    harness
+        .client
+        .delete_by_inode_with_options(
+            &namespace,
+            current.inode_id,
+            &current
+                .binding_version
+                .expect("a named entry has a binding version"),
+            &actor,
+            &DeleteByInodeOptions {
+                behavior: DeleteDirectoryBehavior::Recursive,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("delete the directory by inode");
+    assert_api_code(
+        harness
+            .client
+            .stat_by_inode(&namespace, current.inode_id)
+            .await,
+        404,
+        ErrorCode::InodeNotFound,
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_move_by_inode_rebinds_under_a_parent_inode_at_the_current_binding_version() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = server_with_namespace(temp_dir.path(), "http-inode-move").await;
+    let namespace = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    harness
+        .client
+        .put_file(&demo_path("/inbox/report.txt"), b"body", &actor)
+        .await
+        .expect("put file");
+    harness
+        .client
+        .create_directory(&demo_path("/archive"), &actor)
+        .await
+        .expect("create destination");
+    let archive = harness
+        .client
+        .stat(&demo_path("/archive"))
+        .await
+        .expect("stat destination")
+        .inode_id;
+    let report = harness
+        .client
+        .stat(&demo_path("/inbox/report.txt"))
+        .await
+        .expect("stat file");
+    let version = report
+        .binding_version
+        .expect("a named entry has a binding version");
+
+    harness
+        .client
+        .move_by_inode(
+            &namespace,
+            report.inode_id,
+            &version,
+            archive,
+            &display_name("2026.txt"),
+            &actor,
+        )
+        .await
+        .expect("move by inode");
+    assert_eq!(
+        harness
+            .client
+            .stat(&demo_path("/archive/2026.txt"))
+            .await
+            .expect("stat moved file")
+            .inode_id,
+        report.inode_id
+    );
+    assert_api_code(
+        harness
+            .client
+            .move_by_inode(
+                &namespace,
+                report.inode_id,
+                &version,
+                archive,
+                &display_name("2027.txt"),
+                &actor,
+            )
+            .await,
+        409,
+        ErrorCode::BindingVersionMismatch,
+    );
 
     harness.server.abort();
 }

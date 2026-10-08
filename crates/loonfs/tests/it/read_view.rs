@@ -958,6 +958,28 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         &download.content_ref,
         captured.content_ref().expect("content reference")
     );
+    assert_eq!(
+        view.read_file_by_inode(captured.inode_id)
+            .await
+            .expect("read captured bytes by inode")
+            .bytes,
+        b"captured"
+    );
+    let mut stream = view
+        .read_file_stream_by_inode(captured.inode_id)
+        .await
+        .expect("stream captured bytes by inode");
+    let mut streamed = Vec::new();
+    while let Some(chunk) = stream.next_chunk().await.expect("captured chunk") {
+        streamed.extend_from_slice(&chunk);
+    }
+    assert_eq!(streamed, b"captured");
+    let inode_download = view
+        .create_download_by_inode(captured.inode_id)
+        .await
+        .expect("resolve captured download by inode");
+    assert_eq!(inode_download.revision_no, download.revision_no);
+    assert_eq!(inode_download.content_ref, download.content_ref);
 
     namespace_writer
         .delete_snapshot(&snapshot.checkpoint_id)

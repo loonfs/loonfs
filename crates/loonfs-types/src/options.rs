@@ -162,7 +162,16 @@ pub struct DeleteOptions {
     pub expected_inode_id: Option<InodeId>,
 }
 
-/// Options for moving a path.
+/// Options for deleting an inode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeleteByInodeOptions {
+    /// Directory delete behavior.
+    pub behavior: DeleteDirectoryBehavior,
+    /// Commit ID, message, and preconditions.
+    pub commit: CommitOptions,
+}
+
+/// Options for moving a path or an inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MoveOptions {
     /// Create-only or replace-existing behavior for the destination.
@@ -176,7 +185,7 @@ pub struct MoveOptions {
     pub expected_destination_revision_no: Option<RevisionNo>,
 }
 
-/// Options for copying a file path.
+/// Options for copying a file path or a file inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CopyOptions {
     /// Create-only or replace-existing behavior for the destination.
@@ -265,6 +274,13 @@ mod tests {
                 behavior: DeleteDirectoryBehavior::NonRecursive,
                 commit: commit.clone(),
                 expected_inode_id: None,
+            }
+        );
+        assert_eq!(
+            DeleteByInodeOptions::default(),
+            DeleteByInodeOptions {
+                behavior: DeleteDirectoryBehavior::NonRecursive,
+                commit: commit.clone(),
             }
         );
         assert_eq!(

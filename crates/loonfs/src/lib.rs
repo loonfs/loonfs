@@ -88,22 +88,23 @@ pub use loonfs_types::api::v0::{
 };
 pub use loonfs_types::{
     AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
-    AttributesProjection, AttributesRevisionNo, CapabilityDocument, ChangeSeq, Checkpoint,
-    CheckpointOwnerSummary, ChecksumAlgorithm, CommitId, CommitPrecondition, CompactionStepOutcome,
-    ContentId, ContentRef, ContentRefKind, DeleteCheckpointResponse, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DeleteSnapshotResponse, DeletedCheckpointsByOwner,
-    DeletedObjectCounts, DestinationBehavior, DirectoryPageCursor, DisplayName, EffectiveLimit,
-    FileBytes, FileRevision, FileRevisionsPageCursor, FoldWalOutcome, FoldWalResponse, GcResponse,
-    InodeId, InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListInodeChildrenResponse, ListPathEntriesResponse, ListSnapshotsResponse, ManifestNo,
-    MetadataCompactionOutcome, MetadataCompactionRequest, MetadataCompactionResponse,
-    MetadataMaintenanceResponse, NameKey, NamespaceDiagnostics, NamespaceId, NamespaceMetadata,
-    Page, PageRequest, PaginationPolicy, PathEntry, PathEntryKind, PinId, RetainedCandidates,
-    RetainedReason, RevisionNo, RunMaintenanceRequest, RunMaintenanceResponse, SnapshotSummary,
-    TrashEntry, UploadId, WalFoldStepOutcome, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_SNAPSHOTS,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    AttributesProjection, AttributesRevisionNo, BindingVersion, CapabilityDocument, ChangeSeq,
+    Checkpoint, CheckpointOwnerSummary, ChecksumAlgorithm, CommitId, CommitPrecondition,
+    CompactionStepOutcome, ContentId, ContentRef, ContentRefKind, DeleteCheckpointResponse,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DeleteSnapshotResponse,
+    DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior, DirectoryPageCursor,
+    DisplayName, EffectiveLimit, FileBytes, FileRevision, FileRevisionsPageCursor, FoldWalOutcome,
+    FoldWalResponse, GcResponse, InodeId, InodeKind, ListCheckpointsResponse,
+    ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
+    ListSnapshotsResponse, ManifestNo, MetadataCompactionOutcome, MetadataCompactionRequest,
+    MetadataCompactionResponse, MetadataMaintenanceResponse, NameKey, NamespaceDiagnostics,
+    NamespaceId, NamespaceMetadata, Page, PageRequest, PaginationPolicy, PathEntry, PathEntryKind,
+    PinId, RetainedCandidates, RetainedReason, RevisionNo, RunMaintenanceRequest,
+    RunMaintenanceResponse, SnapshotSummary, TrashEntry, UploadId, WalFoldStepOutcome, WriterId,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_SNAPSHOTS, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    PROTOCOL_VERSION,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
@@ -219,10 +220,11 @@ pub use metadata_cache::{
 };
 pub use options::{
     AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions,
-    ListOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
-    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
-    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions,
+    ForkNamespaceOptions, ListOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
+    ReadFileStreamOptions, StatOptions, UndeleteDestination, UndeleteOptions,
+    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
