@@ -293,6 +293,7 @@ pub(super) fn event_descriptor(event: &loonfs_types::api::v0::FilesystemChange) 
             public_inode_id(*inode_id),
             access_revision_no.0
         ),
+        FilesystemChange::Unknown => "unknown event".to_owned(),
     }
 }
 

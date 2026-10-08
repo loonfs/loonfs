@@ -742,6 +742,7 @@ impl Client {
 mod tests {
     use super::*;
     use crate::scripted_transport::{self, Outcome};
+    use loonfs_types::api::v0::FilesystemChange;
     use loonfs_types::{ContentId, EntryInodeKind, PathEntryKind};
 
     fn client_for(transport: &scripted_transport::ScriptedTransport) -> Client {
@@ -857,5 +858,56 @@ mod tests {
             .expect("one page")
             .expect("decoded trash");
         assert_eq!(trash.entries[0].inode_kind, EntryInodeKind::Unknown);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_event_kind_decodes_as_unknown_and_a_known_event_is_unchanged() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let content_id =
+            ContentId::parse("con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").expect("content id");
+        let content_ref = ContentRef::blob_v1(namespace_id.clone(), content_id, b"hello");
+        let feed = serde_json::json!({
+            "namespace_id": "demo",
+            "after_seq": 418,
+            "through_seq": 419,
+            "changes": [{
+                "namespace_id": "demo",
+                "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
+                "committed_seq": 419,
+                "committed_by": "usr_8f3c",
+                "committed_at_ms": 1_752_624_000_000_u64,
+                "events": [
+                    {
+                        "kind": "link_created",
+                        "inode_id": "ino_43",
+                        "parent_inode_id": "ino_7",
+                        "display_name": "latest",
+                        "binding_version": "def",
+                        "target_inode_id": "ino_42"
+                    },
+                    {
+                        "kind": "content_changed",
+                        "inode_id": "ino_42",
+                        "revision_no": 8,
+                        "content_ref": content_ref
+                    }
+                ]
+            }]
+        });
+        let transport =
+            scripted_transport::script([Outcome::Success(feed.to_string().into_bytes())]);
+
+        let page = client_for(&transport)
+            .list_changes(&namespace_id, ChangeSeq(418))
+            .next()
+            .await
+            .expect("one page")
+            .expect("decoded feed");
+        let events = &page.changes[0].events;
+        assert_eq!(events[0], FilesystemChange::Unknown);
+        assert_eq!(
+            serde_json::to_value(&events[1]).expect("serialize known event"),
+            feed["changes"][0]["events"][1]
+        );
     }
 }

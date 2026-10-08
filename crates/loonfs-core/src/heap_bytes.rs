@@ -200,6 +200,7 @@ impl HeapBytes for FilesystemChange {
             } => deleted_binding.name_key.heap_bytes() + deleted_binding.display_name.heap_bytes(),
             Self::AttributesChanged { attributes, .. } => attributes.heap_bytes(),
             Self::AccessChanged { grants, .. } => grants.heap_bytes(),
+            Self::Unknown => 0,
         }
     }
 }

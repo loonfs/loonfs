@@ -1144,7 +1144,7 @@
         "type": "object"
       },
       "FilesystemChange": {
-        "description": "One filesystem change within a commit.\n\nOne request operation can produce multiple changes.",
+        "description": "One filesystem change within a commit.\n\nOne request operation can produce multiple changes.\n\nNewer servers may report other event kinds; clients ignore them.",
         "discriminator": {
           "mapping": {
             "access_changed": "#/components/schemas/FilesystemChangeAccessChanged",

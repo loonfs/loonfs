@@ -44,6 +44,8 @@ pub struct DirectoryBinding {
 /// One filesystem change within a commit.
 ///
 /// One request operation can produce multiple changes.
+///
+/// Newer servers may report other event kinds; clients ignore them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -165,6 +167,11 @@ pub enum FilesystemChange {
         /// The inode's complete direct grants after this update.
         grants: AccessGrants,
     },
+    /// A kind added by a newer server, without its kind-specific fields.
+    ///
+    /// It serializes as `unknown` because the reported kind is not kept.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Change-feed response after a cursor.
