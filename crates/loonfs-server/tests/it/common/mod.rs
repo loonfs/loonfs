@@ -182,10 +182,10 @@ pub(crate) async fn start_tls_server(mut config: ServerConfig) -> TlsTestServer 
         .map(|token| token.expose().to_owned());
 
     let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(serve_with_shutdown(config, async move {
+    let mut server = tokio::spawn(serve_with_shutdown(config, async move {
         let _ = shutdown_signal.await;
     }));
-    wait_until_listening(addr).await;
+    wait_until_listening(addr, &mut server).await;
 
     let server_url = format!("https://{addr}");
     let ca_cert_path = cert_path.display().to_string();
@@ -230,10 +230,10 @@ pub(crate) async fn start_graceful_server(mut config: ServerConfig) -> GracefulT
         .map(|token| token.expose().to_owned());
 
     let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(serve_with_shutdown(config, async move {
+    let mut server = tokio::spawn(serve_with_shutdown(config, async move {
         let _ = shutdown_signal.await;
     }));
-    wait_until_listening(addr).await;
+    wait_until_listening(addr, &mut server).await;
 
     let server_url = format!("http://{addr}");
     GracefulTestServer {
@@ -282,8 +282,15 @@ async fn reserve_loopback_addr() -> SocketAddr {
 
 #[allow(clippy::disallowed_methods, clippy::panic)]
 // Test-harness polling for a port the server binds on its own schedule.
-async fn wait_until_listening(addr: SocketAddr) {
+async fn wait_until_listening(
+    addr: SocketAddr,
+    server: &mut tokio::task::JoinHandle<Result<(), ServeError>>,
+) {
     for _ in 0..500 {
+        if server.is_finished() {
+            let outcome = server.await;
+            panic!("server on {addr} stopped before it listened: {outcome:?}");
+        }
         if tokio::net::TcpStream::connect(addr).await.is_ok() {
             return;
         }

@@ -141,7 +141,7 @@ async fn a_kept_block_survives_a_reopen() {
 }
 
 #[tokio::test]
-async fn a_second_open_of_one_directory_is_refused() {
+async fn a_second_open_of_one_directory_is_refused_until_the_first_closes() {
     let temp_dir = tempdir().expect("tempdir");
     let held = open(temp_dir.path()).await;
 
@@ -157,6 +157,9 @@ async fn a_second_open_of_one_directory_is_refused() {
     }
 
     held.close().await.expect("close local cache");
+    // `held` is still alive, as a cache can be after its server stops.
+    let next = open(temp_dir.path()).await;
+    next.close().await.expect("close the next cache");
 }
 
 #[tokio::test]
