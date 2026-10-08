@@ -803,7 +803,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         .client
         .run_maintenance(
             &namespace,
-            &RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
+            &RunMaintenanceRequest::Retention(AdvanceRetentionRequest::default()),
             None,
         )
         .await

@@ -185,7 +185,8 @@ pub use manifest::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
     CompactionStepOutcome, FoldedWalTail, MetadataCompactionCancellation,
     MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataCompactionSpec,
-    MetadataFamilyGroup, MetadataLsmPolicy, SegmentBlockLoader, SegmentRowIterator,
+    MetadataFamilyGroup, MetadataLsmPolicy, RetentionTarget, SegmentBlockLoader,
+    SegmentRowIterator,
 };
 pub use manifest::{ManifestLoadError, ManifestLoadFailureClass};
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};

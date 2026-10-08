@@ -5,8 +5,9 @@
 
 use crate::common::*;
 use loonfs::{
-    DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, ErrorCode, InodeId, PageRequest,
-    PathEntry, PutFileOptions,
+    AdvanceRetentionOptions, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior,
+    ErrorCode, InodeId, ListFileRevisionsResponse, PageRequest, PathEntry, PutFileOptions,
+    RetentionTarget, RevisionNo,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use tempfile::tempdir;
@@ -829,4 +830,93 @@ fn inode_children_empty_resumed_page_reports_the_drifted_head() {
     assert!(resumed.entries.is_empty());
     assert!(resumed.next_cursor.is_none());
     assert!(resumed.head_seq > first.head_seq);
+}
+
+#[tokio::test]
+async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = open_runtime_async(store(temp_dir.path()), "revision-floor-pages").await;
+    let namespace_id = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    fs.create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create namespace");
+    let replace = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..Default::default()
+    };
+    let mut committed = Vec::new();
+    for bodies in [&["v1"][..], &["v2", "v3"], &["v4", "v5", "v6"]] {
+        for body in bodies {
+            let commit = fs
+                .put_file_with_options(&namespace_id, "/doc.txt", body.as_bytes(), &actor, &replace)
+                .await
+                .expect("put revision");
+            committed.push(commit.committed_seq);
+        }
+        fs.create_checkpoint(&namespace_id)
+            .await
+            .expect("fold the revisions into a run");
+    }
+    // The floor lands on revision 3, so the next base compaction drops
+    // revisions 1 and 2.
+    let advanced = fs
+        .maintenance
+        .advance_retention_floor_with_options(
+            &namespace_id,
+            &AdvanceRetentionOptions {
+                target: RetentionTarget::Seq(committed[2]),
+            },
+        )
+        .await
+        .expect("advance the floor to revision 3");
+    assert_eq!(advanced.retention_floor_seq, committed[2]);
+
+    let revision_numbers = |page: &ListFileRevisionsResponse| {
+        page.revisions
+            .iter()
+            .map(|revision| revision.revision_no.0)
+            .collect::<Vec<_>>()
+    };
+    let first = fs
+        .list_file_revisions(&namespace_id, "/doc.txt")
+        .page(PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        })
+        .await
+        .expect("first revision page");
+    assert_eq!(revision_numbers(&first), [6, 5]);
+
+    compact_until_done(&fs.maintenance, &namespace_id).await;
+    let reader = fresh_reader(store(temp_dir.path())).await;
+    let namespace = reader.namespace(&namespace_id);
+    let second = namespace
+        .list_file_revisions("/doc.txt")
+        .page(PageRequest {
+            limit: page_limit(2),
+            cursor: first.next_cursor.clone(),
+        })
+        .await
+        .expect("second revision page");
+    assert_eq!(
+        revision_numbers(&second),
+        [4, 3],
+        "the cursor resumes after revision 5 and ends at the newest revision at the floor"
+    );
+    assert!(second.next_cursor.is_none());
+    assert_eq!(
+        namespace
+            .read_file_revision("/doc.txt", RevisionNo(3))
+            .await
+            .expect("the revision at the floor stays readable")
+            .bytes,
+        b"v3"
+    );
+    expect_code(
+        namespace
+            .read_file_revision("/doc.txt", RevisionNo(2))
+            .await,
+        ErrorCode::RevisionNotFound,
+    );
 }

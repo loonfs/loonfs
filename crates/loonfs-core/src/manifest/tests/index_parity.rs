@@ -276,7 +276,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let advanced = advance_retention_floor(&store, &namespace_id)
+    let advanced = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance floor");
     let floor = advanced.retention_floor_seq;
@@ -356,16 +356,25 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         &materialized.metadata_state,
         ApiMetadataRowFamily::Revisions,
     );
-    let checksum_one = Checksum::sha256(b"alpha one\n");
-    let checksum_two = Checksum::sha256(b"alpha two\n");
-    assert!(revisions.iter().any(|row| matches!(
-        row,
-        MetadataRow::FileRevision (crate::metadata::RevisionRecord { content_ref, .. }) if content_ref.checksum == checksum_one
-    )));
-    assert!(revisions.iter().any(|row| matches!(
-        row,
-        MetadataRow::FileRevision (crate::metadata::RevisionRecord { content_ref, .. }) if content_ref.checksum == checksum_two
-    )));
+    let kept = |body: &[u8]| {
+        let checksum = Checksum::sha256(body);
+        revisions.iter().any(|row| matches!(
+            row,
+            MetadataRow::FileRevision (crate::metadata::RevisionRecord { content_ref, .. }) if content_ref.checksum == checksum
+        ))
+    };
+    assert!(
+        !kept(b"alpha one\n"),
+        "a revision superseded at or below the floor is dropped"
+    );
+    assert!(
+        kept(b"alpha two\n"),
+        "the newest revision at the floor stays"
+    );
+    assert!(
+        kept(b"scratch\n"),
+        "a deleted file keeps its newest revision"
+    );
 
     let binds = manifest_rows_for_family(
         &materialized.metadata_state,
@@ -381,7 +390,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         .iter()
         .all(|binding| binding.is_bound()));
 
-    let restored = restore_file_revision(
+    let error = restore_file_revision(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -390,8 +399,19 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         None,
     )
     .await
-    .expect("restoring a revision below the floor succeeds");
-    assert!(restored.committed_seq > ChangeSeq(0));
+    .expect_err("a dropped revision cannot be restored");
+    assert_eq!(error.code(), ErrorCode::RevisionNotFound);
+    let restored = restore_file_revision(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        RevisionNo(2),
+        &context,
+        None,
+    )
+    .await
+    .expect("restoring the newest revision at the floor succeeds");
+    assert!(restored.committed_seq > floor);
 }
 #[test]
 fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {

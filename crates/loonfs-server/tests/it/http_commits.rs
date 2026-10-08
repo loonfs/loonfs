@@ -394,7 +394,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         .client
         .run_maintenance(
             &namespace,
-            &RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
+            &RunMaintenanceRequest::Retention(AdvanceRetentionRequest::default()),
             None,
         )
         .await

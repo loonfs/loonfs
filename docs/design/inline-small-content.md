@@ -62,7 +62,7 @@ A direct download returns a presigned URL for the content object. Inline content
 
 A fold writes every inline value in its range as a content object before it writes segments or publishes the manifest. The writes run with bounded concurrency after the fold's publication budget starts, and the fold checks the budget when they return.
 
-In a live namespace, materialized content is never garbage: each object belongs to a committed revision, and revisions are retained. A fold that crashes, exceeds its budget, or loses the manifest race leaves objects that the next fold finds already present. There is no orphan to discover and no cleanup state to persist. An object already at the key must hold the same bytes, and the verified write checks this. A mismatch stops the fold without publishing.
+In a live namespace, collection never deletes materialized content: each object belongs to a committed revision, and no operation reclaims a live namespace's content, even after a base compaction removes that revision at or below the retention floor. A fold that crashes, exceeds its budget, or loses the manifest race leaves objects that the next fold finds already present. There is no orphan to discover and no cleanup state to persist. An object already at the key must hold the same bytes, and the verified write checks this. A mismatch stops the fold without publishing.
 
 A fold can pause between reading a tail and writing its content while the namespace is deleted and swept. A fold call reads a fresh manifest, but a writer's own fold starts from its retained view. Neither checks its publication budget until its content writes return. A content write can therefore land after a sweep. It is found the way a late upload is: the retired-owner sweep lists the content prefix again on every later pass ([format section 11.8](../specs/format.md#118-sweeping-a-retired-owners-content)).
 
@@ -90,7 +90,7 @@ Cold-stat time and fold time grew with the tail. Tails of 2, 8, and 32 MiB of 4 
 
 ## Alternatives considered
 
-**Keep values in segments.** Small reads would need no content object at all. But revisions are retained permanently, so every compaction of the revisions family would rewrite file bytes. Metadata blocks would fill with payloads and slow path resolution and listing, and direct downloads still need an object. Writing the bytes out at the fold keeps the metadata tree free of file bytes.
+**Keep values in segments.** Small reads would need no content object at all. But every compaction of the revisions family rewrites the revisions it keeps, so it would rewrite file bytes. Metadata blocks would fill with payloads and slow path resolution and listing, and direct downloads still need an object. Writing the bytes out at the fold keeps the metadata tree free of file bytes.
 
 **A new content reference kind.** One revision would have two references over time: an inline kind in the log and `blob_v1` in segments. Fingerprints, retries, the change feed, and content equality would all need to treat them as equal. Naming logical content and resolving its location avoids this.
 
@@ -102,6 +102,6 @@ Cold-stat time and fold time grew with the tail. Tails of 2, 8, and 32 MiB of 4 
 
 **A separate payload section in the WAL object.** Metadata readers could skip inline bytes by reading a range, which removes the cold-replay and change-feed costs. It needs a second framing layer and its own integrity check.
 
-**Packing a fold's values into one object.** A fold would make one write instead of one per value. Revisions are never dropped, so a pack in a live namespace never becomes partly dead. It changes reference resolution and direct downloads.
+**Packing a fold's values into one object.** A fold would make one write instead of one per value. A base compaction can remove revisions at or below the retention floor, so a pack can become partly dead, and reclaiming its space would need a rewrite. It changes reference resolution and direct downloads.
 
 **Removing upload-session writes from the staged path.** Content stays outside the log, but something must replace the session's role as the collector's candidate index. It helps embedded writers only.

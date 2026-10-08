@@ -52,7 +52,7 @@ impl Rival {
                 assert!(merges > 0, "the merge rival should publish");
             }
             Self::RetentionAdvance => {
-                advance_retention_floor(store, namespace_id)
+                advance_retention_floor(store, None, namespace_id, RetentionTarget::Head)
                     .await
                     .expect("advance the floor");
             }

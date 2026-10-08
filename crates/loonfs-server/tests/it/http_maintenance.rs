@@ -111,10 +111,23 @@ fn post_retention_advance(
     server_url: &str,
     namespace: &str,
 ) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+    post_retention_advance_with(server_url, namespace, serde_json::json!({}))
+}
+
+fn post_retention_advance_with(
+    server_url: &str,
+    namespace: &str,
+    target: serde_json::Value,
+) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+    let mut request = target;
+    request
+        .as_object_mut()
+        .expect("retention targets are an object")
+        .insert("kind".to_owned(), serde_json::json!("retention"));
     post_maintenance_json_body(
         &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
         "test-token",
-        serde_json::json!({ "kind": "retention" }),
+        request,
     )
 }
 
@@ -290,15 +303,39 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(unsafe_gc.code, "invalid_request");
     assert!(unsafe_gc.message.contains("derived safety minimum"));
 
+    let both = post_retention_advance_with(
+        &server_url,
+        namespace.as_str(),
+        serde_json::json!({ "to_seq": 1, "cutoff_at_ms": 0 }),
+    )
+    .expect_err("a request names at most one target");
+    assert_eq!(both.code, "invalid_request");
+    assert_eq!(both.param.as_deref(), Some("/cutoff_at_ms"));
+    // Every commit is stamped after the epoch, so this cutoff passes none.
+    let unmoved = post_retention_advance_with(
+        &server_url,
+        namespace.as_str(),
+        serde_json::json!({ "cutoff_at_ms": 0 }),
+    )
+    .expect("advance retention to a cutoff");
+    assert_eq!(retention_floor(unmoved), ChangeSeq(0));
+
     let advanced = retention_floor(
         post_retention_advance(&server_url, namespace.as_str()).expect("advance retention"),
     );
     assert_eq!(advanced, ChangeSeq(1));
 
-    // Both calls reach the same floor.
+    // Both calls reach the same floor, and a target below it moves nothing.
     let repeated =
         post_retention_advance(&server_url, namespace.as_str()).expect("repeat retention");
     assert_eq!(retention_floor(repeated), advanced);
+    let below = post_retention_advance_with(
+        &server_url,
+        namespace.as_str(),
+        serde_json::json!({ "to_seq": 0 }),
+    )
+    .expect("advance retention to a sequence below the floor");
+    assert_eq!(retention_floor(below), advanced);
 
     let bytes = client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello maintenance\n");
@@ -447,7 +484,7 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
         .run_maintenance(
             &namespace,
             &loonfs_types::RunMaintenanceRequest::Retention(
-                loonfs_types::AdvanceRetentionRequest {},
+                loonfs_types::AdvanceRetentionRequest::default(),
             ),
             None,
         )

@@ -452,7 +452,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         .await
         .expect("current");
     store.reset();
-    let advanced = advance_retention_floor(&store, &namespace_id)
+    let advanced = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance");
     assert_eq!(store.counts().create_if_absent_puts, 1);
@@ -471,7 +471,7 @@ async fn retention_publishes_only_a_number_and_floor_change_and_writers_read_it(
         .expect("writer floor");
     assert_eq!(anchor.retention_floor_seq(), expected.head_seq);
     store.reset();
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("already advanced");
     assert_eq!(store.counts().puts, 0);
@@ -788,7 +788,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     create_checkpoint(&inner, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    advance_retention_floor(&inner, &namespace_id)
+    advance_retention_floor(&inner, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance retention");
 

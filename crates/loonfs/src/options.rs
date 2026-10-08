@@ -6,9 +6,9 @@
 //! Results are the `loonfs-types` wire shapes themselves, the same way handles
 //! already return `Commit` and `FoldWalResponse`.
 
-use crate::{Error, MetadataCompactionPolicy, Result};
+use crate::{Error, MetadataCompactionPolicy, Result, RetentionTarget};
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
-use loonfs_types::MetadataMaintenanceRequest;
+use loonfs_types::{AdvanceRetentionRequest, MetadataMaintenanceRequest};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub use loonfs_types::options::{
@@ -95,6 +95,32 @@ impl MetadataMaintenanceOptions {
             self.idle_fold_after_ms > 0
                 && now_ms.saturating_sub(committed_at_ms) >= self.idle_fold_after_ms
         })
+    }
+}
+
+/// Options for advancing a namespace's retention floor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdvanceRetentionOptions {
+    /// Where the floor moves. The default is the folded manifest head.
+    pub target: RetentionTarget,
+}
+
+impl AdvanceRetentionOptions {
+    /// Resolves a wire-level retention request, which names at most one
+    /// target.
+    pub fn from_request(request: AdvanceRetentionRequest) -> Result<Self> {
+        let target = match (request.to_seq, request.cutoff_at_ms) {
+            (None, None) => RetentionTarget::Head,
+            (Some(seq), None) => RetentionTarget::Seq(seq),
+            (None, Some(cutoff_at_ms)) => RetentionTarget::Cutoff { cutoff_at_ms },
+            (Some(_), Some(_)) => {
+                return Err(Error::InvalidRequest {
+                    message: "`to_seq` cannot be combined with `cutoff_at_ms`".to_owned(),
+                    param: "/cutoff_at_ms",
+                })
+            }
+        };
+        Ok(Self { target })
     }
 }
 

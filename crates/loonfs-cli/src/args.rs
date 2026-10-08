@@ -1355,8 +1355,11 @@ pub(crate) enum MaintenanceIndexCommand {
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceRetentionCommand {
     /// Advance the retention floor and discard older replay history.
-    /// This does not remove file revisions.
-    Advance(MaintenanceNamespaceArgs),
+    ///
+    /// The floor moves to the folded manifest head unless a target is given.
+    /// A later base compaction keeps every file revision above the floor and
+    /// each file's newest revision at or below it.
+    Advance(MaintenanceRetentionAdvanceArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1388,6 +1391,20 @@ pub(crate) struct MaintenanceIndexEnableArgs {
 pub(crate) struct MaintenanceNamespaceArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct MaintenanceRetentionAdvanceArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Advance the floor to this sequence, or to the folded manifest head
+    /// when that is lower.
+    #[arg(long, conflicts_with = "before")]
+    pub to_seq: Option<u64>,
+    /// Advance the floor to the last commit committed at or before this Unix
+    /// time in milliseconds.
+    #[arg(long, value_name = "UNIX_MS")]
+    pub before: Option<u64>,
 }
 
 #[derive(Debug, Args)]

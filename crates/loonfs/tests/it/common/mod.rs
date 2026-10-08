@@ -166,6 +166,34 @@ pub(crate) fn metadata_options(max_wal_tail_objects: u64) -> MetadataMaintenance
     }
 }
 
+/// Runs explicit compaction until no family group is due, so every group
+/// ends in one base run and the retention floor's rules have been applied.
+pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: &NamespaceId) {
+    let options = MetadataMaintenanceOptions {
+        compaction_policy: loonfs::MetadataCompactionPolicy::CompactImmediately,
+        ..MetadataMaintenanceOptions::default()
+    };
+    for _ in 0..32 {
+        let step = maintenance
+            .maintain_metadata_with_options(namespace_id, &options)
+            .await
+            .expect("compact metadata");
+        if step.compaction == (loonfs::CompactionStepOutcome::NotNeeded {}) {
+            return;
+        }
+    }
+    panic!("compaction did not finish within 32 steps");
+}
+
+/// A reader with nothing cached, so its first read loads the current manifest.
+pub(crate) async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {
+    LoonFs::builder_with_store(store)
+        .read_only()
+        .build()
+        .await
+        .expect("build a fresh reader")
+}
+
 /// One handle set per test fixture: a writer, its derived reader, and an
 /// maintenance handle sharing the same store, exercised through the blocking
 /// helpers below.

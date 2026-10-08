@@ -270,7 +270,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     let moved = load_read_anchor(&store, &namespace_id)
         .await
         .expect("moved anchor");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("floor at move");
     let (manifest_no, _) = drain_compaction(
@@ -378,7 +378,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("fold the move");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("floor at the move");
     let (manifest_no, _) = drain_compaction(
@@ -486,7 +486,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         .expect("parent lookup")
         .expect("the child is bound");
     assert_eq!(parent.parent_inode_id, last_parent);
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("floor at the last move");
     let (manifest_no, _) = drain_compaction(

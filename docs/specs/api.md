@@ -1079,7 +1079,7 @@ A maintenance run body names exactly one job with `kind`:
 | `metadata_compaction` | None | `compaction`, tagged by `outcome`; a published outcome includes the manifest number and row, byte, and segment counts |
 | `gc` | Optional `grace_window_ms` | The collection result |
 | `grep_gc` | None | `deleted_segments`, `deleted_other_objects`, `namespace_reaped`, and `retained_candidates` |
-| `retention` | None | `retention_floor_seq` |
+| `retention` | Optional `to_seq` or `cutoff_at_ms` | `retention_floor_seq` |
 | `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. Grants `admin` on the root row to the principal and keeps every other root grant, through a commit that checks no subject and is attributed to `Loonfs-Actor`. Use it when an ACL namespace has lost every administrator. |
 
 The response carries the same `kind`, the addressed `namespace_id`, and that
@@ -1120,7 +1120,7 @@ byte, and segment counts. `cancelled` means the caller cancelled the job.
 or all publication attempts lost. `fenced` means another process advanced
 the manifest's compactor epoch. These last three outcomes publish no manifest.
 
-For `metadata`, `max_wal_tail_objects` overrides the fold threshold. Zero and values above the write-rejection threshold return `invalid_request`. A tail below the threshold is still folded once it goes idle: its newest commit is as old as the server's configured idle period, 15 minutes by default, on the server's clock ([format: maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is retained unless the request uses `kind: "retention"`. For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace ([format: upload cleanup](format.md#116-upload-session-cleanup)).
+For `metadata`, `max_wal_tail_objects` overrides the fold threshold. Zero and values above the write-rejection threshold return `invalid_request`. A tail below the threshold is still folded once it goes idle: its newest commit is as old as the server's configured idle period, 15 minutes by default, on the server's clock ([format: maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is retained unless the request uses `kind: "retention"`. For `retention`, the floor moves to the folded manifest head unless the request names one target. `to_seq` moves it to that sequence, or to the folded manifest head when the sequence is above it. `cutoff_at_ms` is a Unix time in milliseconds: the floor moves to the last commit committed at or before it. The server reads commits upward from the current floor and stops at the first commit whose `committed_at_ms` is later than the cutoff, because commit times come from writers' clocks and need not increase with sequence. A request that names both targets returns `invalid_request`. A target at or below the current floor changes nothing, and the response reports the current floor ([format: advancing the floor](format.md#101-advancing-the-retention-floor)). For `gc`, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions keep their leases and completed content keeps its derived reclamation grace ([format: upload cleanup](format.md#116-upload-session-cleanup)).
 
 Responses contain counts for that call. Concurrent calls can overlap deletion
 attempts, so these counts are operational summaries. No collection state is
@@ -1130,11 +1130,15 @@ Each GC request runs one complete stateless pass.
 `GcRequest` accepts `grace_window_ms`. It has no cursor.
 Nothing sweeps unless `gc` is present.
 
-The retention floor bounds incremental replay only. File revision history
-is never pruned: a revisions listing is always complete, however far the
-floor has advanced. File content and recoverable deletions in the trash are
-never pruned either. All of them remain at least until the namespace is
-deleted and retired, and no operation in this version reclaims file history.
+The retention floor bounds incremental replay and file revision history.
+File history above the retention floor is complete; at or below the floor
+each file keeps its newest revision. Once the floor advances, a base
+compaction removes the older revisions, so a revision listing ends at that
+newest revision and reading or restoring a removed revision returns
+`revision_not_found`. A deleted file keeps its newest revision, so undelete
+still restores its content. File content and recoverable deletions in the
+trash are never pruned. They remain at least until the namespace is deleted
+and retired, and no operation in this version reclaims file content.
 
 #### Checkpoint inventory
 
@@ -1316,16 +1320,17 @@ Retirement eligibility and content reclamation follow [format sections 9.5](form
 Retention is coarse: a deleted ancestor keeps every object it
 published while a live descendant still depends on it. GC does not select
 individual published objects within a namespace. Deleting a file or tree in an active
-namespace also does not reclaim its published content, because LoonFS retains
-every file revision.
+namespace also does not reclaim its published content, and neither does a
+compaction that removes old revisions at or below the retention floor.
 
 The metadata retention floor is separate. It limits WAL replay history and
-makes older WAL objects eligible for GC. Advance it explicitly with
-`POST .../runs` and body `{"kind":"retention"}`, or
-`loonfs maintenance retention advance`. It does not remove file revisions.
-Completed upload sessions in active namespaces use the derived content
-reclamation grace, slightly longer than seven days, before GC can reclaim
-staged content that no retained revision references.
+file revision history, and makes older WAL objects eligible for GC. Advance
+it explicitly with `POST .../runs` and body `{"kind":"retention"}`, or
+`loonfs maintenance retention advance`. After it advances, a base compaction
+keeps every revision above the floor and each file's newest revision at or
+below it. Completed upload sessions in active namespaces use the derived
+content reclamation grace, slightly longer than seven days, before GC can
+reclaim staged content that no commit published.
 
 Run GC repeatedly, including after a pass finds nothing left to delete. An
 already-issued upload capability can write an object after deletion, and a
@@ -2027,15 +2032,19 @@ can expose a partial or unverified prefix before a later error.
 Revision listings return newest revisions first and use the standard
 `limit`/`cursor` pattern. The path route resolves the current inode first; the
 inode route addresses it directly. Both return the same path-free response.
-`next_cursor` is included only when another page is available. Revision
-history is not pruned, so paging to the end reaches revision 1.
+`next_cursor` is included only when another page is available. File history
+above the retention floor is complete; at or below the floor each file keeps
+its newest revision, so paging to the end reaches revision 1 only while no
+base compaction has removed it. The cursor resumes after the last revision
+returned, so a compaction between pages neither repeats nor skips a retained
+revision.
 
 The inode revision route,
 `GET /inodes/{inode_id}/revisions/{revision_no}/content`, reads and verifies
 a revision without resolving a current path. Deleted files remain readable
 while their revision rows are retained. A directory returns `path_conflict`,
-an unknown inode returns `inode_not_found`, and an unknown revision returns
-`revision_not_found`.
+an unknown inode returns `inode_not_found`, and an unknown or removed
+revision returns `revision_not_found`.
 
 `GET /inodes/{inode_id}/content` reads the current revision of a visible file
 inode wherever it is bound, streamed and verified like the path route. Like
@@ -3102,6 +3111,9 @@ target may still read them. It verifies the checkpoint, then installs the target
 
 The response contains the new namespace's initial state. Its head sequence and
 retention floor equal the captured basis sequence. The target's first data commit is one sequence above that head.
+Inherited file history follows the floor rule from the start: after the
+target's first base compaction, each inherited file keeps its newest revision
+at or below the fork point, plus the revisions the target adds.
 
 If the target ID is active, the server returns `namespace_exists` before writing a source pin. If it is deleted, the server returns `namespace_deleted` before writing a source pin. If the source checkpoint cannot be verified, the server returns `checkpoint_unavailable` and no target namespace is installed.
 

@@ -433,9 +433,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// sequence, or `None` when the inode has never had attributes written.
     ///
     /// Both legs filter by `visible_seq`. The revision lookup this is modeled
-    /// on filters only its row-state leg, because a file's revision history
-    /// is append-only and a revision read at the head is the same answer at
-    /// any sequence at or above it. Attributes are not history: each record
+    /// on filters only its row-state leg, because a file revision row is never
+    /// rewritten and a revision read at the head is the same answer at any
+    /// sequence at or above it. Attributes are not history: each record
     /// replaces the one before it, so a checkpoint-basis or fork-basis read
     /// that let a newer manifest row through would answer with a map that
     /// sequence never saw.

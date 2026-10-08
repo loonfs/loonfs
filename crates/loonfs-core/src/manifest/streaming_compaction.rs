@@ -606,8 +606,6 @@ const fn row_cluster(families: &'static [MetadataRowFamily]) -> RetentionCluster
     }
 }
 
-/// Revision rows are never dropped, so they are rewritten in key order.
-const REVISION_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Revisions])];
 const PUBLICATION_CLUSTERS: [RetentionCluster; 1] =
     [row_cluster(&[MetadataRowFamily::ContentPublications])];
 const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Inodes])];
@@ -628,6 +626,11 @@ const ACTIVE_DELETION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     families: &[MetadataRowFamily::ActiveDeletions],
     locality: LocalityGrouping::LeadingKeyComponents(2),
     rule: RetentionRule::ActiveDeletions,
+}];
+const REVISION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
+    families: &[MetadataRowFamily::Revisions],
+    locality: LocalityGrouping::LeadingKeyComponents(1),
+    rule: RetentionRule::WholeState,
 }];
 const ATTRIBUTE_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     families: &[MetadataRowFamily::Attributes],

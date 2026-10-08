@@ -12,7 +12,8 @@ use crate::args::{
     MaintenanceCheckpointDeleteArgs, MaintenanceCheckpointListArgs, MaintenanceCommand,
     MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
     MaintenanceMetadataArgs, MaintenanceNamespaceArgs, MaintenanceRecoverAdministratorArgs,
-    MaintenanceRetentionCommand, MaintenanceStoreCommand, MaintenanceStoreProbeArgs,
+    MaintenanceRetentionAdvanceArgs, MaintenanceRetentionCommand, MaintenanceStoreCommand,
+    MaintenanceStoreProbeArgs,
 };
 use crate::backend::StepBudget;
 use crate::error::CliError;
@@ -278,7 +279,7 @@ async fn run_maintenance_compact(
 async fn run_maintenance_retention_advance(
     kind: CommandKind,
     config_path: &Path,
-    args: MaintenanceNamespaceArgs,
+    args: MaintenanceRetentionAdvanceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let retention_floor_before = context
@@ -293,7 +294,10 @@ async fn run_maintenance_retention_advance(
         .client
         .run_maintenance(
             context.namespace(),
-            &RunMaintenanceRequest::Retention(AdvanceRetentionRequest {}),
+            &RunMaintenanceRequest::Retention(AdvanceRetentionRequest {
+                to_seq: args.to_seq.map(ChangeSeq),
+                cutoff_at_ms: args.before,
+            }),
             context.actor_id.as_ref(),
         )
         .await

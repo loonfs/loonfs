@@ -160,7 +160,7 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
         },
     )
     .await;
-    advance_retention_floor(store, namespace_id)
+    advance_retention_floor(store, None, namespace_id, RetentionTarget::Head)
         .await
         .expect("advance the floor past the deletions");
 
@@ -251,7 +251,7 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
         },
     )
     .await;
-    advance_retention_floor(store, namespace_id)
+    advance_retention_floor(store, None, namespace_id, RetentionTarget::Head)
         .await
         .expect("advance the floor past the renames");
 
@@ -1010,17 +1010,57 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
 }
 
 #[tokio::test]
-async fn compaction_preserves_every_revision_and_publication_below_the_floor() {
+async fn compaction_keeps_the_newest_revision_at_the_floor_and_every_publication() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_bindings_workload(&store, &namespace_id).await;
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    // Below the floor: three revisions of a file that stays and of one that is
+    // deleted. The first write of each creates inodes 2 and 3.
+    for body in ["one", "two", "three"] {
+        for path in ["/live.txt", "/deleted.txt"] {
+            write_file_bytes(&store, &namespace_id, path, body.as_bytes(), &context, None)
+                .await
+                .expect("write a revision");
+        }
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the revisions");
+    }
+    delete_path(&store, &namespace_id, "/deleted.txt", &context, None)
+        .await
+        .expect("delete a file");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint the deletion");
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
+        .await
+        .expect("advance the floor past the deletion");
+    // Above the floor: two more revisions of the file that stays.
+    for body in ["four", "five"] {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/live.txt",
+            body.as_bytes(),
+            &context,
+            None,
+        )
+        .await
+        .expect("write a revision above the floor");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("checkpoint the revision");
+    }
+
     for group in [
         MetadataFamilyGroup::Revisions,
         MetadataFamilyGroup::ContentPublications,
     ] {
         let before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
-
         let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
         let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
         let Ok(result) = run_compaction(
@@ -1034,18 +1074,36 @@ async fn compaction_preserves_every_revision_and_publication_below_the_floor() {
         else {
             panic!("nothing cancelled this job");
         };
-        assert_eq!(
-            result.rows_read, result.rows_written,
-            "a history rebuild drops nothing"
-        );
-
         publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
+        let after = group_rows_of_current_manifest(&store, &namespace_id, group).await;
 
+        if group == MetadataFamilyGroup::ContentPublications {
+            assert_eq!(after, before, "publication rows are never dropped");
+            assert_eq!(result.rows_read, result.rows_written);
+            continue;
+        }
+        let kept: Vec<(u64, u64)> = after[&ApiMetadataRowFamily::Revisions]
+            .iter()
+            .map(|row| match row {
+                MetadataRow::FileRevision(revision) => {
+                    (revision.inode_id.0, revision.revision_no.0)
+                }
+                other => panic!("the revisions family holds a foreign row: {other:?}"),
+            })
+            .collect();
         assert_eq!(
-            group_rows_of_current_manifest(&store, &namespace_id, group).await,
-            before,
-            "revision and publication rows are never dropped"
+            kept,
+            [(2, 5), (2, 4), (2, 3), (3, 3)],
+            "each file keeps the revisions above the floor and its newest at or below it, \
+             and the deleted file keeps its newest"
         );
+        assert!(
+            after[&ApiMetadataRowFamily::Revisions]
+                .iter()
+                .all(|row| before[&ApiMetadataRowFamily::Revisions].contains(row)),
+            "kept rows are input rows, unchanged"
+        );
+        assert_eq!((result.rows_read, result.rows_written), (8, 4));
     }
 }
 
@@ -1403,7 +1461,7 @@ async fn seed_binding_history(
         },
     )
     .await;
-    advance_retention_floor(store, namespace_id)
+    advance_retention_floor(store, None, namespace_id, RetentionTarget::Head)
         .await
         .expect("advance the floor past the deletions");
     write_file_bytes(store, namespace_id, "/late.txt", b"late\n", &context, None)

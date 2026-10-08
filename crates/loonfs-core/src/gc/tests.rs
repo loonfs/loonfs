@@ -11,11 +11,11 @@ use crate::limits::{
     CONTENT_RECLAMATION_GRACE_MS, GC_MIN_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
     UPLOAD_SESSION_LEASE_MS,
 };
-use crate::manifest::advance_retention_floor;
 use crate::manifest::tests::{
     compact_a_family_group, create_checkpoint, mutation_context, write_test_file,
 };
 use crate::manifest::MetadataCompactionPolicy;
+use crate::manifest::{advance_retention_floor, RetentionTarget};
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use crate::pin::record::delete_pin;
 use crate::test_support::ops::create;
@@ -205,7 +205,7 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance floor");
 
@@ -1053,7 +1053,7 @@ async fn completed_uploads_use_publication_lookups_without_scanning_segments() {
             crate::manifest::fold_wal(&store, &namespace_id)
                 .await
                 .expect("fold wal");
-            advance_retention_floor(&store, &namespace_id)
+            advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
                 .await
                 .expect("advance floor");
         }
@@ -1140,7 +1140,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance floor");
 
@@ -1334,7 +1334,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance floor");
     // A commit past the floor: its WAL object is the live replay gap.
@@ -2129,7 +2129,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance floor");
 

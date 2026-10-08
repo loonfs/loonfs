@@ -109,7 +109,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     .expect("advance source");
     engine.fold_wal().await.expect("fold current source");
     let floor = engine
-        .advance_retention_floor()
+        .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await
         .expect("advance floor");
     assert!(floor.retention_floor_seq > snapshot.captured_seq);

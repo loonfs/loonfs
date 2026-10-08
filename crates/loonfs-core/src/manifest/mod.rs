@@ -39,6 +39,7 @@ pub use self::compaction_merge::{
 pub use self::compaction_step::{CompactionStepOutcome, MetadataCompactionPolicy};
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::fold::{fold_wal_tail, next_run_no_after, FoldedWalTail};
+pub use self::retention::RetentionTarget;
 pub use self::runs::{MetadataFamilyGroup, MetadataLsmPolicy};
 pub use self::statistics::{
     load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,

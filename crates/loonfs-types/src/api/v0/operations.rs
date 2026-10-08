@@ -1475,11 +1475,25 @@ impl RetainedCandidates {
     }
 }
 
-/// An option-free request that selects retention-floor advancement.
+/// Selects retention-floor advancement, to the folded manifest head unless
+/// the request names one target.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct AdvanceRetentionRequest {}
+pub struct AdvanceRetentionRequest {
+    /// Advance the floor to this sequence, or to the folded manifest head
+    /// when that is lower. Cannot be combined with `cutoff_at_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub to_seq: Option<ChangeSeq>,
+    /// Advance the floor to the last commit committed at or before this Unix
+    /// time in milliseconds. Commits are read upward from the floor, and the
+    /// first one committed after this time ends the advance. Cannot be
+    /// combined with `to_seq`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub cutoff_at_ms: Option<u64>,
+}
 
 /// Result of advancing the retention floor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1505,7 +1519,8 @@ pub enum RunMaintenanceRequest {
     Gc(GcRequest),
     /// Collects aged, unreferenced grep index objects.
     GrepGc {},
-    /// Advances the retention floor to the folded manifest head.
+    /// Advances the retention floor, to the folded manifest head unless the
+    /// request names a target.
     Retention(AdvanceRetentionRequest),
     /// Restores a root administrator.
     RecoverAdministrator(RecoverAdministratorRequest),
@@ -2622,7 +2637,23 @@ mod tests {
             ),
             (
                 serde_json::json!({"kind": "retention"}),
-                Some(RunMaintenanceRequest::Retention(AdvanceRetentionRequest {})),
+                Some(RunMaintenanceRequest::Retention(
+                    AdvanceRetentionRequest::default(),
+                )),
+            ),
+            (
+                serde_json::json!({"kind": "retention", "to_seq": 12}),
+                Some(RunMaintenanceRequest::Retention(AdvanceRetentionRequest {
+                    to_seq: Some(ChangeSeq(12)),
+                    cutoff_at_ms: None,
+                })),
+            ),
+            (
+                serde_json::json!({"kind": "retention", "cutoff_at_ms": 1_752_624_000_000u64}),
+                Some(RunMaintenanceRequest::Retention(AdvanceRetentionRequest {
+                    to_seq: None,
+                    cutoff_at_ms: Some(1_752_624_000_000),
+                })),
             ),
             (
                 serde_json::json!({"kind": "grep_gc"}),
