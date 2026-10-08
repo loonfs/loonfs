@@ -9,7 +9,7 @@ use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::time::Deadline;
-use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CreateNamespaceOptions, Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
@@ -19,8 +19,8 @@ use loonfs_types::{
     api::v0::FilesystemChange,
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    DirectoryPageCursor, EntryInodeKind, InodeId, NameKey, NamespaceId, Page, PageRequest,
-    PathEntry, RevisionNo,
+    DirectoryPageCursor, EntryInodeKind, InodeId, NameKey, NamespaceId, NamespaceNaming, Page,
+    PageRequest, PathEntry, RevisionNo,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -1756,15 +1756,41 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
 #[tokio::test]
 async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
     #[derive(serde::Deserialize)]
-    struct NameMapping {
+    struct NameVector {
         display_name: loonfs_types::DisplayName,
-        name_key: NameKey,
+        case_insensitive: NameKey,
+        case_sensitive: NameKey,
     }
 
-    let corpus: Vec<NameMapping> = serde_json::from_str(include_str!(
+    let corpus: Vec<NameVector> = serde_json::from_str(include_str!(
         "../../../loonfs-types/tests/golden/name_folding.v1.json"
     ))
     .expect("folding corpus");
+    for naming in [
+        NamespaceNaming::CaseInsensitive,
+        NamespaceNaming::CaseSensitive,
+    ] {
+        assert_corpus_admission_and_lookup(
+            naming,
+            corpus.iter().map(|vector| {
+                let name_key = match naming {
+                    NamespaceNaming::CaseInsensitive => &vector.case_insensitive,
+                    NamespaceNaming::CaseSensitive => &vector.case_sensitive,
+                };
+                (&vector.display_name, name_key)
+            }),
+        )
+        .await;
+    }
+}
+
+/// Creates each display name and its name key as root directories of a
+/// namespace with `naming`: a spelling whose key is already taken is refused
+/// before any write, and both spellings resolve to the first entry created.
+async fn assert_corpus_admission_and_lookup<'a>(
+    naming: NamespaceNaming,
+    corpus: impl Iterator<Item = (&'a loonfs_types::DisplayName, &'a NameKey)>,
+) {
     let temp_dir = tempdir().expect("tempdir");
     let store = loonfs_test_support::stores::RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -1772,14 +1798,22 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
     );
     let context = mutation_context();
     let namespace_id = namespace_id("demo");
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap namespace");
+    bootstrap_namespace_with_options(
+        &store,
+        &namespace_id,
+        &context,
+        &CreateNamespaceOptions {
+            naming,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("bootstrap namespace");
     let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone());
     let mut entries = std::collections::BTreeMap::<NameKey, PathEntry>::new();
-    for mapping in corpus {
-        let stored_path = format!("/{}", mapping.display_name);
-        let lookup_path = format!("/{}", mapping.name_key);
+    for (display_name, name_key) in corpus {
+        let stored_path = format!("/{display_name}");
+        let lookup_path = format!("/{name_key}");
         for path in [&stored_path, &lookup_path] {
             let candidate = CommitCandidate::new(CommitRequest::single(
                 CommitId::generate(),
@@ -1803,7 +1837,7 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
                 .into_iter()
                 .next()
                 .expect("one admission result");
-            if entries.contains_key(&mapping.name_key) {
+            if entries.contains_key(name_key) {
                 let error = result.expect_err("folded sibling collision");
                 assert_eq!(error.code(), ErrorCode::PathConflict);
                 assert_eq!(store.counts().puts, 0);
@@ -1815,14 +1849,14 @@ async fn the_folding_corpus_pins_directory_admission_collisions_and_lookup() {
             let resolved = resolve_path(&store, &namespace_id, path)
                 .await
                 .expect("resolve corpus spelling");
-            if let Some(entry) = entries.get(&mapping.name_key) {
+            if let Some(entry) = entries.get(name_key) {
                 assert_eq!(&resolved, entry);
             } else {
-                assert_eq!(named_entry(&resolved), mapping.display_name.as_str());
+                assert_eq!(named_entry(&resolved), display_name.as_str());
                 assert!(entries
                     .values()
                     .all(|other| other.inode_id != resolved.inode_id));
-                entries.insert(mapping.name_key.clone(), resolved);
+                entries.insert(name_key.clone(), resolved);
             }
         }
     }

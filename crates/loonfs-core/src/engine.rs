@@ -467,8 +467,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             &self.mutation_context()?,
             actor_id,
-            &options.access,
-            options.allow_existing,
+            options,
         )
         .await
     }

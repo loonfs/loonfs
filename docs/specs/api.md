@@ -994,7 +994,7 @@ The table below lists the retry class for every v0 operation.
 | Check server health | `get_health` | `idempotent` | `GET /health` |
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`; requires the `Loonfs-Actor` header and accepts the optional `access` body field |
+| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`; requires the `Loonfs-Actor` header and accepts the optional `access` and `naming` body fields |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`; `snapshot_id` is optional) |
@@ -1653,7 +1653,8 @@ or separate display names. Representative request:
 ```json
 {
   "namespace_id": "demo",
-  "access": {"kind":"unrestricted"}
+  "access": {"kind":"unrestricted"},
+  "naming": "case_insensitive"
 }
 ```
 
@@ -1666,6 +1667,7 @@ starts at sequence 0 with a retention floor of 0:
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "access": {"kind":"unrestricted"},
+  "naming": "case_insensitive",
   "head_seq": 0,
   "retention_floor_seq": 0
 }
@@ -1706,6 +1708,7 @@ namespace returns `410` with `namespace_deleted`.
 {
   "namespace_id": "demo",
   "access": {"kind": "unrestricted"},
+  "naming": "case_insensitive",
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "head_seq": 418,
@@ -1719,13 +1722,14 @@ The `NamespaceMetadata` object has exactly these fields:
 | --- | --- |
 | `namespace_id` | Durable namespace id. |
 | `access` | Access mode: `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
+| `naming` | Naming mode: `"case_insensitive"` or `"case_sensitive"`. It decides how sibling names compare ([format section 1.4](format.md#14-names-and-paths)). |
 | `created_at_ms` | Time the namespace was created, in Unix milliseconds. |
 | `created_by` | Actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | Present only for a fork. Contains `source_namespace_id` and the captured `source_head_seq`. |
 | `head_seq` | Current visible namespace sequence. |
 | `retention_floor_seq` | Oldest position a change feed can resume after. The feed returns changes above it. |
 
-The create request carries `access` with the same shape plus `root_grants` for the `acl` kind, defaulting to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`.
+The create request carries `access` with the same shape plus `root_grants` for the `acl` kind, defaulting to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. It also carries `naming`, defaulting to `case_insensitive`. Both modes are fixed for the namespace's life, and a fork keeps its source's modes.
 
 Namespace status derives the live sequence from the manifest and numbered
 WAL tip. A cold read follows a lagging hint by probing forward. A missing
@@ -3074,6 +3078,7 @@ Representative response:
   "created_at_ms": 1752625000000,
   "created_by": "usr_8f3c",
   "access": {"kind":"unrestricted"},
+  "naming": "case_insensitive",
   "fork_basis": {
     "source_namespace_id": "demo",
     "source_head_seq": 418
@@ -3193,7 +3198,7 @@ candidate. A delete or an undelete therefore changes no postings, and an
 exact query after an undelete includes the restored files without a rebuild.
 
 The `path_prefix` value is a complete absolute path, not a partial textual
-segment prefix. The server resolves it using the name-key folding rule
+segment prefix. The server resolves it using the namespace's naming mode
 ([format: names and paths](format.md#14-names-and-paths)), then limits results to descendants of that
 inode. It must therefore
 use the same canonical spelling as any other path. A scope that does not exist
@@ -3255,7 +3260,7 @@ A conforming server must:
    `hint.json`, plus the numbered WAL objects after the folded boundary, replayed
    as logical commits; checkpoints pin manifest versions for retention, stable
    reads, restore, and forks;
-8. fold sibling names into name keys by the v0 rule ([format: names and paths](format.md#14-names-and-paths));
+8. map sibling names to name keys by each namespace's naming mode, applying each mode's rule exactly ([format: names and paths](format.md#14-names-and-paths));
 9. keep control-plane sessions and any implementation-specific coordinators
    out of namespace history and the change feed;
 10. preserve per-commit idempotency, ordering, and change-feed identity even

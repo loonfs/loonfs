@@ -22,8 +22,7 @@ pub(crate) async fn create<S: ObjectStore + ?Sized>(
         namespace_id,
         context,
         &loonfs_test_support::test_actor(),
-        &loonfs_types::NamespaceAccess::unrestricted(),
-        false,
+        &crate::options::CreateNamespaceOptions::default(),
     )
     .await
 }

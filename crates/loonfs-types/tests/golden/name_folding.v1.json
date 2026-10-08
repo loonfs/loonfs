@@ -1,166 +1,207 @@
 [
   {
     "display_name": "Café.TXT",
-    "name_key": "café.txt"
+    "case_insensitive": "café.txt",
+    "case_sensitive": "Café.TXT"
   },
   {
     "display_name": "CAFÉ.txt",
-    "name_key": "café.txt"
+    "case_insensitive": "café.txt",
+    "case_sensitive": "CAFÉ.txt"
   },
   {
     "display_name": "Straße",
-    "name_key": "strasse"
+    "case_insensitive": "strasse",
+    "case_sensitive": "Straße"
   },
   {
     "display_name": "STRASSE",
-    "name_key": "strasse"
+    "case_insensitive": "strasse",
+    "case_sensitive": "STRASSE"
   },
   {
     "display_name": "ẞ",
-    "name_key": "ss"
+    "case_insensitive": "ss",
+    "case_sensitive": "ẞ"
   },
   {
     "display_name": "ﬀ",
-    "name_key": "ff"
+    "case_insensitive": "ff",
+    "case_sensitive": "ﬀ"
   },
   {
     "display_name": "ﬃ",
-    "name_key": "ffi"
+    "case_insensitive": "ffi",
+    "case_sensitive": "ﬃ"
   },
   {
     "display_name": "FFI",
-    "name_key": "ffi"
+    "case_insensitive": "ffi",
+    "case_sensitive": "FFI"
   },
   {
     "display_name": "Σ",
-    "name_key": "σ"
+    "case_insensitive": "σ",
+    "case_sensitive": "Σ"
   },
   {
     "display_name": "σ",
-    "name_key": "σ"
+    "case_insensitive": "σ",
+    "case_sensitive": "σ"
   },
   {
     "display_name": "ς",
-    "name_key": "σ"
+    "case_insensitive": "σ",
+    "case_sensitive": "ς"
   },
   {
     "display_name": "ΟΣ",
-    "name_key": "οσ"
+    "case_insensitive": "οσ",
+    "case_sensitive": "ΟΣ"
   },
   {
     "display_name": "ΐ",
-    "name_key": "ΐ"
+    "case_insensitive": "ΐ",
+    "case_sensitive": "ΐ"
   },
   {
     "display_name": "Ϊ́",
-    "name_key": "ΐ"
+    "case_insensitive": "ΐ",
+    "case_sensitive": "Ϊ́"
   },
   {
     "display_name": "I",
-    "name_key": "i"
+    "case_insensitive": "i",
+    "case_sensitive": "I"
   },
   {
     "display_name": "i",
-    "name_key": "i"
+    "case_insensitive": "i",
+    "case_sensitive": "i"
   },
   {
     "display_name": "İ",
-    "name_key": "i̇"
+    "case_insensitive": "i̇",
+    "case_sensitive": "İ"
   },
   {
     "display_name": "i̇",
-    "name_key": "i̇"
+    "case_insensitive": "i̇",
+    "case_sensitive": "i̇"
   },
   {
     "display_name": "ı",
-    "name_key": "ı"
+    "case_insensitive": "ı",
+    "case_sensitive": "ı"
   },
   {
     "display_name": "Kelvin",
-    "name_key": "kelvin"
+    "case_insensitive": "kelvin",
+    "case_sensitive": "Kelvin"
   },
   {
     "display_name": "Ångström",
-    "name_key": "ångström"
+    "case_insensitive": "ångström",
+    "case_sensitive": "Ångström"
   },
   {
     "display_name": "Ångström",
-    "name_key": "ångström"
+    "case_insensitive": "ångström",
+    "case_sensitive": "Ångström"
   },
   {
     "display_name": "МОСКВА",
-    "name_key": "москва"
+    "case_insensitive": "москва",
+    "case_sensitive": "МОСКВА"
   },
   {
     "display_name": "Αθήνα",
-    "name_key": "αθήνα"
+    "case_insensitive": "αθήνα",
+    "case_sensitive": "Αθήνα"
   },
   {
     "display_name": "東京",
-    "name_key": "東京"
+    "case_insensitive": "東京",
+    "case_sensitive": "東京"
   },
   {
     "display_name": "العربية",
-    "name_key": "العربية"
+    "case_insensitive": "العربية",
+    "case_sensitive": "العربية"
   },
   {
     "display_name": "שלום",
-    "name_key": "שלום"
+    "case_insensitive": "שלום",
+    "case_sensitive": "שלום"
   },
   {
     "display_name": "नमस्ते",
-    "name_key": "नमस्ते"
+    "case_insensitive": "नमस्ते",
+    "case_sensitive": "नमस्ते"
   },
   {
     "display_name": "가",
-    "name_key": "가"
+    "case_insensitive": "가",
+    "case_sensitive": "가"
   },
   {
     "display_name": "가",
-    "name_key": "가"
+    "case_insensitive": "가",
+    "case_sensitive": "가"
   },
   {
     "display_name": "𐐀",
-    "name_key": "𐐨"
+    "case_insensitive": "𐐨",
+    "case_sensitive": "𐐀"
   },
   {
     "display_name": "Ა",
-    "name_key": "ა"
+    "case_insensitive": "ა",
+    "case_sensitive": "Ა"
   },
   {
     "display_name": "ა",
-    "name_key": "ა"
+    "case_insensitive": "ა",
+    "case_sensitive": "ა"
   },
   {
     "display_name": "Ꞹ",
-    "name_key": "ꞹ"
+    "case_insensitive": "ꞹ",
+    "case_sensitive": "Ꞹ"
   },
   {
     "display_name": "ꞹ",
-    "name_key": "ꞹ"
+    "case_insensitive": "ꞹ",
+    "case_sensitive": "ꞹ"
   },
   {
     "display_name": "Ɤ",
-    "name_key": "ɤ"
+    "case_insensitive": "ɤ",
+    "case_sensitive": "Ɤ"
   },
   {
     "display_name": "ɤ",
-    "name_key": "ɤ"
+    "case_insensitive": "ɤ",
+    "case_sensitive": "ɤ"
   },
   {
     "display_name": "Ꭰ",
-    "name_key": "Ꭰ"
+    "case_insensitive": "Ꭰ",
+    "case_sensitive": "Ꭰ"
   },
   {
     "display_name": "ꭰ",
-    "name_key": "Ꭰ"
+    "case_insensitive": "Ꭰ",
+    "case_sensitive": "ꭰ"
   },
   {
     "display_name": "readme-123.txt",
-    "name_key": "readme-123.txt"
+    "case_insensitive": "readme-123.txt",
+    "case_sensitive": "readme-123.txt"
   },
   {
     "display_name": "123_+-",
-    "name_key": "123_+-"
+    "case_insensitive": "123_+-",
+    "case_sensitive": "123_+-"
   }
 ]

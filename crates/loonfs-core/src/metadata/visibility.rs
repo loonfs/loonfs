@@ -9,7 +9,9 @@ use super::{
     AccessRevisionRecord, DirentryBindingRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
 use futures::FutureExt;
-use loonfs_types::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
+use loonfs_types::{
+    AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, NamespaceNaming, ROOT_INODE_ID,
+};
 use std::collections::BTreeSet;
 use std::future::Future;
 
@@ -337,9 +339,10 @@ pub(crate) async fn visible_page_child<R: MetadataVisibilityReads>(
 
 /// Resolves `absolute_path` component by component through visible
 /// directories and visible child bindings, starting at the canonical root
-/// inode.
+/// inode. Each component folds into its name key under `naming`.
 pub(crate) async fn resolve_visible_path<R>(
     reads: &mut R,
+    naming: NamespaceNaming,
     absolute_path: &AbsolutePath,
 ) -> Result<ResolvedVisiblePath, R::Error>
 where
@@ -385,7 +388,7 @@ where
         let not_found = || VisiblePathError::PathNotFound {
             absolute_path: current_absolute_path.join(&display_name).to_string(),
         };
-        let name_key = NameKey::for_display_name(&display_name);
+        let name_key = NameKey::for_display_name(naming, &display_name);
         let direntry = reads
             .active_child_binding(current_inode_id, &name_key)
             .await?

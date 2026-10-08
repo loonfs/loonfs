@@ -10,7 +10,9 @@ use super::{
     AccessRevisionRecord, DirentryBindingRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
 use loonfs_types::format::manifest::DeltaPosition;
-use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey};
+use loonfs_types::{
+    AbsolutePath, ActorId, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey, NamespaceNaming,
+};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
@@ -186,11 +188,13 @@ impl MetadataState {
 
     pub fn resolve_visible_path(
         &self,
+        naming: NamespaceNaming,
         absolute_path: &AbsolutePath,
         base_seq: ChangeSeq,
     ) -> Result<ResolvedVisiblePath, VisiblePathError> {
         resolve_in_memory_read(visibility::resolve_visible_path(
             &mut self.reads_at_seq(base_seq),
+            naming,
             absolute_path,
         ))
     }

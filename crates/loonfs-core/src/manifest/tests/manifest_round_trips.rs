@@ -783,6 +783,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
         access: loonfs_types::NamespaceAccess::Unrestricted {},
+        naming: loonfs_types::NamespaceNaming::CaseInsensitive,
         fork_basis: None,
         status: loonfs_types::format::control::NamespaceStatus::Active {},
         writer: None,

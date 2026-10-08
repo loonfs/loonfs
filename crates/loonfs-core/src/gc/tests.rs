@@ -2806,8 +2806,10 @@ async fn create_on_a_deleted_id_fails_before_and_after_content_reclamation() {
                 &namespace_id,
                 &deadline,
                 &loonfs_test_support::test_actor(),
-                &loonfs_types::NamespaceAccess::unrestricted(),
-                allow_existing,
+                &crate::options::CreateNamespaceOptions {
+                    allow_existing,
+                    ..Default::default()
+                },
             )
             .await
             .expect_err("deleted id");

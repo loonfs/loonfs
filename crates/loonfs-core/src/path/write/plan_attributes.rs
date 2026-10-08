@@ -46,7 +46,12 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
         Absence::Path(absolute_path.as_str()),
     )
     .await?;
-    ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
+    ensure_expected_inode(
+        view.view.naming(),
+        &target,
+        expected_inode_id,
+        &final_component(absolute_path)?,
+    )?;
     update_attributes(
         view,
         target.inode_id,

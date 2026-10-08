@@ -756,6 +756,27 @@ fn recursive_copy_rejects_its_own_subtree_including_equivalent_names() {
 }
 
 #[test]
+fn recursive_copy_containment_follows_the_namespace_naming_mode() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo", "--naming", "case_sensitive"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let shown = harness.run(&["--json", "namespace", "show"]);
+    assert_success(&shown);
+    assert_eq!(json_data(&shown)["naming"], "case_sensitive");
+    assert!(stdout_string(&harness.run(&["namespace", "show"])).contains("naming: case_sensitive"));
+
+    assert_success(&harness.run(&["mkdir", "-p", "/Docs/sub"]));
+    assert_success(&harness.run(&["mkdir", "/docs"]));
+    // `/docs` is a different directory in this namespace, not the source.
+    assert_success(&harness.run(&["cp", "-r", "/Docs", "/docs/copy"]));
+    assert_success(&harness.run(&["--json", "stat", "/docs/copy/sub"]));
+    let inside = harness.run(&["--json", "cp", "-r", "/Docs", "/Docs/sub/copy"]);
+    assert_failure(&inside);
+    assert_eq!(json_error(&inside)["code"], "invalid_request");
+}
+
+#[test]
 fn recursive_transfers_preserve_a_completely_empty_root() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

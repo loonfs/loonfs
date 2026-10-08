@@ -940,15 +940,17 @@ mod tests {
             &restricted,
             &context,
             &loonfs_test_support::test_actor(),
-            &NamespaceAccess::Acl {
-                principal_scope: principal_scope.clone(),
-                root_grants: AccessGrants::new(BTreeMap::from([(
-                    administrator.clone(),
-                    AccessRights::ADMIN,
-                )]))
-                .expect("root grants"),
+            &crate::options::CreateNamespaceOptions {
+                access: NamespaceAccess::Acl {
+                    principal_scope: principal_scope.clone(),
+                    root_grants: AccessGrants::new(BTreeMap::from([(
+                        administrator.clone(),
+                        AccessRights::ADMIN,
+                    )]))
+                    .expect("root grants"),
+                },
+                ..Default::default()
             },
-            false,
         )
         .await
         .expect("bootstrap a restricted namespace");

@@ -129,7 +129,7 @@ pub use ids::{
     MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
 };
 pub use manifest::{MetadataFamilyGroup, NamespaceAccess};
-pub use name_policy::name_key_for_display_name;
+pub use name_policy::{name_key_for_display_name, NamespaceNaming};
 pub use options::AttributeInclusion;
 pub use pagination::{
     decode_cursor, decode_token, encode_cursor, encode_token, DirectoryPageCursor, EffectiveLimit,

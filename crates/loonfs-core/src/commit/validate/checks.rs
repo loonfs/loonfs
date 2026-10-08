@@ -708,7 +708,7 @@ async fn validate_name_absent<S: ObjectStore + ?Sized>(
 ) -> Result<NameKey, CoreError> {
     validate_inode_kind(view, parent_inode_id, InodeKind::Directory, operand).await?;
 
-    let name_key = NameKey::for_display_name(display_name);
+    let name_key = NameKey::for_display_name(view.view().naming(), display_name);
     if let Some(existing) = view
         .view()
         .visible_child(parent_inode_id, &name_key)

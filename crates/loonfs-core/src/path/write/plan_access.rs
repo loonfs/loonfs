@@ -74,7 +74,12 @@ pub(super) async fn plan_update_access<S: ObjectStore + ?Sized>(
             }
         }
     } else {
-        ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
+        ensure_expected_inode(
+            view.view.naming(),
+            &target,
+            expected_inode_id,
+            &final_component(absolute_path)?,
+        )?;
     }
     Ok(update_access(
         target.inode_id,

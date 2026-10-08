@@ -7,14 +7,18 @@ use super::context::{
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, CurrentArgs, NamespaceAccessArg, NamespaceCommand, NamespaceCreateArgs,
-    NamespaceDeleteArgs, NamespaceForkArgs, NamespaceShowArgs, NamespaceUseArgs, RuntimeBehavior,
+    NamespaceDeleteArgs, NamespaceForkArgs, NamespaceNamingArg, NamespaceShowArgs,
+    NamespaceUseArgs, RuntimeBehavior,
 };
 use crate::config::mutate_config;
 use crate::error::CliError;
 use crate::profiles::set_default_namespace;
 use crate::prompt::prompt_line;
 use crate::resolve::{load_cli_config, parse_namespace_id, resolve_actor, resolve_namespace};
-use loonfs_types::{AccessGrants, AccessRights, NamespaceAccess, PrincipalId, PrincipalScope};
+use loonfs_client::CreateNamespaceOptions;
+use loonfs_types::{
+    AccessGrants, AccessRights, NamespaceAccess, NamespaceNaming, PrincipalId, PrincipalScope,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -92,10 +96,19 @@ async fn run_namespace_create(
         .map_err(|error| error.with_param("namespace_id"))
         .map_err(|error| context.fail(kind, error))?;
     let access = namespace_access(&args).map_err(|error| context.fail(kind, error))?;
+    let naming = match args.naming {
+        NamespaceNamingArg::CaseInsensitive => NamespaceNaming::CaseInsensitive,
+        NamespaceNamingArg::CaseSensitive => NamespaceNaming::CaseSensitive,
+    };
     let namespace = context
         .target
         .client
-        .create_namespace(&namespace_id, &actor_id, access)
+        .create_namespace_with_options(
+            &namespace_id,
+            &actor_id,
+            access,
+            &CreateNamespaceOptions { naming },
+        )
         .await
         .map_err(|error| context.fail(kind, error))?;
 

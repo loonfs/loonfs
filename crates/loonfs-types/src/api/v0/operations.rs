@@ -7,7 +7,7 @@ use crate::{
     AttributesRevisionNo, BindingVersion, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
     ManifestNo, NamespaceId, PinId, RevisionNo, WriterEpoch, WriterId,
 };
-use crate::{NamespaceAccess, PrincipalId, PrincipalScope};
+use crate::{NamespaceAccess, NamespaceNaming, PrincipalId, PrincipalScope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -174,6 +174,10 @@ pub struct CreateNamespaceRequest {
     /// unrestricted.
     #[serde(default = "NamespaceAccess::unrestricted")]
     pub access: NamespaceAccess,
+    /// How sibling names compare, fixed for the namespace's life. Defaults
+    /// to `case_insensitive`.
+    #[serde(default)]
+    pub naming: NamespaceNaming,
     /// Durable namespace id to create.
     pub namespace_id: NamespaceId,
 }
@@ -197,6 +201,8 @@ pub struct ForkNamespaceRequest {
 pub struct NamespaceMetadata {
     /// The namespace's access mode.
     pub access: NamespaceAccessMode,
+    /// How sibling names compare in the namespace.
+    pub naming: NamespaceNaming,
     /// Namespace ID.
     pub namespace_id: NamespaceId,
     /// Time the namespace was created, in Unix milliseconds.
@@ -1809,6 +1815,7 @@ mod tests {
     fn namespace_wire_shape_has_only_core_state() {
         let namespace = NamespaceMetadata {
             access: NamespaceAccessMode::Unrestricted {},
+            naming: NamespaceNaming::CaseSensitive,
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
@@ -1821,6 +1828,7 @@ mod tests {
             serde_json::json!({
                 "namespace_id": "demo",
                 "access": {"kind": "unrestricted"},
+                "naming": "case_sensitive",
                 "created_at_ms": 1000,
                 "created_by": "test",
                 "head_seq": 11,

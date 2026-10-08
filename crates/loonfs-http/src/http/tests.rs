@@ -72,6 +72,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "bounded_merge_published",
     "built_through_seq",
     "captured_seq",
+    "case_insensitive",
+    "case_sensitive",
     "checkpoint_id",
     "checkpoint_not_deletable",
     "checksum",

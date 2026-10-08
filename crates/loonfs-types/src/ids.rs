@@ -386,10 +386,12 @@ fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
 }
 
 /// Maximum name-key length in UTF-8 bytes. Keys are derived from display
-/// names capped at [`crate::path::MAX_DISPLAY_NAME_BYTES`]; case folding
-/// expands at most threefold in bytes, so 768 admits every key derivable
-/// from a valid name while bounding row keys, filter keys, and cursors.
+/// names capped at [`crate::path::MAX_DISPLAY_NAME_BYTES`]; normalization and
+/// case folding expand at most threefold in bytes, so 768 admits every key
+/// derivable from a valid name while bounding row keys, filter keys, and
+/// cursors.
 pub const MAX_NAME_KEY_BYTES: usize = 768;
+const _: () = assert!(MAX_NAME_KEY_BYTES >= 3 * crate::path::MAX_DISPLAY_NAME_BYTES);
 /// Maximum validated namespace and commit id length in UTF-8 bytes.
 pub const MAX_ID_BYTES: usize = 128;
 
@@ -633,9 +635,20 @@ string_id! {
 }
 
 impl NameKey {
-    /// Computes the lookup key for a display name.
-    pub fn for_display_name(display_name: &crate::DisplayName) -> Self {
-        Self(crate::name_key_for_display_name(display_name.as_str()))
+    /// Computes the lookup key for a display name under a namespace's naming
+    /// mode.
+    ///
+    /// Every key fits [`MAX_NAME_KEY_BYTES`]: normalization and case folding
+    /// expand a code point at most threefold in bytes, and a display name has
+    /// at most [`crate::path::MAX_DISPLAY_NAME_BYTES`].
+    pub fn for_display_name(
+        naming: crate::NamespaceNaming,
+        display_name: &crate::DisplayName,
+    ) -> Self {
+        Self(crate::name_key_for_display_name(
+            naming,
+            display_name.as_str(),
+        ))
     }
 }
 
