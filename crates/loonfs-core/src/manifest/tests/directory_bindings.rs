@@ -412,6 +412,138 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
 }
 
 #[tokio::test]
+async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_base_compaction() {
+    let directory = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("child-moves").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    crate::commit_engine::publish_namespace_commits_batch(
+        &store,
+        &namespace_id,
+        vec![CommitCandidate::new(CommitRequest {
+            commit_id: CommitId::parse("parents").expect("commit id"),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            operations: ["/a", "/b", "/c"]
+                .into_iter()
+                .map(|path| FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse(path).expect("path"),
+                    parents: false,
+                })
+                .collect(),
+            preconditions: Vec::new(),
+        })],
+        &context,
+    )
+    .await
+    .into_iter()
+    .next()
+    .expect("one result")
+    .expect("create the parents");
+    write_file_bytes(&store, &namespace_id, "/c/report", b"body", &context, None)
+        .await
+        .expect("create the child");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the creates");
+    let created = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("created view");
+    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let mut inode_ids = Vec::new();
+    for path in ["/a", "/b", "/c", "/c/report"] {
+        let entry = created
+            .resolve_path(path, AttributeInclusion::Omit, &access)
+            .await
+            .expect("created path");
+        inode_ids.push(entry.inode_id);
+    }
+    let (last_parent, child) = (inode_ids[0], inode_ids[3]);
+    assert!(
+        inode_ids[0] < inode_ids[1] && inode_ids[1] < inode_ids[2],
+        "the child's last edge must sort before its earlier edges"
+    );
+
+    for (source, destination) in [("/c/report", "/b/report"), ("/b/report", "/a/report")] {
+        move_path(&store, &namespace_id, source, destination, &context, None)
+            .await
+            .expect("move the child");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the moves");
+    let moved = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("moved view");
+    let parent = moved
+        .metadata_view()
+        .current_parent_binding_for_child(child)
+        .await
+        .expect("parent lookup")
+        .expect("the child is bound");
+    assert_eq!(parent.parent_inode_id, last_parent);
+    advance_retention_floor(&store, &namespace_id)
+        .await
+        .expect("floor at the last move");
+    let (manifest_no, _) = drain_compaction(
+        &store,
+        &namespace_id,
+        MetadataLsmPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataLsmPolicy::default()
+        },
+    )
+    .await;
+
+    let rebuilt = load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
+        .await
+        .expect("index row counts and digests agree");
+    let forward =
+        manifest_rows_for_family(&rebuilt.metadata_state, ApiMetadataRowFamily::DirentryBinds);
+    assert_eq!(
+        forward.len(),
+        4,
+        "three parents and one edge of the child: {forward:?}"
+    );
+    let child_rows = forward
+        .iter()
+        .filter(|row| matches!(row, MetadataRow::DirentryBinding(binding) if binding.child_inode_id == child))
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(child_rows.as_slice(), [MetadataRow::DirentryBinding(binding)] if binding.is_bound() && binding.parent_inode_id == last_parent && binding.name_key.as_str() == "report"),
+        "{child_rows:?}"
+    );
+    let compacted = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("compacted view");
+    let parent = compacted
+        .metadata_view()
+        .current_parent_binding_for_child(child)
+        .await
+        .expect("parent lookup")
+        .expect("the child is bound");
+    assert_eq!(parent.parent_inode_id, last_parent);
+    for (path, bound) in [
+        ("/a/report", true),
+        ("/b/report", false),
+        ("/c/report", false),
+    ] {
+        let entry = compacted
+            .resolve_path(path, AttributeInclusion::Omit, &access)
+            .await;
+        match entry {
+            Ok(entry) if bound => assert_eq!(entry.inode_id, child),
+            Err(error) if !bound => assert_eq!(error.code(), ErrorCode::PathNotFound),
+            other => panic!("unexpected lookup of `{path}`: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_listing_reads_only_the_slot_binding_family() {
     let directory = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(directory.path()).expect("store");

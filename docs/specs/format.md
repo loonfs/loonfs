@@ -73,7 +73,7 @@ A directory slot is a parent inode and a name key, `(parent_inode_id, name_key)`
 
 Each binding change writes a `direntry_binding` row. Its `committed_seq` and `delta_index` are the row's own position in namespace history. At sequence `N`, a slot's value is the row with the greatest `(committed_seq, delta_index)` whose sequence is at or below `N`. If that row is unbound, or the slot has no such row, the name is available. When one commit changes a slot more than once, the last delta wins.
 
-The `direntry_binds` family orders these rows by slot, and the `direntry_child_binds` family orders the same rows by child. A child's current parent is found in the child index with the same rule. Commit validation allows at most one child per slot and at most one parent per child. A move unbinds the child's old slot before it binds the new one. The two indexes therefore agree at every read sequence.
+The `direntry_binds` family orders these rows by slot, and the `direntry_child_binds` family orders the same rows by child. A child's current parent is found in the child index with the same rule. Commit validation allows at most one child per slot and at most one parent per child. A bind must name a child with no current binding, unless the same operation unbinds that binding first. A move unbinds the child's old slot before it binds the new one. The two indexes therefore agree at every read sequence.
 
 A bind writes a bound value to both indexes. An unbind writes an unbound value to both, with the parent, name key, and child from its WAL delta. The WAL delta also names the bind it removes by sequence and delta index, and validation checks that this bind is the current binding. The materialized row stores only the unbind's own position. An unbound value is a tombstone for older values of its slot or child. Section 10.3 defines when it can be removed.
 
@@ -857,7 +857,7 @@ The following rules apply only when the selected inputs include the group's olde
 | Family | Rows retained or removed |
 | --- | --- |
 | `inodes` | Retain all inode rows. |
-| `direntry_binds`, `direntry_child_binds` | For each slot and child in `direntry_binds`, and for each child in `direntry_child_binds`, retain all versions above the floor and the newest version at or below it. Drop that floor version too if it is unbound. |
+| `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child), retain all versions above the floor and the newest version at or below it. Drop that floor version too if it is unbound. |
 | `revisions` | Retain every file revision, including revisions of deleted files. |
 | `tombstones` | Retain all set and revoke events. |
 | `active_deletions` | Retain listed deletions until revoked. Remove a cancelled `listed`/`removed` pair together. The floor does not expire a recoverable deletion. |
@@ -866,9 +866,9 @@ The following rules apply only when the selected inputs include the group's olde
 | `attributes` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 | `access` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 
-An unbound binding version is a tombstone. It must remain while it hides older versions of its slot or child. Only a bottom-anchored compaction, which includes the group's oldest run, can drop it. That compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every row, including unbound versions at or below the floor. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
+An unbound binding version is a tombstone. It must remain while it hides older versions of its edge. Only a bottom-anchored compaction, which includes the group's oldest run, can drop it. That compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every row, including unbound versions at or below the floor. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
 
-Each binding event appears in both indexes. At the floor, a bound value is current in both indexes or in neither, because replacing a slot's child requires an unbind and moving a child requires unbinding its old slot. Removing unbound floor values, together with the older values they hide, therefore leaves the same events in both indexes. Row counts and row digests verify that the two indexes agree. Every event above the floor remains.
+Each binding event appears in both indexes, and both indexes group their rows by edge. Compaction therefore keeps or removes each event in both indexes alike, and both keep the same events. Row counts and row digests verify that the two indexes agree. Every event above the floor remains.
 
 A binding row takes its position from the delta that published it, so a later bind does not depend on an earlier unbound value. Attribute and access revisions keep a cleared floor state, because the next update is validated against its revision number.
 
@@ -1302,7 +1302,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | --- | --- |
 | `inodes` | `inode-{inode_id:020}` |
 | `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}-{child_inode_id:020}-{committed_seq:020}-{delta_index:010}` |
-| `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{committed_seq:020}-{delta_index:010}-{parent_inode_id:020}-{name_key_hex}` |
+| `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}-{parent_inode_id:020}-{name_key_hex}-{committed_seq:020}-{delta_index:010}` |
 | `revisions` | `revision-{inode_id:020}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `tombstones` | `tombstone-{root_inode_id:020}-{committed_seq:020}-{delta_index:010}` |
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` |
@@ -1312,7 +1312,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
-The slot index sorts a slot's rows by child and then by position, oldest first. The child index sorts a child's rows by position, oldest first. A read selects the greatest visible position among a slot's rows or a child's rows. Compaction groups the slot index by slot and child, and the child index by child. While it scans one group, it holds at most one candidate floor row. In the slot index it also carries one flag across the groups of a slot. The flag records that an earlier child is bound in the slot at the floor. A second child bound in the slot at the floor is corruption, and compaction refuses it.
+The two binding families hold the same edge events in two orders. An edge is a parent, a name key, and a child. The slot index sorts a slot's rows by child and then by position, oldest first. The child index sorts a child's rows by parent, then by name key, and then by position, oldest first. Key order is therefore not position order within a slot or a child. A read selects the greatest visible position among a slot's rows or a child's rows. Compaction groups both families by edge. While it scans one edge, it holds at most one candidate floor row. It also carries the last edge bound at the floor across the edges of one slot in the slot index, and across the edges of one child in the child index. One child per slot and one parent per child are rules that commit validation enforces (section 1.3). A second child bound in one slot at the floor, or a second parent bound for one child at the floor, is corruption, and compaction refuses it.
 
 Ascending byte order scans an inode's file revisions, attributes, and access rows newest-first. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry. The stored widths are still ten digits.
 

@@ -14,7 +14,10 @@ use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::control::{NamespaceStatus, WriterBlock};
-use loonfs_types::format::{manifest::DeletedBinding, wal::WalDelta};
+use loonfs_types::format::{
+    manifest::DeletedBinding,
+    wal::{WalCommitDelta, WalDelta},
+};
 use loonfs_types::{
     next_public_ordinal, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq,
     CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
@@ -216,12 +219,43 @@ fn validation_context(
     }
 }
 
+fn committed_seq(context: &TestValidationContext<'_>) -> ChangeSeq {
+    next_public_ordinal(context.head.seq.0)
+        .map(ChangeSeq)
+        .expect("test heads stay under the sequence cap")
+}
+
+fn validated_commit_id() -> CommitId {
+    CommitId::parse("validated-commit").expect("valid commit id")
+}
+
+async fn validate_planned_ops(
+    ops: &[CommitOp],
+    committed_at_ms: u64,
+    context: &TestValidationContext<'_>,
+) -> Result<Vec<WalCommitDelta>, CoreError> {
+    let accepted_rows = MetadataState::default();
+    let mut metadata_state = PublishValidationView::new(
+        InMemoryMetadataView::in_memory(context.metadata_state, None, context.head.seq),
+        &accepted_rows,
+        committed_seq(context),
+    );
+    validate_ops(
+        ops,
+        &mut metadata_state,
+        &mut CommitNumbering::default(),
+        &validated_commit_id(),
+        &loonfs_test_support::test_actor(),
+        committed_at_ms,
+    )
+    .await
+}
+
 async fn build_commit_plan(
     ops: &[CommitOp],
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
 ) -> Result<CommitPlan, CommitValidationError> {
-    let accepted_rows = MetadataState::default();
     let mut allocator = InodeAllocator::new(context.head.next_inode_id);
     let mut allocation = allocator.begin_candidate();
     for op in ops {
@@ -238,42 +272,24 @@ async fn build_commit_plan(
             );
         }
     }
-    let committed_seq = next_public_ordinal(context.head.seq.0)
-        .map(ChangeSeq)
-        .expect("test heads stay under the sequence cap");
-    let commit_id = CommitId::parse("validated-commit").expect("valid commit id");
-    let mut metadata_state = PublishValidationView::new(
-        InMemoryMetadataView::in_memory(context.metadata_state, None, context.head.seq),
-        &accepted_rows,
-        committed_seq,
-    );
-    let mut numbering = CommitNumbering::default();
-    let result = validate_ops(
-        ops,
-        &mut metadata_state,
-        &mut numbering,
-        &commit_id,
-        &loonfs_test_support::test_actor(),
-        committed_at_ms,
-    )
-    .await;
-
-    let deltas = result.map_err(|error| match error {
-        CoreError::CommitValidation(error) => error,
-        error => panic!("unexpected validation dependency error: {error}"),
-    })?;
+    let deltas = validate_planned_ops(ops, committed_at_ms, context)
+        .await
+        .map_err(|error| match error {
+            CoreError::CommitValidation(error) => error,
+            error => panic!("unexpected validation dependency error: {error}"),
+        })?;
     let resulting_next_inode_id = allocator
         .commit_candidate(allocation)
         .expect("commit test allocation");
     Ok(ValidatedCommitPlan {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-        commit_id,
+        commit_id: validated_commit_id(),
         actor_id: loonfs_test_support::test_actor(),
         writer_epoch: context.head.writer_epoch,
         message: None,
         semantic_identity: test_fingerprint(),
         apply_after_seq: context.head.seq,
-        assigned_seq: committed_seq,
+        assigned_seq: committed_seq(context),
         deltas,
     }
     .finish(resulting_next_inode_id))
@@ -437,6 +453,55 @@ async fn a_create_for_a_bound_name_is_rejected() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
+    let metadata_state = metadata_state_after(&[
+        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt".to_owned(),
+            content_ref("content-1"),
+        ),
+    ]);
+    let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(3));
+    let docs_binding = ResolvedBinding {
+        parent_inode_id: InodeId(1),
+        name_key: NameKey::parse("docs").expect("valid name key"),
+        display_name: test_display_name("docs"),
+        child_inode_id: InodeId(2),
+        position: loonfs_types::format::manifest::DeltaPosition {
+            seq: ChangeSeq(1),
+            delta_index: 1,
+        },
+    };
+    let reused_inode = CommitOp::CreateFile {
+        child_inode_id: InodeId(3),
+        parent_inode_id: InodeId(1),
+        display_name: test_display_name("copy.txt"),
+        content_ref: content_ref("content-2"),
+    };
+    let unbinds_another_child = CommitOp::Rename {
+        inode_id: InodeId(3),
+        source_binding: docs_binding,
+        new_parent_inode_id: InodeId(1),
+        new_display_name: test_display_name("moved.txt"),
+    };
+
+    for op in [reused_inode, unbinds_another_child] {
+        let error = validate_planned_ops(&[op], 4_200, &context)
+            .await
+            .expect_err("inode 3 already has a parent");
+        assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            "namespace corrupt: a commit binds inode `3`, which is already bound as \
+             `readme.txt` under parent inode `2`"
+        );
+    }
 }
 
 #[tokio::test]

@@ -23,7 +23,7 @@ pub(super) const ITERATOR_FETCH_TARGET_BYTES: usize = 2 * 1024 * 1024;
 /// Defines which adjacent rows a retention rule processes together.
 ///
 /// Groups use the shortest shared row-key prefix required by the rule: a
-/// slot and child, a child, a deletion identity, an inode, or a single row.
+/// binding edge, a deletion identity, an inode, or a single row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalityGrouping {
     /// Every row is judged on its own.
