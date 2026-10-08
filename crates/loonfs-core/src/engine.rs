@@ -636,6 +636,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         inode_id: InodeId,
         revision_no: Option<RevisionNo>,
         context: &RuntimeReadContext,
+        chunk_bytes: NonZeroU64,
+        start_offset: u64,
     ) -> Result<FileContentStream<S>>
     where
         S: Clone,
@@ -651,14 +653,19 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             None => view.current_revision_for_inode(inode_id, &access).await?,
         }
         .content_ref;
+        if start_offset > content_ref.size_bytes {
+            return Err(CoreError::ResumeOffsetOutOfRange {
+                start_offset,
+                size_bytes: content_ref.size_bytes,
+            });
+        }
         Ok(FileContentStream::open_inner(
             self.store.clone(),
             view.resolve_content_location(&content_ref)?,
             None,
             content_ref,
-            NonZeroU64::new(crate::CONTENT_READ_CHUNK_BYTES)
-                .expect("content read chunk size should be nonzero"),
-            0,
+            chunk_bytes,
+            start_offset,
         )
         .await?)
     }

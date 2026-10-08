@@ -513,11 +513,29 @@ impl ReadView {
         &self,
         inode_id: InodeId,
     ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.read_file_stream_by_inode_with_options(inode_id, &ReadFileStreamOptions::default())
+            .await
+    }
+
+    /// Streams the revision of a file inode that this view selects in
+    /// bounded chunks, as `options` asks. Complete verification requires
+    /// consuming the stream to its end.
+    pub async fn read_file_stream_by_inode_with_options(
+        &self,
+        inode_id: InodeId,
+        options: &ReadFileStreamOptions,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
             Ok(self
                 .engine
-                .read_file_stream_by_inode(inode_id, None, &self.context)
+                .read_file_stream_by_inode(
+                    inode_id,
+                    None,
+                    &self.context,
+                    options.chunk_bytes,
+                    options.start_offset,
+                )
                 .await?)
         })
         .await
@@ -1540,6 +1558,17 @@ impl<M> Namespace<M> {
 
     /// Streams the current content of a visible file inode, wherever it is
     /// bound. Complete verification requires consuming the stream to its end.
+    pub async fn read_file_stream_by_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.read_file_stream_by_inode_with_options(inode_id, &ReadFileStreamOptions::default())
+            .await
+    }
+
+    /// Streams the current content of a visible file inode, wherever it is
+    /// bound, as `options` asks. Complete verification requires consuming the
+    /// stream to its end.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.read_file_stream_by_inode",
@@ -1552,23 +1581,32 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn read_file_stream_by_inode(
+    pub async fn read_file_stream_by_inode_with_options(
         &self,
         inode_id: InodeId,
+        options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let _permit = self.core.inner.config.execution_budget.read_permit().await;
-        self.core.record_trace_context(&tracing::Span::current());
-        self.core
-            .read(&self.namespace_id, |engine, context| async move {
-                Ok(engine
-                    .read_file_stream_by_inode(inode_id, None, &context)
-                    .await?)
-            })
-            .await
+        self.file_stream_by_inode(inode_id, None, options).await
     }
 
     /// Streams a retained inode revision, including content without a visible path.
     /// Complete verification requires consuming the stream to its end.
+    pub async fn read_file_revision_stream_by_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.read_file_revision_stream_by_inode_with_options(
+            inode_id,
+            revision_no,
+            &ReadFileStreamOptions::default(),
+        )
+        .await
+    }
+
+    /// Streams a retained inode revision, including content without a visible
+    /// path, as `options` asks. Complete verification requires consuming the
+    /// stream to its end.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.read_file_revision_stream_by_inode",
@@ -1581,17 +1619,35 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn read_file_revision_stream_by_inode(
+    pub async fn read_file_revision_stream_by_inode_with_options(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
+        options: &ReadFileStreamOptions,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.file_stream_by_inode(inode_id, Some(revision_no), options)
+            .await
+    }
+
+    async fn file_stream_by_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: Option<RevisionNo>,
+        options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
+        let options = *options;
         self.core
             .read(&self.namespace_id, |engine, context| async move {
                 Ok(engine
-                    .read_file_stream_by_inode(inode_id, Some(revision_no), &context)
+                    .read_file_stream_by_inode(
+                        inode_id,
+                        revision_no,
+                        &context,
+                        options.chunk_bytes,
+                        options.start_offset,
+                    )
                     .await?)
             })
             .await

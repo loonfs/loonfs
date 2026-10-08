@@ -17,6 +17,7 @@ use loonfs_types::{
     AttributeInclusion, ChangeSeq, ContentRef, Page, PageRequest, PaginationPolicy, RevisionNo,
     TrashEntry, TrashPageCursor,
 };
+use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 fn grants(principal: &str, rights: &[AccessRight]) -> AccessGrants {
@@ -1038,7 +1039,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
             .map(|entry| entry.inode_id)
             .map_err(|error| error.code());
         let current_content_result = reader
-            .read_file_stream_by_inode(inode_id, None, &context)
+            .read_file_stream_by_inode(inode_id, None, &context, NonZeroU64::MIN, 0)
             .await
             .map(|_| inode_id)
             .map_err(|error| error.code());

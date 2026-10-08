@@ -4,9 +4,10 @@ use crate::common::{open_runtime_async, store, TestRuntime};
 use loonfs::{
     CommitId, CommitOptions, DeleteByInodeOptions, DeleteDirectoryBehavior, DisplayName,
     EntryInodeKind, ErrorCode, InodeId, LoonFs, Namespace, PageRequest, PaginationPolicy,
-    PutFileOptions, RevisionNo, Writable,
+    PutFileOptions, ReadFileStreamOptions, RevisionNo, Writable,
 };
 use loonfs_test_support::ids::namespace_id;
+use std::num::NonZeroU64;
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -285,6 +286,47 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
         path_gets.len(),
         "identity stat must remain a point lookup: path={path_gets:#?}, inode={inode_gets:#?}"
     );
+}
+
+#[tokio::test]
+async fn a_resumed_inode_stream_reads_only_the_rest_in_the_asked_chunks() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (_fs, namespace) = writable_namespace(temp_dir.path(), "inode-stream-resume-test").await;
+    let bytes: Vec<u8> = (0..4 * 1024 + 17)
+        .map(|offset: usize| (offset % 251) as u8)
+        .collect();
+    namespace
+        .put_file("/data.bin", &bytes, &loonfs_test_support::test_actor())
+        .await
+        .expect("put file");
+    let inode_id = namespace
+        .stat("/data.bin")
+        .await
+        .expect("stat file")
+        .inode_id;
+    let held = 1024 + 5;
+
+    let mut stream = namespace
+        .read_file_stream_by_inode_with_options(
+            inode_id,
+            &ReadFileStreamOptions {
+                chunk_bytes: NonZeroU64::new(1024).expect("non-zero chunk size"),
+                start_offset: held as u64,
+            },
+        )
+        .await
+        .expect("open resumed stream");
+    stream
+        .fold_resumed_prefix(&bytes[..held])
+        .expect("fold the held prefix");
+    let mut chunk_lengths = Vec::new();
+    let mut fetched = Vec::new();
+    while let Some(chunk) = stream.next_chunk().await.expect("verified chunk") {
+        chunk_lengths.push(chunk.len());
+        fetched.extend_from_slice(&chunk);
+    }
+    assert_eq!(chunk_lengths, [1024, 1024, 1024, 12]);
+    assert_eq!(fetched, bytes[held..]);
 }
 
 #[tokio::test]
