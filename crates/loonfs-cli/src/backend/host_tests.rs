@@ -6,7 +6,6 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use loonfs_client::{NamespacePath, PayloadSource};
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
-use loonfs_types::NamespaceAccess;
 
 #[test]
 fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_limit() {
@@ -30,7 +29,7 @@ fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_lim
         let actor = loonfs_test_support::test_actor();
         target
             .client
-            .create_namespace(path.namespace(), &actor, NamespaceAccess::unrestricted())
+            .create_namespace(path.namespace(), &actor)
             .await
             .expect("namespace without a listener");
         let chunk = Bytes::from(vec![42; 1024 * 1024]);
@@ -77,7 +76,7 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
         let target = open().await;
         target
             .client
-            .create_namespace(&namespace_id, &actor, NamespaceAccess::unrestricted())
+            .create_namespace(&namespace_id, &actor)
             .await
             .expect("namespace");
         let store = target
@@ -153,7 +152,7 @@ async fn an_embedded_fence_fails_the_request_and_a_later_request_starts_a_new_se
     let path = NamespacePath::parse("demo", "/first").expect("path");
     first
         .client
-        .create_namespace(path.namespace(), &actor, NamespaceAccess::unrestricted())
+        .create_namespace(path.namespace(), &actor)
         .await
         .expect("create namespace");
     first

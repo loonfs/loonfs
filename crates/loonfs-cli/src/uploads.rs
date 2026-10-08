@@ -553,11 +553,7 @@ mod tests {
         let spec = NamespacePath::parse("demo", "/file").expect("path");
         target
             .client
-            .create_namespace(
-                spec.namespace(),
-                &loonfs_test_support::test_actor(),
-                loonfs_types::NamespaceAccess::unrestricted(),
-            )
+            .create_namespace(spec.namespace(), &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
         let path = directory.path().join("journal.json");

@@ -103,11 +103,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     let remote_ns = namespace_id("remote");
     harness
         .client
-        .create_namespace(
-            &remote_ns,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&remote_ns, &loonfs_test_support::test_actor())
         .await
         .expect("create remote namespace");
     let first = stage_uploaded_content(&harness.client, &remote_ns, FIRST_BYTES).await;
@@ -238,11 +234,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
@@ -343,11 +335,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
@@ -433,11 +421,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
@@ -539,11 +523,7 @@ async fn an_empty_operation_list_is_rejected() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -594,11 +574,7 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let content = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
@@ -658,11 +634,7 @@ async fn a_foreign_binding_precondition_identifies_the_version_field() {
     for namespace in [&namespace, &foreign_namespace] {
         harness
             .client
-            .create_namespace(
-                namespace,
-                &loonfs_test_support::test_actor(),
-                loonfs_types::NamespaceAccess::unrestricted(),
-            )
+            .create_namespace(namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         harness
@@ -741,11 +713,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -892,11 +860,7 @@ async fn a_batch_replays_under_its_commit_id() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -1125,11 +1089,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let first = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;

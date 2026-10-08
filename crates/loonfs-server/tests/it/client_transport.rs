@@ -44,11 +44,7 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
     let target = NamespacePath::parse("demo", "/stream.bin").expect("path");
     let actor = loonfs_test_support::test_actor();
     client
-        .create_namespace(
-            target.namespace(),
-            &actor,
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(target.namespace(), &actor)
         .await
         .expect("create namespace");
     let chunks = vec![Bytes::from(vec![42; 32 * 1024]); 4];

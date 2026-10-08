@@ -24,11 +24,7 @@ fn path(absolute_path: &str) -> NamespacePath {
 async fn served_namespace(harness: &crate::common::TestServer) {
     harness
         .client
-        .create_namespace(
-            &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     for absolute_path in ["/docs/report.txt", "/docs/notes.txt"] {
@@ -287,11 +283,7 @@ async fn an_unrestricted_namespace_answers_namespace_unrestricted_over_http() {
     .await;
     harness
         .client
-        .create_namespace(
-            &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let error = harness

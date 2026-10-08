@@ -49,11 +49,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     let namespace = namespace_id("metered");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("metered", "/note.txt").expect("parse path");

@@ -93,11 +93,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token rejected").await;
@@ -143,11 +139,7 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token missing").await;
@@ -188,11 +180,7 @@ async fn path_put_with_valid_content_token_succeeds() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let bytes = b"valid token";
@@ -238,11 +226,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garba
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token replay").await;
@@ -312,11 +296,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let target = stage_uploaded_content(&harness.client, &namespace, b"target content").await;
@@ -359,11 +339,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let first = stage_uploaded_content(&harness.client, &namespace, b"first").await;
@@ -444,11 +420,7 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let body = json!({
@@ -487,11 +459,7 @@ async fn every_upload_session_route_requires_the_bearer_token() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let begin = harness

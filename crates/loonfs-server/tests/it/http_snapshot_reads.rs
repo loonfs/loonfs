@@ -220,11 +220,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     let namespace = namespace_id("snapshot-read-state");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
@@ -386,11 +382,7 @@ async fn snapshot_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
     let namespace = namespace_id("snapshot-inode-reads");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
@@ -462,11 +454,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     let namespace = namespace_id("snapshot-change-feed");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     for name in ["one", "two", "three", "four"] {
@@ -564,11 +552,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
     let namespace = namespace_id("snapshot-read-errors");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
@@ -771,11 +755,7 @@ async fn snapshot_page_cursors_resume_one_pinned_directory() {
     let namespace = namespace_id("snapshot-pagination");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     for name in ["a", "c", "e", "g"] {
