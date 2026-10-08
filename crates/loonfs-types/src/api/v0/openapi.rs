@@ -18,20 +18,20 @@ use utoipa::ToSchema;
 /// when building the static specification, not when serving an HTTP request.
 pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     let mut named = NamedSchemas::default();
-    named.tagged::<CreateUploadBody>("mode");
-    named.tagged::<CheckpointOwnerSummary>("kind");
-    named.tagged::<CommitPrecondition>("kind");
-    named.tagged::<FilesystemChange>("kind");
-    named.tagged::<FilesystemOperation>("kind");
-    named.tagged::<MetadataCompactionOutcome>("outcome");
-    named.tagged::<NamespaceAccess>("kind");
-    named.tagged::<NamespaceAccessMode>("kind");
-    named.tagged::<ObjectTransferAccess>("kind");
-    named.tagged::<CompactionStepOutcome>("outcome");
-    named.tagged::<RunMaintenanceRequest>("kind");
-    named.tagged::<RunMaintenanceResponse>("kind");
-    named.tagged::<CompleteUploadBody>("mode");
-    named.tagged::<WalFoldStepOutcome>("outcome");
+    named.tagged::<CreateUploadBody>("mode", None);
+    named.tagged::<CheckpointOwnerSummary>("kind", None);
+    named.tagged::<CommitPrecondition>("kind", None);
+    named.tagged::<FilesystemChange>("kind", Some("unknown"));
+    named.tagged::<FilesystemOperation>("kind", None);
+    named.tagged::<MetadataCompactionOutcome>("outcome", None);
+    named.tagged::<NamespaceAccess>("kind", None);
+    named.tagged::<NamespaceAccessMode>("kind", None);
+    named.tagged::<ObjectTransferAccess>("kind", None);
+    named.tagged::<CompactionStepOutcome>("outcome", None);
+    named.tagged::<RunMaintenanceRequest>("kind", None);
+    named.tagged::<RunMaintenanceResponse>("kind", None);
+    named.tagged::<CompleteUploadBody>("mode", None);
+    named.tagged::<WalFoldStepOutcome>("outcome", None);
     named.composite::<PathEntry, PathEntryKind>("inode_kind", Some("unknown"));
     named.composite::<UploadSession, UploadSessionStatus>("status", None);
     named.composite::<GrepIndex, GrepIndexLifecycle>("status", None);
@@ -61,9 +61,21 @@ struct NamedSchemas {
 }
 
 impl NamedSchemas {
-    fn tagged<T: ToSchema>(&mut self, tag: &str) {
+    fn tagged<T: ToSchema>(&mut self, tag: &str, catch_all: Option<&str>) {
         let source = Source::of::<T>();
-        self.union(&T::name(), tag, source.schema.clone(), &source, None);
+        let mut union = source.schema.clone();
+        if let Some(catch_all) = catch_all {
+            let variants = union["oneOf"].as_array_mut().expect("tagged union");
+            let derived = variants.len();
+            variants.retain(|variant| variant["properties"][tag]["enum"][0] != catch_all);
+            assert_eq!(
+                variants.len() + 1,
+                derived,
+                "{}: declared catch-all `{catch_all}` must be one variant",
+                T::name()
+            );
+        }
+        self.union(&T::name(), tag, union, &source, None);
     }
 
     fn composite<T: ToSchema, Kind: ToSchema>(&mut self, tag: &str, catch_all: Option<&str>) {
@@ -289,10 +301,11 @@ mod tests {
             .expect("derived schema")
             .contains(&json!("next_cursor")));
         let request = serde_json::to_value(CommitRequest::schema()).expect("derived schema");
-        assert_eq!(
-            request["properties"]["message"]["type"],
-            json!(["string", "null"])
-        );
+        assert_eq!(request["properties"]["message"]["type"], "string");
+        assert!(!request["required"]
+            .as_array()
+            .expect("derived schema")
+            .contains(&json!("message")));
     }
 
     #[test]
@@ -313,6 +326,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "fixed tag")]
     fn a_wrong_declared_tag_fails_generation() {
-        NamedSchemas::default().tagged::<PathEntryKind>("kind");
+        NamedSchemas::default().tagged::<PathEntryKind>("kind", None);
     }
 }
