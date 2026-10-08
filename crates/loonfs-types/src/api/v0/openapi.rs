@@ -65,15 +65,7 @@ impl NamedSchemas {
         let source = Source::of::<T>();
         let mut union = source.schema.clone();
         if let Some(catch_all) = catch_all {
-            let variants = union["oneOf"].as_array_mut().expect("tagged union");
-            let derived = variants.len();
-            variants.retain(|variant| variant["properties"][tag]["enum"][0] != catch_all);
-            assert_eq!(
-                variants.len() + 1,
-                derived,
-                "{}: declared catch-all `{catch_all}` must be one variant",
-                T::name()
-            );
+            strip_catch_all(&mut union, tag, catch_all, &T::name());
         }
         self.union(&T::name(), tag, union, &source, None);
     }
@@ -90,18 +82,10 @@ impl NamedSchemas {
         members.remove(index);
         let fields = self.flatten(envelope, &source);
         let mut union = serde_json::to_value(Kind::schema()).expect("derived union");
-        let variants = union["oneOf"].as_array_mut().expect("kind variants");
         if let Some(catch_all) = catch_all {
-            let derived = variants.len();
-            variants.retain(|variant| variant["properties"][tag]["enum"][0] != catch_all);
-            assert_eq!(
-                variants.len() + 1,
-                derived,
-                "{}: declared catch-all `{catch_all}` must be one variant",
-                Kind::name()
-            );
+            strip_catch_all(&mut union, tag, catch_all, &Kind::name());
         }
-        for variant in variants {
+        for variant in union["oneOf"].as_array_mut().expect("kind variants") {
             if variant.get("title").is_none() {
                 let value = variant["properties"][tag]["enum"][0]
                     .as_str()
@@ -238,6 +222,17 @@ impl Source {
                 .collect(),
         }
     }
+}
+
+fn strip_catch_all(union: &mut Value, tag: &str, catch_all: &str, name: &str) {
+    let variants = union["oneOf"].as_array_mut().expect("tagged union");
+    let derived = variants.len();
+    variants.retain(|variant| variant["properties"][tag]["enum"][0] != catch_all);
+    assert_eq!(
+        variants.len() + 1,
+        derived,
+        "{name}: declared catch-all `{catch_all}` must be one variant"
+    );
 }
 
 fn merge_fields(target: &mut Value, source: &Value) {
