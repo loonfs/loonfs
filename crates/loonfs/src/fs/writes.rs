@@ -8,8 +8,9 @@ use crate::ByteStream;
 use crate::Result;
 use crate::{
     AccessState, ActorId, AttributeChanges, ChangeSeq, Commit, CommitId, CommitOptions, ContentRef,
-    CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, NamespaceId,
-    PutFileOptions, RevisionNo, UpdateAccessOptions, UpdateAttributesOptions,
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, DisplayName, InodeId, MoveOptions,
+    NamespaceId, PutFileOptions, RevisionNo, UndeleteOptions, UpdateAccessByInodeOptions,
+    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 use crate::{LoonFs, Namespace, Writable};
 use futures::StreamExt;
@@ -738,6 +739,65 @@ impl Namespace<Writable> {
         .await
     }
 
+    /// Copies a file inode to a name under a parent inode, refusing to
+    /// replace an existing entry.
+    pub async fn copy_by_inode(
+        &self,
+        inode_id: InodeId,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: &DisplayName,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.copy_by_inode_with_options(
+            inode_id,
+            destination_parent_inode_id,
+            destination_display_name,
+            actor,
+            &CopyOptions::default(),
+        )
+        .await
+    }
+
+    /// Copies a file inode to a name under a parent inode. The new file
+    /// reuses the source revision's content reference: no bytes are copied.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.copy_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "copy_by_inode",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn copy_by_inode_with_options(
+        &self,
+        inode_id: InodeId,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: &DisplayName,
+        actor: &ActorId,
+        options: &CopyOptions,
+    ) -> Result<Commit> {
+        self.core.record_trace_context(&tracing::Span::current());
+        self.commit_one(
+            actor,
+            &options.commit,
+            FilesystemOperation::CopyByInode {
+                inode_id,
+                destination_parent_inode_id,
+                destination_display_name: destination_display_name.clone(),
+                precondition: loonfs_types::DestinationPrecondition {
+                    behavior: options.behavior,
+                    expected_inode_id: options.expected_destination_inode_id,
+                    expected_revision_no: options.expected_destination_revision_no,
+                },
+            },
+        )
+        .await
+    }
+
     /// Restores a prior file revision by appending a new current revision.
     pub async fn restore_revision(
         &self,
@@ -781,6 +841,56 @@ impl Namespace<Writable> {
             options,
             FilesystemOperation::RestoreRevision {
                 path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                source_revision_no,
+            },
+        )
+        .await
+    }
+
+    /// Restores a prior revision of a file inode by appending a new current
+    /// revision.
+    pub async fn restore_revision_by_inode(
+        &self,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.restore_revision_by_inode_with_options(
+            inode_id,
+            source_revision_no,
+            actor,
+            &CommitOptions::default(),
+        )
+        .await
+    }
+
+    /// Restores a prior revision of a file inode by appending a new current
+    /// revision, under the given commit settings.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.restore_revision_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "restore_revision_by_inode",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn restore_revision_by_inode_with_options(
+        &self,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        actor: &ActorId,
+        options: &CommitOptions,
+    ) -> Result<Commit> {
+        self.core.record_trace_context(&tracing::Span::current());
+        self.commit_one(
+            actor,
+            options,
+            FilesystemOperation::RestoreRevisionByInode {
+                inode_id,
                 source_revision_no,
             },
         )
@@ -843,6 +953,57 @@ impl Namespace<Writable> {
         .await
     }
 
+    /// Writes and removes attributes on a visible inode.
+    pub async fn update_attributes_by_inode(
+        &self,
+        inode_id: InodeId,
+        actor: &ActorId,
+        changes: AttributeChanges,
+    ) -> Result<Commit> {
+        self.update_attributes_by_inode_with_options(
+            inode_id,
+            actor,
+            changes,
+            &UpdateAttributesByInodeOptions::default(),
+        )
+        .await
+    }
+
+    /// Writes and removes attributes on a visible file or directory inode,
+    /// under an optional attribute revision precondition.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.update_attributes_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "update_attributes_by_inode",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn update_attributes_by_inode_with_options(
+        &self,
+        inode_id: InodeId,
+        actor: &ActorId,
+        changes: AttributeChanges,
+        options: &UpdateAttributesByInodeOptions,
+    ) -> Result<Commit> {
+        self.core.record_trace_context(&tracing::Span::current());
+        self.commit_one(
+            actor,
+            &options.commit,
+            FilesystemOperation::UpdateAttributesByInode {
+                inode_id,
+                set: changes.set,
+                remove: changes.remove,
+                expected_attributes_revision_no: options.expected_attributes_revision_no,
+            },
+        )
+        .await
+    }
+
     /// Replaces a visible inode's access row, including the root.
     pub async fn update_access(
         &self,
@@ -895,26 +1056,70 @@ impl Namespace<Writable> {
         .await
     }
 
-    /// Restores a deleted file or subtree, optionally at a new path.
-    pub async fn undelete(
+    /// Replaces a visible inode's access row, including the root's.
+    pub async fn update_access_by_inode(
         &self,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-        destination_path: Option<&str>,
         actor: &ActorId,
+        access: AccessState,
     ) -> Result<Commit> {
-        self.undelete_with_options(
+        self.update_access_by_inode_with_options(
             inode_id,
-            deletion_seq,
-            destination_path,
             actor,
-            &CommitOptions::default(),
+            access,
+            &UpdateAccessByInodeOptions::default(),
         )
         .await
     }
 
-    /// Restores a deleted file or subtree, optionally at a new path, under
-    /// the given commit settings.
+    /// Replaces a visible inode's access row, including the root's, under an
+    /// optional access revision precondition.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.update_access_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "update_access_by_inode",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn update_access_by_inode_with_options(
+        &self,
+        inode_id: InodeId,
+        actor: &ActorId,
+        access: AccessState,
+        options: &UpdateAccessByInodeOptions,
+    ) -> Result<Commit> {
+        self.core.record_trace_context(&tracing::Span::current());
+        self.commit_one(
+            actor,
+            &options.commit,
+            FilesystemOperation::UpdateAccessByInode {
+                inode_id,
+                boundary: access.boundary,
+                grants: access.grants,
+                expected_access_revision_no: options.expected_access_revision_no,
+            },
+        )
+        .await
+    }
+
+    /// Restores a deleted file or subtree under the parent and name its
+    /// deletion recorded.
+    pub async fn undelete(
+        &self,
+        inode_id: InodeId,
+        deletion_seq: ChangeSeq,
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.undelete_with_options(inode_id, deletion_seq, actor, &UndeleteOptions::default())
+            .await
+    }
+
+    /// Restores a deleted file or subtree where `options` says.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.undelete",
@@ -931,24 +1136,14 @@ impl Namespace<Writable> {
         &self,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        destination_path: Option<&str>,
         actor: &ActorId,
-        options: &CommitOptions,
+        options: &UndeleteOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
-        // An absent destination restores in place: the entry re-binds under
-        // the parent and name its deletion recorded.
-        let destination_path = destination_path
-            .map(loonfs_core::path::parse_mutation_path)
-            .transpose()?;
         self.commit_one(
             actor,
-            options,
-            FilesystemOperation::Undelete {
-                inode_id,
-                deletion_seq,
-                destination_path,
-            },
+            &options.commit,
+            FilesystemOperation::undelete(inode_id, deletion_seq, &options.destination),
         )
         .await
     }

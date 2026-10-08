@@ -3,8 +3,9 @@
 use super::ensure_expected_inode;
 use super::publish_path_planning::{
     ensure_parent_directories, is_missing_visible_path, require_vacant_path,
-    resolve_parent_directory, resolve_visible_path_for_authorization, CompiledFilesystemOperation,
-    PublishPathPlanningView, ResolvedParents,
+    resolve_parent_directory, resolve_visible_child, resolve_visible_inode,
+    resolve_visible_path_for_authorization, CompiledFilesystemOperation, PublishPathPlanningView,
+    ResolvedParents,
 };
 use crate::authorize::Absence;
 use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
@@ -14,7 +15,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::TombstoneRowAction;
 use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, ChangeSeq, ContentRef, DestinationBehavior,
-    ExpectedFileState, InodeId, InodeKind, ROOT_INODE_ID,
+    DisplayName, ExpectedFileState, InodeId, InodeKind, ROOT_INODE_ID,
 };
 
 pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
@@ -53,10 +54,60 @@ pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
     Ok(CompiledFilesystemOperation::new(ops))
 }
 
+/// Where an undelete binds the entry it restores.
+pub(super) enum UndeleteDestination<'a> {
+    /// The parent and name the deletion recorded.
+    Recorded,
+    Path(&'a AbsolutePath),
+    Name {
+        parent_inode_id: InodeId,
+        display_name: &'a DisplayName,
+    },
+}
+
+impl<'a> UndeleteDestination<'a> {
+    /// Reads the request's destination fields, which name at most one
+    /// destination.
+    pub(super) fn from_request(
+        path: Option<&'a AbsolutePath>,
+        parent_inode_id: Option<InodeId>,
+        display_name: Option<&'a DisplayName>,
+    ) -> Result<Self> {
+        let (field, message) = match (path, parent_inode_id, display_name) {
+            (None, None, None) => return Ok(Self::Recorded),
+            (Some(path), None, None) => return Ok(Self::Path(path)),
+            (None, Some(parent_inode_id), Some(display_name)) => {
+                return Ok(Self::Name {
+                    parent_inode_id,
+                    display_name,
+                })
+            }
+            (Some(_), _, _) => (
+                "destination_path",
+                "`destination_path` cannot be combined with `destination_parent_inode_id` \
+                 or `destination_display_name`",
+            ),
+            (None, Some(_), None) => (
+                "destination_display_name",
+                "`destination_parent_inode_id` requires `destination_display_name`",
+            ),
+            (None, None, Some(_)) => (
+                "destination_parent_inode_id",
+                "`destination_display_name` requires `destination_parent_inode_id`",
+            ),
+        };
+        Err(CoreError::InvalidCommitField {
+            field,
+            message: message.to_owned(),
+            precondition_index: None,
+        })
+    }
+}
+
 pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
-    absolute_path: Option<&AbsolutePath>,
+    destination: UndeleteDestination<'_>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let active = view.view.active_subtree_tombstone(inode_id).await?;
@@ -84,8 +135,8 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
         Absence::Inode,
     )
     .await?;
-    let (parent_inode_id, display_name) = match absolute_path {
-        Some(absolute_path) => {
+    let (parent_inode_id, display_name) = match destination {
+        UndeleteDestination::Path(absolute_path) => {
             ensure_mutation_path(absolute_path)?;
             let parent_inode_id = resolve_parent_directory(
                 view,
@@ -104,7 +155,36 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
                 .await?;
             (parent_inode_id, final_component(absolute_path)?.clone())
         }
-        None => {
+        UndeleteDestination::Name {
+            parent_inode_id,
+            display_name,
+        } => {
+            let parent = resolve_visible_inode(view, parent_inode_id).await?;
+            view.authorize(
+                parent_inode_id,
+                AccessRights::from_iter([AccessRight::Create]),
+                Absence::Inode,
+            )
+            .await?;
+            if parent.inode_kind != InodeKind::Directory {
+                return Err(CoreError::ExpectedDirectory {
+                    target: parent.absolute_path.to_string(),
+                    kind: parent.inode_kind,
+                });
+            }
+            if let Some(existing) =
+                resolve_visible_child(view, parent_inode_id, display_name).await?
+            {
+                return Err(CoreError::DestinationExists {
+                    path: parent.absolute_path.join(display_name).to_string(),
+                    existing_display_name: Some(existing.display_name),
+                });
+            }
+            view.authorize_relocation(inode_id, saved_parent, parent_inode_id)
+                .await?;
+            (parent_inode_id, display_name.clone())
+        }
+        UndeleteDestination::Recorded => {
             view.authorize(
                 saved_parent,
                 AccessRights::from_iter([AccessRight::Create]),

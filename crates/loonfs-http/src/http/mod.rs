@@ -33,13 +33,16 @@ use self::extractors::{
     OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
     MAX_COMPLETION_BODY_BYTES, MAX_JSON_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
-use self::handlers_downloads::{create_download, create_download_by_inode};
+use self::handlers_downloads::{
+    create_download, create_download_by_inode, create_revision_download_by_inode,
+};
 use self::handlers_filesystem::{
     create_commit, get_file_bytes, get_path_entry, list_changes, list_file_revisions,
     list_path_entries, list_trash,
 };
 use self::handlers_inodes::{
-    get_file_revision_bytes_by_inode, get_inode, list_file_revisions_by_inode, list_inode_children,
+    get_file_bytes_by_inode, get_file_revision_bytes_by_inode, get_inode,
+    list_file_revisions_by_inode, list_inode_children,
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, create_snapshot, delete_checkpoint, delete_namespace,
@@ -96,6 +99,7 @@ enum RequestLogSeverity {
 // Membership is limited to streamed content and operator work that is long by design.
 const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
     "/v0/namespaces/{namespace_id}/filesystem/content",
+    "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
     "/v0/maintenance/namespaces/{namespace_id}/runs",
@@ -312,6 +316,14 @@ pub fn router(state: BindingState) -> Router {
             get(list_inode_children),
         )
         .route(
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+            get(get_file_bytes_by_inode),
+        )
+        .route(
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+            post(create_download_by_inode),
+        )
+        .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
             get(list_file_revisions_by_inode),
         )
@@ -321,7 +333,7 @@ pub fn router(state: BindingState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
-            post(create_download_by_inode),
+            post(create_revision_download_by_inode),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/trash",

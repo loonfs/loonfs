@@ -176,11 +176,11 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         .await
         .expect("delete file before recovery");
     let restored = namespace_writer
-        .undelete(
+        .undelete_with_options(
             restored_inode,
             recover.committed_seq,
-            Some("/docs/restored.txt"),
             &test_actor(),
+            &undelete_at("/docs/restored.txt"),
         )
         .await
         .expect("restore file at a new name");

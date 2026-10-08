@@ -9,6 +9,7 @@ use crate::metadata::MetadataVisibilityReads;
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::path::read;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::{
     AbsolutePath, BindingVersion as BindingVersionToken, DestinationBehavior, DisplayName, InodeId,
     InodeKind, NameKey, NamespaceAccess, NamespaceId, ROOT_INODE_ID,
@@ -54,6 +55,14 @@ pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?S
     pub(super) access: &'a NamespaceAccess,
     pub(super) authorizer: &'a Authorizer<'a>,
     pub(super) view: &'a MetadataView<'view, 'store, S>,
+}
+
+/// Rejects the root, which only an access update may name as its target.
+pub(super) fn ensure_mutation_inode(inode_id: InodeId) -> Result<()> {
+    if inode_id == ROOT_INODE_ID {
+        return Err(CoreError::RootMutationForbidden);
+    }
+    Ok(())
 }
 
 pub(super) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
@@ -107,14 +116,7 @@ pub(super) fn check_binding_version<S: ObjectStore + ?Sized>(
     resolved: &ResolvedVisiblePath,
     expected_binding_version: &BindingVersionToken,
 ) -> Result<()> {
-    let expected =
-        binding_version::decode(expected_binding_version, view.namespace_id).map_err(|error| {
-            CoreError::InvalidCommitField {
-                field: "expected_binding_version",
-                message: format!("invalid expected binding version: {error}"),
-                precondition_index: None,
-            }
-        })?;
+    let expected = decode_expected_binding_version(view, expected_binding_version)?;
     let Some(current) = resolved.binding_version else {
         return Err(CoreError::RootMutationForbidden);
     };
@@ -122,11 +124,41 @@ pub(super) fn check_binding_version<S: ObjectStore + ?Sized>(
         return Err(CoreError::BindingVersionMismatch {
             inode_id: resolved.inode_id,
             expected_binding_version: expected_binding_version.clone(),
-            actual_binding_version: binding_version::encode(current, view.namespace_id),
+            actual_binding_version: Some(binding_version::encode(current, view.namespace_id)),
             precondition_index: None,
         });
     }
     Ok(())
+}
+
+/// The error for a binding version expected of an inode that is not visible.
+pub(super) fn hidden_inode_binding_error<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    inode_id: InodeId,
+    expected_binding_version: &BindingVersionToken,
+) -> CoreError {
+    match decode_expected_binding_version(view, expected_binding_version) {
+        Ok(_) => CoreError::BindingVersionMismatch {
+            inode_id,
+            expected_binding_version: expected_binding_version.clone(),
+            actual_binding_version: None,
+            precondition_index: None,
+        },
+        Err(error) => error,
+    }
+}
+
+fn decode_expected_binding_version<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    expected_binding_version: &BindingVersionToken,
+) -> Result<DeltaPosition> {
+    binding_version::decode(expected_binding_version, view.namespace_id).map_err(|error| {
+        CoreError::InvalidCommitField {
+            field: "expected_binding_version",
+            message: format!("invalid expected binding version: {error}"),
+            precondition_index: None,
+        }
+    })
 }
 
 pub(super) async fn source_binding<S: ObjectStore + ?Sized>(

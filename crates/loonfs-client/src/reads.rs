@@ -556,6 +556,32 @@ impl Client {
         query.finish()
     }
 
+    /// Returns the current bytes of a visible file inode, wherever it is bound.
+    pub async fn read_file_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<Vec<u8>> {
+        self.request_bytes(&self.inode_content_url(namespace_id, inode_id, None))
+            .await
+    }
+
+    /// Streams the current content of a visible file inode through the
+    /// server, wherever it is bound. See [`Self::read_file_stream_with_options`]
+    /// for when the bytes are verified.
+    pub async fn read_file_stream_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<PayloadStream> {
+        self.call_for_response_stream(&self.get(&self.inode_content_url(
+            namespace_id,
+            inode_id,
+            None,
+        )))
+        .await
+    }
+
     /// Reads and verifies one retained file revision by inode identity.
     pub async fn read_file_revision_by_inode(
         &self,
@@ -563,11 +589,43 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
+        self.request_bytes(&self.inode_content_url(namespace_id, inode_id, Some(revision_no)))
+            .await
+    }
+
+    /// Streams one retained file revision by inode identity through the
+    /// server. See [`Self::read_file_stream_with_options`] for when the bytes
+    /// are verified.
+    pub async fn read_file_revision_stream_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<PayloadStream> {
+        self.call_for_response_stream(&self.get(&self.inode_content_url(
+            namespace_id,
+            inode_id,
+            Some(revision_no),
+        )))
+        .await
+    }
+
+    fn inode_content_url(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: Option<RevisionNo>,
+    ) -> String {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
-            self.base_url
-        );
-        self.request_bytes(&url).await
+        match revision_no {
+            Some(revision_no) => format!(
+                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+                self.base_url
+            ),
+            None => format!(
+                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+                self.base_url
+            ),
+        }
     }
 }

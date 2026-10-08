@@ -2740,6 +2740,14 @@ fn commit_precondition_wire_shapes_match_golden() {
         CommitPrecondition::PathAbsence {
             path: AbsolutePath::parse("/docs/missing").expect("path"),
         },
+        CommitPrecondition::InodeBinding {
+            inode_id: InodeId(42),
+            expected_binding_version: loonfs_types::BindingVersion::parse("aaaa").expect("version"),
+        },
+        CommitPrecondition::NameAbsence {
+            parent_inode_id: InodeId(7),
+            display_name: loonfs_types::DisplayName::parse("missing").expect("name"),
+        },
         CommitPrecondition::AttributesRevision {
             inode_id: InodeId(42),
             expected_attributes_revision_no: loonfs_types::AttributesRevisionNo(2),

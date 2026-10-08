@@ -4,8 +4,9 @@
 
 use bytes::Bytes;
 use loonfs_client::{
-    Client, ClientConfig, ClientError, CommitOptions, CreateDirectoryOptions, DeleteOptions,
-    MoveOptions, NamespacePath, PutFileOptions,
+    AccessState, AttributeChanges, Client, ClientConfig, ClientError, CommitOptions,
+    CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
+    UndeleteDestination, UndeleteOptions, UpdateAttributesByInodeOptions,
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
@@ -19,9 +20,10 @@ use loonfs_types::api::v0::{
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::PageRequest;
 use loonfs_types::{
-    ActorId, ApiError, BindingVersion, ChangeSeq, Checksum, CommitId, CommitRequest, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, DisplayName, FilesystemOperation, NamespaceId,
-    PathEntry,
+    AccessGrants, ActorId, ApiError, AttributeKey, AttributeValue, AttributesRevisionNo,
+    BindingVersion, ChangeSeq, Checksum, CommitId, CommitPrecondition, CommitRequest, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, DestinationPrecondition, DisplayName,
+    FilesystemOperation, NamespaceId, PathEntry, RevisionNo, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -35,6 +37,7 @@ async fn rust_client_matches_the_reference_corpus() {
     for case in &cases {
         match case.name.as_str() {
             "children_by_inode" => run_children_by_inode(&harness, case).await,
+            "inode_addressing" => run_inode_addressing(&harness, case).await,
             "inode_mutations" => run_inode_mutations(&harness, case).await,
             "error_contract" => run_error_contract(&harness, case).await,
             "commit_replay" => run_commit_replay(&harness, case).await,
@@ -705,7 +708,7 @@ async fn run_download(harness: &Harness, case: &Case) {
         .expect("stat download file");
     let grant = harness
         .client
-        .create_download(&spec, &Default::default())
+        .create_download(&spec)
         .await
         .expect("begin direct download");
     assert_eq!(stat.content_ref(), Some(&grant.content_ref));
@@ -1234,6 +1237,367 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .await
         .expect("delete by inode");
     assert_eq!(deleted.committed_seq.0, expected.deleted_committed_seq);
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InodeAddressingRequest {
+    namespace_id: String,
+    directory: String,
+    actor_id: ActorId,
+    source_file_name: String,
+    renamed_file_name: String,
+    copy_file_name: String,
+    restored_file_name: String,
+    first_content_utf8: String,
+    second_content_utf8: String,
+    attribute_key: String,
+    attribute_value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InodeAddressingExpected {
+    current_revision_no: u64,
+    copied_committed_seq: u64,
+    restored_revision_no: u64,
+    attributes_revision_no: u64,
+    entry_names: Vec<String>,
+    stale_binding_version: ErrorStatusExpected,
+    occupied_name: ErrorStatusExpected,
+    unrestricted_access: ErrorStatusExpected,
+    deleted_content: ErrorStatusExpected,
+}
+
+async fn run_inode_addressing(harness: &Harness, case: &Case) {
+    let (request, expected) = parse_values::<InodeAddressingRequest, InodeAddressingExpected>(case);
+    let namespace = namespace_id(&request.namespace_id);
+    let actor = &request.actor_id;
+    let child_path = |name: &str| {
+        namespace_path(
+            &request.namespace_id,
+            &format!("{}/{name}", request.directory),
+        )
+    };
+    harness
+        .client
+        .create_namespace(
+            &namespace,
+            actor,
+            loonfs_types::NamespaceAccess::unrestricted(),
+        )
+        .await
+        .expect("create inode-addressing namespace");
+    let directory = namespace_path(&request.namespace_id, &request.directory);
+    harness
+        .client
+        .create_directory(&directory, actor)
+        .await
+        .expect("create inode-addressing directory");
+    let source_path = child_path(&request.source_file_name);
+    harness
+        .client
+        .put_file_with_options(
+            &source_path,
+            request.first_content_utf8.as_bytes(),
+            actor,
+            &put_options("conf-inode-addressing-first"),
+        )
+        .await
+        .expect("put first revision");
+    harness
+        .client
+        .put_file_with_options(
+            &source_path,
+            request.second_content_utf8.as_bytes(),
+            actor,
+            &PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                commit: commit_options("conf-inode-addressing-second"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("put second revision");
+    let parent_inode_id = harness
+        .client
+        .stat(&directory)
+        .await
+        .expect("stat inode-addressing directory")
+        .inode_id;
+    let source = harness
+        .client
+        .stat(&source_path)
+        .await
+        .expect("stat source");
+    let source_inode_id = source.inode_id;
+    let stale_version = source.binding_version.expect("source binding version");
+    let renamed_path = child_path(&request.renamed_file_name);
+    harness
+        .client
+        .move_path_with_options(
+            &source_path,
+            &renamed_path,
+            actor,
+            &MoveOptions {
+                commit: commit_options("conf-inode-addressing-rename"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rename source by path");
+    let renamed = harness
+        .client
+        .stat(&renamed_path)
+        .await
+        .expect("stat renamed source");
+    let fresh_version = renamed
+        .binding_version
+        .clone()
+        .expect("renamed binding version");
+
+    assert_eq!(
+        harness
+            .client
+            .read_file_by_inode(&namespace, source_inode_id)
+            .await
+            .expect("read current content by inode"),
+        request.second_content_utf8.as_bytes()
+    );
+    let grant = harness
+        .client
+        .create_download_by_inode(&namespace, source_inode_id)
+        .await
+        .expect("grant current content by inode");
+    assert_eq!(grant.inode_id, source_inode_id);
+    assert_eq!(grant.revision_no.0, expected.current_revision_no);
+    assert_eq!(Some(&grant.content_ref), renamed.content_ref());
+
+    let copy = |id: &str, preconditions: Vec<CommitPrecondition>| {
+        CommitRequest::single(
+            commit_id(id),
+            None,
+            FilesystemOperation::CopyByInode {
+                inode_id: source_inode_id,
+                destination_parent_inode_id: parent_inode_id,
+                destination_display_name: display_name(&request.copy_file_name),
+                precondition: DestinationPrecondition::default(),
+            },
+        )
+        .preconditions(preconditions)
+    };
+    let binding = |expected_binding_version: BindingVersion| CommitPrecondition::InodeBinding {
+        inode_id: source_inode_id,
+        expected_binding_version,
+    };
+    let absence = |name: &str| CommitPrecondition::NameAbsence {
+        parent_inode_id,
+        display_name: display_name(name),
+    };
+    let stale = harness
+        .client
+        .commit(
+            &namespace,
+            actor,
+            &copy(
+                "conf-inode-addressing-stale-copy",
+                vec![binding(stale_version)],
+            ),
+        )
+        .await
+        .expect_err("a stale binding precondition must fail");
+    assert_api_error(&stale, &expected.stale_binding_version);
+    let occupied = harness
+        .client
+        .commit(
+            &namespace,
+            actor,
+            &copy(
+                "conf-inode-addressing-occupied-copy",
+                vec![
+                    binding(fresh_version.clone()),
+                    absence(&request.renamed_file_name),
+                ],
+            ),
+        )
+        .await
+        .expect_err("a bound name must fail its absence precondition");
+    assert_api_error(&occupied, &expected.occupied_name);
+    let copied = harness
+        .client
+        .commit(
+            &namespace,
+            actor,
+            &copy(
+                "conf-inode-addressing-copy",
+                vec![binding(fresh_version), absence(&request.copy_file_name)],
+            ),
+        )
+        .await
+        .expect("copy by inode");
+    assert_eq!(copied.committed_seq.0, expected.copied_committed_seq);
+    let copy_path = child_path(&request.copy_file_name);
+    let copy_entry = harness.client.stat(&copy_path).await.expect("stat copy");
+    assert_ne!(copy_entry.inode_id, source_inode_id);
+    assert_eq!(
+        harness
+            .client
+            .read_file(&copy_path)
+            .await
+            .expect("read copy"),
+        request.second_content_utf8.as_bytes()
+    );
+
+    harness
+        .client
+        .restore_revision_by_inode_with_options(
+            &namespace,
+            source_inode_id,
+            RevisionNo(1),
+            actor,
+            &commit_options("conf-inode-addressing-restore"),
+        )
+        .await
+        .expect("restore revision by inode");
+    let restored = harness
+        .client
+        .stat(&renamed_path)
+        .await
+        .expect("stat restored source");
+    assert_eq!(
+        restored.revision_no().expect("restored revision").0,
+        expected.restored_revision_no
+    );
+    assert_eq!(
+        harness
+            .client
+            .read_file_by_inode(&namespace, source_inode_id)
+            .await
+            .expect("read restored content by inode"),
+        request.first_content_utf8.as_bytes()
+    );
+
+    let attribute_key = AttributeKey::parse(&request.attribute_key).expect("attribute key");
+    let attribute_value = AttributeValue::parse(&request.attribute_value).expect("attribute value");
+    harness
+        .client
+        .update_attributes_by_inode_with_options(
+            &namespace,
+            copy_entry.inode_id,
+            actor,
+            AttributeChanges {
+                set: std::collections::BTreeMap::from([(
+                    attribute_key.clone(),
+                    attribute_value.clone(),
+                )]),
+                remove: Vec::new(),
+            },
+            &UpdateAttributesByInodeOptions {
+                commit: commit_options("conf-inode-addressing-attributes"),
+                expected_attributes_revision_no: Some(AttributesRevisionNo(0)),
+            },
+        )
+        .await
+        .expect("update attributes by inode");
+    let labeled = harness
+        .client
+        .stat(&copy_path)
+        .await
+        .expect("stat labeled copy")
+        .attributes
+        .expect("projected attributes");
+    assert_eq!(
+        labeled.attributes_revision_no.0,
+        expected.attributes_revision_no
+    );
+    assert_eq!(
+        labeled.attributes.as_map().get(&attribute_key),
+        Some(&attribute_value)
+    );
+
+    let unrestricted = harness
+        .client
+        .update_access_by_inode(
+            &namespace,
+            ROOT_INODE_ID,
+            actor,
+            AccessState {
+                boundary: false,
+                grants: AccessGrants::default(),
+            },
+        )
+        .await
+        .expect_err("an unrestricted namespace holds no access rows");
+    assert_api_error(&unrestricted, &expected.unrestricted_access);
+
+    let deletion = harness
+        .client
+        .delete_path_with_options(
+            &copy_path,
+            actor,
+            &DeleteOptions {
+                commit: commit_options("conf-inode-addressing-delete-copy"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("delete copy");
+    harness
+        .client
+        .undelete_with_options(
+            &namespace,
+            copy_entry.inode_id,
+            deletion.committed_seq,
+            actor,
+            &UndeleteOptions {
+                commit: commit_options("conf-inode-addressing-undelete"),
+                destination: UndeleteDestination::Name {
+                    parent_inode_id,
+                    display_name: display_name(&request.restored_file_name),
+                },
+            },
+        )
+        .await
+        .expect("undelete under a parent inode");
+    assert_eq!(
+        harness
+            .client
+            .stat(&child_path(&request.restored_file_name))
+            .await
+            .expect("stat undeleted copy")
+            .inode_id,
+        copy_entry.inode_id
+    );
+
+    harness
+        .client
+        .delete_path_with_options(
+            &renamed_path,
+            actor,
+            &DeleteOptions {
+                commit: commit_options("conf-inode-addressing-delete-source"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("delete source");
+    let deleted = harness
+        .client
+        .read_file_by_inode(&namespace, source_inode_id)
+        .await
+        .expect_err("a deleted inode has no current content");
+    assert_api_error(&deleted, &expected.deleted_content);
+
+    let listing = harness
+        .client
+        .list(&directory)
+        .page(first_page())
+        .await
+        .expect("list inode-addressing directory");
+    assert_eq!(
+        listing.entries.iter().map(listed_name).collect::<Vec<_>>(),
+        expected.entry_names
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -1950,7 +2314,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let grant = harness
         .client
-        .create_download(&upload_path, &Default::default())
+        .create_download(&upload_path)
         .await
         .expect("begin end-to-end download");
     let streamed = stream_grant(&harness.client, &grant).await;

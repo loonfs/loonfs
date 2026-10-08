@@ -83,6 +83,16 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
             .await
             .expect("stat renamed path")
     );
+    assert_eq!(
+        namespace
+            .read_file_by_inode(inode_id)
+            .await
+            .expect("read current content by inode after rename"),
+        namespace
+            .read_file("/after.txt")
+            .await
+            .expect("read renamed path")
+    );
     let revisions = namespace
         .list_file_revisions_by_inode(inode_id)
         .page(page_request())
@@ -107,6 +117,14 @@ async fn stat_inode_tracks_a_rename_and_retained_revisions_keep_the_same_identit
         .await
         .expect_err("deleted inode is not current");
     assert_eq!(hidden.code(), ErrorCode::InodeNotFound);
+    assert_eq!(
+        namespace
+            .read_file_by_inode(inode_id)
+            .await
+            .expect_err("deleted inode has no current content")
+            .code(),
+        ErrorCode::InodeNotFound
+    );
     assert_eq!(
         namespace
             .read_file_revision_by_inode(inode_id, RevisionNo(2))

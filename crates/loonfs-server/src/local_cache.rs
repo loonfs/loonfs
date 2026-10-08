@@ -33,7 +33,7 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// The directory beneath the configured root that the disk tier writes.
 ///
@@ -102,13 +102,15 @@ type PerKind = [Arc<dyn CounterHandle>; BLOCK_KINDS.len()];
 /// Foyer-backed cache with a byte-limited memory tier and local disk tier.
 ///
 /// After [`close`](StoredMetadataBlockCache::close), lookups return `None`,
-/// mutations do nothing, and repeated closes succeed.
+/// mutations do nothing, and repeated closes succeed. A clean close also
+/// releases the directory, so another cache can open it.
 pub struct FoyerStoredMetadataBlockCache {
     cache: HybridCache<StoredMetadataBlockKey, Bytes>,
-    /// The exclusive lock on the configured root, held for the life of this
-    /// cache. Closing the file is what releases it, so the field is kept
-    /// even though nothing reads it.
-    _directory_lock: File,
+    /// The exclusive lock on the configured root. Closing the file releases
+    /// the lock. A clean close drops the file rather than leaving that to
+    /// the last holder of this cache: a task can still hold the cache after
+    /// its server stops, and the next server must find the directory free.
+    directory_lock: Mutex<Option<File>>,
     /// The two foyer counters this process keeps, filled by foyer itself
     /// through the registry installed at construction.
     overflow: FoyerOverflowCounters,
@@ -197,7 +199,7 @@ impl FoyerStoredMetadataBlockCache {
 
         Ok(Self {
             cache,
-            _directory_lock: directory_lock,
+            directory_lock: Mutex::new(Some(directory_lock)),
             overflow,
             closed: AtomicBool::new(false),
             get_failure_logged: AtomicBool::new(false),
@@ -294,6 +296,12 @@ impl StoredMetadataBlockCache for FoyerStoredMetadataBlockCache {
         match self.cache.close().await {
             Ok(()) => {
                 self.metrics.closes_clean.increment(1);
+                drop(
+                    self.directory_lock
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(),
+                );
                 Ok(())
             }
             Err(error) => {

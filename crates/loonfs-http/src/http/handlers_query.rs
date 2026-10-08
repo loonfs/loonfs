@@ -22,6 +22,7 @@ pub(super) struct GrepQuery {
     pattern: Option<String>,
     case_insensitive: Option<String>,
     path_prefix: Option<String>,
+    inode_id: Option<String>,
     allow_scan: Option<String>,
     allow_stale: Option<String>,
     limit: Option<String>,
@@ -49,7 +50,8 @@ pub(super) struct GrepQuery {
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("pattern" = String, Query, description = "Pattern in the Rust `regex` crate's dialect. Its UTF-8 encoding must be at most 1024 bytes."),
             ("case_insensitive" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Match case-insensitively (`true` or `false`). Defaults to `false`."),
-            ("path_prefix" = Option<String>, Query, description = "Complete absolute path used to restrict matches."),
+            ("path_prefix" = Option<String>, Query, description = "Complete absolute path used to restrict matches. Cannot be combined with `inode_id`."),
+            ("inode_id" = Option<String>, Query, description = "Inode whose descendants restrict matches. Cannot be combined with `path_prefix`.", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
             ("allow_scan" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Permit a capped exhaustive scan when the pattern has no required grams (`true` or `false`). Defaults to `false`."),
             ("allow_stale" = inline(Option<OpenApiDefaultFalseBoolean>), Query, description = "Return indexed-only results when the unindexed tail exceeds the scan budget (`true` or `false`). Defaults to `false`."),
             ("limit" = inline(Option<OpenApiPageLimit>), Query, description = "Maximum matches per page"),
@@ -57,9 +59,9 @@ pub(super) struct GrepQuery {
         ),
         responses(
             (status = 200, description = "One page of matches", body = GrepResponse),
-            (status = 400, description = "Invalid pattern, cursor, or an unindexable pattern without allow_scan", body = ApiError),
+            (status = 400, description = "Invalid pattern, cursor, or scope, both scopes, or an unindexable pattern without allow_scan", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 404, description = "Namespace, scope path, or scope inode not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 501, description = "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError),
@@ -103,10 +105,20 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
             })
         })
         .transpose()?;
+    let inode_id = query
+        .inode_id
+        .map(|value| {
+            loonfs_types::public_inode_id::decode(&value).map_err(|error| {
+                ApiResponseError::new(loonfs_types::ErrorCode::InvalidRequest, &error.to_string())
+                    .with_param("inode_id")
+            })
+        })
+        .transpose()?;
     Ok(GrepRequest {
         pattern,
         case_insensitive: parse_optional_boolean(query.case_insensitive, "case_insensitive")?,
         path_prefix,
+        inode_id,
         cursor: query.cursor,
         allow_stale: parse_optional_boolean(query.allow_stale, "allow_stale")?,
         allow_scan: parse_optional_boolean(query.allow_scan, "allow_scan")?,

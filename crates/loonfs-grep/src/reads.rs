@@ -179,16 +179,30 @@ impl NamespaceReadView<'_> {
             .await?)
     }
 
-    /// Lists one directory page against the read view.
-    pub(crate) async fn list_path_page(
+    /// Resolves one visible inode, and its current path, against the read view.
+    pub(crate) async fn resolve_inode(&self, inode_id: InodeId) -> Result<PathEntry> {
+        Ok(self
+            .view
+            .stat_by_inode_with_options(
+                inode_id,
+                &StatOptions {
+                    include_attributes: loonfs_types::AttributeInclusion::Omit,
+                    snapshot_id: None,
+                },
+            )
+            .await?)
+    }
+
+    /// Lists one page of a directory inode's children against the read view.
+    pub(crate) async fn list_inode_children_page(
         &self,
-        absolute_path: &AbsolutePath,
+        inode_id: InodeId,
         cursor: Option<String>,
         limit: usize,
     ) -> Result<Page<PathEntry, String>> {
         let page = self
             .view
-            .list(absolute_path.as_str())
+            .list_by_inode(inode_id)
             .page(page_request(cursor, limit)?)
             .await?;
         Ok(Page {

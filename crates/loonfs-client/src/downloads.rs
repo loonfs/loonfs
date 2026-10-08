@@ -3,12 +3,11 @@
 use super::*;
 use crate::transport::SendPolicy;
 
-/// Selects a retained revision or snapshot for a download. Set at most one.
+/// Options for a download of a file's content by path.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
-    /// Download one retained revision instead of the current file.
-    pub revision_no: Option<RevisionNo>,
-    /// Download the file revision captured by this snapshot.
+    /// Download the file revision captured by this snapshot instead of the
+    /// current one.
     pub snapshot_id: Option<PinId>,
 }
 
@@ -122,13 +121,38 @@ impl Client {
             .supports(FEATURE_DOWNLOADS_DIRECT_GET))
     }
 
+    /// Requests short-lived direct access to a file's current content.
+    pub async fn create_download(&self, spec: &NamespacePath) -> Result<CreateDownloadResponse> {
+        self.create_download_with_options(spec, &DownloadOptions::default())
+            .await
+    }
+
     /// Requests short-lived direct access to a file's content: the current
-    /// revision by default, or a retained revision or snapshot when the options
-    /// name one.
-    pub async fn create_download(
+    /// revision, or the revision a snapshot captured when the options name
+    /// one.
+    pub async fn create_download_with_options(
         &self,
         spec: &NamespacePath,
         options: &DownloadOptions,
+    ) -> Result<CreateDownloadResponse> {
+        self.request_download(spec, None, options.snapshot_id.clone())
+            .await
+    }
+
+    /// Requests short-lived direct access to one retained revision of a file.
+    pub async fn create_revision_download(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<CreateDownloadResponse> {
+        self.request_download(spec, Some(revision_no), None).await
+    }
+
+    async fn request_download(
+        &self,
+        spec: &NamespacePath,
+        revision_no: Option<RevisionNo>,
+        snapshot_id: Option<PinId>,
     ) -> Result<CreateDownloadResponse> {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/downloads",
@@ -137,8 +161,8 @@ impl Client {
         );
         let request = CreateDownloadRequest {
             path: spec.absolute_path().clone(),
-            revision_no: options.revision_no,
-            snapshot_id: options.snapshot_id.clone(),
+            revision_no,
+            snapshot_id,
         };
         // A grant creates nothing and names nothing new, so asking twice
         // costs two URLs and changes no state: this one may be resent.
@@ -150,8 +174,29 @@ impl Client {
         .await
     }
 
-    /// Requests direct access to one retained inode revision.
+    /// Requests direct access to the current content of a visible file
+    /// inode, wherever it is bound.
     pub async fn create_download_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<CreateDownloadByInodeResponse> {
+        let inode_id = loonfs_types::public_inode_id::encode(inode_id);
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+            self.base_url
+        );
+        self.request_json::<(), CreateDownloadByInodeResponse>(
+            self.post(&url),
+            None,
+            SendPolicy::Retry,
+        )
+        .await
+    }
+
+    /// Requests direct access to one retained inode revision, without
+    /// requiring a current path.
+    pub async fn create_revision_download_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,

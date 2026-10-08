@@ -3,7 +3,8 @@
 use super::ensure_expected_inode;
 use super::publish_path_planning::ReplaceDestination;
 use super::publish_path_planning::{
-    classify_replace_destination, is_missing_visible_path, resolve_parent_directory,
+    classify_replace_destination, ensure_mutation_inode, is_missing_visible_path,
+    resolve_parent_directory, resolve_visible_child, resolve_visible_inode,
     resolve_visible_path_for_authorization, source_binding, CompiledFilesystemOperation,
     PublishPathPlanningView,
 };
@@ -195,14 +196,103 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     .await?;
     let replaced =
         classify_replace_destination(occupant, behavior, source.inode_id, to_path.as_str())?;
+    plan_copy(
+        view,
+        &source,
+        target_parent,
+        &final_component(to_path)?,
+        replaced,
+        to_path.as_str(),
+        expected_destination,
+        allocation,
+    )
+    .await
+}
 
+pub(super) async fn plan_copy_by_inode<S: ObjectStore + ?Sized>(
+    inode_id: InodeId,
+    destination_parent_inode_id: InodeId,
+    destination_display_name: &DisplayName,
+    behavior: DestinationBehavior,
+    expected_destination: Option<ExpectedFileState>,
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    allocation: &mut CandidateAllocation,
+) -> Result<CompiledFilesystemOperation> {
+    ensure_mutation_inode(inode_id)?;
+    let source = resolve_visible_inode(view, inode_id).await?;
+    view.authorize(
+        inode_id,
+        AccessRights::from_iter([AccessRight::Read]),
+        Absence::Inode,
+    )
+    .await?;
+    if source.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            target: source.absolute_path.to_string(),
+            kind: source.inode_kind,
+        });
+    }
+    let target_parent = resolve_visible_inode(view, destination_parent_inode_id).await?;
+    if target_parent.inode_kind != InodeKind::Directory {
+        view.authorize(
+            destination_parent_inode_id,
+            AccessRights::from_iter([AccessRight::Create]),
+            Absence::Inode,
+        )
+        .await?;
+        return Err(CoreError::ExpectedDirectory {
+            target: target_parent.absolute_path.to_string(),
+            kind: target_parent.inode_kind,
+        });
+    }
+    let destination_path = target_parent
+        .absolute_path
+        .join(destination_display_name)
+        .to_string();
+    let occupant =
+        resolve_visible_child(view, destination_parent_inode_id, destination_display_name).await?;
+    view.authorize_destination(
+        occupant.as_ref(),
+        behavior,
+        Some(inode_id),
+        destination_parent_inode_id,
+        Replacement::WritesFile,
+        Absence::Inode,
+    )
+    .await?;
+    let replaced = classify_replace_destination(occupant, behavior, inode_id, &destination_path)?;
+    plan_copy(
+        view,
+        &source,
+        destination_parent_inode_id,
+        destination_display_name,
+        replaced,
+        &destination_path,
+        expected_destination,
+        allocation,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a copy takes the move inputs plus the allocation its new inode draws from"
+)]
+async fn plan_copy<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    source: &ResolvedVisiblePath,
+    target_parent: InodeId,
+    target_name: &DisplayName,
+    replaced: ReplaceDestination,
+    destination_path: &str,
+    expected_destination: Option<ExpectedFileState>,
+    allocation: &mut CandidateAllocation,
+) -> Result<CompiledFilesystemOperation> {
     let revision = view
         .view
         .latest_revision_head(source.inode_id)
         .await?
-        .ok_or_else(|| CoreError::PathNotFound(from_path.as_str().to_owned()))?;
-
-    let target_name = final_component(to_path)?;
+        .ok_or_else(|| CoreError::PathNotFound(source.absolute_path.to_string()))?;
     let mut ops = Vec::new();
     match &replaced {
         // Copying a file onto its own binding would delete the source to
@@ -210,7 +300,7 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
         // `Replace` — the same-file rule every copy tool applies.
         ReplaceDestination::SameInode => {
             return Err(CoreError::DestinationExists {
-                path: to_path.as_str().to_owned(),
+                path: destination_path.to_owned(),
                 existing_display_name: Some(source.display_name.clone()),
             })
         }
@@ -218,13 +308,13 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
             ensure_expected_inode(
                 existing,
                 expected_destination.map(|expected| expected.inode_id),
-                &target_name,
+                target_name,
             )?;
             let existing_revision = view
                 .view
                 .latest_revision_head(existing.inode_id)
                 .await?
-                .ok_or_else(|| CoreError::PathNotFound(to_path.as_str().to_owned()))?;
+                .ok_or_else(|| CoreError::PathNotFound(destination_path.to_owned()))?;
             let base_revision_no = expected_destination
                 .and_then(|state| state.revision_no)
                 .unwrap_or(existing_revision.revision_no);
@@ -236,7 +326,7 @@ pub(super) async fn plan_copy_file_path<S: ObjectStore + ?Sized>(
         }
         ReplaceDestination::Vacant => {
             if expected_destination.is_some() {
-                return Err(CoreError::PathNotFound(to_path.as_str().to_owned()));
+                return Err(CoreError::PathNotFound(destination_path.to_owned()));
             }
             let child_inode_id = allocation.allocate()?;
             ops.push(CommitOp::CreateFile {

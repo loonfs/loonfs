@@ -31,6 +31,16 @@
         "path": "/docs/missing"
       },
       {
+        "kind": "inode_binding",
+        "inode_id": "ino_42",
+        "expected_binding_version": "aaaa"
+      },
+      {
+        "kind": "name_absence",
+        "parent_inode_id": "ino_7",
+        "display_name": "missing"
+      },
+      {
         "kind": "attributes_revision",
         "inode_id": "ino_42",
         "expected_attributes_revision_no": 2

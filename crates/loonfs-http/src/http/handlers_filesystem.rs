@@ -162,7 +162,10 @@ impl ReadTarget {
     ) -> loonfs::Result<loonfs::downloads::DirectDownloadTarget> {
         match self {
             Self::Snapshot(view) => view.create_download(path).await,
-            Self::Live(namespace) => namespace.create_download(path, revision_no).await,
+            Self::Live(namespace) => match revision_no {
+                Some(revision_no) => namespace.create_revision_download(path, revision_no).await,
+                None => namespace.create_download(path).await,
+            },
         }
     }
 

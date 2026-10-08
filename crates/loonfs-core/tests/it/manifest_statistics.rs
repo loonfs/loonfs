@@ -400,6 +400,8 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
             inode_id: inode,
             deletion_seq: deleted.committed_seq,
             destination_path: None,
+            destination_parent_inode_id: None,
+            destination_display_name: None,
         },
         &context,
     )

@@ -1212,6 +1212,8 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
             inode_id: file_inode,
             deletion_seq: deleted.committed_seq,
             destination_path: None,
+            destination_parent_inode_id: None,
+            destination_display_name: None,
         },
         &context,
     )

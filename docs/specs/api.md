@@ -23,7 +23,7 @@ within an API group is expressed as **named features** (section 2).
 
 | API group | Ops | Status |
 | --- | --- | --- |
-| `filesystem/v0` | Path and inode reads, path mutations, uploads, the change feed, namespace state, capability discovery, and standard errors. Namespace lifecycle, snapshots, attributes, inode child listing, and direct transfers are features. | **Mandatory** for any conforming deployment |
+| `filesystem/v0` | Path and inode reads, path and inode mutations, uploads, the change feed, namespace state, capability discovery, and standard errors. Namespace lifecycle, snapshots, attributes, inode child listing, and direct transfers are features. | **Mandatory** for any conforming deployment |
 | `maintenance/v0` | Namespace diagnostics, checkpoints, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep index maintenance as a feature. | Optional |
 | `query/v0` | Content search over derived indexes as the `query.grep` feature. | Optional |
 
@@ -133,7 +133,7 @@ Registered limit keys:
 | `upload.service_proxied.max_content_bytes` | Largest request body accepted by one service-proxied upload content request (`PUT .../uploads/{upload_id}/content`). This is not a maximum file size. Clients may use `direct_put` for larger content only when `filesystem.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
 | `upload.direct_put.max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.service_proxied.max_content_bytes`, which bounds service-proxied uploads. A size hint above this limit returns `content_too_large` at begin, and completion checks the actual stored size. Advertised only alongside `filesystem.uploads.direct_put`. |
 | `upload.complete.max_request_body_bytes` | Largest JSON body accepted by `POST .../uploads/{upload_id}/complete`. Larger requests return `content_too_large`. |
-| `download.service_proxied.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will stream and return in one response. Over-limit reads answer `content_too_large`; proxied reads use bounded chunks but do not support range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. The check is against the whole file. The proxied read has no ranged form. |
+| `download.service_proxied.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, `GET .../inodes/{inode_id}/content`, or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will stream and return in one response. Over-limit reads answer `content_too_large`; proxied reads use bounded chunks but do not support range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. The check is against the whole file. The proxied read has no ranged form. |
 | `upload.service_proxied.max_concurrent_requests` | How many service-proxied upload requests a serving process streams at once. The cap is shared by all callers and is not a per-caller allowance. Requests past it answer `server_busy`. |
 | `download.service_proxied.max_concurrent_requests` | How many service-proxied content reads a serving process streams at once. The cap is shared by all callers and is not a per-caller allowance. Requests past it answer `server_busy`. A read holds its place until its body finishes or is dropped. |
 | `access.max_principals_per_request` | Most principal ids one request may act as. Over-limit headers answer `invalid_request`. |
@@ -251,7 +251,7 @@ The codes that populate it:
 | `stale_revision` | `inode_id`, `expected_revision_no`, `actual_revision_no` (absent when the inode has no current revision or is not visible); `precondition_index` for a failed request precondition |
 | `stale_attributes` | `inode_id`, `expected_attributes_revision_no` (absent when the caller stated no expectation), `actual_attributes_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
 | `stale_access` | `inode_id`, `expected_access_revision_no` (absent when the caller stated no expectation), `actual_access_revision_no` (absent when the inode is not visible); `precondition_index` for a failed request precondition |
-| `binding_version_mismatch` | `inode_id`, `expected_binding_version` (the request's token as supplied), `actual_binding_version` (the current binding's token); `precondition_index` for a failed request precondition. Clients must not parse or order the tokens |
+| `binding_version_mismatch` | `inode_id`, `expected_binding_version` (the request's token as supplied), `actual_binding_version` (the current binding's token, absent when the inode is not visible); `precondition_index` for a failed request precondition. Clients must not parse or order the tokens |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt: the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). The sequence comes from the receipt and the fingerprint comes from the retained commit row at that sequence, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `stale_head` | `expected_head_seq`, `actual_head_seq` for a caller-supplied head precondition; `precondition_index` identifies a failed request precondition. |
@@ -295,7 +295,7 @@ The full registry (`ErrorCode` in `loonfs-types`):
 | `stale_attributes` | 409 | The inode's attribute revision moved while the update was being decided. Two things raise it: a caller-supplied expected attribute revision that is no longer current, and the revision precondition every attribute update carries even when the caller states no expectation. Re-read the attributes and retry. |
 | `stale_access` | 409 | The inode's access revision moved while the update was being decided. Re-read the access row and retry. |
 | `namespace_unrestricted` | 409 | The namespace's access mode is unrestricted, so it holds no access rows. |
-| `binding_version_mismatch` | 409 | The binding version supplied for an inode move or delete is not the entry's current binding version. Re-read the entry before retrying. |
+| `binding_version_mismatch` | 409 | The binding version supplied for an inode move or delete, or by a binding precondition, is not the entry's current binding version. Re-read the entry before retrying. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | Another writer superseded this session. The session is dead and this request fails. The host drops it; a later request opens a new session whose first publish takes the namespace back. Sustained fencing of one namespace means two writers receive its traffic. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
@@ -566,7 +566,7 @@ Commit bodies reject unknown fields so a misspelled precondition cannot be ignor
 
 Every named entry includes a `binding_version`, an opaque token identifying its current parent/name binding. Creating, moving, or undeleting an entry produces a new token; content and attribute writes do not. Clients must not parse or order these tokens. A token is valid only for the namespace that issued it.
 
-Inode-addressed moves and deletes require the token as `expected_binding_version`. A valid token that does not match the entry's current binding returns `binding_version_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request.
+Inode-addressed moves and deletes require the token as `expected_binding_version`. A valid token that does not match the entry's current binding returns `binding_version_mismatch`; a malformed token or one from another namespace returns `invalid_request`. The precondition is part of the commit's identity and is evaluated after any earlier operations in the same request. The `inode_binding` request precondition checks the same token for any operation.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -616,10 +616,19 @@ Optional `expected_binding_version` also detects moves away and back.
 A binding version mismatch returns `binding_version_mismatch`.
 Binding the root to `ino_1` passes without a binding version. The root has no binding version, so supplying one returns `invalid_request`.
 
+`inode_binding` requires `inode_id` and `expected_binding_version`.
+The inode must be visible and still bound at that version, wherever its path now leads.
+A mismatch returns `binding_version_mismatch`; `actual_binding_version` is absent when the inode is not visible.
+A malformed token, a token from another namespace, or the root inode, which has no binding version, returns `invalid_request`.
+
 `path_absence` requires only an absolute `path` and rejects inode or binding version fields.
 It passes when no visible entry resolves at the full path, including when an ancestor is missing or an intermediate component is not a directory.
 A bound path returns `path_conflict` with `actual_inode_id` set and `expected_inode_id` absent.
 Absence of `/` fails with actual inode `ino_1`.
+
+`name_absence` requires `parent_inode_id` and `display_name`.
+It passes when the parent has no visible child whose name key matches the name, including when the parent is not visible or is not a directory.
+A bound name returns `path_conflict` with `actual_inode_id` set and `expected_inode_id` absent.
 
 `attributes_revision` requires a visible `inode_id` whose attribute revision equals `expected_attributes_revision_no`.
 Any attribute update invalidates it, as does deletion. Content-only rewrites do not.
@@ -994,9 +1003,11 @@ The table below lists the retry class for every v0 operation.
 | List file revisions by path | `list_file_revisions` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | List file revisions by inode | `list_file_revisions_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
 | Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&snapshot_id=...` (`revision_no` and `snapshot_id` are optional and mutually exclusive) |
+| Read current file content by inode | `get_file_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/content` |
 | Read prior file content by inode | `get_file_revision_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
 | Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` with body `path`, optional `revision_no`, and optional `snapshot_id` (`snapshot_id` cannot be combined with `revision_no`) |
-| Start a download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with no body |
+| Start a current download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` with no body |
+| Start a revision download by inode | `create_revision_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with no body |
 | List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits`; requires the `Loonfs-Actor` header |
 | Create an upload session | `create_upload` | `not_idempotent` | `POST /v0/namespaces/{ns}/uploads`; returns the open session |
@@ -1986,7 +1997,7 @@ Those rows represent current state and are not removed when the retention floor 
 }
 ```
 
-### 6.7 `GET /filesystem/content`
+### 6.7 `GET /filesystem/content` and `GET /inodes/{inode_id}/content`
 
 The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
@@ -2010,10 +2021,18 @@ inode route addresses it directly. Both return the same path-free response.
 `next_cursor` is included only when another page is available. Revision
 history is not pruned, so paging to the end reaches revision 1.
 
-The inode content route reads and verifies a revision without resolving a
-current path. Deleted files remain readable while their revision rows are
-retained. A directory returns `path_conflict`, an unknown inode returns
-`inode_not_found`, and an unknown revision returns `revision_not_found`.
+The inode revision route,
+`GET /inodes/{inode_id}/revisions/{revision_no}/content`, reads and verifies
+a revision without resolving a current path. Deleted files remain readable
+while their revision rows are retained. A directory returns `path_conflict`,
+an unknown inode returns `inode_not_found`, and an unknown revision returns
+`revision_not_found`.
+
+`GET /inodes/{inode_id}/content` reads the current revision of a visible file
+inode wherever it is bound, streamed and verified like the path route. Like
+the path route without `revision_no`, it needs only `read`. A deleted or
+unknown inode returns `inode_not_found`, and a directory returns
+`path_conflict`.
 
 Embedded by-reference reads require administrator access to the reading
 namespace. The namespace's read view must contain a publication for the
@@ -2218,13 +2237,17 @@ still match. A replacing move deletes the destination inode, including its
 attributes. Attribute-level concurrency uses
 `expected_attributes_revision_no` separately.
 
-Five operations use inode IDs instead of paths. They let clients act on an entry they previously read even if its path has changed. An unknown or hidden inode returns `inode_not_found`.
+Nine operations use inode IDs instead of paths. They let clients act on an entry they previously read even if its path has changed. An unknown or hidden inode returns `inode_not_found`.
 
 `create_directory_by_inode` and `create_file_by_inode` create an entry under an existing parent directory. Both are create-only and return `path_conflict` when the name is already in use.
 
 `put_file_revision_by_inode` appends a revision to a file wherever it is currently located. It requires `expected_revision_no` and returns `stale_revision` when the file has changed.
 
 `move_by_inode` and `delete_by_inode` require `expected_binding_version` (section 5.1). Their destination, replacement, and recursive-delete behavior matches `move_path` and `delete_path`. The namespace root cannot be moved or deleted.
+
+`copy_by_inode` copies the current revision of a file inode to `destination_display_name` under `destination_parent_inode_id`. Its `behavior`, destination preconditions, and attribute rule match `copy_path`.
+
+`restore_revision_by_inode`, `update_attributes_by_inode`, and `update_access_by_inode` behave like `restore_revision`, `update_attributes`, and `update_access`, with the target named by `inode_id`. They take no `expected_inode_id`, because the inode is the target, so `expected_attributes_revision_no` and `expected_access_revision_no` stand alone. `copy_by_inode`, `restore_revision_by_inode`, and `update_attributes_by_inode` reject the root inode with `invalid_request`, as their path forms reject `/`. `update_access_by_inode` accepts it.
 
 `Loonfs-Actor: usr_8f3c`
 
@@ -2334,6 +2357,12 @@ remembered spelling, so recovery lands correctly even when the enclosing
 directories were renamed after the delete. The in-place parent and name obey
 the same rules a path would: the parent must not be deleted, and the name must
 be free, each answering its usual code otherwise.
+
+The destination may instead name a parent inode: `destination_parent_inode_id`
+and `destination_display_name`, which are required together. The parent must
+be a visible directory and the name must be free. A request that supplies
+`destination_path` with either of them, or one of them alone, answers
+`invalid_request` with `param` naming the field at fault.
 
 Only the root of a deletion can be undeleted, and `deletion_seq` must match the active deletion sequence. A mismatch returns `not_deleted` with the expected and actual sequences, preventing a stale recovery request from cancelling a later deletion.
 
@@ -2475,11 +2504,11 @@ response is `forbidden` with the checked `inode_id` in the error details.
 | put_file with no_replace at an occupied name | `create` on the parent before reporting the conflict. |
 | delete_path, delete_by_inode | `remove` on the source parent. |
 | move_path, move_by_inode | `remove` on the source parent and `create` on the destination parent; replacing an occupant also requires `remove` on the destination parent. |
-| copy_path | `read` on the source file; `create` on the destination parent for a vacant name or a name conflict, or `write` on an occupied file being replaced. |
-| restore_revision | `write` and `history` on the file. |
-| update_attributes | `write` on the target inode. |
+| copy_path, copy_by_inode | `read` on the source file; `create` on the destination parent for a vacant name or a name conflict, or `write` on an occupied file being replaced. |
+| restore_revision, restore_revision_by_inode | `write` and `history` on the file. |
+| update_attributes, update_attributes_by_inode | `write` on the target inode. |
 | undelete | `remove` on the saved parent and `create` on the recovery parent, including when recovering in place. |
-| update_access | Authority for the changes, as described below. |
+| update_access, update_access_by_inode | Authority for the changes, as described below. |
 
 A move that changes any principal's effective rights on the moved inode is
 authorized as if the mover had granted the gained rights. The mover must hold
@@ -2495,7 +2524,8 @@ without `manage` must hold `share`, leave the boundary unchanged, and hold every
 right it adds or removes from any principal's direct grant.
 
 Preconditions require `read` on the inode they name, or the existing parent for
-path absence; a namespace-head precondition needs no inode right.
+path absence and the parent for name absence; a namespace-head precondition
+needs no inode right.
 
 The not-found-versus-forbidden rule also applies to reads: a subject with no
 right on the target receives `path_not_found` or `inode_not_found`; a subject
@@ -2503,7 +2533,7 @@ with some right but without a required right receives `forbidden`.
 
 | Read operation | Required rights |
 | --- | --- |
-| Path or inode stat, directory listing, current content, current download | `read` on the target inode. |
+| Stat, directory listing, current content, or current download, by path or inode | `read` on the target inode. |
 | Older content revision or historical download, by path or inode | `read` and `history` on the target inode. |
 | Revision listing, by path or inode | `read` and `history` on the target inode. |
 | Snapshot stat, listing, content, or download | `read` and `history` on the historical inode, evaluated at the current head. |
@@ -2826,7 +2856,7 @@ checks the arriving bytes against:
 }
 ```
 
-The inode form is
+The inode revision form is
 `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`.
 The request has no body and its response does not include a path:
 
@@ -2851,9 +2881,14 @@ The request has no body and its response does not include a path:
 }
 ```
 
-Both download routes use the same provider support check and access format.
-The inode route remains available after a rename or deletion while the
-revision is retained.
+`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current
+revision of a visible file inode and returns the same response. It has no
+body.
+
+The download routes use the same provider support check and access format.
+The inode revision route remains available after a rename or deletion while
+the revision is retained. The current inode route follows the inode across
+renames and returns `inode_not_found` once it is deleted.
 
 Four properties follow from the shape, and clients may rely on all of them.
 
@@ -3140,7 +3175,14 @@ segment prefix. The server resolves it using the name-key folding rule
 inode. It must therefore
 use the same canonical spelling as any other path. A scope that does not exist
 answers `path_not_found`; an
-empty existing scope answers successfully with no matches. A missing data half answers `not_supported` with the
+empty existing scope answers successfully with no matches.
+
+`inode_id` names the scope by identity instead, and limits results to the
+inode's descendants wherever it is bound. A request may supply `path_prefix`
+or `inode_id` but not both; both answer `invalid_request` with `param`
+`inode_id`. An inode that is not visible answers `inode_not_found`.
+
+A missing data half answers `not_supported` with the
 `feature` field naming `query.grep`, the same key capability discovery
 advertises the serving half under.
 

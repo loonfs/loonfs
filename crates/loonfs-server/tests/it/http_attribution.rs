@@ -241,7 +241,6 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
             &namespace,
             deleted.inode_id,
             deleted.deletion_seq,
-            None,
             &undelete_actor,
         )
         .await

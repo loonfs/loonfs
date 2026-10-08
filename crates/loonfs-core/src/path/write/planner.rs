@@ -2,16 +2,18 @@
 //! operations into one commit's operations.
 
 use super::intent::{CommitRequest, FilesystemOperation};
-use super::plan_access::plan_update_access;
-use super::plan_attributes::plan_update_attributes;
+use super::plan_access::{plan_update_access, plan_update_access_by_inode};
+use super::plan_attributes::{plan_update_attributes, plan_update_attributes_by_inode};
 use super::plan_by_inode::{
     plan_create_by_inode, plan_delete_by_inode, plan_move_by_inode,
     plan_put_file_revision_by_inode, NewChild,
 };
-use super::plan_create::{plan_create_directory, plan_put_file_content_ref, plan_undelete};
+use super::plan_create::{
+    plan_create_directory, plan_put_file_content_ref, plan_undelete, UndeleteDestination,
+};
 use super::plan_delete::plan_delete_path;
-use super::plan_restore::plan_restore_revision;
-use super::plan_transfer::{plan_copy_file_path, plan_move_path};
+use super::plan_restore::{plan_restore_revision, plan_restore_revision_by_inode};
+use super::plan_transfer::{plan_copy_by_inode, plan_copy_file_path, plan_move_path};
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use crate::authorize::Authorizer;
 use crate::commit::{
@@ -263,15 +265,45 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             )
             .await
         }
+        FilesystemOperation::CopyByInode {
+            inode_id,
+            destination_parent_inode_id,
+            destination_display_name,
+            precondition,
+        } => {
+            plan_copy_by_inode(
+                *inode_id,
+                *destination_parent_inode_id,
+                destination_display_name,
+                precondition.behavior,
+                precondition.resolve(PreconditionFields::Destination)?,
+                view,
+                allocation,
+            )
+            .await
+        }
         FilesystemOperation::RestoreRevision {
             path,
             source_revision_no,
         } => plan_restore_revision(path, *source_revision_no, view).await,
+        FilesystemOperation::RestoreRevisionByInode {
+            inode_id,
+            source_revision_no,
+        } => plan_restore_revision_by_inode(*inode_id, *source_revision_no, view).await,
         FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
             destination_path,
-        } => plan_undelete(*inode_id, *deletion_seq, destination_path.as_ref(), view).await,
+            destination_parent_inode_id,
+            destination_display_name,
+        } => {
+            let destination = UndeleteDestination::from_request(
+                destination_path.as_ref(),
+                *destination_parent_inode_id,
+                destination_display_name.as_ref(),
+            )?;
+            plan_undelete(*inode_id, *deletion_seq, destination, view).await
+        }
         FilesystemOperation::UpdateAttributes {
             path,
             set,
@@ -289,6 +321,21 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             )
             .await
         }
+        FilesystemOperation::UpdateAttributesByInode {
+            inode_id,
+            set,
+            remove,
+            expected_attributes_revision_no,
+        } => {
+            plan_update_attributes_by_inode(
+                *inode_id,
+                set,
+                remove,
+                *expected_attributes_revision_no,
+                view,
+            )
+            .await
+        }
         FilesystemOperation::UpdateAccess {
             path,
             boundary,
@@ -301,6 +348,21 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 *boundary,
                 grants,
                 *expected_inode_id,
+                *expected_access_revision_no,
+                view,
+            )
+            .await
+        }
+        FilesystemOperation::UpdateAccessByInode {
+            inode_id,
+            boundary,
+            grants,
+            expected_access_revision_no,
+        } => {
+            plan_update_access_by_inode(
+                *inode_id,
+                *boundary,
+                grants,
                 *expected_access_revision_no,
                 view,
             )
@@ -855,6 +917,8 @@ mod tests {
             inode_id: deleted_inode_id,
             deletion_seq: deletion.committed_seq,
             destination_path: destination.map(|path| AbsolutePath::parse(path).expect("path")),
+            destination_parent_inode_id: None,
+            destination_display_name: None,
         };
         let staged = store_bytes_as_content(&store, &namespace_id, b"staged")
             .await

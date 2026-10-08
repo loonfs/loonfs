@@ -10,10 +10,10 @@
 //! a receipt, which identifies the commit row containing the fingerprint.
 
 use crate::{
-    AbsolutePath, AccessRevisionNo, AccessRight, ActorId, AttributesRevisionNo, ChangeSeq,
-    ChecksumAlgorithm, CommitPrecondition, ContentId, ContentRef, ContentRefKind,
-    DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId, NamespaceId,
-    RevisionNo, SubjectId,
+    AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
+    AttributeValue, AttributesRevisionNo, ChangeSeq, ChecksumAlgorithm, CommitPrecondition,
+    ContentId, ContentRef, ContentRefKind, DeleteDirectoryBehavior, DestinationBehavior,
+    FilesystemOperation, InodeId, NamespaceId, RevisionNo, SubjectId,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -145,14 +145,28 @@ enum OperationFingerprintInput<'a> {
         expected_destination_inode_id: Option<InodeId>,
         expected_destination_revision_no: Option<RevisionNo>,
     },
+    CopyByInode {
+        inode_id: InodeId,
+        destination_parent_inode_id: InodeId,
+        destination_display_name: &'a str,
+        behavior: DestinationBehavior,
+        expected_destination_inode_id: Option<InodeId>,
+        expected_destination_revision_no: Option<RevisionNo>,
+    },
     RestoreRevision {
         path: &'a str,
+        source_revision_no: RevisionNo,
+    },
+    RestoreRevisionByInode {
+        inode_id: InodeId,
         source_revision_no: RevisionNo,
     },
     Undelete {
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
         destination_path: Option<&'a str>,
+        destination_parent_inode_id: Option<InodeId>,
+        destination_display_name: Option<&'a str>,
     },
     // Both preconditions join the preimage for the same reason the delete precondition
     // does: a changed expectation is a different logical request. `set` is a
@@ -166,11 +180,23 @@ enum OperationFingerprintInput<'a> {
         expected_inode_id: Option<InodeId>,
         expected_attributes_revision_no: Option<AttributesRevisionNo>,
     },
+    UpdateAttributesByInode {
+        inode_id: InodeId,
+        set: BTreeMap<&'a str, &'a str>,
+        remove: Vec<&'a str>,
+        expected_attributes_revision_no: Option<AttributesRevisionNo>,
+    },
     UpdateAccess {
         path: &'a str,
         boundary: bool,
         grants: BTreeMap<&'a str, Vec<&'static str>>,
         expected_inode_id: Option<InodeId>,
+        expected_access_revision_no: Option<AccessRevisionNo>,
+    },
+    UpdateAccessByInode {
+        inode_id: InodeId,
+        boundary: bool,
+        grants: BTreeMap<&'a str, Vec<&'static str>>,
         expected_access_revision_no: Option<AccessRevisionNo>,
     },
 }
@@ -190,8 +216,16 @@ enum PreconditionFingerprintInput<'a> {
         expected_inode_id: InodeId,
         expected_binding_version: Option<&'a str>,
     },
+    InodeBinding {
+        inode_id: InodeId,
+        expected_binding_version: &'a str,
+    },
     PathAbsence {
         path: &'a str,
+    },
+    NameAbsence {
+        parent_inode_id: InodeId,
+        display_name: &'a str,
     },
     AttributesRevision {
         inode_id: InodeId,
@@ -230,8 +264,22 @@ fn precondition_fingerprint_input(
                 .as_ref()
                 .map(|value| value.as_str()),
         },
+        CommitPrecondition::InodeBinding {
+            inode_id,
+            expected_binding_version,
+        } => PreconditionFingerprintInput::InodeBinding {
+            inode_id: *inode_id,
+            expected_binding_version: expected_binding_version.as_str(),
+        },
         CommitPrecondition::PathAbsence { path } => PreconditionFingerprintInput::PathAbsence {
             path: path.as_str(),
+        },
+        CommitPrecondition::NameAbsence {
+            parent_inode_id,
+            display_name,
+        } => PreconditionFingerprintInput::NameAbsence {
+            parent_inode_id: *parent_inode_id,
+            display_name: display_name.as_str(),
         },
         CommitPrecondition::AttributesRevision {
             inode_id,
@@ -440,6 +488,19 @@ fn operation_fingerprint_input<'a>(
             expected_destination_inode_id: precondition.expected_inode_id,
             expected_destination_revision_no: precondition.expected_revision_no,
         },
+        FilesystemOperation::CopyByInode {
+            inode_id,
+            destination_parent_inode_id,
+            destination_display_name,
+            precondition,
+        } => OperationFingerprintInput::CopyByInode {
+            inode_id: *inode_id,
+            destination_parent_inode_id: *destination_parent_inode_id,
+            destination_display_name: destination_display_name.as_str(),
+            behavior: precondition.behavior,
+            expected_destination_inode_id: precondition.expected_inode_id,
+            expected_destination_revision_no: precondition.expected_revision_no,
+        },
         FilesystemOperation::RestoreRevision {
             path,
             source_revision_no,
@@ -447,14 +508,25 @@ fn operation_fingerprint_input<'a>(
             path: path.as_str(),
             source_revision_no: *source_revision_no,
         },
+        FilesystemOperation::RestoreRevisionByInode {
+            inode_id,
+            source_revision_no,
+        } => OperationFingerprintInput::RestoreRevisionByInode {
+            inode_id: *inode_id,
+            source_revision_no: *source_revision_no,
+        },
         FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
             destination_path,
+            destination_parent_inode_id,
+            destination_display_name,
         } => OperationFingerprintInput::Undelete {
             inode_id: *inode_id,
             deletion_seq: *deletion_seq,
             destination_path: destination_path.as_ref().map(AbsolutePath::as_str),
+            destination_parent_inode_id: *destination_parent_inode_id,
+            destination_display_name: destination_display_name.as_ref().map(|name| name.as_str()),
         },
         FilesystemOperation::UpdateAttributes {
             path,
@@ -462,25 +534,24 @@ fn operation_fingerprint_input<'a>(
             remove,
             expected_inode_id,
             expected_attributes_revision_no,
-        } => {
-            // The wire type preserves the caller's list so validation can
-            // report duplicate keys. The fingerprint uses the sorted, unique
-            // set because order and duplicate entries do not change the
-            // requested mutation.
-            let mut remove: Vec<&str> = remove.iter().map(|key| key.as_str()).collect();
-            remove.sort_unstable();
-            remove.dedup();
-            OperationFingerprintInput::UpdateAttributes {
-                path: path.as_str(),
-                set: set
-                    .iter()
-                    .map(|(key, value)| (key.as_str(), value.as_str()))
-                    .collect(),
-                remove,
-                expected_inode_id: *expected_inode_id,
-                expected_attributes_revision_no: *expected_attributes_revision_no,
-            }
-        }
+        } => OperationFingerprintInput::UpdateAttributes {
+            path: path.as_str(),
+            set: attribute_set_fingerprint_input(set),
+            remove: attribute_removal_fingerprint_input(remove),
+            expected_inode_id: *expected_inode_id,
+            expected_attributes_revision_no: *expected_attributes_revision_no,
+        },
+        FilesystemOperation::UpdateAttributesByInode {
+            inode_id,
+            set,
+            remove,
+            expected_attributes_revision_no,
+        } => OperationFingerprintInput::UpdateAttributesByInode {
+            inode_id: *inode_id,
+            set: attribute_set_fingerprint_input(set),
+            remove: attribute_removal_fingerprint_input(remove),
+            expected_attributes_revision_no: *expected_attributes_revision_no,
+        },
         FilesystemOperation::UpdateAccess {
             path,
             boundary,
@@ -490,20 +561,53 @@ fn operation_fingerprint_input<'a>(
         } => OperationFingerprintInput::UpdateAccess {
             path: path.as_str(),
             boundary: *boundary,
-            grants: grants
-                .as_map()
-                .iter()
-                .map(|(principal, rights)| {
-                    (
-                        principal.as_str(),
-                        rights.iter().map(AccessRight::as_str).collect(),
-                    )
-                })
-                .collect(),
+            grants: grants_fingerprint_input(grants),
             expected_inode_id: *expected_inode_id,
             expected_access_revision_no: *expected_access_revision_no,
         },
+        FilesystemOperation::UpdateAccessByInode {
+            inode_id,
+            boundary,
+            grants,
+            expected_access_revision_no,
+        } => OperationFingerprintInput::UpdateAccessByInode {
+            inode_id: *inode_id,
+            boundary: *boundary,
+            grants: grants_fingerprint_input(grants),
+            expected_access_revision_no: *expected_access_revision_no,
+        },
     })
+}
+
+fn attribute_set_fingerprint_input(
+    set: &BTreeMap<AttributeKey, AttributeValue>,
+) -> BTreeMap<&str, &str> {
+    set.iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect()
+}
+
+/// The wire type preserves the caller's list so validation can report
+/// duplicate keys. The fingerprint uses the sorted, unique set because order
+/// and duplicate entries do not change the requested mutation.
+fn attribute_removal_fingerprint_input(remove: &[AttributeKey]) -> Vec<&str> {
+    let mut remove: Vec<&str> = remove.iter().map(AttributeKey::as_str).collect();
+    remove.sort_unstable();
+    remove.dedup();
+    remove
+}
+
+fn grants_fingerprint_input(grants: &AccessGrants) -> BTreeMap<&str, Vec<&'static str>> {
+    grants
+        .as_map()
+        .iter()
+        .map(|(principal, rights)| {
+            (
+                principal.as_str(),
+                rights.iter().map(AccessRight::as_str).collect(),
+            )
+        })
+        .collect()
 }
 
 /// Computes the semantic fingerprint used to validate a reused commit ID.
@@ -883,6 +987,98 @@ mod tests {
                 fingerprint(serde_json::from_value(variant).expect("variant")),
                 "a changed {field} must change the fingerprint"
             );
+        }
+    }
+
+    #[test]
+    fn inode_forms_fingerprint_every_request_field() {
+        for (baseline, variants) in [
+            (
+                serde_json::json!({
+                    "kind": "copy_by_inode",
+                    "inode_id": "ino_42",
+                    "destination_parent_inode_id": "ino_7",
+                    "destination_display_name": "copy.txt",
+                    "behavior": "replace",
+                    "expected_destination_inode_id": "ino_9",
+                    "expected_destination_revision_no": 2
+                }),
+                vec![
+                    ("inode_id", serde_json::json!("ino_43")),
+                    ("destination_parent_inode_id", serde_json::json!("ino_8")),
+                    ("destination_display_name", serde_json::json!("other.txt")),
+                    ("expected_destination_inode_id", serde_json::json!("ino_10")),
+                    ("expected_destination_revision_no", serde_json::json!(3)),
+                ],
+            ),
+            (
+                serde_json::json!({
+                    "kind": "restore_revision_by_inode",
+                    "inode_id": "ino_42",
+                    "source_revision_no": 3
+                }),
+                vec![
+                    ("inode_id", serde_json::json!("ino_43")),
+                    ("source_revision_no", serde_json::json!(4)),
+                ],
+            ),
+            (
+                serde_json::json!({
+                    "kind": "undelete",
+                    "inode_id": "ino_42",
+                    "deletion_seq": 17,
+                    "destination_parent_inode_id": "ino_7",
+                    "destination_display_name": "report.txt"
+                }),
+                vec![
+                    ("destination_parent_inode_id", serde_json::json!("ino_8")),
+                    ("destination_display_name", serde_json::json!("other.txt")),
+                    ("destination_path", serde_json::json!("/report.txt")),
+                ],
+            ),
+            (
+                serde_json::json!({
+                    "kind": "update_attributes_by_inode",
+                    "inode_id": "ino_42",
+                    "set": {"owner": "ada"},
+                    "remove": ["draft"],
+                    "expected_attributes_revision_no": 3
+                }),
+                vec![
+                    ("inode_id", serde_json::json!("ino_43")),
+                    ("set", serde_json::json!({"owner": "grace"})),
+                    ("remove", serde_json::json!(["final"])),
+                    ("expected_attributes_revision_no", serde_json::json!(4)),
+                ],
+            ),
+            (
+                serde_json::json!({
+                    "kind": "update_access_by_inode",
+                    "inode_id": "ino_9",
+                    "boundary": true,
+                    "grants": {"prn_ada": ["read", "write"]},
+                    "expected_access_revision_no": 2
+                }),
+                vec![
+                    ("inode_id", serde_json::json!("ino_10")),
+                    ("boundary", serde_json::json!(false)),
+                    ("grants", serde_json::json!({"prn_ada": ["read"]})),
+                    ("expected_access_revision_no", serde_json::json!(3)),
+                ],
+            ),
+        ] {
+            let baseline_fingerprint =
+                fingerprint(serde_json::from_value(baseline.clone()).expect("operation"));
+            for (field, value) in variants {
+                let mut variant = baseline.clone();
+                variant[field] = value;
+                assert_ne!(
+                    baseline_fingerprint,
+                    fingerprint(serde_json::from_value(variant).expect("variant")),
+                    "a changed {field} must change the {} fingerprint",
+                    baseline["kind"]
+                );
+            }
         }
     }
 

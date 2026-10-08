@@ -974,7 +974,8 @@ impl<M> Namespace<M> {
             .await
     }
 
-    /// Prepares a content object for a direct download.
+    /// Prepares the content object of a file's current revision for a direct
+    /// download.
     ///
     /// See the API specification's download transport contract. The handle's
     /// `max_read_content_bytes` does not apply to direct downloads.
@@ -990,7 +991,33 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_download(
+    pub async fn create_download(&self, absolute_path: &str) -> Result<DirectDownloadTarget> {
+        self.direct_download(absolute_path, None).await
+    }
+
+    /// Prepares the content object of one retained file revision for a
+    /// direct download. See [`Self::create_download`].
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.create_revision_download",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "create_revision_download",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn create_revision_download(
+        &self,
+        absolute_path: &str,
+        revision_no: RevisionNo,
+    ) -> Result<DirectDownloadTarget> {
+        self.direct_download(absolute_path, Some(revision_no)).await
+    }
+
+    async fn direct_download(
         &self,
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
@@ -1007,8 +1034,8 @@ impl<M> Namespace<M> {
             .await
     }
 
-    /// Resolves retained inode content for a direct download without
-    /// requiring a current path.
+    /// Prepares the content object of the current revision of a visible file
+    /// inode, wherever it is bound, for a direct download.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.create_download_by_inode",
@@ -1024,7 +1051,37 @@ impl<M> Namespace<M> {
     pub async fn create_download_by_inode(
         &self,
         inode_id: InodeId,
+    ) -> Result<DirectDownloadByInodeTarget> {
+        self.direct_download_by_inode(inode_id, None).await
+    }
+
+    /// Prepares the content object of one retained inode revision for a
+    /// direct download, without requiring a current path.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.create_revision_download_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "create_revision_download_by_inode",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn create_revision_download_by_inode(
+        &self,
+        inode_id: InodeId,
         revision_no: RevisionNo,
+    ) -> Result<DirectDownloadByInodeTarget> {
+        self.direct_download_by_inode(inode_id, Some(revision_no))
+            .await
+    }
+
+    async fn direct_download_by_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: Option<RevisionNo>,
     ) -> Result<DirectDownloadByInodeTarget> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
@@ -1356,6 +1413,66 @@ impl<M> Namespace<M> {
             .await
     }
 
+    /// Reads the current content of a visible file inode, wherever it is
+    /// bound, plus the metadata entry it came from.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.read_file_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "read_file_by_inode",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn read_file_by_inode(&self, inode_id: InodeId) -> Result<FileBytes> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.core.record_trace_context(&tracing::Span::current());
+        self.core
+            .read(&self.namespace_id, |engine, read_context| async move {
+                let read = engine
+                    .get_file_by_inode(
+                        inode_id,
+                        &read_context,
+                        self.core.inner.config.max_read_content_bytes,
+                    )
+                    .await?;
+                Ok(read)
+            })
+            .await
+    }
+
+    /// Streams the current content of a visible file inode, wherever it is
+    /// bound. Complete verification requires consuming the stream to its end.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.read_file_stream_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "read_file_stream_by_inode",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn read_file_stream_by_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.core.record_trace_context(&tracing::Span::current());
+        self.core
+            .read(&self.namespace_id, |engine, context| async move {
+                Ok(engine
+                    .read_file_stream_by_inode(inode_id, None, &context)
+                    .await?)
+            })
+            .await
+    }
+
     /// Streams a retained inode revision, including content without a visible path.
     /// Complete verification requires consuming the stream to its end.
     #[tracing::instrument(
@@ -1380,7 +1497,7 @@ impl<M> Namespace<M> {
         self.core
             .read(&self.namespace_id, |engine, context| async move {
                 Ok(engine
-                    .read_file_revision_stream_by_inode(inode_id, revision_no, &context)
+                    .read_file_stream_by_inode(inode_id, Some(revision_no), &context)
                     .await?)
             })
             .await

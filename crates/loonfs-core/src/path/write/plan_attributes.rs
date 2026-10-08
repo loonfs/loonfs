@@ -2,7 +2,8 @@
 
 use super::ensure_expected_inode;
 use super::publish_path_planning::{
-    resolve_visible_path_for_authorization, CompiledFilesystemOperation, PublishPathPlanningView,
+    ensure_mutation_inode, resolve_visible_inode, resolve_visible_path_for_authorization,
+    CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::Absence;
 use crate::commit::CommitOp;
@@ -46,9 +47,43 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
     )
     .await?;
     ensure_expected_inode(&target, expected_inode_id, &final_component(absolute_path)?)?;
+    update_attributes(
+        view,
+        target.inode_id,
+        set,
+        remove,
+        expected_attributes_revision_no,
+    )
+    .await
+}
 
-    let (current_revision_no, current) =
-        view.view.attributes_at_visible_seq(target.inode_id).await?;
+pub(super) async fn plan_update_attributes_by_inode<S: ObjectStore + ?Sized>(
+    inode_id: InodeId,
+    set: &BTreeMap<AttributeKey, AttributeValue>,
+    remove: &[AttributeKey],
+    expected_attributes_revision_no: Option<AttributesRevisionNo>,
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+) -> Result<CompiledFilesystemOperation> {
+    ensure_mutation_inode(inode_id)?;
+    validate_request_shape(set, remove)?;
+    resolve_visible_inode(view, inode_id).await?;
+    view.authorize(
+        inode_id,
+        AccessRights::from_iter([AccessRight::Write]),
+        Absence::Inode,
+    )
+    .await?;
+    update_attributes(view, inode_id, set, remove, expected_attributes_revision_no).await
+}
+
+async fn update_attributes<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    inode_id: InodeId,
+    set: &BTreeMap<AttributeKey, AttributeValue>,
+    remove: &[AttributeKey],
+    expected_attributes_revision_no: Option<AttributesRevisionNo>,
+) -> Result<CompiledFilesystemOperation> {
+    let (current_revision_no, current) = view.view.attributes_at_visible_seq(inode_id).await?;
     // A caller-supplied precondition replaces the freshly-read revision in the op,
     // so commit validation rejects a raced update with the stale-attributes
     // error and its expected/actual details.
@@ -67,7 +102,7 @@ pub(super) async fn plan_update_attributes<S: ObjectStore + ?Sized>(
     })?;
     Ok(CompiledFilesystemOperation::new(vec![
         CommitOp::UpdateAttributes {
-            inode_id: target.inode_id,
+            inode_id,
             base_attributes_revision_no,
             attributes,
         },

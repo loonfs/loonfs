@@ -88,6 +88,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "content_ref",
     "content_token",
     "content_tokens",
+    "copy_by_inode",
     "copy_path",
     "create_directory_by_inode",
     "create_file_by_inode",
@@ -126,6 +127,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "head_seq",
     "idle_session_close_after_ms",
     "include_attributes",
+    "inode_binding",
     "inode_id",
     "inode_kind",
     "load_checkpoint_statistics",
@@ -141,6 +143,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "metadata_segments",
     "move_by_inode",
     "move_path",
+    "name_absence",
     "name_key",
     "namespace_head",
     "namespace_id",
@@ -172,6 +175,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "reorganize_pending",
     "request_deadline_ms",
     "request_id",
+    "restore_revision",
+    "restore_revision_by_inode",
     "retained_candidates",
     "retention_floor_seq",
     "retries_exhausted",
@@ -197,7 +202,9 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "unit_published",
     "unrecognized_key",
     "update_access",
+    "update_access_by_inode",
     "update_attributes",
+    "update_attributes_by_inode",
     "updated_at_ms",
     "updated_by",
     "upload_id",
@@ -1855,6 +1862,20 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         401,
         "unauthorized",
     );
+    let grep_inode_url =
+        format!("http://{addr}/v0/namespaces/demo/grep?pattern=needle&inode_id=27");
+    let body = expect_enveloped(
+        || {
+            raw_agent()
+                .get(&grep_inode_url)
+                .set("authorization", "Bearer test-token")
+                .call()
+        },
+        "invalid grep inode scope should answer 400",
+        400,
+        "invalid_request",
+    );
+    assert_eq!(body["param"], "inode_id");
 
     let runs_url = format!("http://{addr}/v0/maintenance/namespaces/demo/runs");
     expect_enveloped(
@@ -2682,6 +2703,7 @@ fn grep_error_request() -> GrepRequest {
         pattern: "needle".to_owned(),
         case_insensitive: false,
         path_prefix: None,
+        inode_id: None,
         cursor: None,
         allow_stale: false,
         allow_scan: false,
@@ -3438,7 +3460,7 @@ mod direct_download {
         );
 
         let grant = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect("download grant");
         assert_eq!(grant.path.as_str(), "/big.bin");
@@ -3452,13 +3474,27 @@ mod direct_download {
             .expect("stream the granted object");
         assert_eq!(written, payload.len() as u64);
         assert_eq!(received, payload);
+        let current_grant = client
+            .create_download_by_inode(&namespace, entry.inode_id)
+            .await
+            .expect("grant the current inode revision");
+        assert_eq!(current_grant.revision_no, RevisionNo(1));
+        assert_eq!(current_grant.content_ref, grant.content_ref);
 
         client
             .delete_path(&target, &loonfs_test_support::test_actor())
             .await
             .expect("delete current binding");
+        assert_api_error(
+            client
+                .create_download_by_inode(&namespace, entry.inode_id)
+                .await,
+            404,
+            ErrorCode::InodeNotFound.as_str(),
+            None,
+        );
         let inode_grant = client
-            .create_download_by_inode(&namespace, entry.inode_id, RevisionNo(1))
+            .create_revision_download_by_inode(&namespace, entry.inode_id, RevisionNo(1))
             .await
             .expect("grant retained inode revision");
         assert_eq!(inode_grant.inode_id, entry.inode_id);
@@ -3508,7 +3544,7 @@ mod direct_download {
             .expect("seed revision 1");
 
         let grant = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect("grant for revision 1");
         assert_eq!(grant.revision_no, RevisionNo(1));
@@ -3533,13 +3569,7 @@ mod direct_download {
         // And asking for the old revision by number resolves to the same
         // object the earlier grant named.
         let pinned = client
-            .create_download(
-                &target,
-                &loonfs_client::DownloadOptions {
-                    revision_no: Some(RevisionNo(1)),
-                    snapshot_id: None,
-                },
-            )
+            .create_revision_download(&target, RevisionNo(1))
             .await
             .expect("grant for a prior revision");
         assert_eq!(pinned.revision_no, RevisionNo(1));
@@ -3572,7 +3602,7 @@ mod direct_download {
             .expect("seed a file");
 
         let error = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect_err("a deployment with no issuer cannot grant reads");
         match &error {
@@ -3594,7 +3624,7 @@ mod direct_download {
             .expect("stat proxied file")
             .inode_id;
         let inode_error = client
-            .create_download_by_inode(&namespace, inode_id, RevisionNo(1))
+            .create_revision_download_by_inode(&namespace, inode_id, RevisionNo(1))
             .await
             .expect_err("the inode route honors the same provider gate");
         match inode_error {
@@ -3787,7 +3817,7 @@ mod direct_download {
             .expect("a large file goes straight to object storage under a crc32c claim");
 
         let grant = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect("download grant");
         assert_eq!(
@@ -3853,7 +3883,7 @@ mod direct_download {
         // It came home through the grant, byte for byte, which proves the
         // object the presigned write created is the one the commit named.
         let grant = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect("download grant");
         assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);

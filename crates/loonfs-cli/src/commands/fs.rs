@@ -30,7 +30,7 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_client::{
     AttributeChanges, CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath,
-    PutFileOptions, UpdateAttributesOptions,
+    PutFileOptions, UndeleteDestination, UndeleteOptions, UpdateAttributesOptions,
 };
 use loonfs_types::api::v0::UploadSessionStatus;
 use loonfs_types::PinId;
@@ -351,6 +351,7 @@ pub(crate) async fn run_filesystem_grep(
         pattern: args.pattern.clone(),
         case_insensitive: args.ignore_case,
         path_prefix,
+        inode_id: None,
         cursor: args.pagination.cursor.clone(),
         allow_stale: args.allow_stale,
         allow_scan: args.allow_scan,
@@ -1277,6 +1278,9 @@ pub(crate) async fn run_filesystem_undelete(
     let deletion_seq =
         parse_public_ordinal_arg("--deletion-seq", args.deletion_seq, ChangeSeq::parse)
             .map_err(|error| context.fail(kind, error))?;
+    let destination = spec.as_ref().map_or(UndeleteDestination::Recorded, |spec| {
+        UndeleteDestination::Path(spec.absolute_path().clone())
+    });
     let result = context
         .target
         .client
@@ -1284,9 +1288,11 @@ pub(crate) async fn run_filesystem_undelete(
             context.namespace(),
             args.inode,
             deletion_seq,
-            spec.as_ref().map(|spec| spec.absolute_path()),
             context.actor(),
-            &commit,
+            &UndeleteOptions {
+                commit,
+                destination,
+            },
         )
         .await
         .map_err(|error| context.fail(kind, error))?;

@@ -29,6 +29,7 @@ fn request(pattern: &str) -> GrepRequest {
         pattern: pattern.to_owned(),
         case_insensitive: false,
         path_prefix: None,
+        inode_id: None,
         cursor: None,
         allow_stale: false,
         allow_scan: false,

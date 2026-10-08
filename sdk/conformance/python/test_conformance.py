@@ -30,9 +30,12 @@ from loonfs.server import (
     CreateUploadBody_ServiceProxied,
     Checksum,
     CommitPrecondition,
+    CommitPrecondition_InodeBinding,
+    CommitPrecondition_NameAbsence,
     Commit,
     CompletedUploadPart,
     ConflictError,
+    FilesystemOperation_CopyByInode,
     FilesystemOperation_CreateDirectory,
     FilesystemOperation_CreateDirectoryByInode,
     FilesystemOperation_CreateFileByInode,
@@ -42,6 +45,10 @@ from loonfs.server import (
     FilesystemOperation_MovePath,
     FilesystemOperation_PutFile,
     FilesystemOperation_PutFileRevisionByInode,
+    FilesystemOperation_RestoreRevisionByInode,
+    FilesystemOperation_Undelete,
+    FilesystemOperation_UpdateAccessByInode,
+    FilesystemOperation_UpdateAttributesByInode,
     ListPathEntriesResponse,
     LoonFS,
     NotFoundError,
@@ -69,6 +76,7 @@ EXPECTED_CASES = [
     "download",
     "end_to_end",
     "error_contract",
+    "inode_addressing",
     "inode_mutations",
     "pagination",
     "proxy",
@@ -290,6 +298,34 @@ class InodeMutationsExpected:
     deleted_committed_seq: int
     stale_binding_version: ErrorStatusExpected
     malformed_binding_version: ErrorStatusExpected
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class InodeAddressingRequest:
+    namespace_id: str
+    directory: str
+    actor_id: ActorId
+    source_file_name: str
+    renamed_file_name: str
+    copy_file_name: str
+    restored_file_name: str
+    first_content_utf8: str
+    second_content_utf8: str
+    attribute_key: str
+    attribute_value: str
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class InodeAddressingExpected:
+    current_revision_no: int
+    copied_committed_seq: int
+    restored_revision_no: int
+    attributes_revision_no: int
+    entry_names: list[str]
+    stale_binding_version: ErrorStatusExpected
+    occupied_name: ErrorStatusExpected
+    unrestricted_access: ErrorStatusExpected
+    deleted_content: ErrorStatusExpected
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -1146,6 +1182,200 @@ def test_inode_mutations(cases: dict[str, ConformanceCase], harness: Harness) ->
         ),
     )
     assert deleted.committed_seq == expected.deleted_committed_seq
+
+
+def test_inode_addressing(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode(
+        cases["inode_addressing"], InodeAddressingRequest, InodeAddressingExpected
+    )
+    client = harness.client
+    namespace_id = request.namespace_id
+    actor_headers = {"additional_headers": {"Loonfs-Actor": request.actor_id}}
+
+    def child_path(name: str) -> str:
+        return f"{request.directory}/{name}"
+
+    def read_current(inode_id: str) -> bytes:
+        return b"".join(client.inodes.content(namespace_id, inode_id))
+
+    client.namespaces.create(namespace_id=namespace_id, request_options=actor_headers)
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-addressing-directory",
+        request.actor_id,
+        FilesystemOperation_CreateDirectory(path=request.directory, parents=False),
+    )
+    client.files.upload(
+        namespace_id,
+        path=child_path(request.source_file_name),
+        content=request.first_content_utf8.encode(),
+        request_options=actor_headers,
+        commit_id="conf-inode-addressing-first",
+    )
+    client.files.upload(
+        namespace_id,
+        path=child_path(request.source_file_name),
+        content=request.second_content_utf8.encode(),
+        request_options=actor_headers,
+        commit_id="conf-inode-addressing-second",
+        behavior="replace",
+    )
+    parent_inode_id = client.files.retrieve(namespace_id, path=request.directory).inode_id
+    source = _file_entry(
+        client.files.retrieve(namespace_id, path=child_path(request.source_file_name))
+    )
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-addressing-rename",
+        request.actor_id,
+        FilesystemOperation_MovePath(
+            source_path=child_path(request.source_file_name),
+            destination_path=child_path(request.renamed_file_name),
+        ),
+    )
+    renamed = _file_entry(
+        client.files.retrieve(namespace_id, path=child_path(request.renamed_file_name))
+    )
+
+    assert read_current(source.inode_id) == request.second_content_utf8.encode()
+    grant = client.inodes.create_download(namespace_id, source.inode_id)
+    assert grant.inode_id == source.inode_id
+    assert grant.revision_no == expected.current_revision_no
+    assert grant.content_ref == renamed.content_ref
+
+    def copy(commit_id: str, preconditions: list[CommitPrecondition]) -> Any:
+        return _apply(
+            client,
+            namespace_id,
+            commit_id,
+            request.actor_id,
+            FilesystemOperation_CopyByInode(
+                inode_id=source.inode_id,
+                destination_parent_inode_id=parent_inode_id,
+                destination_display_name=request.copy_file_name,
+            ),
+            preconditions=preconditions,
+        )
+
+    def binding(version: str | None) -> CommitPrecondition:
+        assert version is not None, "a named entry has a binding_version"
+        return CommitPrecondition_InodeBinding(
+            inode_id=source.inode_id, expected_binding_version=version
+        )
+
+    def absence(name: str) -> CommitPrecondition:
+        return CommitPrecondition_NameAbsence(
+            parent_inode_id=parent_inode_id, display_name=name
+        )
+
+    with pytest.raises(ConflictError) as stale:
+        copy("conf-inode-addressing-stale-copy", [binding(source.binding_version)])
+    assert stale.value.status_code == expected.stale_binding_version.status
+    assert stale.value.body.code == expected.stale_binding_version.code
+
+    with pytest.raises(ConflictError) as occupied:
+        copy(
+            "conf-inode-addressing-occupied-copy",
+            [binding(renamed.binding_version), absence(request.renamed_file_name)],
+        )
+    assert occupied.value.status_code == expected.occupied_name.status
+    assert occupied.value.body.code == expected.occupied_name.code
+
+    copied = copy(
+        "conf-inode-addressing-copy",
+        [binding(renamed.binding_version), absence(request.copy_file_name)],
+    )
+    assert copied.committed_seq == expected.copied_committed_seq
+    copy_entry = _file_entry(
+        client.files.retrieve(namespace_id, path=child_path(request.copy_file_name))
+    )
+    assert copy_entry.inode_id != source.inode_id
+
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-addressing-restore",
+        request.actor_id,
+        FilesystemOperation_RestoreRevisionByInode(
+            inode_id=source.inode_id, source_revision_no=1
+        ),
+    )
+    restored = _file_entry(
+        client.files.retrieve(namespace_id, path=child_path(request.renamed_file_name))
+    )
+    assert restored.revision_no == expected.restored_revision_no
+    assert read_current(source.inode_id) == request.first_content_utf8.encode()
+
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-addressing-attributes",
+        request.actor_id,
+        FilesystemOperation_UpdateAttributesByInode(
+            inode_id=copy_entry.inode_id,
+            set={request.attribute_key: request.attribute_value},
+            expected_attributes_revision_no=0,
+        ),
+    )
+    labeled = _file_entry(
+        client.files.retrieve(namespace_id, path=child_path(request.copy_file_name))
+    )
+    assert labeled.attributes_revision_no == expected.attributes_revision_no
+    assert labeled.attributes == {request.attribute_key: request.attribute_value}
+
+    with pytest.raises(ConflictError) as unrestricted:
+        _apply(
+            client,
+            namespace_id,
+            "conf-inode-addressing-access",
+            request.actor_id,
+            FilesystemOperation_UpdateAccessByInode(
+                inode_id="ino_1", boundary=False, grants={}
+            ),
+        )
+    assert unrestricted.value.status_code == expected.unrestricted_access.status
+    assert unrestricted.value.body.code == expected.unrestricted_access.code
+
+    deletion = _apply(
+        client,
+        namespace_id,
+        "conf-inode-addressing-delete-copy",
+        request.actor_id,
+        FilesystemOperation_DeletePath(path=child_path(request.copy_file_name)),
+    )
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-addressing-undelete",
+        request.actor_id,
+        FilesystemOperation_Undelete(
+            inode_id=copy_entry.inode_id,
+            deletion_seq=deletion.committed_seq,
+            destination_parent_inode_id=parent_inode_id,
+            destination_display_name=request.restored_file_name,
+        ),
+    )
+    undeleted = client.files.retrieve(
+        namespace_id, path=child_path(request.restored_file_name)
+    )
+    assert undeleted.inode_id == copy_entry.inode_id
+
+    _apply(
+        client,
+        namespace_id,
+        "conf-inode-addressing-delete-source",
+        request.actor_id,
+        FilesystemOperation_DeletePath(path=child_path(request.renamed_file_name)),
+    )
+    with pytest.raises(NotFoundError) as deleted:
+        read_current(source.inode_id)
+    assert deleted.value.status_code == expected.deleted_content.status
+    assert deleted.value.body.code == expected.deleted_content.code
+
+    entries = client.files.list(namespace_id, path=request.directory).entries
+    assert _listed_names(entries) == expected.entry_names
 
 
 def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:

@@ -348,6 +348,14 @@ fn openapi_documents_current_server_paths() {
             "get",
         ),
         (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+            "get",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+            "post",
+        ),
+        (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
             "get",
         ),
@@ -475,17 +483,21 @@ fn openapi_documents_current_server_paths() {
         }
     }
 
-    let inode_download = &paths
-        ["/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads"]
-        ["post"];
-    assert!(inode_download.get("requestBody").is_none());
-    assert_eq!(
-        inode_download["x-fern-request-name"],
-        "CreateDownloadByInodeRequest"
-    );
-    assert!(spec["components"]["schemas"]
-        .get("CreateDownloadByInodeRequest")
-        .is_none());
+    for (path, request_name) in [
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+            "CreateDownloadByInodeRequest",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+            "CreateRevisionDownloadByInodeRequest",
+        ),
+    ] {
+        let inode_download = &paths[path]["post"];
+        assert!(inode_download.get("requestBody").is_none());
+        assert_eq!(inode_download["x-fern-request-name"], request_name);
+        assert!(spec["components"]["schemas"].get(request_name).is_none());
+    }
 
     for (path, method, parameter, schema_name) in [
         (
@@ -509,6 +521,14 @@ fn openapi_documents_current_server_paths() {
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
             "get",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+            "get",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+            "post",
         ),
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
@@ -550,6 +570,16 @@ fn openapi_documents_current_server_paths() {
             "list_inode_children",
         ),
         (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+            "get",
+            "get_file_bytes_by_inode",
+        ),
+        (
+            "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+            "post",
+            "create_download_by_inode",
+        ),
+        (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
             "get",
             "list_file_revisions_by_inode",
@@ -562,7 +592,7 @@ fn openapi_documents_current_server_paths() {
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
             "post",
-            "create_download_by_inode",
+            "create_revision_download_by_inode",
         ),
     ] {
         let actual = paths
@@ -1337,10 +1367,14 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FilesystemOperationMovePath",
                 "FilesystemOperationMoveByInode",
                 "FilesystemOperationCopyPath",
+                "FilesystemOperationCopyByInode",
                 "FilesystemOperationUndelete",
                 "FilesystemOperationRestoreRevision",
+                "FilesystemOperationRestoreRevisionByInode",
                 "FilesystemOperationUpdateAttributes",
+                "FilesystemOperationUpdateAttributesByInode",
                 "FilesystemOperationUpdateAccess",
+                "FilesystemOperationUpdateAccessByInode",
             ][..],
         ),
         (

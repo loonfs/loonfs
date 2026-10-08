@@ -4,6 +4,7 @@
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
+use futures::StreamExt;
 use loonfs_client::AttributeChanges;
 use loonfs_client::{ClientError, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
@@ -15,6 +16,14 @@ use loonfs_types::{ApiError, DeleteDirectoryBehavior, ErrorCode, InodeId, Revisi
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
+
+async fn drain(mut stream: loonfs_client::PayloadStream) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        bytes.extend_from_slice(&chunk.expect("content chunk"));
+    }
+    bytes
+}
 
 fn assert_api_code<T: std::fmt::Debug>(
     result: Result<T, ClientError>,
@@ -112,6 +121,25 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
             .await
             .expect("stat renamed path")
     );
+    assert_eq!(
+        harness
+            .client
+            .read_file_by_inode(&namespace, inode_id)
+            .await
+            .expect("read current content after rename"),
+        b"two"
+    );
+    assert_eq!(
+        drain(
+            harness
+                .client
+                .read_file_stream_by_inode(&namespace, inode_id)
+                .await
+                .expect("stream current content after rename"),
+        )
+        .await,
+        b"two"
+    );
     let revisions = harness
         .client
         .list_file_revisions_by_inode(&namespace, inode_id)
@@ -150,12 +178,31 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
         404,
         ErrorCode::InodeNotFound,
     );
+    assert_api_code(
+        harness
+            .client
+            .read_file_by_inode(&namespace, inode_id)
+            .await,
+        404,
+        ErrorCode::InodeNotFound,
+    );
     assert_eq!(
         harness
             .client
             .read_file_revision_by_inode(&namespace, inode_id, RevisionNo(2))
             .await
             .expect("read retained deleted revision"),
+        b"two"
+    );
+    assert_eq!(
+        drain(
+            harness
+                .client
+                .read_file_revision_stream_by_inode(&namespace, inode_id, RevisionNo(2))
+                .await
+                .expect("stream retained deleted revision"),
+        )
+        .await,
         b"two"
     );
     assert_eq!(
@@ -223,6 +270,14 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
         409,
         ErrorCode::PathConflict,
     );
+    assert_api_code(
+        harness
+            .client
+            .read_file_by_inode(&namespace, directory_id)
+            .await,
+        409,
+        ErrorCode::PathConflict,
+    );
     for result in [
         harness
             .client
@@ -286,7 +341,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     assert_api_code(
         harness
             .client
-            .create_download_by_inode(&namespace, file_id, RevisionNo(1))
+            .create_revision_download_by_inode(&namespace, file_id, RevisionNo(1))
             .await,
         501,
         ErrorCode::NotSupported,
@@ -571,7 +626,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
             .inode_id,
         InodeId(27)
     );
-    for suffix in ["", "/revisions", "/revisions/1/content"] {
+    for suffix in ["", "/content", "/revisions", "/revisions/1/content"] {
         raw_agent()
             .get(&format!(
                 "{}/v0/namespaces/demo/inodes/ino_27{suffix}",
@@ -588,6 +643,8 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
         ("GET", "/revisions"),
         ("GET", "/revisions/1/content"),
         ("POST", "/revisions/1/downloads"),
+        ("GET", "/content"),
+        ("POST", "/downloads"),
     ];
     for malformed in ["27", "ino_027", "ino_0", "INO_27"] {
         for (method, suffix) in routes {

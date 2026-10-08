@@ -165,8 +165,8 @@
       "destination_path": "/docs/report.txt"
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":42,\"deletion_seq\":17,\"destination_path\":\"/docs/report.txt\"}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:3778013e834de2527993acc119142f4e4b4533bd5d13855666f45c5934fe8df4"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":42,\"deletion_seq\":17,\"destination_path\":\"/docs/report.txt\",\"destination_parent_inode_id\":null,\"destination_display_name\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:6e1337a05fffef99cfa6ed2b5a19f38151240fa5a458ceae82de4928d3d4bcd3"
   },
   {
     "name": "undelete_12",
@@ -176,8 +176,8 @@
       "deletion_seq": 17
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":42,\"deletion_seq\":17,\"destination_path\":null}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:72ab3f131ed3817c5804a1814962f8d0431076e851d9c3673885284464dca05a"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":42,\"deletion_seq\":17,\"destination_path\":null,\"destination_parent_inode_id\":null,\"destination_display_name\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:188a13e70e5bb140adc0b1c7fd0c50cdada1da9d663abc4f6418834af254db83"
   },
   {
     "name": "update_attributes_13",
@@ -555,5 +555,124 @@
     ],
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"put_file_revision_by_inode\",\"inode_id\":42,\"content_ref\":{\"kind\":\"inline_v1\",\"sha256\":\"b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6\",\"size_bytes\":16},\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
     "fingerprint": "v1:sha256:d8df3f042a42c45809fc3fe6100b002c0d0d52d58bfc2ad7754f816b1cec4fa5"
+  },
+  {
+    "name": "copy_by_inode",
+    "operation": {
+      "kind": "copy_by_inode",
+      "inode_id": "ino_42",
+      "destination_parent_inode_id": "ino_7",
+      "destination_display_name": "copy.txt",
+      "behavior": "no_replace"
+    },
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"copy_by_inode\",\"inode_id\":42,\"destination_parent_inode_id\":7,\"destination_display_name\":\"copy.txt\",\"behavior\":\"no_replace\",\"expected_destination_inode_id\":null,\"expected_destination_revision_no\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:7e55b5ba29093adac1a6343166ee07663be18123d8e76602f5916a631e441b3e"
+  },
+  {
+    "name": "copy_by_inode_replacing",
+    "operation": {
+      "kind": "copy_by_inode",
+      "inode_id": "ino_42",
+      "destination_parent_inode_id": "ino_7",
+      "destination_display_name": "copy.txt",
+      "behavior": "replace",
+      "expected_destination_inode_id": "ino_9",
+      "expected_destination_revision_no": 2
+    },
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"copy_by_inode\",\"inode_id\":42,\"destination_parent_inode_id\":7,\"destination_display_name\":\"copy.txt\",\"behavior\":\"replace\",\"expected_destination_inode_id\":9,\"expected_destination_revision_no\":2}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:9f7cfcf1970c79abaad40dec591f8bcb2c76b4928ebbc2d19df3109642685c54"
+  },
+  {
+    "name": "restore_revision_by_inode",
+    "operation": {
+      "kind": "restore_revision_by_inode",
+      "inode_id": "ino_42",
+      "source_revision_no": 3
+    },
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"restore_revision_by_inode\",\"inode_id\":42,\"source_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:5f8e957d79d3d4b4482a6b0be7d23267af83f9f25bf689f5ad6ee77ac17f694c"
+  },
+  {
+    "name": "undelete_under_parent_inode",
+    "operation": {
+      "kind": "undelete",
+      "inode_id": "ino_42",
+      "deletion_seq": 17,
+      "destination_parent_inode_id": "ino_7",
+      "destination_display_name": "report.txt"
+    },
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":42,\"deletion_seq\":17,\"destination_path\":null,\"destination_parent_inode_id\":7,\"destination_display_name\":\"report.txt\"}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:ad57e96de680b50130ca9f1726a269a3d6ecbf4249f3f4885756d49b8a13940d"
+  },
+  {
+    "name": "update_attributes_by_inode",
+    "operation": {
+      "kind": "update_attributes_by_inode",
+      "inode_id": "ino_42",
+      "set": {
+        "owner": "ada"
+      },
+      "remove": [
+        "draft"
+      ],
+      "expected_attributes_revision_no": 3
+    },
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"update_attributes_by_inode\",\"inode_id\":42,\"set\":{\"owner\":\"ada\"},\"remove\":[\"draft\"],\"expected_attributes_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:d236c3c2e4640a29a7d7cad9d625ec14cd3d9ef97fb6f631ead3d1549c118d24"
+  },
+  {
+    "name": "update_access_by_inode",
+    "operation": {
+      "kind": "update_access_by_inode",
+      "inode_id": "ino_9",
+      "boundary": true,
+      "grants": {
+        "prn_team": [
+          "read",
+          "write"
+        ]
+      },
+      "expected_access_revision_no": 2
+    },
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"update_access_by_inode\",\"inode_id\":9,\"boundary\":true,\"grants\":{\"prn_team\":[\"read\",\"write\"]},\"expected_access_revision_no\":2}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:d9b6c758d9c1b0bf13432088061c77083e965ca733eaada39edaaadd6fcdb670"
+  },
+  {
+    "name": "inode_binding_precondition",
+    "operation": {
+      "kind": "create_directory",
+      "path": "/docs"
+    },
+    "preconditions": [
+      {
+        "kind": "inode_binding",
+        "inode_id": "ino_42",
+        "expected_binding_version": "aaaa"
+      }
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"create_directory\",\"path\":\"/docs\",\"parents\":false}],\"message\":null,\"preconditions\":[{\"kind\":\"inode_binding\",\"inode_id\":42,\"expected_binding_version\":\"aaaa\"}]}",
+    "fingerprint": "v1:sha256:2e19d9664023b725dc0f881c9b54c9a39c4e96218aebc897679b84006c7e71e1"
+  },
+  {
+    "name": "name_absence_precondition",
+    "operation": {
+      "kind": "create_directory",
+      "path": "/docs"
+    },
+    "preconditions": [
+      {
+        "kind": "name_absence",
+        "parent_inode_id": "ino_7",
+        "display_name": "report.txt"
+      }
+    ],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"create_directory\",\"path\":\"/docs\",\"parents\":false}],\"message\":null,\"preconditions\":[{\"kind\":\"name_absence\",\"parent_inode_id\":7,\"display_name\":\"report.txt\"}]}",
+    "fingerprint": "v1:sha256:7fec97a48e081ff12b5c73a4d5ca974b5a32cffd30cfd3ed2526a1d7571d398a"
   }
 ]

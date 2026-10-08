@@ -3,8 +3,9 @@
 
 use crate::PinId;
 use crate::{
-    AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue, AttributesRevisionNo, CommitId,
-    CommitPrecondition, DeleteDirectoryBehavior, DestinationBehavior, InodeId, RevisionNo,
+    AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
+    AttributesRevisionNo, CommitId, CommitPrecondition, DeleteDirectoryBehavior,
+    DestinationBehavior, DisplayName, InodeId, RevisionNo,
 };
 use std::collections::BTreeMap;
 
@@ -88,6 +89,15 @@ pub struct UpdateAttributesOptions {
     pub expected_attributes_revision_no: Option<AttributesRevisionNo>,
 }
 
+/// Options for writing and removing a visible inode's attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateAttributesByInodeOptions {
+    /// Commit ID, message, and preconditions.
+    pub commit: CommitOptions,
+    /// The attribute revision that must still be current.
+    pub expected_attributes_revision_no: Option<AttributesRevisionNo>,
+}
+
 /// An inode's complete direct access: the state an access update writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessState {
@@ -105,6 +115,15 @@ pub struct UpdateAccessOptions {
     /// The inode that the path must still resolve to before the update.
     pub expected_inode_id: Option<InodeId>,
     /// With an inode precondition, the access revision that must still be current.
+    pub expected_access_revision_no: Option<AccessRevisionNo>,
+}
+
+/// Options for replacing a visible inode's access row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateAccessByInodeOptions {
+    /// Commit ID, message, and preconditions.
+    pub commit: CommitOptions,
+    /// The access revision that must still be current.
     pub expected_access_revision_no: Option<AccessRevisionNo>,
 }
 
@@ -169,6 +188,32 @@ pub struct CopyOptions {
     /// The revision that must still be current when using `Replace` behavior with
     /// `expected_destination_inode_id`.
     pub expected_destination_revision_no: Option<RevisionNo>,
+}
+
+/// Where an undelete binds the entry it restores.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UndeleteDestination {
+    /// The parent and name the deletion recorded.
+    #[default]
+    Recorded,
+    /// A new absolute path.
+    Path(AbsolutePath),
+    /// A name under a directory inode.
+    Name {
+        /// The directory to restore into.
+        parent_inode_id: InodeId,
+        /// The name to restore under that directory.
+        display_name: DisplayName,
+    },
+}
+
+/// Options for undeleting a file or subtree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UndeleteOptions {
+    /// Commit ID, message, and preconditions.
+    pub commit: CommitOptions,
+    /// Where the restored entry is bound.
+    pub destination: UndeleteDestination,
 }
 
 /// Options for starting a direct multipart upload.

@@ -558,6 +558,8 @@ mod tests {
                 inode_id: InodeId(42),
                 deletion_seq: ChangeSeq(417),
                 destination_path: None,
+                destination_parent_inode_id: None,
+                destination_display_name: None,
             }
         ));
     }

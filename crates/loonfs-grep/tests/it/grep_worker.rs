@@ -7,7 +7,7 @@ use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost
 use bytes::Bytes;
 use loonfs::{
     CoreError, CreateNamespaceOptions, ErrorCode, LoonFs, Maintenance, MetadataMaintenanceOptions,
-    NamespaceId, PutFileOptions, SharedObjectStore,
+    NamespaceId, PutFileOptions, SharedObjectStore, UndeleteDestination, UndeleteOptions,
 };
 use loonfs_grep::keyspace::{
     grep_prefix, hint_key, manifest_key, manifests_prefix, segment_key, segments_prefix,
@@ -45,6 +45,7 @@ fn request(pattern: &str) -> GrepRequest {
         pattern: pattern.to_owned(),
         case_insensitive: false,
         path_prefix: None,
+        inode_id: None,
         cursor: None,
         allow_stale: false,
         allow_scan: false,
@@ -1317,11 +1318,16 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     );
 
     namespace_writer
-        .undelete(
+        .undelete_with_options(
             docs_inode_id,
             deleted.committed_seq,
-            Some("/docs"),
             &loonfs_test_support::test_actor(),
+            &UndeleteOptions {
+                destination: UndeleteDestination::Path(
+                    AbsolutePath::parse("/docs").expect("valid destination path"),
+                ),
+                ..Default::default()
+            },
         )
         .await
         .expect("undelete the subtree");
@@ -1400,11 +1406,16 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
 
     let undeleted = namespace_writer
-        .undelete(
+        .undelete_with_options(
             docs_inode_id,
             deleted.committed_seq,
-            Some("/docs"),
             &loonfs_test_support::test_actor(),
+            &UndeleteOptions {
+                destination: UndeleteDestination::Path(
+                    AbsolutePath::parse("/docs").expect("valid destination path"),
+                ),
+                ..Default::default()
+            },
         )
         .await
         .expect("undelete subtree after backfill");
@@ -1779,6 +1790,107 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     writer.shutdown().await.expect("shutdown");
 }
 
+#[tokio::test]
+async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
+    use loonfs::publish::{CommitRequest, FilesystemOperation};
+    use loonfs::{CommitId, FilesystemChange};
+    use loonfs_types::{DisplayName, MAX_PATH_BYTES, ROOT_INODE_ID};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("deep-scan").expect("namespace id");
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id("deep-scan-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let commit = |operation| {
+        CommitRequest::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            operation,
+        )
+    };
+
+    let name = |level: usize| format!("{level:02}{}", "n".repeat(253));
+    let mut directory = ROOT_INODE_ID;
+    let mut directory_path = String::new();
+    for level in 0..20 {
+        let created = namespace
+            .commit(commit(FilesystemOperation::CreateDirectoryByInode {
+                parent_inode_id: directory,
+                display_name: DisplayName::parse(name(level)).expect("display name"),
+            }))
+            .await
+            .expect("create a directory by inode");
+        directory = match created.events.as_slice() {
+            [FilesystemChange::DirectoryCreated { inode_id, .. }] => *inode_id,
+            other => panic!("expected one created directory, got {other:?}"),
+        };
+        directory_path = format!("{directory_path}/{}", name(level));
+    }
+    assert!(directory_path.len() > MAX_PATH_BYTES);
+    let content = namespace
+        .prepare_content(b"a tree\n")
+        .await
+        .expect("prepare content");
+    namespace
+        .commit_prepared(
+            commit(FilesystemOperation::CreateFileByInode {
+                parent_inode_id: directory,
+                display_name: DisplayName::parse("leaf.txt").expect("display name"),
+                content_ref: Some(content.content_ref().clone()),
+                inline_content: None,
+            }),
+            vec![content],
+        )
+        .await
+        .expect("create a file by inode");
+    let host = GrepHost::new(&store, "deep-scan").await;
+    host.enable_grep_index(&namespace_id).await.expect("enable");
+
+    // "ee" has no trigram, so it scans the directory tree; "tree" uses the index.
+    let mut unscoped_scan = request("ee");
+    unscoped_scan.allow_scan = true;
+    let mut inode_scan = unscoped_scan.clone();
+    inode_scan.inode_id = Some(directory);
+    let mut path_scan = unscoped_scan.clone();
+    path_scan.path_prefix = Some(AbsolutePath::parse(format!("/{}", name(0))).expect("scope path"));
+    let file_path = format!("{directory_path}/leaf.txt");
+    for (case, grep_request) in [
+        ("unscoped scan", unscoped_scan),
+        ("inode-scoped scan", inode_scan),
+        ("path-scoped scan", path_scan),
+        ("indexed query", request("tree")),
+    ] {
+        let response = host
+            .grep(&namespace_id, &grep_request, default_page_limit())
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert_eq!(
+            response
+                .matches
+                .iter()
+                .map(|found| found.path.as_str())
+                .collect::<Vec<_>>(),
+            [file_path.as_str()],
+            "{case}"
+        );
+    }
+
+    writer.shutdown().await.expect("shutdown");
+}
+
 fn assert_not_enabled_error(case: &str, result: loonfs_grep::Result<GrepResponse>) {
     match result {
         Err(error @ GrepError::NotEnabled) => {
@@ -1937,6 +2049,34 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
         .await
         .expect_err("a missing scope must remain a missing path");
     assert_eq!(error.code(), ErrorCode::PathNotFound);
+
+    let docs_inode_id = namespace.stat("/docs").await.expect("stat docs").inode_id;
+    let mut inode_scope = request("needle");
+    inode_scope.inode_id = Some(docs_inode_id);
+    let mut path_scope = request("needle");
+    path_scope.path_prefix = Some(AbsolutePath::parse("/docs").expect("scope path"));
+    let scoped_by_inode = new_query(&store, &namespace_id, &inode_scope)
+        .await
+        .expect("inode scope query");
+    assert_eq!(scoped_by_inode.matches.len(), 12);
+    assert_eq!(
+        scoped_by_inode.matches,
+        new_query(&store, &namespace_id, &path_scope)
+            .await
+            .expect("path scope query")
+            .matches
+    );
+    let mut both_scopes = inode_scope.clone();
+    both_scopes.path_prefix = path_scope.path_prefix.clone();
+    let error = new_query(&store, &namespace_id, &both_scopes)
+        .await
+        .expect_err("a request names at most one scope");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    inode_scope.inode_id = Some(loonfs_types::InodeId(MAX_PUBLIC_INTEGER));
+    let error = new_query(&store, &namespace_id, &inode_scope)
+        .await
+        .expect_err("a missing inode scope must remain a missing inode");
+    assert_eq!(error.code(), ErrorCode::InodeNotFound);
 
     let mut page_request = request("shared needle");
     let mut found_matches = BTreeSet::new();
