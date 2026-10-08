@@ -1196,7 +1196,7 @@ def test_inode_addressing(cases: dict[str, ConformanceCase], harness: Harness) -
         return f"{request.directory}/{name}"
 
     def read_current(inode_id: str) -> bytes:
-        return b"".join(client.inodes.current_content(namespace_id, inode_id))
+        return b"".join(client.inodes.content(namespace_id, inode_id))
 
     client.namespaces.create(namespace_id=namespace_id, request_options=actor_headers)
     _apply(
@@ -1240,7 +1240,7 @@ def test_inode_addressing(cases: dict[str, ConformanceCase], harness: Harness) -
     )
 
     assert read_current(source.inode_id) == request.second_content_utf8.encode()
-    grant = client.inodes.create_current_download(namespace_id, source.inode_id)
+    grant = client.inodes.create_download(namespace_id, source.inode_id)
     assert grant.inode_id == source.inode_id
     assert grant.revision_no == expected.current_revision_no
     assert grant.content_ref == renamed.content_ref

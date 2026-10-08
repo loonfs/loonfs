@@ -165,15 +165,6 @@ enum OperationFingerprintInput<'a> {
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
         destination_path: Option<&'a str>,
-    },
-    // An undelete that names a parent inode or a name writes every
-    // destination field. One that names neither keeps the shape above, so
-    // its fingerprint is the one it had before these fields existed.
-    #[serde(rename = "undelete")]
-    UndeleteUnderParent {
-        inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-        destination_path: Option<&'a str>,
         destination_parent_inode_id: Option<InodeId>,
         destination_display_name: Option<&'a str>,
     },
@@ -528,20 +519,9 @@ fn operation_fingerprint_input<'a>(
             inode_id,
             deletion_seq,
             destination_path,
-            destination_parent_inode_id: None,
-            destination_display_name: None,
-        } => OperationFingerprintInput::Undelete {
-            inode_id: *inode_id,
-            deletion_seq: *deletion_seq,
-            destination_path: destination_path.as_ref().map(AbsolutePath::as_str),
-        },
-        FilesystemOperation::Undelete {
-            inode_id,
-            deletion_seq,
-            destination_path,
             destination_parent_inode_id,
             destination_display_name,
-        } => OperationFingerprintInput::UndeleteUnderParent {
+        } => OperationFingerprintInput::Undelete {
             inode_id: *inode_id,
             deletion_seq: *deletion_seq,
             destination_path: destination_path.as_ref().map(AbsolutePath::as_str),

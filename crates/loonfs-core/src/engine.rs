@@ -528,6 +528,21 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .await
     }
 
+    /// Reads the current content of a visible file inode, wherever it is
+    /// bound, with its entry.
+    pub async fn get_file_by_inode(
+        &self,
+        inode_id: InodeId,
+        context: &RuntimeReadContext,
+        max_content_bytes: Option<u64>,
+    ) -> Result<FileBytes> {
+        let head_view = self.authorization_head_view().await?;
+        let access = self.read_access(context, head_view.as_ref())?;
+        let view = self.load_read_view(context).await?;
+        view.get_file_bytes_by_inode(&self.store, inode_id, max_content_bytes, &access)
+            .await
+    }
+
     /// Resolves the metadata half of a buffered read for runtime speculation.
     pub async fn resolve_file_content(
         &self,

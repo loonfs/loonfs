@@ -34,7 +34,7 @@ use self::extractors::{
     MAX_COMPLETION_BODY_BYTES, MAX_JSON_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use self::handlers_downloads::{
-    create_current_download_by_inode, create_download, create_download_by_inode,
+    create_download, create_download_by_inode, create_revision_download_by_inode,
 };
 use self::handlers_filesystem::{
     create_commit, get_file_bytes, get_path_entry, list_changes, list_file_revisions,
@@ -321,7 +321,7 @@ pub fn router(state: BindingState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
-            post(create_current_download_by_inode),
+            post(create_download_by_inode),
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
@@ -333,7 +333,7 @@ pub fn router(state: BindingState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
-            post(create_download_by_inode),
+            post(create_revision_download_by_inode),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/trash",

@@ -3460,7 +3460,7 @@ mod direct_download {
         );
 
         let grant = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect("download grant");
         assert_eq!(grant.path.as_str(), "/big.bin");
@@ -3475,7 +3475,7 @@ mod direct_download {
         assert_eq!(written, payload.len() as u64);
         assert_eq!(received, payload);
         let current_grant = client
-            .create_download_by_inode(&namespace, entry.inode_id, None)
+            .create_download_by_inode(&namespace, entry.inode_id)
             .await
             .expect("grant the current inode revision");
         assert_eq!(current_grant.revision_no, RevisionNo(1));
@@ -3487,14 +3487,14 @@ mod direct_download {
             .expect("delete current binding");
         assert_api_error(
             client
-                .create_download_by_inode(&namespace, entry.inode_id, None)
+                .create_download_by_inode(&namespace, entry.inode_id)
                 .await,
             404,
             ErrorCode::InodeNotFound.as_str(),
             None,
         );
         let inode_grant = client
-            .create_download_by_inode(&namespace, entry.inode_id, Some(RevisionNo(1)))
+            .create_revision_download_by_inode(&namespace, entry.inode_id, RevisionNo(1))
             .await
             .expect("grant retained inode revision");
         assert_eq!(inode_grant.inode_id, entry.inode_id);
@@ -3544,7 +3544,7 @@ mod direct_download {
             .expect("seed revision 1");
 
         let grant = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect("grant for revision 1");
         assert_eq!(grant.revision_no, RevisionNo(1));
@@ -3569,13 +3569,7 @@ mod direct_download {
         // And asking for the old revision by number resolves to the same
         // object the earlier grant named.
         let pinned = client
-            .create_download(
-                &target,
-                &loonfs_client::DownloadOptions {
-                    revision_no: Some(RevisionNo(1)),
-                    snapshot_id: None,
-                },
-            )
+            .create_revision_download(&target, RevisionNo(1))
             .await
             .expect("grant for a prior revision");
         assert_eq!(pinned.revision_no, RevisionNo(1));
@@ -3608,7 +3602,7 @@ mod direct_download {
             .expect("seed a file");
 
         let error = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect_err("a deployment with no issuer cannot grant reads");
         match &error {
@@ -3630,7 +3624,7 @@ mod direct_download {
             .expect("stat proxied file")
             .inode_id;
         let inode_error = client
-            .create_download_by_inode(&namespace, inode_id, Some(RevisionNo(1)))
+            .create_revision_download_by_inode(&namespace, inode_id, RevisionNo(1))
             .await
             .expect_err("the inode route honors the same provider gate");
         match inode_error {
@@ -3823,7 +3817,7 @@ mod direct_download {
             .expect("a large file goes straight to object storage under a crc32c claim");
 
         let grant = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect("download grant");
         assert_eq!(
@@ -3889,7 +3883,7 @@ mod direct_download {
         // It came home through the grant, byte for byte, which proves the
         // object the presigned write created is the one the commit named.
         let grant = client
-            .create_download(&target, &Default::default())
+            .create_download(&target)
             .await
             .expect("download grant");
         assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);

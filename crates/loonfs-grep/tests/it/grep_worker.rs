@@ -7,7 +7,7 @@ use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost
 use bytes::Bytes;
 use loonfs::{
     CoreError, CreateNamespaceOptions, ErrorCode, LoonFs, Maintenance, MetadataMaintenanceOptions,
-    NamespaceId, PutFileOptions, SharedObjectStore,
+    NamespaceId, PutFileOptions, SharedObjectStore, UndeleteDestination, UndeleteOptions,
 };
 use loonfs_grep::keyspace::{
     grep_prefix, hint_key, manifest_key, manifests_prefix, segment_key, segments_prefix,
@@ -1318,11 +1318,16 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     );
 
     namespace_writer
-        .undelete(
+        .undelete_with_options(
             docs_inode_id,
             deleted.committed_seq,
-            Some("/docs"),
             &loonfs_test_support::test_actor(),
+            &UndeleteOptions {
+                destination: UndeleteDestination::Path(
+                    AbsolutePath::parse("/docs").expect("valid destination path"),
+                ),
+                ..Default::default()
+            },
         )
         .await
         .expect("undelete the subtree");
@@ -1401,11 +1406,16 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
 
     let undeleted = namespace_writer
-        .undelete(
+        .undelete_with_options(
             docs_inode_id,
             deleted.committed_seq,
-            Some("/docs"),
             &loonfs_test_support::test_actor(),
+            &UndeleteOptions {
+                destination: UndeleteDestination::Path(
+                    AbsolutePath::parse("/docs").expect("valid destination path"),
+                ),
+                ..Default::default()
+            },
         )
         .await
         .expect("undelete subtree after backfill");

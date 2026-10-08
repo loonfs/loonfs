@@ -809,3 +809,13 @@ impl RuntimeStoreProbe {
         self.hint_gets.count(OperationClass::Read)
     }
 }
+
+/// Undelete options that restore the entry at `path`.
+pub(crate) fn undelete_at(path: &str) -> loonfs::UndeleteOptions {
+    loonfs::UndeleteOptions {
+        destination: loonfs::UndeleteDestination::Path(
+            loonfs::AbsolutePath::parse(path).expect("valid undelete destination"),
+        ),
+        ..Default::default()
+    }
+}

@@ -1,6 +1,7 @@
 //! Operation requests and responses for the v0 HTTP API.
 
 use super::ContentToken;
+use crate::options::UndeleteDestination;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
     AttributesRevisionNo, BindingVersion, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId,
@@ -816,6 +817,31 @@ pub enum FilesystemOperation {
 }
 
 impl FilesystemOperation {
+    /// An undelete of the deletion of `inode_id` committed at
+    /// `deletion_seq`, bound where `destination` says.
+    pub fn undelete(
+        inode_id: InodeId,
+        deletion_seq: ChangeSeq,
+        destination: &UndeleteDestination,
+    ) -> Self {
+        let (destination_path, destination_parent_inode_id, destination_display_name) =
+            match destination {
+                UndeleteDestination::Recorded => (None, None, None),
+                UndeleteDestination::Path(path) => (Some(path.clone()), None, None),
+                UndeleteDestination::Name {
+                    parent_inode_id,
+                    display_name,
+                } => (None, Some(*parent_inode_id), Some(display_name.clone())),
+            };
+        Self::Undelete {
+            inode_id,
+            deletion_seq,
+            destination_path,
+            destination_parent_inode_id,
+            destination_display_name,
+        }
+    }
+
     /// Returns the content written by this operation, if any.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match self {

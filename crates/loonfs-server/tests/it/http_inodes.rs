@@ -4,6 +4,7 @@
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::start_server;
+use futures::StreamExt;
 use loonfs_client::AttributeChanges;
 use loonfs_client::{ClientError, DeleteOptions, NamespacePath};
 use loonfs_test_support::http::raw_agent;
@@ -15,6 +16,14 @@ use loonfs_types::{ApiError, DeleteDirectoryBehavior, ErrorCode, InodeId, Revisi
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
+
+async fn drain(mut stream: loonfs_client::PayloadStream) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        bytes.extend_from_slice(&chunk.expect("content chunk"));
+    }
+    bytes
+}
 
 fn assert_api_code<T: std::fmt::Debug>(
     result: Result<T, ClientError>,
@@ -120,6 +129,17 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
             .expect("read current content after rename"),
         b"two"
     );
+    assert_eq!(
+        drain(
+            harness
+                .client
+                .read_file_stream_by_inode(&namespace, inode_id)
+                .await
+                .expect("stream current content after rename"),
+        )
+        .await,
+        b"two"
+    );
     let revisions = harness
         .client
         .list_file_revisions_by_inode(&namespace, inode_id)
@@ -172,6 +192,17 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
             .read_file_revision_by_inode(&namespace, inode_id, RevisionNo(2))
             .await
             .expect("read retained deleted revision"),
+        b"two"
+    );
+    assert_eq!(
+        drain(
+            harness
+                .client
+                .read_file_revision_stream_by_inode(&namespace, inode_id, RevisionNo(2))
+                .await
+                .expect("stream retained deleted revision"),
+        )
+        .await,
         b"two"
     );
     assert_eq!(
@@ -310,7 +341,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     assert_api_code(
         harness
             .client
-            .create_download_by_inode(&namespace, file_id, Some(RevisionNo(1)))
+            .create_revision_download_by_inode(&namespace, file_id, RevisionNo(1))
             .await,
         501,
         ErrorCode::NotSupported,

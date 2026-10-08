@@ -87,7 +87,7 @@ pub use loonfs_types::api::v0::{
     UploadSessionStatus,
 };
 pub use loonfs_types::{
-    ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
+    AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
     AttributesProjection, AttributesRevisionNo, CapabilityDocument, ChangeSeq, Checkpoint,
     CheckpointOwnerSummary, ChecksumAlgorithm, CommitId, CommitPrecondition, CompactionStepOutcome,
     ContentId, ContentRef, ContentRefKind, DeleteCheckpointResponse, DeleteDirectoryBehavior,
@@ -221,8 +221,8 @@ pub use options::{
     AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateCheckpointOptions,
     CreateDirectoryOptions, DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions,
     ListOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions,
-    StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
-    UpdateAttributesOptions,
+    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
+    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};

@@ -7687,14 +7687,14 @@
         "x-fern-sdk-group-name": [
           "inodes"
         ],
-        "x-fern-sdk-method-name": "currentContent",
+        "x-fern-sdk-method-name": "content",
         "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads": {
       "post": {
         "description": "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound. The request has no body and the response does not include a path.",
-        "operationId": "create_current_download_by_inode",
+        "operationId": "create_download_by_inode",
         "parameters": [
           {
             "description": "Namespace id",
@@ -7792,15 +7792,15 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "summary": "Begin current download by inode",
+        "summary": "Begin download by inode",
         "tags": [
           "inodes"
         ],
-        "x-fern-request-name": "CreateCurrentDownloadByInodeRequest",
+        "x-fern-request-name": "CreateDownloadByInodeRequest",
         "x-fern-sdk-group-name": [
           "inodes"
         ],
-        "x-fern-sdk-method-name": "createCurrentDownload",
+        "x-fern-sdk-method-name": "createDownload",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -8057,14 +8057,14 @@
         "x-fern-sdk-group-name": [
           "inodes"
         ],
-        "x-fern-sdk-method-name": "content",
+        "x-fern-sdk-method-name": "revisionContent",
         "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads": {
       "post": {
         "description": "Authorizes a direct read of one retained inode revision. The request has no body and the response does not include a path.",
-        "operationId": "create_download_by_inode",
+        "operationId": "create_revision_download_by_inode",
         "parameters": [
           {
             "description": "Namespace id",
@@ -8171,15 +8171,15 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "summary": "Begin download by inode",
+        "summary": "Begin revision download by inode",
         "tags": [
           "inodes"
         ],
-        "x-fern-request-name": "CreateDownloadByInodeRequest",
+        "x-fern-request-name": "CreateRevisionDownloadByInodeRequest",
         "x-fern-sdk-group-name": [
           "inodes"
         ],
-        "x-fern-sdk-method-name": "createDownload",
+        "x-fern-sdk-method-name": "createRevisionDownload",
         "x-loonfs-retry": "idempotent"
       }
     },

@@ -165,8 +165,8 @@
       "destination_path": "/docs/report.txt"
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":42,\"deletion_seq\":17,\"destination_path\":\"/docs/report.txt\"}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:3778013e834de2527993acc119142f4e4b4533bd5d13855666f45c5934fe8df4"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":42,\"deletion_seq\":17,\"destination_path\":\"/docs/report.txt\",\"destination_parent_inode_id\":null,\"destination_display_name\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:6e1337a05fffef99cfa6ed2b5a19f38151240fa5a458ceae82de4928d3d4bcd3"
   },
   {
     "name": "undelete_12",
@@ -176,8 +176,8 @@
       "deletion_seq": 17
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":42,\"deletion_seq\":17,\"destination_path\":null}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:72ab3f131ed3817c5804a1814962f8d0431076e851d9c3673885284464dca05a"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":42,\"deletion_seq\":17,\"destination_path\":null,\"destination_parent_inode_id\":null,\"destination_display_name\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:188a13e70e5bb140adc0b1c7fd0c50cdada1da9d663abc4f6418834af254db83"
   },
   {
     "name": "update_attributes_13",

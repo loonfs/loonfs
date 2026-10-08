@@ -133,7 +133,7 @@ Registered limit keys:
 | `upload.service_proxied.max_content_bytes` | Largest request body accepted by one service-proxied upload content request (`PUT .../uploads/{upload_id}/content`). This is not a maximum file size. Clients may use `direct_put` for larger content only when `filesystem.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
 | `upload.direct_put.max_content_bytes` | Largest object this deployment's provider accepts in one presigned `direct_put` request. Unrelated to `upload.service_proxied.max_content_bytes`, which bounds service-proxied uploads. A size hint above this limit returns `content_too_large` at begin, and completion checks the actual stored size. Advertised only alongside `filesystem.uploads.direct_put`. |
 | `upload.complete.max_request_body_bytes` | Largest JSON body accepted by `POST .../uploads/{upload_id}/complete`. Larger requests return `content_too_large`. |
-| `download.service_proxied.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content` or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will stream and return in one response. Over-limit reads answer `content_too_large`; proxied reads use bounded chunks but do not support range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. The check is against the whole file. The proxied read has no ranged form. |
+| `download.service_proxied.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, `GET .../inodes/{inode_id}/content`, or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) will stream and return in one response. Over-limit reads answer `content_too_large`; proxied reads use bounded chunks but do not support range reads. A file past this limit is read through the corresponding path or inode download grant when `filesystem.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. The check is against the whole file. The proxied read has no ranged form. |
 | `upload.service_proxied.max_concurrent_requests` | How many service-proxied upload requests a serving process streams at once. The cap is shared by all callers and is not a per-caller allowance. Requests past it answer `server_busy`. |
 | `download.service_proxied.max_concurrent_requests` | How many service-proxied content reads a serving process streams at once. The cap is shared by all callers and is not a per-caller allowance. Requests past it answer `server_busy`. A read holds its place until its body finishes or is dropped. |
 | `access.max_principals_per_request` | Most principal ids one request may act as. Over-limit headers answer `invalid_request`. |
@@ -1003,9 +1003,11 @@ The table below lists the retry class for every v0 operation.
 | List file revisions by path | `list_file_revisions` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | List file revisions by inode | `list_file_revisions_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
 | Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&snapshot_id=...` (`revision_no` and `snapshot_id` are optional and mutually exclusive) |
+| Read current file content by inode | `get_file_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/content` |
 | Read prior file content by inode | `get_file_revision_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
 | Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` with body `path`, optional `revision_no`, and optional `snapshot_id` (`snapshot_id` cannot be combined with `revision_no`) |
-| Start a download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with no body |
+| Start a current download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` with no body |
+| Start a revision download by inode | `create_revision_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with no body |
 | List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits`; requires the `Loonfs-Actor` header |
 | Create an upload session | `create_upload` | `not_idempotent` | `POST /v0/namespaces/{ns}/uploads`; returns the open session |
@@ -1995,7 +1997,7 @@ Those rows represent current state and are not removed when the retention floor 
 }
 ```
 
-### 6.7 `GET /filesystem/content`
+### 6.7 `GET /filesystem/content` and `GET /inodes/{inode_id}/content`
 
 The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
@@ -2854,7 +2856,7 @@ checks the arriving bytes against:
 }
 ```
 
-The inode form is
+The inode revision form is
 `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`.
 The request has no body and its response does not include a path:
 

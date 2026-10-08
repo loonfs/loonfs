@@ -39,14 +39,6 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
-        "create_current_download_by_inode",
-        SdkName {
-            group: &["inodes"],
-            method: "createCurrentDownload",
-            request: Some("CreateCurrentDownloadByInodeRequest"),
-        },
-    ),
-    (
         "create_download",
         SdkName {
             group: &["files"],
@@ -68,6 +60,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
             group: &["namespaces"],
             method: "create",
             request: None,
+        },
+    ),
+    (
+        "create_revision_download_by_inode",
+        SdkName {
+            group: &["inodes"],
+            method: "createRevisionDownload",
+            request: Some("CreateRevisionDownloadByInodeRequest"),
         },
     ),
     (
@@ -162,7 +162,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         "get_file_bytes_by_inode",
         SdkName {
             group: &["inodes"],
-            method: "currentContent",
+            method: "content",
             request: Some("GetFileBytesByInodeRequest"),
         },
     ),
@@ -170,7 +170,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         "get_file_revision_bytes_by_inode",
         SdkName {
             group: &["inodes"],
-            method: "content",
+            method: "revisionContent",
             request: Some("GetFileRevisionBytesByInodeRequest"),
         },
     ),

@@ -79,16 +79,62 @@ pub(super) async fn create_download(
     }))
 }
 
-/// Authorizes a direct read of one retained inode revision.
+/// Authorizes a direct read of the current revision of a file inode.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
         post,
         operation_id = "create_download_by_inode",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+        path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
+        description = "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound. The request has no body and the response does not include a path.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
+        ),
+        responses(
+            (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
+            (status = 400, description = "Invalid inode ID", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or visible inode not found", body = ApiError),
+            (status = 409, description = "Inode is not a file", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 501, description = "Direct download is unsupported", body = ApiError),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn create_download_by_inode(
+    State(state): State<BindingState>,
+    SubjectHeaders(subject): SubjectHeaders,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(path): AppPath<InodePathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
+) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let inode_id = parse_inode_id(&path.inode_id)?;
+    let issuer = direct_get_issuer(&state)?;
+    let target = runtime
+        .namespace(&namespace_id)
+        .create_download_by_inode(inode_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    inode_download_response(issuer, namespace_id, target).await
+}
+
+/// Authorizes a direct read of one retained inode revision.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        operation_id = "create_revision_download_by_inode",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+        tag = "inodes",
+        summary = "Begin revision download by inode",
         description = "Authorizes a direct read of one retained inode revision. The request has no body and the response does not include a path.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
@@ -107,7 +153,7 @@ pub(super) async fn create_download(
         )
     )
 )]
-pub(super) async fn create_download_by_inode(
+pub(super) async fn create_revision_download_by_inode(
     State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -118,62 +164,20 @@ pub(super) async fn create_download_by_inode(
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
-    inode_download(&state, runtime, namespace_id, inode_id, Some(revision_no)).await
-}
-
-/// Authorizes a direct read of the current revision of a file inode.
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        post,
-        operation_id = "create_current_download_by_inode",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
-        tag = "inodes",
-        summary = "Begin current download by inode",
-        description = "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound. The request has no body and the response does not include a path.",
-        params(
-            ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
-        ),
-        responses(
-            (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode ID", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or visible inode not found", body = ApiError),
-            (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "Direct download is unsupported", body = ApiError),
-            crate::http::openapi::UnavailableResponses
-        )
-    )
-)]
-pub(super) async fn create_current_download_by_inode(
-    State(state): State<BindingState>,
-    SubjectHeaders(subject): SubjectHeaders,
-    NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppPath(path): AppPath<InodePathParams>,
-    AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
-    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
-    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
-    let inode_id = parse_inode_id(&path.inode_id)?;
-    inode_download(&state, runtime, namespace_id, inode_id, None).await
-}
-
-async fn inode_download(
-    state: &BindingState,
-    runtime: &loonfs::LoonFs<loonfs::Writable>,
-    namespace_id: loonfs_types::NamespaceId,
-    inode_id: loonfs_types::InodeId,
-    revision_no: Option<loonfs_types::RevisionNo>,
-) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
-    let issuer = direct_get_issuer(state)?;
+    let issuer = direct_get_issuer(&state)?;
     let target = runtime
         .namespace(&namespace_id)
-        .create_download_by_inode(inode_id, revision_no)
+        .create_revision_download_by_inode(inode_id, revision_no)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    inode_download_response(issuer, namespace_id, target).await
+}
+
+async fn inode_download_response(
+    issuer: &dyn DirectGetIssuer,
+    namespace_id: loonfs_types::NamespaceId,
+    target: loonfs::downloads::DirectDownloadByInodeTarget,
+) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
     let access = presigned_access(issuer, &target.object_key).await?;
     Ok(Json(CreateDownloadByInodeResponse {
         namespace_id,

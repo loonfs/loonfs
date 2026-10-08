@@ -102,16 +102,23 @@ impl ResolvedTarget {
         start_offset: u64,
     ) -> Result<FileDownload, CliError> {
         if self.client.offers_direct_download().await? {
-            let grant = self
-                .client
-                .create_download(
-                    spec,
-                    &DownloadOptions {
-                        revision_no,
-                        snapshot_id: snapshot_id.cloned(),
-                    },
-                )
-                .await?;
+            let grant = match revision_no {
+                Some(revision_no) => {
+                    self.client
+                        .create_revision_download(spec, revision_no)
+                        .await?
+                }
+                None => {
+                    self.client
+                        .create_download_with_options(
+                            spec,
+                            &DownloadOptions {
+                                snapshot_id: snapshot_id.cloned(),
+                            },
+                        )
+                        .await?
+                }
+            };
             return Ok(FileDownload::Direct {
                 revision_no: grant.revision_no,
                 stream: Box::new(

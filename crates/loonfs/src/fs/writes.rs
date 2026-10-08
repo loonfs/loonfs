@@ -9,8 +9,8 @@ use crate::Result;
 use crate::{
     AccessState, ActorId, AttributeChanges, ChangeSeq, Commit, CommitId, CommitOptions, ContentRef,
     CopyOptions, CreateDirectoryOptions, DeleteOptions, DisplayName, InodeId, MoveOptions,
-    NamespaceId, PutFileOptions, RevisionNo, UpdateAccessByInodeOptions, UpdateAccessOptions,
-    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    NamespaceId, PutFileOptions, RevisionNo, UndeleteOptions, UpdateAccessByInodeOptions,
+    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 use crate::{LoonFs, Namespace, Writable};
 use futures::StreamExt;
@@ -1107,26 +1107,19 @@ impl Namespace<Writable> {
         .await
     }
 
-    /// Restores a deleted file or subtree, optionally at a new path.
+    /// Restores a deleted file or subtree under the parent and name its
+    /// deletion recorded.
     pub async fn undelete(
         &self,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        destination_path: Option<&str>,
         actor: &ActorId,
     ) -> Result<Commit> {
-        self.undelete_with_options(
-            inode_id,
-            deletion_seq,
-            destination_path,
-            actor,
-            &CommitOptions::default(),
-        )
-        .await
+        self.undelete_with_options(inode_id, deletion_seq, actor, &UndeleteOptions::default())
+            .await
     }
 
-    /// Restores a deleted file or subtree, optionally at a new path, under
-    /// the given commit settings.
+    /// Restores a deleted file or subtree where `options` says.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.undelete",
@@ -1143,84 +1136,14 @@ impl Namespace<Writable> {
         &self,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        destination_path: Option<&str>,
         actor: &ActorId,
-        options: &CommitOptions,
-    ) -> Result<Commit> {
-        self.core.record_trace_context(&tracing::Span::current());
-        // An absent destination restores in place: the entry re-binds under
-        // the parent and name its deletion recorded.
-        let destination_path = destination_path
-            .map(loonfs_core::path::parse_mutation_path)
-            .transpose()?;
-        self.commit_one(
-            actor,
-            options,
-            FilesystemOperation::Undelete {
-                inode_id,
-                deletion_seq,
-                destination_path,
-                destination_parent_inode_id: None,
-                destination_display_name: None,
-            },
-        )
-        .await
-    }
-
-    /// Restores a deleted file or subtree to a name under a parent inode.
-    pub async fn undelete_by_inode(
-        &self,
-        inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-        destination_parent_inode_id: InodeId,
-        destination_display_name: &DisplayName,
-        actor: &ActorId,
-    ) -> Result<Commit> {
-        self.undelete_by_inode_with_options(
-            inode_id,
-            deletion_seq,
-            destination_parent_inode_id,
-            destination_display_name,
-            actor,
-            &CommitOptions::default(),
-        )
-        .await
-    }
-
-    /// Restores a deleted file or subtree to a name under a parent inode,
-    /// under the given commit settings.
-    #[tracing::instrument(
-        level = "debug",
-        name = "loonfs.undelete_by_inode",
-        err(level = "debug"),
-        skip_all,
-        fields(
-            operation = "undelete_by_inode",
-            namespace_id = %self.namespace_id,
-            mode = tracing::field::Empty,
-            store_kind = tracing::field::Empty,
-        )
-    )]
-    pub async fn undelete_by_inode_with_options(
-        &self,
-        inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-        destination_parent_inode_id: InodeId,
-        destination_display_name: &DisplayName,
-        actor: &ActorId,
-        options: &CommitOptions,
+        options: &UndeleteOptions,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_one(
             actor,
-            options,
-            FilesystemOperation::Undelete {
-                inode_id,
-                deletion_seq,
-                destination_path: None,
-                destination_parent_inode_id: Some(destination_parent_inode_id),
-                destination_display_name: Some(destination_display_name.clone()),
-            },
+            &options.commit,
+            FilesystemOperation::undelete(inode_id, deletion_seq, &options.destination),
         )
         .await
     }

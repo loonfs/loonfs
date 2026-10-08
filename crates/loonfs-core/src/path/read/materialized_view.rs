@@ -304,6 +304,34 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let (entry, content_ref) = self
             .resolve_file_content(absolute_path, None, access)
             .await?;
+        self.file_bytes(store, entry, content_ref, max_content_bytes)
+            .await
+    }
+
+    /// Reads the current content of a visible file inode, wherever it is
+    /// bound, with its entry.
+    pub(crate) async fn get_file_bytes_by_inode(
+        &self,
+        store: &S,
+        inode_id: InodeId,
+        max_content_bytes: Option<u64>,
+        access: &ReadAccess<'_, S>,
+    ) -> Result<FileBytes> {
+        let entry = self
+            .stat_inode(inode_id, AttributeInclusion::Omit, access)
+            .await?;
+        let content_ref = file_content_ref(&entry)?;
+        self.file_bytes(store, entry, content_ref, max_content_bytes)
+            .await
+    }
+
+    async fn file_bytes(
+        &self,
+        store: &S,
+        entry: PathEntry,
+        content_ref: ContentRef,
+        max_content_bytes: Option<u64>,
+    ) -> Result<FileBytes> {
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         let bytes = self
             .resolve_content_location(&content_ref)?
@@ -325,15 +353,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let mut entry = self
             .resolve_path(absolute_path, AttributeInclusion::Omit, access)
             .await?;
-        let content_ref = match &entry.kind {
-            PathEntryKind::File { content_ref, .. } => content_ref.clone(),
-            PathEntryKind::Directory {} => {
-                return Err(CoreError::ExpectedFile {
-                    target: entry.path.to_string(),
-                    kind: InodeKind::Directory,
-                });
-            }
-        };
+        let content_ref = file_content_ref(&entry)?;
         if let Some(revision_no) = revision_no {
             if !matches!(entry.kind, PathEntryKind::File { revision_no: current, .. } if current == revision_no)
             {
@@ -1080,6 +1100,16 @@ pub(crate) fn ensure_within_read_limit(
             max_bytes,
         }),
         _ => Ok(()),
+    }
+}
+
+fn file_content_ref(entry: &PathEntry) -> Result<ContentRef> {
+    match &entry.kind {
+        PathEntryKind::File { content_ref, .. } => Ok(content_ref.clone()),
+        PathEntryKind::Directory {} => Err(CoreError::ExpectedFile {
+            target: entry.path.to_string(),
+            kind: InodeKind::Directory,
+        }),
     }
 }
 

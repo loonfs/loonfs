@@ -245,7 +245,7 @@ async fn assert_direct_get_returns_the_written_bytes(
     );
 
     let grant = client
-        .create_download(target, &Default::default())
+        .create_download(target)
         .await
         .expect("begin download");
     let ObjectTransferAccess::PresignedUrl { method, .. } = &grant.access;
@@ -274,7 +274,7 @@ async fn assert_direct_get_capability_serves_ranges(
     bytes: &[u8],
 ) {
     let grant = client
-        .create_download(target, &Default::default())
+        .create_download(target)
         .await
         .expect("begin download for ranged reads");
     let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
@@ -809,7 +809,7 @@ async fn assert_gcs_read_capability_serves_ranges_and_resumes(
 
     let grant = harness
         .client
-        .create_download(&target, &Default::default())
+        .create_download(&target)
         .await
         .expect("begin download");
     let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
@@ -900,7 +900,7 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
 
     let grant = harness
         .client
-        .create_download(&target, &Default::default())
+        .create_download(&target)
         .await
         .expect("an object past the read cap is served by grant");
     let mut received = Vec::new();
@@ -1164,7 +1164,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     // symmetry this deployment owes.
     let grant = harness
         .client
-        .create_download(&target, &Default::default())
+        .create_download(&target)
         .await
         .expect("begin download of the assembled object");
     let mut received = Vec::new();

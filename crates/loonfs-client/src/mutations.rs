@@ -667,106 +667,40 @@ impl Client {
         .await
     }
 
-    /// Restores a deleted file or subtree, optionally at a new path.
+    /// Restores a deleted file or subtree under the parent and name its
+    /// deletion recorded.
     pub async fn undelete(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        destination_path: Option<&AbsolutePath>,
         actor: &ActorId,
     ) -> Result<Commit> {
         self.undelete_with_options(
             namespace_id,
             inode_id,
             deletion_seq,
-            destination_path,
             actor,
-            &CommitOptions::default(),
+            &UndeleteOptions::default(),
         )
         .await
     }
 
-    /// Restores a deleted file or subtree, optionally at a new path, under
-    /// the given commit settings.
+    /// Restores a deleted file or subtree where `options` says.
     pub async fn undelete_with_options(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: ChangeSeq,
-        destination_path: Option<&AbsolutePath>,
         actor: &ActorId,
-        options: &CommitOptions,
-    ) -> Result<Commit> {
-        // An absent destination restores in place: the entry re-binds under
-        // the parent and name its deletion recorded.
-        self.commit(
-            namespace_id,
-            actor,
-            &single_operation(
-                options,
-                FilesystemOperation::Undelete {
-                    inode_id,
-                    deletion_seq,
-                    destination_path: destination_path.cloned(),
-                    destination_parent_inode_id: None,
-                    destination_display_name: None,
-                },
-            ),
-        )
-        .await
-    }
-
-    /// Restores a deleted file or subtree to a name under a parent inode.
-    pub async fn undelete_by_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-        destination_parent_inode_id: InodeId,
-        destination_display_name: &DisplayName,
-        actor: &ActorId,
-    ) -> Result<Commit> {
-        self.undelete_by_inode_with_options(
-            namespace_id,
-            inode_id,
-            deletion_seq,
-            destination_parent_inode_id,
-            destination_display_name,
-            actor,
-            &CommitOptions::default(),
-        )
-        .await
-    }
-
-    /// Restores a deleted file or subtree to a name under a parent inode,
-    /// under the given commit settings.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the client takes the namespace beside the runtime handle's inputs"
-    )]
-    pub async fn undelete_by_inode_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-        destination_parent_inode_id: InodeId,
-        destination_display_name: &DisplayName,
-        actor: &ActorId,
-        options: &CommitOptions,
+        options: &UndeleteOptions,
     ) -> Result<Commit> {
         self.commit(
             namespace_id,
             actor,
             &single_operation(
-                options,
-                FilesystemOperation::Undelete {
-                    inode_id,
-                    deletion_seq,
-                    destination_path: None,
-                    destination_parent_inode_id: Some(destination_parent_inode_id),
-                    destination_display_name: Some(destination_display_name.clone()),
-                },
+                &options.commit,
+                FilesystemOperation::undelete(inode_id, deletion_seq, &options.destination),
             ),
         )
         .await

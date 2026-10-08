@@ -1485,14 +1485,11 @@ Every operation begins with `kind`, followed by the fields in the order below. E
 | `copy_by_inode` | `inode_id`, `destination_parent_inode_id`, `destination_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
 | `restore_revision` | `path`, `source_revision_no` |
 | `restore_revision_by_inode` | `inode_id`, `source_revision_no` |
-| `undelete` | `inode_id`, `deletion_seq`, `destination_path` |
-| `undelete` naming a parent inode or name | `inode_id`, `deletion_seq`, `destination_path`, `destination_parent_inode_id`, `destination_display_name` |
+| `undelete` | `inode_id`, `deletion_seq`, `destination_path`, `destination_parent_inode_id`, `destination_display_name` |
 | `update_attributes` | `path`, `set`, `remove`, `expected_inode_id`, `expected_attributes_revision_no` |
 | `update_attributes_by_inode` | `inode_id`, `set`, `remove`, `expected_attributes_revision_no` |
 | `update_access` | `path`, `boundary`, `grants`, `expected_inode_id`, `expected_access_revision_no` |
 | `update_access_by_inode` | `inode_id`, `boundary`, `grants`, `expected_access_revision_no` |
-
-An `undelete` that supplies neither `destination_parent_inode_id` nor `destination_display_name` uses the first `undelete` row. One that supplies either uses the second row.
 
 Paths use their validated canonical absolute form. Display-name fields contain one validated component. Inode IDs in these operation shapes use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers. Binding versions retain their opaque string representation.
 

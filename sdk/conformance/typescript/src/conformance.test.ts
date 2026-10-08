@@ -1839,7 +1839,7 @@ conformanceTest("inode_addressing", async (activeHarness, testCase) => {
     const actorHeaders = { headers: { "Loonfs-Actor": request.actor_id } };
     const childPath = (name: string): string => `${request.directory}/${name}`;
     const readCurrent = async (inodeId: string): Promise<Uint8Array> => {
-        const response = await client.inodes.currentContent({
+        const response = await client.inodes.content({
             namespace_id: namespaceId,
             inode_id: inodeId,
         });
@@ -1925,7 +1925,7 @@ conformanceTest("inode_addressing", async (activeHarness, testCase) => {
         await readCurrent(source.inode_id),
         new TextEncoder().encode(request.second_content_utf8),
     );
-    const grant = await client.inodes.createCurrentDownload({
+    const grant = await client.inodes.createDownload({
         namespace_id: namespaceId,
         inode_id: source.inode_id,
     });

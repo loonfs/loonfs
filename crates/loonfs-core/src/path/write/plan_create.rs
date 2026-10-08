@@ -59,7 +59,7 @@ pub(super) enum UndeleteDestination<'a> {
     /// The parent and name the deletion recorded.
     Recorded,
     Path(&'a AbsolutePath),
-    Child {
+    Name {
         parent_inode_id: InodeId,
         display_name: &'a DisplayName,
     },
@@ -77,7 +77,7 @@ impl<'a> UndeleteDestination<'a> {
             (None, None, None) => return Ok(Self::Recorded),
             (Some(path), None, None) => return Ok(Self::Path(path)),
             (None, Some(parent_inode_id), Some(display_name)) => {
-                return Ok(Self::Child {
+                return Ok(Self::Name {
                     parent_inode_id,
                     display_name,
                 })
@@ -155,7 +155,7 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
                 .await?;
             (parent_inode_id, final_component(absolute_path)?.clone())
         }
-        UndeleteDestination::Child {
+        UndeleteDestination::Name {
             parent_inode_id,
             display_name,
         } => {

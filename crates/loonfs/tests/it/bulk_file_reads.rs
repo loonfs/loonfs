@@ -199,11 +199,11 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .expect("delete file")
         .committed_seq;
     namespace
-        .undelete(
+        .undelete_with_options(
             recovered_inode_id,
             deletion_seq,
-            Some("/notes/restored.txt"),
             &loonfs_test_support::test_actor(),
+            &undelete_at("/notes/restored.txt"),
         )
         .await
         .expect("undelete file");
@@ -672,11 +672,11 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         .expect("delete file")
         .committed_seq;
     namespace_writer
-        .undelete(
+        .undelete_with_options(
             recovered,
             recovered_deletion_seq,
-            Some("/m/recovered-again.txt"),
             &loonfs_test_support::test_actor(),
+            &undelete_at("/m/recovered-again.txt"),
         )
         .await
         .expect("undelete file");

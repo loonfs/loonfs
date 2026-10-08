@@ -6,7 +6,7 @@ use bytes::Bytes;
 use loonfs_client::{
     AccessState, AttributeChanges, Client, ClientConfig, ClientError, CommitOptions,
     CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
-    UpdateAttributesByInodeOptions,
+    UndeleteDestination, UndeleteOptions, UpdateAttributesByInodeOptions,
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
@@ -708,7 +708,7 @@ async fn run_download(harness: &Harness, case: &Case) {
         .expect("stat download file");
     let grant = harness
         .client
-        .create_download(&spec, &Default::default())
+        .create_download(&spec)
         .await
         .expect("begin direct download");
     assert_eq!(stat.content_ref(), Some(&grant.content_ref));
@@ -1366,7 +1366,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
     );
     let grant = harness
         .client
-        .create_download_by_inode(&namespace, source_inode_id, None)
+        .create_download_by_inode(&namespace, source_inode_id)
         .await
         .expect("grant current content by inode");
     assert_eq!(grant.inode_id, source_inode_id);
@@ -1544,14 +1544,18 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         .expect("delete copy");
     harness
         .client
-        .undelete_by_inode_with_options(
+        .undelete_with_options(
             &namespace,
             copy_entry.inode_id,
             deletion.committed_seq,
-            parent_inode_id,
-            &display_name(&request.restored_file_name),
             actor,
-            &commit_options("conf-inode-addressing-undelete"),
+            &UndeleteOptions {
+                commit: commit_options("conf-inode-addressing-undelete"),
+                destination: UndeleteDestination::Name {
+                    parent_inode_id,
+                    display_name: display_name(&request.restored_file_name),
+                },
+            },
         )
         .await
         .expect("undelete under a parent inode");
@@ -2310,7 +2314,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let grant = harness
         .client
-        .create_download(&upload_path, &Default::default())
+        .create_download(&upload_path)
         .await
         .expect("begin end-to-end download");
     let streamed = stream_grant(&harness.client, &grant).await;

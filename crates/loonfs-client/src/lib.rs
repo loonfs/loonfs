@@ -75,8 +75,8 @@ pub use ClientError as Error;
 pub use loonfs_types::options::{
     AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateDirectoryOptions,
     DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions,
-    PutFileOptions, StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
-    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    PutFileOptions, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
+    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.

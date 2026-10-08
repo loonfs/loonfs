@@ -1503,7 +1503,7 @@ func runInodeAddressing(t *testing.T, h *harness, testCase conformanceCase) {
 	freshVersion := optionalString(renamed.BindingVersion)
 
 	readCurrent := func(label string) ([]byte, error) {
-		reader, err := h.client.Inodes.CurrentContent(ctx, &loonfs.GetFileBytesByInodeRequest{
+		reader, err := h.client.Inodes.Content(ctx, &loonfs.GetFileBytesByInodeRequest{
 			NamespaceID: request.NamespaceID,
 			InodeID:     source.inodeID,
 		})
@@ -1523,7 +1523,7 @@ func runInodeAddressing(t *testing.T, h *harness, testCase conformanceCase) {
 	if !bytes.Equal(current, []byte(request.SecondContentUTF8)) {
 		t.Error("current content by inode did not match the second revision")
 	}
-	grant, err := h.client.Inodes.CreateCurrentDownload(ctx, &loonfs.CreateCurrentDownloadByInodeRequest{
+	grant, err := h.client.Inodes.CreateDownload(ctx, &loonfs.CreateDownloadByInodeRequest{
 		NamespaceID: request.NamespaceID,
 		InodeID:     source.inodeID,
 	})
