@@ -951,7 +951,7 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
         .await
         .expect("compact commit into receipt row");
     namespace_engine(&store, &namespace_id, &first_context)
-        .advance_retention_floor()
+        .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await
         .expect("advance retention floor past the commit");
 

@@ -197,7 +197,7 @@ async fn maintenance_preserves_writer_and_logical_head() {
         .await
         .expect("checkpoint");
     engine
-        .advance_retention_floor()
+        .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await
         .expect("advance floor");
     gc_namespace(&store, &namespace_id, &GcOptions::default(), &context)

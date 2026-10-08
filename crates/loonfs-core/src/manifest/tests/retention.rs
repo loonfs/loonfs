@@ -180,7 +180,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .expect("bootstrap");
 
     store.reset();
-    let unchanged = advance_retention_floor(&store, &namespace_id)
+    let unchanged = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("initial manifest already covers floor zero");
     assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
@@ -224,7 +224,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     .collect::<BTreeSet<_>>()
     .len();
     store.reset();
-    let advanced = advance_retention_floor(&store, &namespace_id)
+    let advanced = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
@@ -253,6 +253,133 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .await
         .expect("manifest head")
         .is_some());
+}
+
+#[tokio::test]
+async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers_the_floor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    // Commit times come from writers' clocks: the third commit is stamped
+    // before the second.
+    for (path, committed_at_ms) in [
+        ("/a.txt", 2_000),
+        ("/b.txt", 3_000),
+        ("/c.txt", 2_500),
+        ("/d.txt", 5_000),
+    ] {
+        let context = MutationContext {
+            now_ms: committed_at_ms,
+            ..context.clone()
+        };
+        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+            .await
+            .expect("commit");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the commits");
+
+    for (target, expected_floor) in [
+        (
+            RetentionTarget::Cutoff {
+                cutoff_at_ms: 1_999,
+            },
+            ChangeSeq(0),
+        ),
+        // Commit 3 is stamped before the cutoff, but the later commit 2
+        // ends the scan first.
+        (
+            RetentionTarget::Cutoff {
+                cutoff_at_ms: 2_999,
+            },
+            ChangeSeq(1),
+        ),
+        (
+            RetentionTarget::Cutoff {
+                cutoff_at_ms: 3_000,
+            },
+            ChangeSeq(3),
+        ),
+        (RetentionTarget::Seq(ChangeSeq(2)), ChangeSeq(3)),
+        (RetentionTarget::Seq(ChangeSeq(99)), ChangeSeq(4)),
+    ] {
+        let before = current_manifest_no(&store, &namespace_id).await;
+        let floor = advance_retention_floor(&store, None, &namespace_id, target)
+            .await
+            .expect("advance the floor")
+            .retention_floor_seq;
+        assert_eq!(floor, expected_floor, "{target:?}");
+        assert_eq!(read_floor_seq(&store, &namespace_id).await, expected_floor);
+        if target == RetentionTarget::Seq(ChangeSeq(2)) {
+            assert_eq!(
+                current_manifest_no(&store, &namespace_id).await,
+                before,
+                "a target below the floor publishes nothing"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Peak(AtomicUsize);
+    impl crate::cache::ReadWorkingMemoryObserver for Peak {
+        fn in_use(&self, bytes: usize) {
+            self.0.fetch_max(bytes, Ordering::SeqCst);
+        }
+        fn reservation_failed(&self) {}
+    }
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    for path in ["/a.txt", "/b.txt"] {
+        write_file_bytes(&store, &namespace_id, path, b"body\n", &context, None)
+            .await
+            .expect("commit");
+    }
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("fold the commits");
+
+    let peak = Arc::new(Peak(AtomicUsize::new(0)));
+    let observer: Arc<dyn crate::cache::ReadWorkingMemoryObserver> = peak.clone();
+    let cache = MetadataSegmentCache::new(
+        Arc::new(SharedSegmentBlocks::new(0, None)),
+        CacheScope::new(0),
+        Arc::new(crate::cache::ReadWorkingMemory::new(
+            64 * 1024 * 1024,
+            Some(observer),
+        )),
+        None,
+    );
+    let floor = advance_retention_floor(
+        &store,
+        Some(&cache),
+        &namespace_id,
+        RetentionTarget::Cutoff {
+            cutoff_at_ms: u64::MAX,
+        },
+    )
+    .await
+    .expect("advance to the newest commit")
+    .retention_floor_seq;
+    assert_eq!(floor, ChangeSeq(2));
+    assert!(
+        peak.0.load(Ordering::SeqCst) > 0,
+        "the cutoff scan charges the caller's read budget"
+    );
 }
 
 #[tokio::test]
@@ -304,7 +431,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .await
         .expect("delete referenced segment");
 
-    let error = advance_retention_floor(&store, &namespace_id)
+    let error = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect_err("missing basis segment blocks floor advancement");
     assert!(matches!(
@@ -378,7 +505,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     );
     store.fail_next(1);
 
-    let error = advance_retention_floor(&store, &namespace_id)
+    let error = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect_err("failed basis probe blocks floor advancement");
     assert_eq!(error.code(), ErrorCode::ServerError);
@@ -423,7 +550,7 @@ async fn retention_floor_advancement_preserves_writer_identity() {
         .expect("load before retention")
         .head;
 
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance retention");
     let after = load_current_projection(&store, &namespace_id)
@@ -748,7 +875,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     crate::manifest::fold_wal(&store, &namespace_id)
         .await
         .expect("fold");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance floor");
     let store = loonfs_test_support::stores::RecordingStore::new(
@@ -2067,7 +2194,7 @@ async fn a_merge_above_the_base_keeps_the_rows_that_shadow_it() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("checkpoint the extra file");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance the floor");
     assert!(
@@ -2353,7 +2480,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         create_checkpoint(&store, &namespace_id, &context)
             .await
             .expect("checkpoint the deletions");
-        advance_retention_floor(&store, &namespace_id)
+        advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
             .await
             .expect("advance the floor past the deletions");
         let visible = visible_namespace(&store, &namespace_id).await;
@@ -2464,7 +2591,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .cloned()
         .collect();
     assert!(!only_pinned.is_empty());
-    let floor = advance_retention_floor(&store, &namespace_id)
+    let floor = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance floor");
     assert!(floor.retention_floor_seq > pin.captured_seq);

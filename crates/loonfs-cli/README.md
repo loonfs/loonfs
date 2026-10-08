@@ -381,9 +381,14 @@ Maintenance
     compaction of a family group. Repeat the command while it publishes to
     compact every eligible group.
 
-  loonfs maintenance retention advance
+  loonfs maintenance retention advance [--to-seq <seq> | --before <unix-ms>]
     Advance the retention floor. This removes change-feed replay history
-    below the folded manifest head but does not remove file revisions.
+    below the floor. A later base compaction keeps every file revision
+    above the floor and each file's newest revision at or below it.
+    The floor moves to the folded manifest head unless a target is given.
+    --to-seq moves it to that sequence, or to the head when that is lower.
+    --before moves it to the last commit committed at or before that Unix
+    time in milliseconds.
 
   loonfs maintenance gc [--grace-window-ms <ms>]
     Run one complete pass and print its report. Each call reads the current

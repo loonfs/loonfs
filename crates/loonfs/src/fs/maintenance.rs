@@ -9,11 +9,11 @@ use crate::trace::phase_span;
 use crate::Maintenance;
 use crate::NamespaceDiagnostics;
 use crate::{
-    AdvanceRetentionResponse, Checkpoint, CompactionStepOutcome, CreateCheckpointOptions,
-    DeleteCheckpointResponse, ErrorCode, FoldWalOutcome, FoldWalResponse, ListCheckpointsResponse,
-    MaintenanceCancellation, MetadataCompactionOutcome, MetadataCompactionResponse,
-    MetadataMaintenanceOptions, MetadataMaintenanceResponse, NamespaceId, PinId, SharedObjectStore,
-    SnapshotSummary, WalFoldStepOutcome,
+    AdvanceRetentionOptions, AdvanceRetentionResponse, Checkpoint, CompactionStepOutcome,
+    CreateCheckpointOptions, DeleteCheckpointResponse, ErrorCode, FoldWalOutcome, FoldWalResponse,
+    ListCheckpointsResponse, MaintenanceCancellation, MetadataCompactionOutcome,
+    MetadataCompactionResponse, MetadataMaintenanceOptions, MetadataMaintenanceResponse,
+    NamespaceId, PinId, SharedObjectStore, SnapshotSummary, WalFoldStepOutcome,
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
@@ -867,11 +867,23 @@ impl Maintenance {
         self.run_wal_fold(namespace_id).await
     }
 
-    /// Advances the namespace retention floor when a verified checkpoint
-    /// makes it safe.
+    /// Runs [`Self::advance_retention_floor_with_options`] toward the folded
+    /// manifest head.
+    pub async fn advance_retention_floor(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<AdvanceRetentionResponse> {
+        self.advance_retention_floor_with_options(namespace_id, &AdvanceRetentionOptions::default())
+            .await
+    }
+
+    /// Advances the namespace retention floor toward `options.target` when a
+    /// verified checkpoint makes it safe.
     ///
-    /// Advancing the floor abandons the replay history below it. Nothing
-    /// schedules it, so an unattended deployment keeps its whole history.
+    /// Advancing the floor abandons the replay history below it, and a later
+    /// base compaction keeps, for each file, every revision above the floor
+    /// and the newest revision at or below it. Nothing schedules it, so an
+    /// unattended deployment keeps its whole history.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.advance_retention_floor",
@@ -884,15 +896,16 @@ impl Maintenance {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn advance_retention_floor(
+    pub async fn advance_retention_floor_with_options(
         &self,
         namespace_id: &NamespaceId,
+        options: &AdvanceRetentionOptions,
     ) -> Result<AdvanceRetentionResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         self.load_live_anchor(namespace_id).await?;
         let result = self
             .engine(namespace_id)
-            .advance_retention_floor()
+            .advance_retention_floor(options.target)
             .await
             .map_err(Error::from);
         self.finish_namespace_mutation(namespace_id, result)

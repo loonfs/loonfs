@@ -1379,10 +1379,20 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Advances the retention floor when a verified checkpoint makes it safe.
-    pub async fn advance_retention_floor(&self) -> Result<AdvanceRetentionResponse> {
+    /// Advances the retention floor toward `target` when a verified checkpoint
+    /// makes it safe.
+    pub async fn advance_retention_floor(
+        &self,
+        target: crate::manifest::RetentionTarget,
+    ) -> Result<AdvanceRetentionResponse> {
         self.mutation_context()?;
-        crate::manifest::advance_retention_floor(&self.store, &self.namespace_id).await
+        crate::manifest::advance_retention_floor(
+            &self.store,
+            self.segment_cache.as_deref(),
+            &self.namespace_id,
+            target,
+        )
+        .await
     }
 
     /// Builds the mutation context for this engine's writer identity.

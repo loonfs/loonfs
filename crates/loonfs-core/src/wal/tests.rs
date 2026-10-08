@@ -673,9 +673,14 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         crate::manifest::fold_wal(store.inner(), &namespace_id)
             .await
             .expect("fold old WAL");
-        crate::manifest::advance_retention_floor(store.inner(), &namespace_id)
-            .await
-            .expect("advance floor");
+        crate::manifest::advance_retention_floor(
+            store.inner(),
+            None,
+            &namespace_id,
+            crate::manifest::RetentionTarget::Head,
+        )
+        .await
+        .expect("advance floor");
         let aged = MutationContext {
             now_ms: grace + 1,
             ..context(1_000)

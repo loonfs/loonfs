@@ -36,7 +36,7 @@
 | **Fork** | A new namespace initialized from a retained source view, sharing stored objects with independent subsequent metadata history. |
 | **Tombstone** | A committed deletion event that hides an inode or subtree while preserving the information needed for undelete. It is a row in a namespace's history. The manifest that a namespace deletion publishes is a different object, the namespace tombstone. |
 | **Namespace tombstone** | A deleted namespace's final manifest ([format section 9.4](format.md#94-deleting-a-namespace)). It stays the current manifest forever and is the last manifest of its chain. It is not a file or subtree tombstone. |
-| **Retention floor** | The lower bound for guaranteed incremental replay and retained metadata views. It limits superseded metadata and receipt retention but does not expire a live namespace's file revisions. |
+| **Retention floor** | The lower bound for guaranteed incremental replay and retained metadata views. It limits superseded metadata, file revision history, and receipt retention. File history above the retention floor is complete; at or below the floor each file keeps its newest revision. |
 | **Namespace retirement** | Eligibility to reclaim a deleted namespace's content prefix and source pin under [format section 9.5](format.md#95-retirement). |
 | **Change feed** | Committed filesystem events ordered by namespace sequence and operation position. |
 | **Cursor** | A position used to resume a paginated read or bounded index build under its consistency rules. Core and grep GC complete one pass without a cursor. |

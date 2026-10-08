@@ -287,9 +287,14 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
             crate::manifest::fold_wal(store.inner(), &namespace_id)
                 .await
                 .expect("replace manifest");
-            crate::manifest::advance_retention_floor(store.inner(), &namespace_id)
-                .await
-                .expect("advance floor");
+            crate::manifest::advance_retention_floor(
+                store.inner(),
+                None,
+                &namespace_id,
+                crate::manifest::RetentionTarget::Head,
+            )
+            .await
+            .expect("advance floor");
             let aged = MutationContext {
                 now_ms: grace + 1,
                 ..context()

@@ -11,8 +11,8 @@ use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{
-    CheckpointPageCursor, CreateNamespaceOptions, DeleteNamespaceOptions, GcOptions,
-    MetadataMaintenanceOptions,
+    AdvanceRetentionOptions, CheckpointPageCursor, CreateNamespaceOptions, DeleteNamespaceOptions,
+    GcOptions, MetadataMaintenanceOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ApiError;
@@ -825,7 +825,7 @@ pub(super) struct CheckpointPathParams {
         path = "/v0/maintenance/namespaces/{namespace_id}/runs",
         tag = "maintenance",
         summary = "Run one maintenance job",
-        description = "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc` or `grep_gc`. A `grep_gc` call collects aged, unreferenced grep index objects and requires `maintenance.grep.index`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation.",
+        description = "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc` or `grep_gc`. A `grep_gc` call collects aged, unreferenced grep index objects and requires `maintenance.grep.index`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation. A `retention` call advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` names.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body(content = RunMaintenanceRequest, description = "The maintenance job to run"),
         responses(
@@ -868,10 +868,14 @@ pub(super) async fn run_maintenance(
             .gc_with_options(&namespace_id, &GcOptions::from_request(request))
             .await
             .map(RunMaintenanceResponse::Gc),
-        RunMaintenanceRequest::Retention(_) => maintenance
-            .advance_retention_floor(&namespace_id)
-            .await
-            .map(RunMaintenanceResponse::Retention),
+        RunMaintenanceRequest::Retention(request) => {
+            let options = AdvanceRetentionOptions::from_request(request)
+                .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+            maintenance
+                .advance_retention_floor_with_options(&namespace_id, &options)
+                .await
+                .map(RunMaintenanceResponse::Retention)
+        }
         RunMaintenanceRequest::GrepGc {} => {
             if !state.options.maintains_grep_index {
                 return Err(grep_index_not_maintained().await);

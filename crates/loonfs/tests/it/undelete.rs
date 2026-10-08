@@ -7,7 +7,7 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, Error,
-    ErrorCode, InodeId, PutFileOptions,
+    ErrorCode, InodeId, PutFileOptions, RevisionNo,
 };
 use loonfs_test_support::ids::{first_page, namespace_id};
 use tempfile::tempdir;
@@ -700,4 +700,89 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
         },
     )
     .expect("matching expectation deletes");
+}
+
+#[tokio::test]
+async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_restores_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = open_runtime_async(store(temp_dir.path()), "undelete-floor-test").await;
+    let namespace_id = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    fs.create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create namespace");
+    let replace = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..Default::default()
+    };
+    // Each revision lands in its own run, so the compaction below is a base
+    // merge that applies the floor; a lone base run is never rewritten.
+    for body in ["draft one", "draft two"] {
+        fs.put_file_with_options(
+            &namespace_id,
+            "/docs/report.txt",
+            body.as_bytes(),
+            &actor,
+            &replace,
+        )
+        .await
+        .expect("put revision");
+        fs.create_checkpoint(&namespace_id)
+            .await
+            .expect("fold the revision");
+    }
+    let inode_id = fs
+        .stat(&namespace_id, "/docs/report.txt")
+        .await
+        .expect("stat before delete")
+        .inode_id;
+    let namespace_writer = fs.namespace_writer(&namespace_id).expect("open namespace");
+    let deletion = namespace_writer
+        .delete_path("/docs/report.txt", &actor)
+        .await
+        .expect("delete file");
+    fs.create_checkpoint(&namespace_id)
+        .await
+        .expect("fold the deletion");
+    let advanced = fs
+        .maintenance
+        .advance_retention_floor(&namespace_id)
+        .await
+        .expect("advance the floor past the deletion");
+    assert_eq!(advanced.retention_floor_seq, deletion.committed_seq);
+    compact_until_done(&fs.maintenance, &namespace_id).await;
+
+    namespace_writer
+        .undelete(inode_id, deletion.committed_seq, &actor)
+        .await
+        .expect("undelete the file");
+    let reader = fresh_reader(store(temp_dir.path())).await;
+    let namespace = reader.namespace(&namespace_id);
+    assert_eq!(
+        namespace
+            .read_file("/docs/report.txt")
+            .await
+            .expect("read the restored file")
+            .bytes,
+        b"draft two"
+    );
+    let revisions = namespace
+        .list_file_revisions("/docs/report.txt")
+        .page(first_page())
+        .await
+        .expect("list revisions");
+    assert_eq!(
+        revisions
+            .revisions
+            .iter()
+            .map(|revision| revision.revision_no)
+            .collect::<Vec<_>>(),
+        [RevisionNo(2)]
+    );
+    expect_code(
+        namespace
+            .read_file_revision("/docs/report.txt", RevisionNo(1))
+            .await,
+        ErrorCode::RevisionNotFound,
+    );
 }

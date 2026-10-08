@@ -30,7 +30,7 @@ use super::load::{
     load_manifest_segments_for_inspection,
 };
 use super::publish::{encode_manifest, ManifestPublicationOutcome};
-use super::retention::advance_retention_floor;
+use super::retention::{advance_retention_floor, RetentionTarget};
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
     flatten_manifest_segments, runs_in_materialization_order, runs_newest_first,

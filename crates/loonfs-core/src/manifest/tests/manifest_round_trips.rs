@@ -375,7 +375,7 @@ async fn current_reads_report_a_missing_hint_as_absent_after_retention_advances(
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("materialize the committed state");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance retention");
 

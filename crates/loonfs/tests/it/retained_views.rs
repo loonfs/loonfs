@@ -402,6 +402,9 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     "{stage}: {namespace}: {path}"
                 );
             }
+            // The source's rebuild applies a floor that passed both
+            // revisions, so only the newer one stays. The fork never compacts.
+            let floor_applied = namespace == &source && matches!(stage, "rebuilt" | "gc");
             let revisions = namespace_reader
                 .list_file_revisions("/docs/renamed.txt")
                 .page(PageRequest {
@@ -410,16 +413,31 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 })
                 .await
                 .expect("revision listing");
-            assert_eq!(revisions.revisions.len(), 2, "{stage}: {namespace}");
-            assert!(revisions.next_cursor.is_none());
             assert_eq!(
-                namespace_reader
-                    .read_file_revision("/docs/renamed.txt", RevisionNo(1))
-                    .await
-                    .expect("first revision bytes")
-                    .bytes,
-                b"first revision"
+                revisions
+                    .revisions
+                    .iter()
+                    .map(|revision| revision.revision_no)
+                    .collect::<Vec<_>>(),
+                if floor_applied {
+                    vec![RevisionNo(2)]
+                } else {
+                    vec![RevisionNo(2), RevisionNo(1)]
+                },
+                "{stage}: {namespace}"
             );
+            assert!(revisions.next_cursor.is_none());
+            let first_revision = namespace_reader
+                .read_file_revision("/docs/renamed.txt", RevisionNo(1))
+                .await;
+            if floor_applied {
+                expect_code(first_revision, ErrorCode::RevisionNotFound);
+            } else {
+                assert_eq!(
+                    first_revision.expect("first revision bytes").bytes,
+                    b"first revision"
+                );
+            }
             let entry = namespace_reader
                 .stat("/docs/renamed.txt")
                 .await

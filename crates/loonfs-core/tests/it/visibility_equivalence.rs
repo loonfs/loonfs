@@ -892,14 +892,14 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
             drain_compaction(&harness, &expected, "before retention").await;
             harness
                 .engine
-                .advance_retention_floor()
+                .advance_retention_floor(loonfs_core::RetentionTarget::Head)
                 .await
                 .expect("advance retention after compaction");
         }
         MaintenanceOrder::RetainThenCompact => {
             harness
                 .engine
-                .advance_retention_floor()
+                .advance_retention_floor(loonfs_core::RetentionTarget::Head)
                 .await
                 .expect("advance retention before compaction");
             drain_compaction(&harness, &expected, "after retention").await;

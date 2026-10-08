@@ -78,8 +78,8 @@ pub use loonfs_core::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
     CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
     ErrorCode, ErrorKind, FileContentStream, GcOptions, ListCheckpointFilesOptions,
-    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, StoreFailureClass,
-    WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, RetentionTarget,
+    StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use loonfs_types::api::v0::{
     Commit, CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, FilesystemChange,
@@ -219,12 +219,12 @@ pub use metadata_cache::{
     DEFAULT_MAX_SEGMENT_BYTES,
 };
 pub use options::{
-    AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions,
-    ForkNamespaceOptions, ListOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
-    ReadFileStreamOptions, StatOptions, UndeleteDestination, UndeleteOptions,
-    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
-    UpdateAttributesOptions,
+    AccessState, AdvanceRetentionOptions, AttributeChanges, CommitOptions, CopyOptions,
+    CreateCheckpointOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MetadataMaintenanceOptions,
+    MoveOptions, PutFileOptions, ReadFileStreamOptions, StatOptions, UndeleteDestination,
+    UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};

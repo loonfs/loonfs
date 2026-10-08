@@ -120,13 +120,13 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
     }
 }
 
-/// Retains all whole-state rows above the floor and the newest revision at
-/// or below the floor for each inode.
+/// Retains every file, attribute, and access revision above the floor and
+/// the newest revision at or below the floor for each inode.
 ///
 /// Whole-state row keys sort each inode's revisions newest first. The first row
-/// at or below the floor represents current state, including a cleared state.
-/// Older revisions cannot be observed and may be removed. Deleted inodes keep
-/// their whole-state rows so an undelete restores the prior state. The operator
+/// at or below the floor is the inode's state at the floor, including a cleared
+/// state, and the floor keeps no older history. Deleted inodes keep their
+/// whole-state rows so an undelete restores the prior state. The operator
 /// processes this order without retaining the complete history.
 #[derive(Debug, Default)]
 pub(super) struct WholeStateRetention {
@@ -180,6 +180,9 @@ impl WholeStateRetention {
 
 fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, ChangeSeq)> {
     match row {
+        MetadataRow::FileRevision(record) => {
+            Some((record.inode_id, record.revision_no.0, record.committed_seq))
+        }
         MetadataRow::AttributesRevision(record) => Some((
             record.inode_id,
             record.attributes_revision_no.0,
@@ -305,7 +308,15 @@ impl BindingRetention {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_types::{AccessRevisionNo, AttributesRevisionNo, DisplayName, InodeId, NameKey};
+    use loonfs_types::{
+        AccessRevisionNo, AttributesRevisionNo, DisplayName, InodeId, NameKey, RevisionNo,
+    };
+
+    const WHOLE_STATE_FAMILIES: [MetadataRowFamily; 3] = [
+        MetadataRowFamily::Revisions,
+        MetadataRowFamily::Attributes,
+        MetadataRowFamily::Access,
+    ];
 
     fn floor() -> ChangeSeq {
         ChangeSeq(100)
@@ -319,20 +330,38 @@ mod tests {
     ) -> MetadataRow {
         let commit_id =
             loonfs_types::CommitId::parse(format!("c_row_{committed_seq}")).expect("commit id");
-        if family == MetadataRowFamily::Access {
-            MetadataRow::AccessRevision(crate::metadata::AccessRevisionRecord {
-                inode_id: InodeId(inode),
-                access_revision_no: AccessRevisionNo(revision),
-                committed_seq: ChangeSeq(committed_seq),
-                commit_id,
-                delta_index: 0,
-                committed_by: loonfs_types::ActorId::loonfs(),
-                committed_at_ms: 1_000 + committed_seq,
-                boundary: false,
-                grants: Default::default(),
-            })
-        } else {
-            MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
+        match family {
+            MetadataRowFamily::Access => {
+                MetadataRow::AccessRevision(crate::metadata::AccessRevisionRecord {
+                    inode_id: InodeId(inode),
+                    access_revision_no: AccessRevisionNo(revision),
+                    committed_seq: ChangeSeq(committed_seq),
+                    commit_id,
+                    delta_index: 0,
+                    committed_by: loonfs_types::ActorId::loonfs(),
+                    committed_at_ms: 1_000 + committed_seq,
+                    boundary: false,
+                    grants: Default::default(),
+                })
+            }
+            MetadataRowFamily::Revisions => {
+                MetadataRow::FileRevision(crate::metadata::RevisionRecord {
+                    inode_id: InodeId(inode),
+                    revision_no: RevisionNo(revision),
+                    committed_seq: ChangeSeq(committed_seq),
+                    commit_id,
+                    committed_by: loonfs_types::ActorId::loonfs(),
+                    committed_at_ms: 1_000 + committed_seq,
+                    delta_index: 0,
+                    content_ref: loonfs_types::ContentRef::blob_v1(
+                        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+                        loonfs_types::ContentId::parse("con_0123456789abcdef0123456789abcdef")
+                            .expect("content id"),
+                        b"body",
+                    ),
+                })
+            }
+            _ => MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
                 inode_id: InodeId(inode),
                 attributes_revision_no: AttributesRevisionNo(revision),
                 committed_seq: ChangeSeq(committed_seq),
@@ -341,7 +370,7 @@ mod tests {
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 1_000 + committed_seq,
                 attributes: Default::default(),
-            })
+            }),
         }
     }
 
@@ -377,7 +406,7 @@ mod tests {
 
     #[test]
     fn one_inode_keeps_the_newest_row_at_the_floor_and_holds_nothing() {
-        for family in [MetadataRowFamily::Attributes, MetadataRowFamily::Access] {
+        for family in WHOLE_STATE_FAMILIES {
             let mut operator = RetentionRule::WholeState.operator();
             let mut kept = Vec::new();
             // Newest first: two above the floor, then a hundred thousand below.
@@ -409,7 +438,7 @@ mod tests {
 
     #[test]
     fn two_whole_state_rows_at_one_revision_below_the_floor_are_refused() {
-        for family in [MetadataRowFamily::Attributes, MetadataRowFamily::Access] {
+        for family in WHOLE_STATE_FAMILIES {
             let mut operator = RetentionRule::WholeState.operator();
             operator
                 .push(family, whole_state_row(family, 7, 5, 50), floor())

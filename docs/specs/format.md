@@ -830,11 +830,13 @@ Retention determines which historical views remain available under the format gu
 
 ### 10.1 Advancing the retention floor
 
-The floor bounds incremental replay, superseded binding history, old attribute states, and commit receipts. It does not expire file revisions or content-publication evidence. WAL objects are not retained by the floor; collection removes them once folded.
+The floor bounds incremental replay, superseded binding history, file revision history, old attribute states, and commit receipts. File history above the retention floor is complete; at or below the floor each file keeps its newest revision. The floor does not expire content-publication evidence. WAL objects are not retained by the floor; collection removes them once folded.
 
 Floor advancement is explicit. The initial sequence floor is 0 for a new root namespace and the fork point for a fork. Automatic folds do not advance it. The change feed returns only commits above the floor, so the commit row at the floor is kept and never replayed; a fork's floor is its fork point so that the source's commit at that sequence stays out of the fork's feed.
 
-A floor advance loads the current manifest and verifies that its referenced segments exist. It publishes a successor with the same runs, head summary, allocators, and authority, setting `retention_floor_seq` to the predecessor's `head_seq`. The floor cannot decrease.
+A floor advance names a target: the current manifest's `head_seq`, a sequence, or a cutoff time. A sequence above `head_seq` targets `head_seq`. For a cutoff time, the advance reads the `commits` family upward from the current floor and stops at the first commit whose `committed_at_ms` is later than the cutoff. The target is the last commit the scan passed, or the current floor when the scan passed none. Commit timestamps are observational and need not increase with sequence, so the scan stops at the first later commit instead of skipping it.
+
+The advance loads the current manifest. A target at or below its floor publishes nothing and reports that floor. Otherwise the advance verifies that the manifest's referenced segments exist and publishes a successor with the same runs, head summary, allocators, and authority, setting `retention_floor_seq` to the target. The floor cannot decrease.
 
 The existence check detects missing recovery material before abandoning the corresponding replay guarantee. It is not a multi-object transaction or a substitute for collection's reference rules. Read paths still verify checksums. A pin below the new sequence floor continues to protect its own manifest and runs.
 
@@ -858,7 +860,7 @@ The following rules apply only when the selected inputs include the group's olde
 | --- | --- |
 | `inodes` | Retain all inode rows. |
 | `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child), retain all versions above the floor and the newest version at or below it. Drop that floor version too if it is unbound. |
-| `revisions` | Retain every file revision, including revisions of deleted files. |
+| `revisions` | For each file, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 | `tombstones` | Retain all set and revoke events. |
 | `active_deletions` | Retain listed deletions until revoked. Remove a cancelled `listed`/`removed` pair together. The floor does not expire a recoverable deletion. |
 | `commits`, `commit_receipts` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it; in a fork it is the source's commit at the fork point. |
@@ -872,9 +874,9 @@ Each binding event appears in both indexes, and both indexes group their rows by
 
 A binding row takes its position from the delta that published it, so a later bind does not depend on an earlier unbound value. Attribute and access revisions keep a cleared floor state, because the next update is validated against its revision number.
 
-An empty attribute map, or an access row with no boundary and no grants, is retained when it is the state at the floor. Removing it could expose an older row and restore state that had been cleared. Attribute and access rows are not removed merely because the inode is deleted, so undelete can restore the same state.
+An empty attribute map, or an access row with no boundary and no grants, is retained when it is the state at the floor. Removing it could expose an older row and restore state that had been cleared. File revision, attribute, and access rows are not removed merely because the inode is deleted, so undelete can restore the same state.
 
-A rewrite must refuse an ambiguous attribute or access history in which two rows for one inode have the same revision number at or below the floor. It cannot choose an arbitrary row and discard the other.
+A rewrite must refuse an ambiguous file revision, attribute, or access history in which two rows for one inode have the same revision number at or below the floor. It cannot choose an arbitrary row and discard the other.
 
 The active-deletion family is a current-state index, not an independent historical trash log. Its removal marker sorts before the corresponding listed entry. Bottom-anchored compaction can remove the pair without leaving an older entry that would reappear in a subsequent read.
 
@@ -902,7 +904,7 @@ Streaming compaction applies the row-retention rules for its selected window, ju
 
 ## 11. Garbage collection
 
-Collection removes objects that no retained view needs, after the applicable age and publication checks. A logical delete alone is not permission to remove file bytes. File revision history remains retained in a live namespace, and a deleted ancestor's content remains while fork descendants depend on it.
+Collection removes objects that no retained view needs, after the applicable age and publication checks. A logical delete alone is not permission to remove file bytes. Collection does not remove a live namespace's published content, even after a base compaction removes every revision that referenced it, and a deleted ancestor's content remains while fork descendants depend on it.
 
 ### 11.1 One complete pass
 

@@ -938,6 +938,53 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "checkpoint_not_found"
         );
 
+        // Every commit is stamped after the epoch, so this cutoff passes none.
+        let early_cutoff = harness.run(&[
+            "maintenance",
+            "retention",
+            "advance",
+            "--before",
+            "0",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&early_cutoff);
+        assert!(
+            stdout_string(&early_cutoff).contains("retention for demo: floor unchanged at seq 0")
+        );
+
+        let targeted_retention = harness.run(&[
+            "maintenance",
+            "retention",
+            "advance",
+            "--to-seq",
+            "1",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&targeted_retention);
+        assert!(stdout_string(&targeted_retention)
+            .contains("retention for demo: floor advanced to seq 1"));
+
+        let both_targets = harness.run(&[
+            "--json",
+            "maintenance",
+            "retention",
+            "advance",
+            "--to-seq",
+            "1",
+            "--before",
+            "0",
+            "--profile",
+            profile,
+        ]);
+        assert_failure(&both_targets);
+        assert_eq!(both_targets.status.code(), Some(2));
+        assert_eq!(
+            parse_json(&both_targets.stderr)["error"]["code"],
+            "invalid_usage"
+        );
+
         let advanced_retention =
             harness.run(&["maintenance", "retention", "advance", "--profile", profile]);
         assert_success(&advanced_retention);

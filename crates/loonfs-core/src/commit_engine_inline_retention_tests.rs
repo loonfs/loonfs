@@ -5,7 +5,7 @@ use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::{gc_namespace, GcOptions};
 use crate::manifest::{
     advance_retention_floor, compaction_step, CompactionStepOutcome, MetadataCompactionPolicy,
-    MetadataLsmPolicy,
+    MetadataLsmPolicy, RetentionTarget,
 };
 use crate::path::read::{load_metadata_view, ReadLoadContext};
 use crate::pin::{create_pin, load_snapshot_read_basis};
@@ -103,7 +103,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     )
     .await
     .expect("pin the original history");
-    let floor = advance_retention_floor(&store, &namespace_id)
+    let floor = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("floor exactly at original commit");
     assert_eq!(floor.retention_floor_seq, original.committed_seq);
@@ -158,7 +158,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .await
         .expect("fold later history");
     assert_eq!(
-        advance_retention_floor(&store, &namespace_id)
+        advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
             .await
             .expect("advance floor")
             .retention_floor_seq,

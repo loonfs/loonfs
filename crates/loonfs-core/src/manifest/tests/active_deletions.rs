@@ -716,7 +716,7 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    advance_retention_floor(&store, &namespace_id)
+    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
         .await
         .expect("advance retention floor");
     drain_compaction(

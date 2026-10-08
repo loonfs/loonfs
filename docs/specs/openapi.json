@@ -3956,13 +3956,23 @@
         "type": "object"
       },
       "RunMaintenanceRequestRetention": {
-        "description": "Advances the retention floor to the folded manifest head.",
+        "description": "Advances the retention floor, to the folded manifest head unless the\nrequest names a target.",
         "properties": {
+          "cutoff_at_ms": {
+            "description": "Advance the floor to the last commit committed at or before this Unix\ntime in milliseconds. Commits are read upward from the floor, and the\nfirst one committed after this time ends the advance. Cannot be\ncombined with `to_seq`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "kind": {
             "enum": [
               "retention"
             ],
             "type": "string"
+          },
+          "to_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Advance the floor to this sequence, or to the folded manifest head\nwhen that is lower. Cannot be combined with `cutoff_at_ms`."
           }
         },
         "required": [
@@ -5588,7 +5598,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc` or `grep_gc`. A `grep_gc` call collects aged, unreferenced grep index objects and requires `maintenance.grep.index`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation.",
+        "description": "Runs one maintenance job for the namespace. The body names the job with `kind`: `metadata`, `metadata_compaction`, `gc`, `grep_gc`, `retention`, or `recover_administrator`. The response carries the same `kind` and that job's result. A deleted namespace accepts only `gc` or `grep_gc`. A `grep_gc` call collects aged, unreferenced grep index objects and requires `maintenance.grep.index`. A `gc` call reads the current manifest and lists pins, then sweeps every family to the end. Each listing starts at the beginning. The call keeps no continuation. A `retention` call advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` names.",
         "operationId": "run_maintenance",
         "parameters": [
           {

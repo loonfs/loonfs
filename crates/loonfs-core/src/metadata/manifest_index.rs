@@ -51,7 +51,7 @@ pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
         .transpose()
 }
 
-pub(super) async fn commits_after_page<S: ObjectStore + ?Sized>(
+pub(crate) async fn commits_after_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     after_seq: ChangeSeq,
     limit: usize,
