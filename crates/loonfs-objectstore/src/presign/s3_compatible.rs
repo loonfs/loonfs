@@ -15,7 +15,8 @@ use crate::presign::v4::{
     hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, unix_ms,
     V4Endpoint, V4RequestParts, V4Scheme,
 };
-use crate::ObjectStoreError;
+use crate::provider_object_store::SHA256_METADATA_KEY;
+use crate::{ByteRange, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use base64::Engine as _;
 use loonfs_types::format::hex::hex_decode_bytes;
@@ -24,6 +25,10 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
+const S3_IF_MATCH_HEADER: &str = "if-match";
+const S3_COPY_SOURCE_HEADER: &str = "x-amz-copy-source";
+const S3_COPY_SOURCE_RANGE_HEADER: &str = "x-amz-copy-source-range";
+const S3_COPY_SOURCE_IF_MATCH_HEADER: &str = "x-amz-copy-source-if-match";
 const S3_CRC64NVME_CHECKSUM_HEADER: &str = "x-amz-checksum-crc64nvme";
 const S3_CHECKSUM_ALGORITHM_HEADER: &str = "x-amz-checksum-algorithm";
 /// Requests a full-object checksum for multipart uploads.
@@ -134,30 +139,94 @@ impl S3CompatiblePresigner {
     }
 
     /// Signs `CreateMultipartUpload` for an object whose checksum will cover
-    /// the whole assembly.
+    /// the whole assembly, carrying `sha256` as its attestation when given.
     pub(crate) async fn presign_create_multipart(
         &self,
         object_key: &str,
+        sha256: Option<&Checksum>,
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
         let credentials = self.signing_credentials(expires_in, now).await?;
+        let mut required_headers = BTreeMap::from([
+            (
+                S3_CHECKSUM_ALGORITHM_HEADER.to_owned(),
+                S3_CRC64NVME_ALGORITHM.to_owned(),
+            ),
+            (
+                S3_CHECKSUM_TYPE_HEADER.to_owned(),
+                S3_FULL_OBJECT_CHECKSUM_TYPE.to_owned(),
+            ),
+        ]);
+        if let Some(sha256) = sha256 {
+            required_headers.insert(
+                format!("x-amz-meta-{SHA256_METADATA_KEY}"),
+                sha256.value.clone(),
+            );
+        }
         self.presign_with_query(
             &credentials,
             "POST",
             object_key,
             SigningRequestParts {
                 operation_query: BTreeMap::from([("uploads".to_owned(), String::new())]),
-                required_headers: BTreeMap::from([
-                    (
-                        S3_CHECKSUM_ALGORITHM_HEADER.to_owned(),
-                        S3_CRC64NVME_ALGORITHM.to_owned(),
-                    ),
-                    (
-                        S3_CHECKSUM_TYPE_HEADER.to_owned(),
-                        S3_FULL_OBJECT_CHECKSUM_TYPE.to_owned(),
-                    ),
+                required_headers,
+            },
+            expires_in,
+            now,
+        )
+    }
+
+    /// Signs `UploadPartCopy` of `source` of the object at `object_key` into
+    /// part `part_number`, copied only while the object's ETag is
+    /// `source_etag` when one is given.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a part copy names its upload, its part, and its source range and version"
+    )]
+    pub(crate) async fn presign_copy_part(
+        &self,
+        object_key: &str,
+        provider_upload_id: &str,
+        part_number: u32,
+        source: &ByteRange,
+        source_etag: Option<&str>,
+        expires_in: Duration,
+        now: SystemTime,
+    ) -> Result<PresignedUrl> {
+        let scoped_key = scope_object_key(self.config.key_prefix.as_deref(), object_key)?;
+        let mut required_headers = BTreeMap::from([
+            (
+                S3_COPY_SOURCE_HEADER.to_owned(),
+                format!(
+                    "{}/{}",
+                    percent_encode_segment(&self.config.bucket),
+                    percent_encode_path(&scoped_key)
+                ),
+            ),
+            (
+                S3_COPY_SOURCE_RANGE_HEADER.to_owned(),
+                format!(
+                    "bytes={}-{}",
+                    source.start_inclusive,
+                    source.end_exclusive - 1
+                ),
+            ),
+        ]);
+        if let Some(etag) = source_etag {
+            required_headers.insert(S3_COPY_SOURCE_IF_MATCH_HEADER.to_owned(), etag.to_owned());
+        }
+        let credentials = self.signing_credentials(expires_in, now).await?;
+        self.presign_with_query(
+            &credentials,
+            "PUT",
+            object_key,
+            SigningRequestParts {
+                operation_query: BTreeMap::from([
+                    ("partNumber".to_owned(), part_number.to_string()),
+                    ("uploadId".to_owned(), provider_upload_id.to_owned()),
                 ]),
+                required_headers,
             },
             expires_in,
             now,
@@ -189,20 +258,39 @@ impl S3CompatiblePresigner {
         )
     }
 
-    /// Signs `CompleteMultipartUpload` carrying the whole-object checksum.
+    /// Signs `CompleteMultipartUpload` carrying the whole-object checksum when
+    /// given, and `mode`'s condition on the key.
     ///
     /// AWS S3 treats that checksum as a precondition and refuses to assemble
     /// an object that does not match it. Cloudflare R2 accepts the request
     /// and stores the true checksum instead, which is why completion still
-    /// reads the object back rather than trusting this call's success.
+    /// reads the object's checksum back rather than trusting this call's
+    /// success.
     pub(crate) async fn presign_complete_multipart(
         &self,
         object_key: &str,
         provider_upload_id: &str,
-        checksum: &Checksum,
+        checksum: Option<&Checksum>,
+        mode: &PutMode,
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
+        let mut required_headers = BTreeMap::new();
+        if let Some(checksum) = checksum {
+            required_headers.insert(
+                S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
+                base64_crc64nvme(checksum)?,
+            );
+        }
+        match mode {
+            PutMode::Overwrite => {}
+            PutMode::CreateIfAbsent => {
+                required_headers.insert(S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned());
+            }
+            PutMode::CompareAndSwap { expected_etag } => {
+                required_headers.insert(S3_IF_MATCH_HEADER.to_owned(), expected_etag.clone());
+            }
+        }
         let credentials = self.signing_credentials(expires_in, now).await?;
         self.presign_with_query(
             &credentials,
@@ -213,10 +301,7 @@ impl S3CompatiblePresigner {
                     "uploadId".to_owned(),
                     provider_upload_id.to_owned(),
                 )]),
-                required_headers: BTreeMap::from([(
-                    S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
-                    base64_crc64nvme(checksum)?,
-                )]),
+                required_headers,
             },
             expires_in,
             now,
@@ -508,8 +593,9 @@ mod tests {
     use crate::presign::{
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
     };
-    use crate::{AwsS3Credentials, ObjectStoreError};
+    use crate::{AwsS3Credentials, ByteRange, ObjectStoreError, PutMode};
     use async_trait::async_trait;
+    use loonfs_types::Checksum;
     use object_store::client::CredentialProvider;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -819,6 +905,71 @@ mod tests {
         assert!(signed
             .url
             .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/namespaces/"));
+    }
+
+    #[tokio::test]
+    async fn internal_multipart_requests_sign_their_attestation_condition_and_copy_source() {
+        let signer = presigner(Some("tenant-a"), None);
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let ttl = Duration::from_secs(60);
+        let sha256 = Checksum::sha256(b"object");
+
+        let created = signer
+            .presign_create_multipart(CONTENT_KEY, Some(&sha256), ttl, now)
+            .await
+            .expect("presign create");
+        assert_eq!(
+            created.headers.get("x-amz-meta-sha256"),
+            Some(&sha256.value)
+        );
+        for (mode, header, value) in [
+            (PutMode::CreateIfAbsent, "if-none-match", "*"),
+            (
+                PutMode::CompareAndSwap {
+                    expected_etag: "\"base\"".to_owned(),
+                },
+                "if-match",
+                "\"base\"",
+            ),
+        ] {
+            let completed = signer
+                .presign_complete_multipart(CONTENT_KEY, "upload", None, &mode, ttl, now)
+                .await
+                .expect("presign complete");
+            assert_eq!(
+                completed.headers.get(header).map(String::as_str),
+                Some(value)
+            );
+            assert!(completed
+                .url
+                .contains(&format!("X-Amz-SignedHeaders=host%3B{header}&")));
+        }
+        let copied = signer
+            .presign_copy_part(
+                CONTENT_KEY,
+                "upload",
+                2,
+                &ByteRange {
+                    start_inclusive: 0,
+                    end_exclusive: 10,
+                },
+                Some("\"base\""),
+                ttl,
+                now,
+            )
+            .await
+            .expect("presign copy");
+        for (header, value) in [
+            (
+                "x-amz-copy-source",
+                format!("bucket/tenant-a/{CONTENT_KEY}"),
+            ),
+            ("x-amz-copy-source-range", "bytes=0-9".to_owned()),
+            ("x-amz-copy-source-if-match", "\"base\"".to_owned()),
+        ] {
+            assert_eq!(copied.headers.get(header), Some(&value));
+        }
+        assert!(copied.url.contains("partNumber=2&uploadId=upload"));
     }
 
     #[tokio::test]

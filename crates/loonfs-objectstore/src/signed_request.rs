@@ -31,7 +31,17 @@ pub(crate) async fn send_signed(
     for (name, value) in &signed.headers {
         builder = builder.header(name, value);
     }
-    let request = builder
+    send(client, key, builder, body).await
+}
+
+/// Sends one request and collects its whole response.
+pub(crate) async fn send(
+    client: &HttpClient,
+    key: &str,
+    request: http::request::Builder,
+    body: HttpRequestBody,
+) -> Result<SignedResponse> {
+    let request = request
         .body(body)
         .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
     let response = client
@@ -53,6 +63,33 @@ pub(crate) async fn send_signed(
 }
 
 /// Reads an object's size and checksum from a signed `HEAD` response.
+/// The object length and ETag a signed `HEAD` reports, or `None` when the
+/// object is absent.
+pub(crate) fn object_length_from_signed_head(
+    key: &str,
+    response: &SignedResponse,
+) -> Result<Option<(u64, String)>> {
+    if let Some(error) = classify_signed_response(key, response.status, None) {
+        return match error {
+            ObjectStoreError::NotFound { .. } => Ok(None),
+            error => Err(error),
+        };
+    }
+    let header = |name: http::header::HeaderName| {
+        response
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let size_bytes = header(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| ObjectStoreError::transport(key, "head reported no content length"))?;
+    let etag = header(http::header::ETAG)
+        .ok_or_else(|| ObjectStoreError::transport(key, "head reported no etag"))?;
+    Ok(Some((size_bytes, etag)))
+}
+
 pub(crate) fn stored_checksum_from_signed_head(
     key: &str,
     response: &SignedResponse,
@@ -113,6 +150,9 @@ pub(crate) fn classify_signed_response(
                 object_key: key.to_owned(),
             }
         }
+        Some("BadDigest") => ObjectStoreError::ChecksumMismatch {
+            object_key: key.to_owned(),
+        },
         Some(code) if RETRYABLE_SIGNED_ERROR_CODES.contains(&code) => {
             ObjectStoreError::retryable_transport(key, message)
         }
@@ -141,4 +181,49 @@ pub(crate) fn classify_signed_response(
         _ => ObjectStoreError::transport(key, message),
     };
     Some(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn head(status: u16, headers: &[(&str, &str)]) -> SignedResponse {
+        let mut map = http::HeaderMap::new();
+        for (name, value) in headers {
+            map.insert(
+                http::header::HeaderName::from_bytes(name.as_bytes()).expect("header"),
+                value.parse().expect("value"),
+            );
+        }
+        SignedResponse {
+            status: http::StatusCode::from_u16(status).expect("status"),
+            headers: map,
+            body: bytes::Bytes::new(),
+        }
+    }
+
+    #[test]
+    fn a_signed_head_reports_the_length_and_etag_or_absence() {
+        let key = "namespaces/demo/content/con_1";
+        assert_eq!(
+            object_length_from_signed_head(
+                key,
+                &head(200, &[("content-length", "12"), ("etag", "\"v1\"")]),
+            )
+            .expect("present"),
+            Some((12, "\"v1\"".to_owned()))
+        );
+        assert_eq!(
+            object_length_from_signed_head(key, &head(404, &[])).expect("absent"),
+            None
+        );
+        assert!(matches!(
+            object_length_from_signed_head(key, &head(200, &[("etag", "\"v1\"")])),
+            Err(ObjectStoreError::Transport { .. })
+        ));
+        assert!(matches!(
+            object_length_from_signed_head(key, &head(403, &[])),
+            Err(ObjectStoreError::PermissionDenied { .. })
+        ));
+    }
 }

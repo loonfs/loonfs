@@ -86,6 +86,15 @@ pub fn content_blob(owner_namespace_id: &NamespaceId, content_id: &ContentId) ->
     format!("namespaces/{owner_namespace_id}/content/{content_id}")
 }
 
+/// Builds a fresh key for a temporary object that an extension writes and
+/// deletes under one namespace.
+pub fn scratch_object(namespace_id: &NamespaceId) -> String {
+    format!(
+        "namespaces/{namespace_id}/scratch/{}",
+        loonfs_types::generated_id("scr")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     // The key builder is tested where it is defined.
@@ -93,7 +102,7 @@ mod tests {
 
     use super::{
         content_blob, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_object_key, pin, upload_session, wal_object, wal_prefix,
+        metadata_segment_object_key, pin, scratch_object, upload_session, wal_object, wal_prefix,
     };
     use loonfs_types::format::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
@@ -159,6 +168,12 @@ mod tests {
             patterns.insert(family.to_owned(), pattern.to_owned());
         }
 
+        let scratch = scratch_object(&namespace_id());
+        let scratch_id = scratch
+            .rsplit('/')
+            .next()
+            .expect("a scratch key ends in its id")
+            .to_owned();
         let substitute = |pattern: &str| -> String {
             pattern
                 .replace("{namespace_id}", "ns-1")
@@ -173,6 +188,7 @@ mod tests {
                 .replace("{segment_id}", "seg_00000000000000000000000000000001")
                 .replace("{upload_id}", "upl_00000000000000000000000000000001")
                 .replace("{content_id}", CONTENT_ID)
+                .replace("{scratch_id}", &scratch_id)
         };
 
         let built = [
@@ -195,6 +211,7 @@ mod tests {
                 "Content objects",
                 content_blob(&namespace_id(), &content_id()),
             ),
+            ("Scratch objects", scratch),
         ];
 
         let expected: std::collections::BTreeMap<String, String> = built

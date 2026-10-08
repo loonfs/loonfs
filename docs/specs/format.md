@@ -194,8 +194,11 @@ namespaces/{namespace_id}/
 ├── pins/{pin_id}.json
 ├── uploads/{upload_id}.json
 ├── content/
+├── scratch/{scratch_id}
 └── extensions/{extension_name}/...
 ```
+
+A scratch object holds the pieces that an extension adds to an object on a provider that composes objects. The extension creates it and deletes it (section 3.2).
 
 A segment inherited by a fork can remain under an ancestor's namespace. Its descriptor records `owner_namespace_id`; the reading namespace is not substituted into the key. All newly written metadata segments, including compaction output, use the producing namespace's `segments/` prefix.
 
@@ -212,6 +215,7 @@ The key layout is part of the format. Other objects must not collide with these 
 | Pin record | Retain one manifest for a user, snapshot, or fork | Create and delete; snapshot expiry can be extended by CAS. |
 | Upload session | Own a transfer and its completed content until publication or cleanup | Conditional lifecycle transitions. |
 | Content object | Complete bytes of one file revision | Write once. |
+| Scratch object | Pieces an extension composes onto its object | Create, then delete. |
 
 A manifest publication can change physical layout or control state without creating a logical commit. A WAL publication can advance logical history without creating a manifest. The hint selects neither history nor visibility: its number may lag successful publications.
 
@@ -308,13 +312,17 @@ Readers determine committed state from verified manifests and numbered WAL objec
 
 An immutable object must not be replaced with different bytes. A collision at a newly generated content or segment key is an error; contention at the next manifest or WAL number follows its publication protocol. Where an operation retries the same object identity, it may reconcile an ambiguous write only using evidence that establishes the expected immutable contents. A mutable record created under a generated id (a pin or an upload session) is identified by the id alone: after a put with an unknown outcome, a record under that id is the creator's own, whatever its bytes now hold, because another caller can change the record as soon as it lands.
 
-Small control objects use conditional single-object writes. Multipart upload is an optimization for larger immutable payloads, not a substitute for atomic control-object CAS.
+An immutable object carries its writer's SHA-256 attestation: the digest of the bytes the writer sent, recorded when the object is created. A provider keeps it as object user metadata named `sha256`, holding 64 lowercase hexadecimal digits. The local store reports the SHA-256 of the bytes it holds.
 
-Multipart completion must preserve immutable content identity. When completion cannot atomically require an absent key, the adapter must prevent concurrent writes through exclusive upload-session ownership and check for an existing object before completion. An absence check alone is insufficient because another request could write the key before completion.
+An immutable write creates its key with put-if-absent at every size; a large one may send its bytes in parts and completes conditionally, so it can take longer than the one request a publication is allowed (C.1), and no publication is an immutable write. A key found occupied is decided by the attestation, read with one metadata request. An equal attestation is the same object, and the write succeeds. A different attestation is a collision. An object without an attestation fails the write, because nothing proves it equal or different. No bytes are read back. A retry whose earlier attempt landed meets its own object and succeeds the same way. A streamed write that needs more than one part carries no attestation, because its digest is unknown when the upload starts; nothing writes its key twice.
 
-An adapter with conditional multipart completion can use that capability. In either case, the session protocol in section 5 applies. See the [provider documentation][provider-spec] for supported transfer constraints.
+Small control objects use conditional single-object writes. Multipart upload is an optimization for larger payloads, not a substitute for atomic control-object CAS.
 
-The incremental-write adapter consumes the payload before evaluating its existence precondition. A digest calculated while forwarding the stream therefore covers the complete payload even when the write is refused. When multipart completion cannot enforce create-if-absent atomically, its final absence check is not sufficient concurrency control; exclusive session ownership remains required.
+A large create completes conditionally where the provider accepts a precondition on completion. Where it does not, completion must still preserve immutable content identity: the adapter prevents concurrent writes through exclusive upload-session ownership and checks for an existing object before completion. An absence check alone is insufficient, because another request could write the key before completion. In either case, the session protocol in section 5 applies. See the [provider documentation][provider-spec] for each provider's path.
+
+The incremental-write adapter consumes the payload before evaluating its existence precondition. A digest calculated while forwarding the stream therefore covers the complete payload even when the write is refused.
+
+An extension is a conditional write of a longer object with the same prefix. It names the version it extends by length and compare token, and it supplies the SHA-256 attestation of the whole result and, where the provider has one, the provider's full-object checksum of the whole result. It succeeds only while that version is current. Where it can, the provider copies or composes the existing bytes instead of receiving them again. A provider that checks the result checksum only after the write reports a mismatch with the longer object already in place.
 
 A failed or cancelled multipart transfer must attempt provider-side abort. Abort failures can leave incomplete parts, so deployments also need the provider cleanup policy assumed by their adapter. An abort does not imply deletion of an already completed content object; object cleanup follows the upload's durable lifecycle.
 
@@ -1455,6 +1463,7 @@ These patterns define the core object families. Segment owners can differ from t
 | **Upload sessions** | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Hint** | `namespaces/{namespace_id}/hint.json` |
 | **Content objects** | `namespaces/{owner_namespace_id}/content/{content_id}` |
+| **Scratch objects** | `namespaces/{namespace_id}/scratch/{scratch_id}` |
 
 ## Appendix B. Semantic commit fingerprints
 

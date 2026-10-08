@@ -410,7 +410,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     keys.sort();
     assert_eq!(retry_keys, keys);
     for key in &keys {
-        assert!(store.snapshot().iter().any(|operation| matches!(operation, RecordedOperation::GetWithMetadata { key: actual, .. } if actual == key)));
+        assert!(store.snapshot().iter().any(|operation| matches!(operation, RecordedOperation::Head { key: actual } if actual == key)));
     }
 }
 
@@ -552,14 +552,14 @@ async fn a_materialization_transport_failure_remains_retryable() {
     let failing = FailStore::new(
         store.clone(),
         KeyPredicate::content_blob(),
-        OperationClass::GetWithMetadata,
-        InjectedError::Transport("readback failure".to_owned()),
+        OperationClass::Head,
+        InjectedError::Transport("attestation head failure".to_owned()),
     );
     failing.fail_all();
     store.reset();
     let error = fold_wal(&failing, &engine.namespace_id)
         .await
-        .expect_err("readback failure");
+        .expect_err("attestation head failure");
     assert!(
         matches!(
             error,

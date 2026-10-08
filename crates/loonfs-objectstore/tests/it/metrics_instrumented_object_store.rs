@@ -12,11 +12,11 @@ use loonfs_objectstore::metrics::{
     VecObjectStoreMetricsRecorder,
 };
 use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorClass,
-    PutMode,
+    ByteRange, ExtendBase, ExtendedObject, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, ObjectStoreErrorClass, PutMode,
 };
 use loonfs_test_support::ids::page_limit;
-use loonfs_types::{EffectiveLimit, ManifestNo, Page};
+use loonfs_types::{Checksum, EffectiveLimit, ManifestNo, Page};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
@@ -103,6 +103,41 @@ async fn records_put_success() {
     assert_eq!(sample.key_class, KeyClass::NamespaceManifest);
     assert_eq!(sample.store_kind.as_deref(), Some("local-fs"));
     assert_eq!(sample.attempts, 1);
+}
+
+#[tokio::test]
+async fn records_an_extension_with_its_pieces_as_bytes_in() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
+    let key = "namespaces/ns-1/content/con_00000000000000000000000000000001";
+    let written = store
+        .put(key, bytes(b"base"), PutMode::CreateIfAbsent)
+        .await
+        .expect("put base");
+
+    store
+        .extend_object(
+            key,
+            &ExtendBase {
+                length: 4,
+                etag: written.etag.expect("etag"),
+            },
+            bytes(b" more"),
+            &ExtendedObject {
+                sha256: Checksum::sha256(b"base more"),
+                crc: None,
+            },
+        )
+        .await
+        .expect("extend");
+
+    let samples = recorder.samples();
+    let sample = samples.last().expect("extension sample");
+    assert_eq!(sample.operation, ObjectStoreOperation::ExtendObject);
+    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.bytes_in, Some(5));
+    assert_eq!(sample.key_class, KeyClass::Content);
 }
 
 #[tokio::test]
@@ -417,6 +452,7 @@ impl DelegatingWriteStore {
             version: None,
             size_bytes: 0,
             last_modified_ms: None,
+            sha256: None,
         }
     }
 }

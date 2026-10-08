@@ -64,17 +64,18 @@ pub(crate) fn next_retry_backoff(
     Some(backoff)
 }
 
-pub(crate) async fn with_transport_retry<T, F, Fut>(
+pub(crate) async fn with_transport_retry<T, E, F, Fut>(
     policy: &TransportRetryPolicy,
     key: &str,
     operation: &'static str,
     payload_bytes: u64,
     deadline: Option<&OperationDeadline<'_>>,
+    retryable: impl Fn(&E) -> bool,
     mut attempt: F,
-) -> object_store::Result<T>
+) -> Result<T, E>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = object_store::Result<T>>,
+    Fut: Future<Output = Result<T, E>>,
 {
     let mut retries = 0;
     loop {
@@ -82,7 +83,7 @@ where
             Ok(value) => return Ok(value),
             Err(error) => error,
         };
-        if !provider_transport_retryable(&error) {
+        if !retryable(&error) {
             return Err(error);
         }
         let Some(backoff) = next_retry_backoff(

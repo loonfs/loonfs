@@ -15,11 +15,13 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, Sto
 use loonfs_objectstore::s3_compatible::{
     aws_s3, cloudflare_r2, AwsS3StoreConfig, CloudflareR2StoreConfig,
 };
-use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{AwsS3Credentials, ObjectStore};
+use loonfs_objectstore::{ExtendBase, ExtendedObject, ImmutableWriteError, ObjectStoreError};
 use loonfs_test_support::ids::page_limit;
-use loonfs_types::{Checksum, ContentId, Page};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, NamespaceId, Page};
 use tempfile::TempDir;
+
+const MIB: usize = 1024 * 1024;
 
 #[test]
 fn provider_env_example_covers_real_provider_contract() {
@@ -84,6 +86,84 @@ async fn local_fs_streamed_write_round_trips() {
     let temp_dir = test_dir("streamed-write");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
     assert_streamed_write_round_trips(&store).await;
+}
+
+#[tokio::test]
+async fn local_fs_honours_attested_writes_and_extension() {
+    let temp_dir = test_dir("attested-extension");
+    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    assert_attested_writes_and_extension(&store, &[16, 1024], ChecksumAlgorithm::Crc64nvme).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real AWS S3 credentials"]
+async fn aws_s3_attested_writes_and_extension() {
+    let config = AwsS3ConformanceConfig::from_env()
+        .expect("load AWS S3 real-provider conformance environment");
+    let store = aws_s3(AwsS3StoreConfig {
+        bucket: config.bucket,
+        region: config.region,
+        endpoint_url: config.endpoint,
+        credentials: AwsS3Credentials::Static {
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+            session_token: config.session_token,
+        },
+        key_prefix: Some(config.prefix),
+        force_path_style: false,
+    })
+    .expect("create AWS S3 object store");
+    assert_attested_writes_and_extension(&store, &[1024, 9 * MIB], ChecksumAlgorithm::Crc64nvme)
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Cloudflare R2 credentials"]
+async fn cloudflare_r2_attested_writes_and_extension() {
+    let config = CloudflareR2ConformanceConfig::from_env()
+        .expect("load Cloudflare R2 real-provider conformance environment");
+    let store = cloudflare_r2(CloudflareR2StoreConfig {
+        bucket: config.bucket,
+        account_id: config.account_id,
+        endpoint_url: config.endpoint,
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create Cloudflare R2 object store");
+    assert_attested_writes_and_extension(&store, &[1024, 65 * MIB], ChecksumAlgorithm::Crc64nvme)
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "requires real GCP GCS credentials"]
+async fn gcp_gcs_attested_writes_and_extension() {
+    let config = GcpGcsConformanceConfig::from_env()
+        .expect("load GCP GCS real-provider conformance environment");
+    let store = gcp_gcs(GcpGcsStoreConfig {
+        bucket: config.bucket,
+        service_account_key_path: config.service_account_key_path,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create GCP GCS object store");
+    assert_attested_writes_and_extension(&store, &[1024, 9 * MIB], ChecksumAlgorithm::Crc32c).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Azure Blob Storage credentials"]
+async fn azure_abs_attested_writes_and_extension() {
+    let config = AzureAbsConformanceConfig::from_env()
+        .expect("load Azure Blob Storage real-provider conformance environment");
+    let store = azure_abs(AzureAbsStoreConfig {
+        account_name: config.account_name,
+        container_name: config.container_name,
+        access_key: config.access_key,
+        endpoint_url: config.endpoint,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create Azure Blob Storage object store");
+    assert_attested_writes_and_extension(&store, &[1024, 9 * MIB], ChecksumAlgorithm::Crc64nvme)
+        .await;
 }
 
 #[tokio::test]
@@ -620,6 +700,95 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
             .is_empty(),
         "a streamed-write exercise leaves nothing behind"
     );
+}
+
+/// Pins attested immutable writes and extension on one store, for each base
+/// length: a write attests its bytes, an occupied key is decided by that
+/// attestation, and an extension appends only under the version it names.
+async fn assert_attested_writes_and_extension<S: ObjectStore>(
+    store: &S,
+    base_lengths: &[usize],
+    crc: ChecksumAlgorithm,
+) {
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let pieces = Bytes::from_static(b" and the pieces appended to it");
+    for &base_length in base_lengths {
+        let key = content_blob(&namespace_id, &ContentId::generate());
+        let base: Vec<u8> = (0..base_length).map(|index| (index % 251) as u8).collect();
+        let written = store
+            .put_immutable_verified(&key, Bytes::from(base.clone()))
+            .await
+            .expect("immutable write");
+        assert_eq!(written.sha256, Some(Checksum::sha256(&base)));
+        store
+            .put_immutable_verified(&key, Bytes::from(base.clone()))
+            .await
+            .expect("the same bytes are the same object");
+        assert!(matches!(
+            store
+                .put_immutable_verified(&key, Bytes::from_static(b"other bytes"))
+                .await,
+            Err(ImmutableWriteError::DifferentObject { .. })
+        ));
+
+        let version = current_version(store, &key).await;
+        let extended = [base.as_slice(), &pieces].concat();
+        let result = ExtendedObject {
+            sha256: Checksum::sha256(&extended),
+            crc: Some(Checksum::compute(crc, &extended)),
+        };
+        store
+            .extend_object(&key, &version, pieces.clone(), &result)
+            .await
+            .expect("extend");
+        assert_eq!(
+            store.get(&key, None).await.expect("get").as_deref(),
+            Some(extended.as_slice())
+        );
+        let head = store.head(&key).await.expect("head").expect("extended");
+        assert_eq!(head.sha256, Some(result.sha256.clone()));
+        assert!(matches!(
+            store
+                .extend_object(&key, &version, pieces.clone(), &result)
+                .await,
+            Err(ObjectStoreError::PreconditionFailed { .. })
+        ));
+
+        let twice = [extended.as_slice(), &pieces].concat();
+        let wrong_crc = ExtendedObject {
+            sha256: Checksum::sha256(&twice),
+            crc: Some(Checksum::compute(crc, b"other bytes")),
+        };
+        let refused = store
+            .extend_object(
+                &key,
+                &current_version(store, &key).await,
+                pieces.clone(),
+                &wrong_crc,
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(ObjectStoreError::ChecksumMismatch { .. })),
+            "{refused:?}"
+        );
+        store.delete(&key).await.expect("delete extended object");
+    }
+    assert!(
+        store
+            .list_prefix("namespaces/demo/scratch/")
+            .await
+            .expect("list scratch objects")
+            .is_empty(),
+        "an extension leaves no scratch object behind"
+    );
+}
+
+async fn current_version<S: ObjectStore>(store: &S, key: &str) -> ExtendBase {
+    let head = store.head(key).await.expect("head").expect("present");
+    ExtendBase {
+        length: head.size_bytes,
+        etag: head.etag.expect("etag"),
+    }
 }
 
 async fn assert_rejects_invalid_keys_consistently(store: &dyn ObjectStore) {
