@@ -12,6 +12,13 @@ pub struct ReadFileOptions {
     pub snapshot_id: Option<PinId>,
 }
 
+/// Options for creating a namespace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CreateNamespaceOptions {
+    /// How sibling names compare, fixed for the namespace's life.
+    pub naming: loonfs_types::NamespaceNaming,
+}
+
 /// Optional selectors for the change feed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListChangesOptions {
@@ -112,12 +119,31 @@ impl Client {
             .await
     }
 
-    /// Creates an empty namespace with the given ID and returns its genesis state.
+    /// Creates an empty case-insensitive namespace with the given ID and
+    /// access mode and returns its genesis state.
     pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
         access: loonfs_types::NamespaceAccess,
+    ) -> Result<NamespaceMetadata> {
+        self.create_namespace_with_options(
+            namespace_id,
+            actor_id,
+            access,
+            &CreateNamespaceOptions::default(),
+        )
+        .await
+    }
+
+    /// Creates an empty namespace with the given ID, access mode, and
+    /// options and returns its genesis state.
+    pub async fn create_namespace_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        actor_id: &loonfs_types::ActorId,
+        access: loonfs_types::NamespaceAccess,
+        options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
@@ -125,6 +151,7 @@ impl Client {
             self.post(&url).header("Loonfs-Actor", actor_id.as_str()),
             Some(&CreateNamespaceRequest {
                 access,
+                naming: options.naming,
                 namespace_id: namespace_id.clone(),
             }),
             SendPolicy::Once,

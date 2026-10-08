@@ -114,8 +114,10 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         &source,
         &context(),
         &actor_id,
-        &loonfs_types::NamespaceAccess::unrestricted(),
-        true,
+        &crate::options::CreateNamespaceOptions {
+            allow_existing: true,
+            ..Default::default()
+        },
     )
     .await
     .expect("allow existing returns the landed namespace");

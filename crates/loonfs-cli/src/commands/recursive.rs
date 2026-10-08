@@ -19,6 +19,7 @@ use crate::render::write_stderr_progress;
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
 use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use loonfs_types::DestinationBehavior;
+use loonfs_types::ErrorCode;
 use loonfs_types::PinId;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -456,20 +457,9 @@ pub(crate) async fn run_copy_tree(
         .map_err(|error| context.fail(kind, error))?;
     let destination = parse_remote(context, destination_root, "destination_path")
         .map_err(|error| context.fail(kind, error))?;
-    let source_key = loonfs_types::name_key_for_display_name(source.absolute_path().as_str());
-    let source_path = source_key.trim_end_matches('/');
-    let destination_key =
-        loonfs_types::name_key_for_display_name(destination.absolute_path().as_str());
-    let destination_path = destination_key.trim_end_matches('/');
-    if destination_path == source_path || destination_path.starts_with(&format!("{source_path}/")) {
-        return Err(context.fail(
-            kind,
-            CliError::invalid_request(
-                "a recursive copy destination must be outside the source tree",
-            )
-            .with_param("destination_path"),
-        ));
-    }
+    ensure_destination_outside_source(context, &source, &destination)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
     // Read the source before creating the destination so a missing source has
     // no remote write side effects.
     let entries = remote_tree(context, source_root, "source_path", None)
@@ -546,6 +536,70 @@ pub(crate) async fn run_copy_tree(
             failures: tally.failures,
         },
     ))
+}
+
+/// Rejects a copy destination at or below the source by walking the parents
+/// of the destination's deepest existing entry. The server resolves both
+/// paths, so the CLI never compares names itself.
+async fn ensure_destination_outside_source(
+    context: &CommandContext,
+    source: &NamespacePath,
+    destination: &NamespacePath,
+) -> Result<(), CliError> {
+    let client = &context.target.client;
+    let source_inode_id = client.stat(source).await?.inode_id;
+    let mut probe = destination.absolute_path().clone();
+    let mut entry = loop {
+        match client
+            .stat(&NamespacePath::new(
+                destination.namespace().clone(),
+                probe.clone(),
+            ))
+            .await
+        {
+            Ok(entry) => break entry,
+            Err(error)
+                if matches!(
+                    error.code(),
+                    Some(ErrorCode::PathNotFound | ErrorCode::PathConflict | ErrorCode::Forbidden)
+                ) =>
+            {
+                match probe.parent() {
+                    Some(parent) => probe = parent,
+                    None => return Ok(()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    loop {
+        if entry.inode_id == source_inode_id {
+            return Err(CliError::invalid_request(
+                "a recursive copy destination must be outside the source tree",
+            )
+            .with_param("destination_path"));
+        }
+        let Some(parent_inode_id) = entry.parent_inode_id else {
+            return Ok(());
+        };
+        // An ancestor the subject cannot read is one the source walk cannot
+        // list either, so the copy cannot reach its own output through it.
+        entry = match client
+            .stat_by_inode(destination.namespace(), parent_inode_id)
+            .await
+        {
+            Ok(parent) => parent,
+            Err(error)
+                if matches!(
+                    error.code(),
+                    Some(ErrorCode::InodeNotFound | ErrorCode::Forbidden)
+                ) =>
+            {
+                return Ok(())
+            }
+            Err(error) => return Err(error.into()),
+        };
+    }
 }
 
 fn parse_remote(

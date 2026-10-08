@@ -88,8 +88,11 @@ fn wal_create_directory(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(&display_name))
-                .expect("derived name key"),
+            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(
+                loonfs_types::NamespaceNaming::CaseInsensitive,
+                &display_name,
+            ))
+            .expect("derived name key"),
             display_name: test_display_name(display_name),
             child_inode_id: inode_id,
             child_kind: loonfs_types::InodeKind::Directory,
@@ -115,8 +118,11 @@ fn wal_create_file(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(&display_name))
-                .expect("derived name key"),
+            name_key: NameKey::parse(loonfs_types::name_key_for_display_name(
+                loonfs_types::NamespaceNaming::CaseInsensitive,
+                &display_name,
+            ))
+            .expect("derived name key"),
             display_name: test_display_name(display_name),
             child_inode_id: inode_id,
             child_kind: loonfs_types::InodeKind::File,
@@ -200,6 +206,7 @@ fn validation_context(
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
         access: loonfs_types::NamespaceAccess::Unrestricted {},
+        naming: loonfs_types::NamespaceNaming::CaseInsensitive,
         fork_basis: None,
         namespace_id: namespace_id.clone(),
         seq,

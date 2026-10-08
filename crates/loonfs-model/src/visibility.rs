@@ -12,7 +12,8 @@ use crate::metadata::{
 };
 use crate::Result;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
+    AbsolutePath, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, NamespaceNaming,
+    ROOT_INODE_ID,
 };
 use std::collections::BTreeSet;
 
@@ -65,8 +66,13 @@ impl MetadataState {
     }
 
     /// Resolves `path` from the root, folding each component into its name
-    /// key and following only bindings of visible children.
-    pub fn resolve_path(&self, path: &AbsolutePath, seq: ChangeSeq) -> Result<PathLookup<'_>> {
+    /// key under `naming` and following only bindings of visible children.
+    pub fn resolve_path(
+        &self,
+        naming: NamespaceNaming,
+        path: &AbsolutePath,
+        seq: ChangeSeq,
+    ) -> Result<PathLookup<'_>> {
         let Some(mut inode) = self.visible_inode(ROOT_INODE_ID, seq)? else {
             return Ok(PathLookup::NotFound {
                 absolute_path: absolute_path(&[]),
@@ -81,7 +87,7 @@ impl MetadataState {
                     inode,
                 });
             }
-            let name_key = NameKey::for_display_name(&component.to_display_name());
+            let name_key = NameKey::for_display_name(naming, &component.to_display_name());
             let Some(entry) = self.visible_entry(inode.inode_id, &name_key, seq)? else {
                 names.push(component.as_str());
                 return Ok(PathLookup::NotFound {

@@ -12,7 +12,7 @@ use crate::{
     ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
     NamespaceId, RevisionNo, RunNo,
 };
-use crate::{PrincipalScope, WalNo, WriterEpoch};
+use crate::{NamespaceNaming, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -1138,6 +1138,8 @@ pub struct NamespaceManifestPayload {
     pub created_by: ActorId,
     /// Access mode, fixed for the namespace.
     pub access: NamespaceAccess,
+    /// How sibling names compare, fixed for the namespace.
+    pub naming: NamespaceNaming,
     /// Fork provenance and source checkpoint identity for this namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_basis: Option<ForkBasis>,
@@ -1206,12 +1208,14 @@ impl NamespaceManifestPayload {
         created_at_ms: u64,
         created_by: ActorId,
         access: NamespaceAccess,
+        naming: NamespaceNaming,
     ) -> Self {
         Self {
             namespace_id,
             created_at_ms,
             created_by,
             access,
+            naming,
             fork_basis: None,
             status: NamespaceStatus::Active {},
             writer: None,
@@ -1316,6 +1320,9 @@ impl NamespaceManifestPayload {
         if successor.access != self.access {
             return invalid("access");
         }
+        if successor.naming != self.naming {
+            return invalid("naming");
+        }
         if successor.fork_basis != self.fork_basis {
             return invalid("fork_basis");
         }
@@ -1403,6 +1410,7 @@ mod tests {
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
+            crate::NamespaceNaming::CaseInsensitive,
         );
         assert_eq!(maximum.checked_add(Default::default()), Some(maximum));
         let mut successor = initial.clone();
@@ -1469,6 +1477,7 @@ mod tests {
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
+            crate::NamespaceNaming::CaseInsensitive,
         );
         let mut next = initial.clone();
         next.manifest_no = ManifestNo(2);
@@ -1477,6 +1486,7 @@ mod tests {
             ("created_at_ms", 1),
             ("fork_basis", 2),
             ("access", 3),
+            ("naming", 4),
         ] {
             let mut successor = next.clone();
             match change {
@@ -1496,12 +1506,13 @@ mod tests {
                         .expect("checkpoint"),
                     })
                 }
-                _ => {
+                3 => {
                     successor.access = super::NamespaceAccess::Acl {
                         principal_scope: crate::PrincipalScope::parse("org_test").expect("scope"),
                         root_grants: crate::AccessGrants::default(),
                     }
                 }
+                _ => successor.naming = crate::NamespaceNaming::CaseSensitive,
             }
             assert_eq!(
                 initial
@@ -1573,6 +1584,7 @@ mod tests {
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             access: super::NamespaceAccess::Unrestricted {},
+            naming: crate::NamespaceNaming::CaseInsensitive,
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
@@ -1616,6 +1628,7 @@ mod tests {
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
             access: super::NamespaceAccess::Unrestricted {},
+            naming: crate::NamespaceNaming::CaseInsensitive,
             fork_basis: None,
             status: crate::control::NamespaceStatus::Active {},
             writer: None,

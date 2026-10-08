@@ -19,8 +19,8 @@ impl LoonFs<Writable> {
         Ok(engine.require_administrator(&context).await?)
     }
 
-    /// Creates an unrestricted namespace, bootstrapping its durable state.
-    /// An existing namespace is an error.
+    /// Creates an unrestricted, case-insensitive namespace, bootstrapping its
+    /// durable state. An existing namespace is an error.
     pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,

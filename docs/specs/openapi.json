@@ -1063,6 +1063,10 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Durable namespace id to create."
+          },
+          "naming": {
+            "$ref": "#/components/schemas/NamespaceNaming",
+            "description": "How sibling names compare, fixed for the namespace's life. Defaults\nto `case_insensitive`."
           }
         },
         "required": [
@@ -3473,6 +3477,10 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace ID."
           },
+          "naming": {
+            "$ref": "#/components/schemas/NamespaceNaming",
+            "description": "How sibling names compare in the namespace."
+          },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Oldest position a change feed can resume after. The feed returns\nchanges above it."
@@ -3480,6 +3488,7 @@
         },
         "required": [
           "access",
+          "naming",
           "namespace_id",
           "created_at_ms",
           "created_by",
@@ -3487,6 +3496,14 @@
           "retention_floor_seq"
         ],
         "type": "object"
+      },
+      "NamespaceNaming": {
+        "description": "How a namespace compares sibling names, fixed at creation.",
+        "enum": [
+          "case_insensitive",
+          "case_sensitive"
+        ],
+        "type": "string"
       },
       "ObjectTransferAccess": {
         "description": "Client-facing direct transfer capability.",

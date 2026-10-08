@@ -201,6 +201,7 @@ fn remote_doctor_checks_transport_auth_health_and_capabilities() {
         serde_json::json!({
             "namespace_id": "demo",
             "access": {"kind": "unrestricted"},
+            "naming": "case_insensitive",
             "head_seq": 0,
             "created_at_ms": 1000,
             "created_by": "loonfs-cli",

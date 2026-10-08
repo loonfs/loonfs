@@ -17,13 +17,14 @@ mod session;
 
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
-use loonfs_types::{DisplayName, InodeId, NameKey, ROOT_INODE_ID};
+use loonfs_types::{DisplayName, InodeId, NameKey, NamespaceNaming, ROOT_INODE_ID};
 
 pub use intent::{CommitRequest, FilesystemOperation};
 pub(crate) use planner::commit_fingerprint;
 pub(crate) use session::PublishPlanningSession;
 
 pub(super) fn ensure_expected_inode(
+    naming: NamespaceNaming,
     resolved: &ResolvedVisiblePath,
     expected: Option<InodeId>,
     name: &DisplayName,
@@ -34,7 +35,7 @@ pub(super) fn ensure_expected_inode(
                 crate::commit::CommitValidationError::BindingPreconditionMismatch {
                     target: format!(
                         "name `{}` under parent inode `{}`",
-                        NameKey::for_display_name(name),
+                        NameKey::for_display_name(naming, name),
                         resolved.parent_inode_id.unwrap_or(ROOT_INODE_ID)
                     ),
                     expected_inode_id: Some(expected),

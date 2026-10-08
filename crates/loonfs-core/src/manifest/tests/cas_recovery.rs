@@ -855,3 +855,32 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
         loonfs_types::CompactorEpoch(2)
     );
 }
+
+#[tokio::test]
+async fn a_successor_manifest_that_changes_naming_is_rejected_at_load() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    create(&store, &namespace_id, &test_context())
+        .await
+        .expect("create");
+    let current = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("current");
+    let mut payload = current.state.envelope.payload().clone();
+    payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
+    payload.naming = loonfs_types::NamespaceNaming::CaseSensitive;
+    let object_key = metadata_manifest_object(&namespace_id, &payload.manifest_no);
+    store
+        .put_if_absent(
+            &object_key,
+            Bytes::from(encode_manifest(payload).expect("manifest").into_bytes()),
+        )
+        .await
+        .expect("write the successor around publication");
+
+    let error = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect_err("a successor may not change the naming mode");
+    assert!(error.to_string().contains("`naming`"), "{error}");
+}

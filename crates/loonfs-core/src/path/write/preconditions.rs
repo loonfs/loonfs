@@ -155,7 +155,7 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                     Err(CoreError::InodeNotFound(_)) => continue,
                     Err(error) => return Err(error),
                 }
-                let name_key = NameKey::for_display_name(display_name);
+                let name_key = NameKey::for_display_name(view.view.naming(), display_name);
                 if let Some(binding) = view.view.visible_child(*parent_inode_id, &name_key).await? {
                     return Err(CommitValidationError::BindingPreconditionMismatch {
                         target: format!("name `{name_key}` under parent inode `{parent_inode_id}`"),

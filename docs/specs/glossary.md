@@ -18,7 +18,8 @@
 | **Binding version** | The sequence and delta position of a particular bind. The API represents this pair as an opaque token. |
 | **Path** | An absolute name resolved by following visible directory bindings from the root. |
 | **Display name** | The stored spelling of a directory entry's name. |
-| **Name key** | The normalized and case-folded value used for sibling-name comparison and lookup. |
+| **Name key** | The value used for sibling-name comparison and lookup. The namespace's naming mode derives it from a display name: normalized, and also case-folded in a `case_insensitive` namespace ([format section 1.4](format.md#14-names-and-paths)). |
+| **Naming mode** | A namespace's fixed choice of how sibling names compare: `case_insensitive` (the default) or `case_sensitive`. |
 | **Revision** | One committed content state of a file, ordered by a revision number scoped to that inode. |
 | **Content object** | The complete bytes of one piece of file content, stored immutably under `namespaces/{owner_namespace_id}/content/{content_id}`. |
 | **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, complete size, and checksum. It identifies content; it does not prove that the content object exists yet. |

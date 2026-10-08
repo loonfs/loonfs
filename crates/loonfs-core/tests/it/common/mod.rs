@@ -73,15 +73,13 @@ pub(crate) mod commit_split_support {
         namespace_id: &NamespaceId,
         context: &MutationContext,
     ) -> Result<loonfs_types::NamespaceMetadata, CoreError> {
-        namespace_engine(store, namespace_id, context)
-            .bootstrap_namespace(
-                &loonfs_test_support::test_actor(),
-                &CreateNamespaceOptions {
-                    access: loonfs_types::NamespaceAccess::Unrestricted {},
-                    allow_existing: false,
-                },
-            )
-            .await
+        bootstrap_namespace_with_options(
+            store,
+            namespace_id,
+            context,
+            &CreateNamespaceOptions::default(),
+        )
+        .await
     }
 
     pub(crate) async fn bootstrap_namespace_allowing_existing<S: ObjectStore + ?Sized>(
@@ -89,14 +87,26 @@ pub(crate) mod commit_split_support {
         namespace_id: &NamespaceId,
         context: &MutationContext,
     ) -> Result<loonfs_types::NamespaceMetadata, CoreError> {
+        bootstrap_namespace_with_options(
+            store,
+            namespace_id,
+            context,
+            &CreateNamespaceOptions {
+                allow_existing: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn bootstrap_namespace_with_options<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        context: &MutationContext,
+        options: &CreateNamespaceOptions,
+    ) -> Result<loonfs_types::NamespaceMetadata, CoreError> {
         namespace_engine(store, namespace_id, context)
-            .bootstrap_namespace(
-                &loonfs_test_support::test_actor(),
-                &CreateNamespaceOptions {
-                    access: loonfs_types::NamespaceAccess::Unrestricted {},
-                    allow_existing: true,
-                },
-            )
+            .bootstrap_namespace(&loonfs_test_support::test_actor(), options)
             .await
     }
 

@@ -35,7 +35,7 @@ pub(super) async fn plan_delete_path<S: ObjectStore + ?Sized>(
         &resolved,
         behavior,
         Absence::Path(absolute_path.as_str()),
-        || ensure_expected_inode(&resolved, expected_inode_id, &name),
+        || ensure_expected_inode(view.view.naming(), &resolved, expected_inode_id, &name),
     )
     .await
 }

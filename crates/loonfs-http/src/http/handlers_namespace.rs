@@ -251,6 +251,7 @@ pub(super) async fn create_namespace(
             &actor_id,
             &CreateNamespaceOptions {
                 access: request.access,
+                naming: request.naming,
                 ..Default::default()
             },
         )

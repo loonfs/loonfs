@@ -85,21 +85,22 @@ The following device names are also reserved, compared case-insensitively and wi
 
 These restrictions are intended to reduce common cross-platform naming problems. They are LoonFS's name grammar, not a guarantee that every external filesystem, archive tool, or sync client accepts every possible tree.
 
-A name key is computed in this order:
+Each namespace records a naming mode in its manifest, fixed at creation. A fork copies the source's mode. The mode selects how a display name maps to its name key:
 
-```text
-NFC normalization
-    -> full Unicode default, non-Turkic case folding
-    -> NFC normalization
-```
+| Mode | Name key |
+| --- | --- |
+| `case_insensitive` | NFC normalization, then full Unicode default, non-Turkic case folding, then NFC normalization again. This is the default. |
+| `case_sensitive` | NFC normalization only. |
 
-Both normalization and folding use Unicode 17.0.0 data. There is no per-namespace case-sensitivity setting. Admission and lookup use the same rule. Name keys follow the same character restrictions as display names, with a 768-byte limit.
+Both normalization and folding use Unicode 17.0.0 data. Admission and lookup in a namespace use its mode. Name keys follow the same character restrictions as display names, with a 768-byte limit. Every key derived from a valid display name fits: normalization and case folding expand a name at most threefold in bytes.
 
-For example, `Report.txt` and `report.txt` have the same name key, so they cannot be separate siblings. The chosen display spelling is still preserved. The [name-folding fixtures][name-vectors] cover normalization and case-folding cases beyond ASCII.
+For example, `Report.txt` and `report.txt` have the same name key in a `case_insensitive` namespace, so they cannot be separate siblings there. In a `case_sensitive` namespace their keys differ, and they can be siblings. In both modes, a precomposed `é` and an `e` followed by a combining acute accent have the same key. The chosen display spelling is always preserved. The [name-folding fixtures][name-vectors] list each mode's key for normalization and case-folding cases beyond ASCII.
+
+The display-name restrictions above do not depend on the mode. A `case_sensitive` namespace still compares the reserved device names case-insensitively.
 
 An absolute path starts with exactly one `/`. It has no empty components, repeated separators, or trailing `/`, except for the root path `/`. A canonical path is limited to 4,096 UTF-8 bytes and 128 components. Noncanonical input is rejected rather than rewritten. These are limits on canonical paths; they do not establish universal compatibility with external filesystem path limits. They bound request paths; a path derived from stored names may exceed them, and inode-addressed reads still serve it.
 
-A change to any name-key mapping changes the format semantics, even if the serialized fields stay the same. Implementations must preserve the Unicode behavior specified here; lowercase conversion alone is insufficient.
+Each mode's mapping is frozen once a namespace holds rows, because its stored slots hold keys derived by that mapping. A change to either mapping changes the format semantics, even if the serialized fields stay the same. Implementations must preserve the Unicode behavior specified here; lowercase conversion alone is insufficient.
 
 ### 1.5 File contents and ownership
 
@@ -381,7 +382,7 @@ A file's current content is its latest revision committed by `N`. Attributes are
 
 ### 4.4 Paths, listings, and revision reads
 
-Resolve a path from root inode `1`, folding each component into its name key and following the active binding. If a component is not visible, the path does not exist. The current format has no mount traversal.
+Resolve a path from root inode `1`, mapping each component to its name key under the namespace's naming mode and following the active binding. If a component is not visible, the path does not exist. The current format has no mount traversal.
 
 A directory listing resolves visible child bindings and uses committed revision metadata for file size and content-reference summaries. It must not fetch and verify every file's content object simply to list a directory.
 
@@ -632,7 +633,7 @@ The `commits` and `commit_receipts` families hold one row each per retained comm
 
 ### 7.2 Publishing a materialized file set
 
-The first manifest has number 1, the requested namespace identity, creation time, and `created_by`, active status, and no writer block. Both epochs, the local folded WAL number, and activity counters start at zero. A plain create has no fork basis or runs, next inode ID 2, and head sequence, base sequence, retention floor, and next run number zero. A fork has the immutable source basis and inherited state described in section 9.2; its head and retention floor equal the pinned source sequence.
+The first manifest has number 1, the requested namespace identity, creation time, `created_by`, access mode, and naming mode, active status, and no writer block. Both epochs, the local folded WAL number, and activity counters start at zero. A plain create has no fork basis or runs, next inode ID 2, and head sequence, base sequence, retention floor, and next run number zero. A fork has the immutable source basis and inherited state described in section 9.2; its head and retention floor equal the pinned source sequence.
 
 A fold starts from a verified manifest and a discovered WAL tip. A fold call discovers both; a writer's own fold takes them from its retained view. It materializes the required numbers after `folded_wal_no`, writes new segments, and publishes the next manifest with `folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary folds write a run at the head when materializing new state.
 
@@ -642,7 +643,7 @@ Before writing segments or publishing the manifest, a fold writes every inline v
 
 Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A fold already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Compaction additionally requires its selected inputs to remain valid.
 
-Successors preserve namespace identity and cannot lower head sequence, writer or compactor epoch, folded WAL number, the retention floor, allocators, or cumulative activity counters. A successor at the same head must preserve activity counters exactly. A tombstone has no successor.
+Successors preserve namespace identity, including the access and naming modes, and cannot lower head sequence, writer or compactor epoch, folded WAL number, the retention floor, allocators, or cumulative activity counters. A successor at the same head must preserve activity counters exactly. A tombstone has no successor.
 
 The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until initiation of the manifest put. An expired attempt publishes nothing further. Its unreferenced output remains subject to segment-age collection rules. Streaming compaction has the longer bound in section 10.4.
 
@@ -768,7 +769,7 @@ A fork starts independent history from the source's retained metadata:
 
 1. Load the target’s current manifest before writing a source pin. Continue only if the target is absent. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
 2. Load and verify the pinned manifest.
-3. Copy the pinned manifest's run references, head sequence, inode allocator, next run number, and access configuration. The inherited runs determine the same base sequence. Preserve every segment's owner. Set the fork basis to the pinned manifest reference and source pin ID.
+3. Copy the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, and naming mode. The inherited runs determine the same base sequence. Preserve every segment's owner. Set the fork basis to the pinned manifest reference and source pin ID.
 4. Build the remaining first-manifest fields under section 7.2 and install it under section 9.1.
 
 The target copies no file bytes or metadata segments. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
@@ -1107,6 +1108,8 @@ In version 1, an inode never has more than one parent binding. For a directory t
 
 Mount creation and traversal are not defined by this version; no standard operation creates a mount.
 
+The naming mode `labels` is reserved. In such a namespace, names would be labels: siblings could share a name, and path routes would answer `not_supported`. This version does not define it, and a manifest with that mode is invalid.
+
 ## Appendix A. Durable records and byte encodings
 
 This appendix is the field and encoding reference for the protocols above. Field names are literal. A `?` after a field in a table means the object member is optional and omitted when absent; the question mark is not part of its stored name.
@@ -1209,6 +1212,7 @@ A namespace manifest contains:
 | `created_at_ms` | Namespace creation time. |
 | `created_by` | Application-supplied actor that created or forked the namespace. |
 | `access` | Access mode, immutable for the namespace: `{"kind":"unrestricted"}`, or `{"kind":"acl"}` with `principal_scope` and `root_grants`. |
+| `naming` | Naming mode, immutable for the namespace: `"case_insensitive"` or `"case_sensitive"` (section 1.4). |
 | `fork_basis?` | Source reference and pin identity, immutable for the namespace. |
 | `status` | Active or deleted state for this namespace. |
 | `writer?` | Diagnostic writer block. |

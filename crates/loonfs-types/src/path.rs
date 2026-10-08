@@ -131,16 +131,6 @@ pub enum PathError {
         /// The first reserved character in the name, reading left to right.
         character: char,
     },
-    /// Reports a valid display spelling whose canonical lookup key exceeds its durable bound.
-    #[error(
-        "display name folds to a {byte_length}-byte name key; the maximum is \
-         {max} bytes",
-        max = crate::ids::MAX_NAME_KEY_BYTES
-    )]
-    FoldedNameKeyTooLong {
-        /// UTF-8 byte length after normalization and case folding.
-        byte_length: usize,
-    },
 }
 
 impl AbsolutePath {
@@ -428,18 +418,6 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
             reason: "is a Windows reserved device name",
         });
     }
-    // Every stored name key is derived from an admitted display name, and
-    // the derivation site treats an invalid derived key as an invariant
-    // violation — so admission must guarantee the derived key stays within
-    // the name-key grammar. v0 folds one way for every namespace; if a
-    // second rule ever arrives this check moves to the boundary that knows
-    // the namespace.
-    let folded_length = crate::name_policy::name_key_for_display_name(value).len();
-    if folded_length > crate::ids::MAX_NAME_KEY_BYTES {
-        return Err(PathError::FoldedNameKeyTooLong {
-            byte_length: folded_length,
-        });
-    }
     Ok(())
 }
 
@@ -504,7 +482,6 @@ impl PathError {
             // payloads that serialize onto the wire.
             Self::DisplayNameContainsControlCharacter { .. }
             | Self::DisplayNameTooLong { .. }
-            | Self::FoldedNameKeyTooLong { .. }
             | Self::PathTooLong { .. }
             | Self::PathTooDeep { .. } => "",
         }
@@ -514,7 +491,7 @@ impl PathError {
 #[cfg(test)]
 mod tests {
     use super::{AbsolutePath, DisplayName, PathError};
-    use crate::NameKey;
+    use crate::{NameKey, NamespaceNaming};
 
     #[test]
     fn unportable_names_are_rejected() {
@@ -762,15 +739,19 @@ mod tests {
     }
 
     #[test]
-    fn maximal_casefold_expansion_stays_within_the_name_key_cap() {
-        // U+0390 case-folds to three code points (six bytes from two): the
-        // worst byte expansion in the fold tables. A maximum-length name of
-        // it folds to 762 bytes, inside the 768-byte key cap — the
-        // headroom [`crate::ids::MAX_NAME_KEY_BYTES`] documents.
+    fn maximal_key_expansion_stays_within_the_name_key_cap() {
+        // U+1D160 normalizes to three code points, twelve bytes from four:
+        // the worst byte expansion of either mode. A maximum-length name of
+        // it has a 756-byte key, inside the 768-byte key cap.
         let display_name =
-            DisplayName::parse("\u{0390}".repeat(127)).expect("maximal expander parses");
-        let key = NameKey::for_display_name(&display_name);
-        assert!(key.as_str().len() <= crate::ids::MAX_NAME_KEY_BYTES);
+            DisplayName::parse("\u{1D160}".repeat(63)).expect("maximal expander parses");
+        for naming in [
+            NamespaceNaming::CaseInsensitive,
+            NamespaceNaming::CaseSensitive,
+        ] {
+            let key = NameKey::for_display_name(naming, &display_name);
+            assert_eq!(key.as_str().len(), 756);
+        }
     }
 
     #[test]

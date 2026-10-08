@@ -7,6 +7,8 @@ use loonfs_types::ChangeSeq;
 pub struct CreateNamespaceOptions {
     /// Access mode the namespace is created with.
     pub access: loonfs_types::NamespaceAccess,
+    /// How sibling names compare in the namespace.
+    pub naming: loonfs_types::NamespaceNaming,
     /// If true, creating an already-existing namespace is treated as success.
     pub allow_existing: bool,
 }
@@ -15,6 +17,7 @@ impl Default for CreateNamespaceOptions {
     fn default() -> Self {
         Self {
             access: loonfs_types::NamespaceAccess::Unrestricted {},
+            naming: loonfs_types::NamespaceNaming::CaseInsensitive,
             allow_existing: false,
         }
     }
@@ -38,6 +41,7 @@ mod tests {
             CreateNamespaceOptions::default(),
             CreateNamespaceOptions {
                 access: loonfs_types::NamespaceAccess::Unrestricted {},
+                naming: loonfs_types::NamespaceNaming::CaseInsensitive,
                 allow_existing: false,
             }
         );

@@ -63,8 +63,8 @@ pub use error::ClientError;
 pub use maintenance::CheckpointsPager;
 pub use payload::{PayloadSource, PayloadStream};
 pub use reads::{
-    ChangesPager, FileRevisionsPager, InodeChildrenPager, ListChangesOptions, PathEntriesPager,
-    ReadFileOptions, SnapshotsPager, TrashPager,
+    ChangesPager, CreateNamespaceOptions, FileRevisionsPager, InodeChildrenPager,
+    ListChangesOptions, PathEntriesPager, ReadFileOptions, SnapshotsPager, TrashPager,
 };
 use transport::{SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT};
 pub use transport_error::TransportError;

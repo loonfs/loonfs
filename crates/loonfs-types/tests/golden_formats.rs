@@ -38,8 +38,8 @@ use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
     CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
-    MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, RevisionNo, RunNo,
-    UploadId, WalNo, WriterEpoch,
+    MetadataSegmentId, NameKey, NamespaceId, NamespaceNaming, PinId, PrincipalId, PrincipalScope,
+    RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -386,6 +386,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         created_at_ms: 1_000,
         created_by: loonfs_types::ActorId::parse("test").expect("actor"),
         access: NamespaceAccess::Unrestricted {},
+        naming: NamespaceNaming::CaseInsensitive,
         fork_basis: None,
         status: NamespaceStatus::Active {},
         writer: Some(WriterBlock {
@@ -465,6 +466,13 @@ fn sample_acl_manifest() -> NamespaceManifestPayload {
             )]))
             .expect("grants"),
         },
+        ..sample_manifest_payload()
+    }
+}
+
+fn sample_case_sensitive_manifest() -> NamespaceManifestPayload {
+    NamespaceManifestPayload {
+        naming: NamespaceNaming::CaseSensitive,
         ..sample_manifest_payload()
     }
 }
@@ -2785,6 +2793,13 @@ fn deleted_namespace_error_details_match_golden() {
 
 #[test]
 fn name_folding_matches_the_fixed_unicode_corpus() {
+    #[derive(Serialize)]
+    struct NameVector {
+        display_name: &'static str,
+        case_insensitive: String,
+        case_sensitive: String,
+    }
+
     let display_names = [
         "Cafe\u{301}.TXT",
         "CAFÉ.txt",
@@ -2830,11 +2845,16 @@ fn name_folding_matches_the_fixed_unicode_corpus() {
     ];
     let corpus: Vec<_> = display_names
         .into_iter()
-        .map(|display_name| {
-            serde_json::json!({
-                "display_name": display_name,
-                "name_key": loonfs_types::name_key_for_display_name(display_name),
-            })
+        .map(|display_name| NameVector {
+            display_name,
+            case_insensitive: loonfs_types::name_key_for_display_name(
+                NamespaceNaming::CaseInsensitive,
+                display_name,
+            ),
+            case_sensitive: loonfs_types::name_key_for_display_name(
+                NamespaceNaming::CaseSensitive,
+                display_name,
+            ),
         })
         .collect();
     let mut bytes = serde_json::to_vec_pretty(&corpus).expect("encode folding corpus");
@@ -2848,6 +2868,10 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
         ("manifest.deleted.v1.json", sample_deleted_manifest()),
         ("manifest.fork.v1.json", sample_fork_manifest()),
         ("manifest.acl.v1.json", sample_acl_manifest()),
+        (
+            "manifest.case_sensitive.v1.json",
+            sample_case_sensitive_manifest(),
+        ),
     ] {
         let encoded = encode_namespace_manifest_json(payload.clone())
             .expect("manifest")

@@ -774,6 +774,13 @@ pub(crate) enum NamespaceAccessArg {
     Acl,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub(crate) enum NamespaceNamingArg {
+    CaseInsensitive,
+    CaseSensitive,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
@@ -793,6 +800,9 @@ pub(crate) struct NamespaceCreateArgs {
     /// A principal granted `admin` on the root at creation; repeatable.
     #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
     pub administrators: Vec<String>,
+    /// How sibling names compare, fixed for the namespace's life.
+    #[arg(long, value_enum, default_value_t = NamespaceNamingArg::CaseInsensitive)]
+    pub naming: NamespaceNamingArg,
 }
 
 #[derive(Debug, Args)]

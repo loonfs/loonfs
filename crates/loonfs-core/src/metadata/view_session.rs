@@ -484,7 +484,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     ) -> Result<ResolvedVisiblePath, CoreError> {
         self.preload_path_walk(absolute_path, prefetch_leaf_revision)
             .await?;
-        visibility::resolve_visible_path(self, absolute_path).await
+        let naming = self.base.naming();
+        visibility::resolve_visible_path(self, naming, absolute_path).await
     }
 
     async fn preload_path_walk(
@@ -492,10 +493,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         absolute_path: &AbsolutePath,
         prefetch_leaf_revision: LeafRevisionPrefetch,
     ) -> Result<(), CoreError> {
+        let naming = self.base.naming();
         let component_name_keys: Vec<NameKey> = absolute_path
             .components()
             .iter()
-            .map(|component| NameKey::for_display_name(&component.to_display_name()))
+            .map(|component| NameKey::for_display_name(naming, &component.to_display_name()))
             .collect();
 
         let mut current_inode_id = ROOT_INODE_ID;

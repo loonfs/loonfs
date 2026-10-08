@@ -538,6 +538,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
 
     let resolved = metadata_state
         .resolve_visible_path(
+            loonfs_types::NamespaceNaming::CaseInsensitive,
             &AbsolutePath::parse("/REPORT.txt").expect("path"),
             ChangeSeq(1),
         )

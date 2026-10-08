@@ -243,6 +243,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
             )
             .await?;
             ensure_expected_inode(
+                view.view.naming(),
                 &existing,
                 expected_file_state.map(|expected| expected.inode_id),
                 &final_name,

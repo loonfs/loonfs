@@ -101,7 +101,7 @@ pub(super) async fn resolve_visible_child<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
     display_name: &DisplayName,
 ) -> Result<Option<ResolvedVisiblePath>> {
-    let name_key = NameKey::for_display_name(display_name);
+    let name_key = NameKey::for_display_name(view.view.naming(), display_name);
     let Some(binding) = view.view.visible_child(parent_inode_id, &name_key).await? else {
         return Ok(None);
     };
@@ -254,7 +254,7 @@ pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
     let mut deepest_existing = current_inode;
     for component in &components[..components.len() - 1] {
         let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(&display_name);
+        let name_key = NameKey::for_display_name(view.view.naming(), &display_name);
         if !creating_missing_ancestors {
             if let Some(child) = view.view.visible_child(current_inode, &name_key).await? {
                 if child.child_kind != InodeKind::Directory {

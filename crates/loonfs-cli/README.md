@@ -177,8 +177,10 @@ Profile management
 
 Namespace management
   loonfs namespace create <namespace> [--access acl --principal-scope <scope> --administrator <principal>...]
-                            [--actor-id <stable-id>]
-    Create a new empty namespace
+                            [--naming case_sensitive] [--actor-id <stable-id>]
+    Create a new empty namespace. Names that differ only in case are the
+    same name unless --naming case_sensitive is given. The naming mode is
+    fixed for the namespace's life
 
   loonfs namespace show [namespace]
     Show the selected namespace's status and creator
