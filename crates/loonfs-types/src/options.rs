@@ -142,6 +142,26 @@ pub struct PutFileOptions {
     pub expected_revision_no: Option<RevisionNo>,
 }
 
+/// Options for appending to a file path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppendFileOptions {
+    /// Commit ID, message, and preconditions.
+    pub commit: CommitOptions,
+    /// The inode that the path must still resolve to.
+    pub expected_inode_id: Option<InodeId>,
+    /// The revision that must still be current, with `expected_inode_id`.
+    pub expected_revision_no: Option<RevisionNo>,
+}
+
+/// Options for appending to a file inode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppendFileByInodeOptions {
+    /// Commit ID, message, and preconditions.
+    pub commit: CommitOptions,
+    /// The revision that must still be current.
+    pub expected_revision_no: Option<RevisionNo>,
+}
+
 /// Options for creating a directory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CreateDirectoryOptions {
@@ -256,6 +276,14 @@ mod tests {
             PutFileOptions::default(),
             PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
+                commit: commit.clone(),
+                expected_inode_id: None,
+                expected_revision_no: None,
+            }
+        );
+        assert_eq!(
+            AppendFileOptions::default(),
+            AppendFileOptions {
                 commit: commit.clone(),
                 expected_inode_id: None,
                 expected_revision_no: None,

@@ -44,6 +44,11 @@ impl Default for PublicationLimits {
 /// Writer policy for content carried in WAL objects.
 /// Retrying a completed inline commit does not upload its content again while
 /// the commit receipt is retained. See `docs/specs/api.md`, section 5.2.
+///
+/// The bytes an append adds always travel in the WAL and never stage. They
+/// count toward the WAL object budget and the unfolded tail, but neither
+/// limit holds an append back: a commit whose appends pass the budget
+/// publishes in a WAL object of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineContentPolicy {
     /// Maximum size prepared inline; defaults to 64 KiB. `None` disables inline preparation.

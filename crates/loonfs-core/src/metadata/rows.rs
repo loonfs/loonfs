@@ -216,6 +216,18 @@ impl MetadataState {
         self.indexes.content_head(content_id)
     }
 
+    /// The first publication row of the reference `content_id` and
+    /// `size_bytes` name. Rows are pushed in commit order.
+    pub fn content_publication(
+        &self,
+        content_id: &loonfs_types::ContentId,
+        size_bytes: u64,
+    ) -> Option<&ContentPublicationRecord> {
+        self.content_publications
+            .iter()
+            .find(|row| &row.content_id == content_id && row.size_bytes == size_bytes)
+    }
+
     /// Whether this commit already published the reference `content_id`
     /// and `size_bytes` name. A commit's rows are the last ones pushed.
     pub(crate) fn publishes_in_commit(

@@ -930,6 +930,16 @@ pub mod lookup_keys {
         format!("{}-", content_publication_probe(content_id))
     }
 
+    /// Selects the rows for one reference length of one content identity,
+    /// ordered by commit sequence.
+    pub fn content_publication_size_prefix(content_id: &ContentId, size_bytes: u64) -> String {
+        format!(
+            "{}{:020}-",
+            content_publication_prefix(content_id),
+            u64::MAX - size_bytes
+        )
+    }
+
     /// Orders publications by content identity, longest reference first,
     /// then by commit sequence.
     pub(super) fn content_publication_row_key(
@@ -938,9 +948,8 @@ pub mod lookup_keys {
         committed_seq: ChangeSeq,
     ) -> String {
         format!(
-            "{}{:020}-{:020}",
-            content_publication_prefix(content_id),
-            u64::MAX - size_bytes,
+            "{}{:020}",
+            content_publication_size_prefix(content_id, size_bytes),
             committed_seq.0
         )
     }

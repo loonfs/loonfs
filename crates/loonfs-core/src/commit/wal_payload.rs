@@ -21,6 +21,7 @@ pub(crate) fn wal_payload_from_prepared_commit(commit: &PreparedCommit) -> WalCo
                 bytes: value.bytes().to_vec(),
                 base: None,
             })
+            .chain(prepared.appended.iter().map(|value| value.piece.clone()))
             .collect(),
         deltas: prepared.deltas.clone(),
     }
@@ -73,6 +74,7 @@ mod tests {
                     },
                 },
             ],
+            appended: Vec::new(),
             resulting_next_inode_id: InodeId(3),
         };
         let prepared = PreparedCommit {

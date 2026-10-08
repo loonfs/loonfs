@@ -97,6 +97,20 @@ const REVISION_BYTES: usize = delta_bytes(
         ),
     ],
 );
+/// One append's piece, apart from its bytes: the entry's fields and a base
+/// in another content object.
+const APPEND_PIECE_BYTES: usize = map_bytes(&[
+    ("content_id", string_bytes(MAX_ID_BYTES)),
+    ("offset", INTEGER_BYTES),
+    ("bytes", string_bytes(0)),
+    (
+        "base",
+        map_bytes(&[
+            ("owner_namespace_id", string_bytes(MAX_ID_BYTES)),
+            ("content_id", string_bytes(MAX_ID_BYTES)),
+        ]),
+    ),
+]);
 const ATTRIBUTES_BYTES: usize = delta_bytes(
     "append_attributes_revision",
     &[
@@ -194,7 +208,12 @@ pub(crate) fn estimated_wal_record_bytes(
         ),
         ("deltas", 9),
     ]);
-    let inline_bytes = if inline_content.is_empty() {
+    let carries_pieces = !inline_content.is_empty()
+        || request
+            .operations
+            .iter()
+            .any(|operation| operation.appended_content().is_some());
+    let inline_bytes = if !carries_pieces {
         0
     } else {
         inline_content
@@ -235,6 +254,10 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
         FilesystemOperation::PutFileRevisionByInode { .. }
         | FilesystemOperation::RestoreRevision { .. }
         | FilesystemOperation::RestoreRevisionByInode { .. } => REVISION_BYTES,
+        FilesystemOperation::AppendFile { inline_content, .. }
+        | FilesystemOperation::AppendFileByInode { inline_content, .. } => {
+            REVISION_BYTES + APPEND_PIECE_BYTES + inline_content.len()
+        }
         FilesystemOperation::DeletePath { .. } | FilesystemOperation::DeleteByInode { .. } => {
             DELETE_BYTES
         }

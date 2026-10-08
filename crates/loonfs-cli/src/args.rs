@@ -193,6 +193,8 @@ pub(crate) enum Command {
     Get(FilesystemGetArgs),
     /// Upload a local file (or directory tree with -r) to a namespace path.
     Put(FilesystemPutArgs),
+    /// Add a local file's bytes, or standard input's, to the end of a file.
+    Append(FilesystemAppendArgs),
     /// List a file's revision history, newest first.
     Revisions(FilesystemRevisionsArgs),
     /// Write a prior revision's content as the file's next revision.
@@ -257,6 +259,7 @@ impl Command {
                 | Self::Grep(_)
                 | Self::Get(_)
                 | Self::Put(_)
+                | Self::Append(_)
                 | Self::Revisions(_)
                 | Self::Restore(_)
                 | Self::Undelete(_)
@@ -1129,6 +1132,29 @@ pub(crate) struct FilesystemPutArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct FilesystemAppendArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
+    /// Local file whose bytes to append, or `-` to read standard input. One
+    /// append carries from 1 byte to 256 KiB.
+    #[arg(value_hint = ValueHint::AnyPath)]
+    pub local_path: String,
+    /// The file to append to. It must already exist.
+    #[arg(value_hint = ValueHint::Other)]
+    pub remote_path: String,
+    /// The append requires that the path still points to this inode.
+    #[arg(long, value_parser = parse_public_inode_id)]
+    pub expected_inode_id: Option<InodeId>,
+    /// The append requires that the file still has this revision and inode.
+    #[arg(long, requires = "expected_inode_id")]
+    pub expected_revision: Option<u64>,
+    #[command(flatten)]
+    pub commit: CommitArgs,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct FilesystemTransferArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
@@ -1562,6 +1588,7 @@ command_kinds! {
     FilesystemGrep => "filesystem_grep",
     FilesystemGet => "filesystem_get",
     FilesystemPut => "filesystem_put",
+    FilesystemAppend => "filesystem_append",
     FilesystemRevisions => "filesystem_revisions",
     FilesystemTrash => "filesystem_trash",
     FilesystemRestore => "filesystem_restore",
@@ -1634,6 +1661,7 @@ impl Cli {
             Command::Grep(_) => CommandKind::FilesystemGrep,
             Command::Get(_) => CommandKind::FilesystemGet,
             Command::Put(_) => CommandKind::FilesystemPut,
+            Command::Append(_) => CommandKind::FilesystemAppend,
             Command::Revisions(_) => CommandKind::FilesystemRevisions,
             Command::Trash(_) => CommandKind::FilesystemTrash,
             Command::Restore(_) => CommandKind::FilesystemRestore,

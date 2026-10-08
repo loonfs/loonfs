@@ -278,6 +278,13 @@ Writing
     still has the inode and optional revision that you read. A revision precondition
     requires the inode precondition, and neither can be used with -r
 
+  loonfs append <local-path|-> <remote-path> [--expected-inode-id <id>]
+                [--expected-revision <n>] [--actor-id <id>]
+    Add the bytes of a local file, or of standard input when the local path
+    is `-`, to the end of an existing file as its next revision. One append
+    carries from 1 byte to 256 KiB. The expected value flags append only if
+    the file still has the inode and optional revision that you read
+
   loonfs mkdir <path> [-p] [--actor-id <id>]
     Create a directory; -p creates missing parents as well and succeeds when
     the directory is already there

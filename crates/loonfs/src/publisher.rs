@@ -626,9 +626,11 @@ impl PreparedCandidate {
             )?,
             wal_record_bytes_upper_bound: candidate
                 .wal_record_bytes_upper_bound_with_inline_content(retained_inline_content),
-            inline_content_bytes: retained_inline_content.iter().fold(0usize, |total, value| {
-                total.saturating_add(value.bytes().len())
-            }),
+            inline_content_bytes: retained_inline_content
+                .iter()
+                .fold(candidate.appended_bytes(), |total, value| {
+                    total.saturating_add(value.bytes().len())
+                }),
             candidate,
         })
     }

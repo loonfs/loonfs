@@ -19,7 +19,10 @@ impl NamespacePublisher {
     ) -> Result<InlineCandidatePlan> {
         let namespace_id = &self.namespace_id;
         let values = candidate.ordered_inline_content(namespace_id)?;
-        let mut remaining = self.inline_content.inline_content_wal_object_budget_bytes;
+        let mut remaining = self
+            .inline_content
+            .inline_content_wal_object_budget_bytes
+            .saturating_sub(candidate.appended_bytes());
         let wal_object_inline_values = values
             .iter()
             .take_while(|value| {

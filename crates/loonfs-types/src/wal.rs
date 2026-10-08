@@ -242,16 +242,34 @@ pub fn semantic_operation_groups(
     deltas.chunk_by(|left, right| left.semantic_operation_index == right.semantic_operation_index)
 }
 
-/// Counts activity represented by one committed delta vector.
+/// Counts activity represented by one committed record.
 /// Returns `None` if a counter overflows.
-pub fn committed_activity(deltas: &[WalCommitDelta]) -> Option<crate::manifest::ManifestActivity> {
+///
+/// A revision counts its full length, except that bytes the record's pieces
+/// add to a content id count once: the first revision that reaches past
+/// what earlier revisions counted for that id counts only the bytes past
+/// it. An append therefore counts the bytes it appends.
+pub fn committed_activity(record: &WalCommitPayload) -> Option<crate::manifest::ManifestActivity> {
+    let mut counted_ends: BTreeMap<&ContentId, u64> = BTreeMap::new();
+    for entry in &record.inline_content {
+        let end = counted_ends
+            .entry(&entry.content_id)
+            .or_insert(entry.offset);
+        *end = (*end).min(entry.offset);
+    }
     let mut activity = crate::manifest::ManifestActivity::default();
-    for group in semantic_operation_groups(deltas) {
+    for group in semantic_operation_groups(&record.deltas) {
         activity.mutations = activity.mutations.checked_add(1)?;
         for delta in group {
             if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
-                activity.content_bytes =
-                    activity.content_bytes.checked_add(content_ref.size_bytes)?;
+                let size_bytes = content_ref.size_bytes;
+                let counted = match counted_ends.get_mut(&content_ref.content_id) {
+                    Some(end) if size_bytes > *end => {
+                        size_bytes - std::mem::replace(end, size_bytes)
+                    }
+                    _ => size_bytes,
+                };
+                activity.content_bytes = activity.content_bytes.checked_add(counted)?;
                 activity.file_revisions = activity.file_revisions.checked_add(1)?;
             }
         }
@@ -587,30 +605,54 @@ mod tests {
 
     use super::*;
 
+    fn activity(
+        content_bytes: u64,
+        file_revisions: u64,
+        mutations: u64,
+    ) -> Option<crate::manifest::ManifestActivity> {
+        let counter =
+            |value| crate::manifest::ActivityCounter::parse(value).expect("activity counter");
+        Some(crate::manifest::ManifestActivity {
+            content_bytes: counter(content_bytes),
+            file_revisions: counter(file_revisions),
+            mutations: counter(mutations),
+        })
+    }
+
     #[test]
     fn committed_activity_counts_full_revisions_and_semantic_groups() {
-        let mut deltas: Vec<_> = inline_wal_object(&[5, 5, 0])
+        let payload = inline_wal_object(&[5, 5, 0]);
+        let mut record = payload.records[0].clone();
+        record.inline_content.clear();
+        record.deltas = payload
             .records
             .into_iter()
             .flat_map(|record| record.deltas)
             .collect();
         // Several deltas in one group count once, and indices can have gaps.
-        deltas[0].semantic_operation_index = 2;
-        deltas[1].semantic_operation_index = 2;
-        deltas[2].semantic_operation_index = 9;
-        assert_eq!(
-            committed_activity(&deltas),
-            Some(crate::manifest::ManifestActivity {
-                content_bytes: crate::manifest::ActivityCounter::parse(10).expect("activity"),
-                file_revisions: crate::manifest::ActivityCounter::parse(3).expect("activity"),
-                mutations: crate::manifest::ActivityCounter::parse(2).expect("activity"),
-            })
-        );
-        assert_eq!(committed_activity(&[]), Some(Default::default()));
-        if let WalDelta::AppendFileRevision { content_ref, .. } = &mut deltas[0].delta {
+        record.deltas[0].semantic_operation_index = 2;
+        record.deltas[1].semantic_operation_index = 2;
+        record.deltas[2].semantic_operation_index = 9;
+        assert_eq!(committed_activity(&record), activity(10, 3, 2));
+        let mut empty = record.clone();
+        empty.deltas.clear();
+        assert_eq!(committed_activity(&empty), Some(Default::default()));
+        if let WalDelta::AppendFileRevision { content_ref, .. } = &mut record.deltas[0].delta {
             content_ref.size_bytes = crate::MAX_PUBLIC_INTEGER;
         }
-        assert_eq!(committed_activity(&deltas), None);
+        assert_eq!(committed_activity(&record), None);
+    }
+
+    #[test]
+    fn committed_activity_counts_appended_bytes_once() {
+        let mut record = appended_wal_object().records.remove(0);
+        assert_eq!(committed_activity(&record), activity(5, 1, 1));
+        let repeated = record.deltas[0].clone();
+        record.deltas.push(WalCommitDelta {
+            semantic_operation_index: 1,
+            ..repeated
+        });
+        assert_eq!(committed_activity(&record), activity(13, 2, 2));
     }
 
     fn inline_wal_object(lengths: &[usize]) -> WalObjectPayload {

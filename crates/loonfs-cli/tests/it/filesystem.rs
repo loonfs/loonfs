@@ -447,6 +447,70 @@ fn put_expected_revision_replaces_only_the_observed_revision() {
 }
 
 #[test]
+fn append_adds_a_local_file_or_standard_input_to_the_end_of_a_file() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("line.txt");
+    let payload_path = payload.to_str().expect("utf-8 path");
+    fs::write(&payload, b"first\n").expect("write payload");
+    assert_success(&harness.run(&["put", payload_path, "/log.txt"]));
+    fs::write(&payload, b"second\n").expect("write payload");
+    let appended = harness.run(&["append", payload_path, "/log.txt"]);
+    assert_success(&appended);
+    assert!(
+        stdout_string(&appended).starts_with("appended to "),
+        "{}",
+        stdout_string(&appended)
+    );
+    assert_success(&harness.run_with_stdin(&["--json", "append", "-", "/log.txt"], b"third\n"));
+
+    let stat = harness.run(&["--json", "stat", "/log.txt"]);
+    assert_success(&stat);
+    assert_eq!(json_data(&stat)["revision_no"], 3);
+    let inode_id = json_data(&stat)["inode_id"]
+        .as_str()
+        .expect("inode id")
+        .to_owned();
+    let guarded = |revision: &str, line: &[u8]| {
+        harness.run_with_stdin(
+            &[
+                "--json",
+                "append",
+                "-",
+                "/log.txt",
+                "--expected-inode-id",
+                &inode_id,
+                "--expected-revision",
+                revision,
+            ],
+            line,
+        )
+    };
+    let stale = guarded("2", b"late\n");
+    assert_failure(&stale);
+    assert_eq!(json_error(&stale)["code"], "stale_revision");
+    assert_success(&guarded("3", b"fourth\n"));
+
+    for (path, bytes, code) in [
+        ("/missing.txt", b"line\n".to_vec(), "path_not_found"),
+        (
+            "/log.txt",
+            vec![b'x'; loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES + 1],
+            "content_too_large",
+        ),
+    ] {
+        let refused = harness.run_with_stdin(&["--json", "append", "-", path], &bytes);
+        assert_failure(&refused);
+        assert_eq!(json_error(&refused)["code"], code);
+    }
+    let cat = harness.run(&["cat", "/log.txt"]);
+    assert_success(&cat);
+    assert_eq!(cat.stdout, b"first\nsecond\nthird\nfourth\n");
+}
+
+#[test]
 fn concurrent_embedded_puts_land_or_report_the_fence() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

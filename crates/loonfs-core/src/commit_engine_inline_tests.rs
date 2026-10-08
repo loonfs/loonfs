@@ -1,4 +1,4 @@
-//! Inline publication, retry identity, admission, and fold contracts.
+//! Inline publication, retry identity, admission, fold, and append contracts.
 
 #[path = "commit_engine_inline_retention_tests.rs"]
 mod retention;
@@ -528,3 +528,6 @@ mod gc_tests;
 
 #[path = "commit_engine_inline_retry_gc_tests.rs"]
 mod retry_gc_tests;
+
+#[path = "commit_engine_inline_append_tests.rs"]
+mod append_tests;

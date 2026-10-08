@@ -4,10 +4,21 @@ use super::CommitFingerprint;
 use crate::storage::inline_content::InlineContent;
 
 use loonfs_types::format::manifest::DeltaPosition;
-use loonfs_types::format::wal::WalCommitDelta;
+use loonfs_types::format::wal::{WalCommitDelta, WalInlineContent};
 use loonfs_types::{
-    ActorId, ChangeSeq, CommitId, DisplayName, InodeId, NameKey, NamespaceId, WriterEpoch,
+    ActorId, ChangeSeq, Checksum, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId,
+    Sha256State, WriterEpoch,
 };
+
+/// The bytes one append adds, the reference its revision names, and what
+/// the commit records about that reference's bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppendedContent {
+    pub(crate) content_ref: ContentRef,
+    pub(crate) hash_state: Option<Sha256State>,
+    pub(crate) crc64nvme: Option<Checksum>,
+    pub(crate) piece: WalInlineContent,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitPlan {
@@ -20,6 +31,7 @@ pub(crate) struct CommitPlan {
     pub apply_after_seq: ChangeSeq,
     pub assigned_seq: ChangeSeq,
     pub(crate) deltas: Vec<WalCommitDelta>,
+    pub(crate) appended: Vec<AppendedContent>,
     pub resulting_next_inode_id: InodeId,
 }
 
@@ -40,6 +52,7 @@ pub(crate) struct ValidatedCommitPlan {
     pub(crate) apply_after_seq: ChangeSeq,
     pub(crate) assigned_seq: ChangeSeq,
     pub(crate) deltas: Vec<WalCommitDelta>,
+    pub(crate) appended: Vec<AppendedContent>,
 }
 
 impl ValidatedCommitPlan {
@@ -56,6 +69,7 @@ impl ValidatedCommitPlan {
             apply_after_seq,
             assigned_seq,
             deltas,
+            appended,
         } = self;
         CommitPlan {
             namespace_id,
@@ -67,6 +81,7 @@ impl ValidatedCommitPlan {
             apply_after_seq,
             assigned_seq,
             deltas,
+            appended,
             resulting_next_inode_id,
         }
     }

@@ -243,10 +243,49 @@ impl CommitCandidate {
             })
     }
 
+    /// Bytes this candidate carries in its WAL record: its inline values and
+    /// the bytes its appends add.
     pub fn inline_content_bytes(&self) -> usize {
-        self.inline_content.iter().fold(0usize, |total, value| {
-            total.saturating_add(value.bytes().len())
-        })
+        self.inline_content
+            .iter()
+            .fold(self.appended_bytes(), |total, value| {
+                total.saturating_add(value.bytes().len())
+            })
+    }
+
+    /// Bytes the request's appends add. They always travel in the WAL.
+    pub fn appended_bytes(&self) -> usize {
+        self.request
+            .operations
+            .iter()
+            .filter_map(FilesystemOperation::appended_content)
+            .fold(0usize, |total, bytes| total.saturating_add(bytes.len()))
+    }
+
+    /// Rejects an append of no bytes or of more than one WAL piece holds,
+    /// naming the operation.
+    pub fn validate_appended_content(&self) -> Result<()> {
+        for (index, operation) in self.request.operations.iter().enumerate() {
+            let Some(bytes) = operation.appended_content() else {
+                continue;
+            };
+            let error = if bytes.is_empty() {
+                CoreError::InvalidCommitField {
+                    field: "inline_content",
+                    message: "an append carries at least 1 byte".to_owned(),
+                    precondition_index: None,
+                }
+            } else if bytes.len() > MAX_WAL_INLINE_CONTENT_BYTES {
+                CoreError::AppendTooLarge {
+                    size_bytes: bytes.len(),
+                    max_bytes: MAX_WAL_INLINE_CONTENT_BYTES,
+                }
+            } else {
+                continue;
+            };
+            return Err(error.at_operation(index));
+        }
+        Ok(())
     }
 
     pub(crate) fn request(&self) -> &CommitRequest {
@@ -427,6 +466,7 @@ impl CommitCandidate {
                 )));
             }
         }
+        self.validate_appended_content()?;
         for value in &self.inline_content {
             let size_bytes = value.bytes().len();
             if size_bytes > MAX_WAL_INLINE_CONTENT_BYTES {

@@ -273,7 +273,7 @@ The full registry (`ErrorCode` in `loonfs-types`):
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
 | `forbidden` | 403 | The subject lacks authority the operation needs: some but not all required rights on a checked inode, the authority a move or access update requires, administrator rights on an administrator-only surface, or the namespace's principal scope. A checked inode on which the subject holds no right answers `path_not_found` or `inode_not_found` instead ([authorization](#authorization-in-acl-namespaces)). |
-| `content_too_large` | 413 | A request or proxied response exceeds its size limit. Every JSON request body must fit within 2 MiB, except on the upload operations, which have their own limits. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.complete.max_request_body_bytes`. For large reads, request a download grant when `filesystem.downloads.direct_get` is available. |
+| `content_too_large` | 413 | A request or proxied response exceeds its size limit. Every JSON request body must fit within 2 MiB, except on the upload operations, which have their own limits. One append carries at most 256 KiB. Send smaller proxied uploads or use `direct_put` when available. Multipart completions must fit within `upload.complete.max_request_body_bytes`. For large reads, request a download grant when `filesystem.downloads.direct_get` is available. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it does not exist. |
@@ -2245,6 +2245,76 @@ meet the configured WAL limits. All operations still commit together. Retry
 the same request with the same inline bytes and commit ID, even if those bytes
 were stored separately. The retry rules in section 5.2 apply.
 
+**Appends.** `append_file` and `append_file_by_inode` add bytes to the end
+of an existing file as its next revision:
+
+| Operation | Other fields (`?` means optional) |
+| --- | --- |
+| `append_file` | `path`, `inline_content`, `expected_inode_id?`, `expected_revision_no?` |
+| `append_file_by_inode` | `inode_id`, `inline_content`, `expected_revision_no?` |
+
+For example, this request adds `second line\n` to `/logs/app.log`:
+
+`Loonfs-Actor: usr_8f3c`
+
+```json
+{
+  "commit_id": "c_3e1f0a9b8c7d4e2f9a1b0c8d7e6f5a43",
+  "operations": [
+    {
+      "kind": "append_file",
+      "path": "/logs/app.log",
+      "inline_content": "c2Vjb25kIGxpbmUK"
+    }
+  ]
+}
+```
+
+`inline_content` holds the bytes to add as standard padded base64, from 1 byte
+to 256 KiB (262,144 bytes) before encoding. The commit carries them in its WAL
+object, so an append needs no upload and no content token, and it does not
+depend on `filesystem.commits.inline_content`. An empty value returns
+`invalid_request` with `param` naming it. A larger value returns
+`content_too_large`.
+
+The target must be a visible file. A directory returns `path_conflict`, and a
+missing path returns `path_not_found`, or `inode_not_found` by inode. An append
+never creates a file. `expected_inode_id` and `expected_revision_no` behave as
+they do on a replacing `put_file`: an inode mismatch returns `path_conflict`, a
+revision mismatch returns `stale_revision`, and on a path the revision
+precondition requires the inode precondition. By inode, `expected_revision_no`
+stands alone.
+
+Without a precondition, appends apply in commit order, each to the result of
+the one before, so concurrent appends lose no bytes. Within one commit, appends
+to one file apply in operation order, and an append after a `put_file` of the
+same file adds to the bytes that put writes.
+
+The new revision has an ordinary content reference whose size and checksum
+cover the whole file. Which content object it names depends on the current
+revision's reference, with owner `O`, content ID `C`, and size `S`:
+
+- When this namespace owns `C` and no revision names more than `S` bytes of
+  `C`, the new reference keeps `C`. The appended bytes extend that object from
+  offset `S`.
+- Otherwise the new reference names a new content ID owned by this namespace,
+  whose first `S` bytes are those of `C`. This happens when another revision
+  already extended `C`, for example after a restore of an older revision or an
+  append to a copy of the file, and in a fork whose file still names the
+  source's content. An append to an empty file also starts a new content ID.
+
+Earlier revisions keep their references and still read their own bytes. The
+checksum continues from what the commit that first published `S` bytes of `C`
+recorded: its SHA-256 state, which gives a SHA-256 reference, or else its
+CRC-64/NVME, which gives a CRC-64/NVME reference. Content that recorded neither,
+which only a direct upload on a provider without CRC-64/NVME produces, answers
+`not_supported` with a message that names the file and no `feature`, because
+the cause is the file's content, not the deployment. Write the whole file with
+`put_file` instead.
+
+A retry under the same commit ID with the same bytes replays the original
+commit. Different bytes return `commit_id_reuse_conflict`.
+
 Move and copy accept the same `behavior` choice as put: `no_replace` (the
 default) fails when the destination is occupied, and `replace` replaces a
 file destination. A replacing move deletes the destination file and rebinds
@@ -2270,7 +2340,7 @@ still match. A replacing move deletes the destination inode, including its
 attributes. Attribute-level concurrency uses
 `expected_attributes_revision_no` separately.
 
-Nine operations use inode IDs instead of paths. They let clients act on an entry they previously read even if its path has changed. An unknown or hidden inode returns `inode_not_found`.
+Ten operations use inode IDs instead of paths. They let clients act on an entry they previously read even if its path has changed. An unknown or hidden inode returns `inode_not_found`.
 
 `create_directory_by_inode` and `create_file_by_inode` create an entry under an existing parent directory. Both are create-only and return `path_conflict` when the name is already in use.
 
@@ -2533,7 +2603,7 @@ response is `forbidden` with the checked `inode_id` in the error details.
 | --- | --- |
 | create_directory, new put_file | `create` on the parent, or the deepest existing directory when allocating parents. |
 | create_directory_by_inode, create_file_by_inode | `create` on the parent. |
-| Replacing put_file, put_file_revision_by_inode | `write` on the existing file. |
+| Replacing put_file, put_file_revision_by_inode, append_file, append_file_by_inode | `write` on the existing file. |
 | put_file with no_replace at an occupied name | `create` on the parent before reporting the conflict. |
 | delete_path, delete_by_inode | `remove` on the source parent. |
 | move_path, move_by_inode | `remove` on the source parent and `create` on the destination parent; replacing an occupant also requires `remove` on the destination parent. |

@@ -46,8 +46,9 @@ pub(crate) enum CommitOp {
         /// Revision the caller observed; the operation conflicts if it is no
         /// longer current.
         base_revision_no: RevisionNo,
-        /// Immutable replacement bytes, which must have valid preparation
-        /// proof before publication.
+        /// Immutable replacement bytes: prepared content, which must have
+        /// valid preparation proof before publication, or the reference an
+        /// append builds from the bytes this commit carries.
         content_ref: ContentRef,
     },
     /// Restore a prior revision as a new current revision.

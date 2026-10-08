@@ -75,6 +75,7 @@ impl PublicationAdmission {
     }
 
     pub(super) fn validate_candidate(candidate: &PreparedCandidate) -> Result<(), CoreError> {
+        candidate.candidate.validate_appended_content()?;
         let document_bytes = candidate
             .wal_record_bytes_upper_bound
             .saturating_add(WAL_OBJECT_OVERHEAD_BYTES);

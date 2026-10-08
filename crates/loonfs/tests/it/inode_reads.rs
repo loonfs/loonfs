@@ -2,9 +2,9 @@
 
 use crate::common::{open_runtime_async, store, TestRuntime};
 use loonfs::{
-    CommitId, CommitOptions, DeleteByInodeOptions, DeleteDirectoryBehavior, DisplayName,
-    EntryInodeKind, ErrorCode, InodeId, LoonFs, Namespace, PageRequest, PaginationPolicy,
-    PutFileOptions, ReadFileStreamOptions, RevisionNo, Writable,
+    AppendFileByInodeOptions, CommitId, CommitOptions, DeleteByInodeOptions,
+    DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, InodeId, LoonFs, Namespace,
+    PageRequest, PaginationPolicy, PutFileOptions, ReadFileStreamOptions, RevisionNo, Writable,
 };
 use loonfs_test_support::ids::namespace_id;
 use std::num::NonZeroU64;
@@ -441,6 +441,46 @@ async fn put_file_by_inode_follows_a_move_and_requires_the_current_revision() {
         .await
         .expect_err("a stale revision is refused");
     assert_eq!(error.code(), ErrorCode::StaleRevision);
+}
+
+#[tokio::test]
+async fn append_file_by_inode_follows_a_move_and_checks_a_stated_revision() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (_fs, namespace) = writable_namespace(temp_dir.path(), "inode-append-file-test").await;
+    let actor = loonfs_test_support::test_actor();
+    namespace
+        .put_file("/draft.txt", b"one", &actor)
+        .await
+        .expect("put first revision");
+    let inode_id = namespace
+        .stat("/draft.txt")
+        .await
+        .expect("stat file")
+        .inode_id;
+    namespace
+        .move_path("/draft.txt", "/final.txt", &actor)
+        .await
+        .expect("rename file");
+
+    namespace
+        .append_file_by_inode(inode_id, b" two", &actor)
+        .await
+        .expect("append by inode");
+    let stale = AppendFileByInodeOptions {
+        expected_revision_no: Some(RevisionNo(1)),
+        ..AppendFileByInodeOptions::default()
+    };
+    let error = namespace
+        .append_file_by_inode_with_options(inode_id, b" three", &actor, &stale)
+        .await
+        .expect_err("a stale revision is refused");
+    assert_eq!(error.code(), ErrorCode::StaleRevision);
+    let current = namespace
+        .read_file("/final.txt")
+        .await
+        .expect("read renamed file");
+    assert_eq!(current.bytes, b"one two");
+    assert_eq!(current.entry.revision_no(), Some(RevisionNo(2)));
 }
 
 #[tokio::test]

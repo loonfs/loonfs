@@ -64,7 +64,7 @@ impl ProjectedWalTail {
         namespace_id: &NamespaceId,
         record: &WalCommitPayload,
     ) -> Result<(), WalObjectError> {
-        let activity = committed_activity(&record.deltas)
+        let activity = committed_activity(record)
             .and_then(|activity| self.activity.checked_add(activity))
             .ok_or(WalObjectError::ActivityOverflow)?;
         for entry in &record.inline_content {

@@ -269,7 +269,7 @@ Readers validate the referenced identity, sequence, and checksum. A missing or c
 
 This section summarizes how commits, writer takeover, folds, discovery, and collection fit together. Sections 4, 6, 7, and 11 give the complete rules.
 
-Each namespace has two chains of numbered objects: manifests and WAL objects. Each chain starts at 1, and a publisher creates each object with put-if-absent at the previous number plus one. A manifest records the namespace's lifecycle, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that hold its rows through `head_seq`. A WAL object holds the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it; a fence holds no commits. The hint is mutable. It names a manifest number, manifest publications raise it by compare-and-swap, and it never decreases. Content objects hold file bytes and are written once. Pins are retained manifests (section 8).
+Each namespace has two chains of numbered objects: manifests and WAL objects. Each chain starts at 1, and a publisher creates each object with put-if-absent at the previous number plus one. A manifest records the namespace's lifecycle, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that hold its rows through `head_seq`. A WAL object holds the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it; a fence holds no commits. The hint is mutable. It names a manifest number, manifest publications raise it by compare-and-swap, and it never decreases. Content objects hold file bytes; an append extends one and never changes the bytes it already holds. Pins are retained manifests (section 8).
 
 A commit creates WAL `tip + 1` with put-if-absent. An acquired writer session plans the batch against the tip it discovered. The put is the commit boundary. A put that collides creates nothing; the writer discovers the new tip and plans again (section 6.3).
 
@@ -593,7 +593,7 @@ The materialized file set also stores each retained commit's record in the `comm
 
 While the receipt is retained, an equal fingerprint under the same `commit_id` identifies a replay of the original commit. A different fingerprint returns `commit_id_reuse_conflict`. A replay does not execute the mutation again or reevaluate its original preconditions against current state.
 
-Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`.
+Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`. The bytes an append adds are identified the same way.
 
 Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when a WAL publication budget passes without a put landing and the tip cannot be confirmed, or when its basis manifest gains a successor (section 6.3). A fold it published itself moves the projection's basis to the new manifest and keeps the commits published since, without a refresh. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
 
@@ -605,7 +605,9 @@ File revision history and commit idempotency have different retention rules. Kee
 
 ### 6.6 Operations and WAL deltas
 
-Standard requests operate on paths or inode IDs. They create directories, write files, move or copy items, delete and undelete items, restore file revisions, and update attributes. Their exact parameters are listed in Appendix B because those parameters also determine retry identity.
+Standard requests operate on paths or inode IDs. They create directories, write files, append to files, move or copy items, delete and undelete items, restore file revisions, and update attributes. Their exact parameters are listed in Appendix B because those parameters also determine retry identity.
+
+An append adds bytes to the end of a file as its next revision, and its commit carries those bytes as a piece (A.5). Let the current revision's reference have owner `O`, content ID `C`, and size `S`. When `O` is the committing namespace, `S` is greater than zero, and the first content-publication row of `C` (A.6) is `S` bytes long, the piece extends `C` at offset `S` and the new reference names `C`. Otherwise the piece starts a new content ID at offset `S` and names `(O, C)` as its base, or is a whole value when `S` is zero. A writer therefore never adds bytes after a prefix that another reference already extended. The new reference's checksum continues from the first content-publication row of `(C, S)`: its `hash_state` gives a SHA-256, or else its `crc64nvme` gives a CRC-64/NVME. A row with neither cannot be continued, and the append fails without writing. Within one commit, the rows of earlier operations count, so appends chain in operation order.
 
 The default destination behavior for puts, moves, and copies is `no_replace`. Deletes default to `non_recursive`, directory creation defaults to `parents: false`, and attribute `set` and `remove` collections default to empty. Optional preconditions have no implied value.
 
@@ -692,7 +694,7 @@ Each manifest stores three cumulative activity counters in a required `activity`
 
 | Counter | What counts |
 | --- | --- |
-| `content_bytes` | Full content length of every committed file revision, including overwrites and revisions that reuse stored content. |
+| `content_bytes` | Full content length of every committed file revision, including overwrites and revisions that reuse stored content. A revision whose bytes its commit's pieces add counts only those bytes, once, so an append counts the bytes it appends. |
 | `file_revisions` | Every committed file-revision append, including an empty revision. |
 | `mutations` | Each semantic operation group in a committed WAL record, identified by `semantic_operation_index`. |
 
@@ -1543,6 +1545,8 @@ Every operation begins with `kind`, followed by the fields in the order below. E
 | `put_file` | `path`, `behavior`, `content_ref`, `expected_inode_id`, `expected_revision_no` |
 | `create_file_by_inode` | `parent_inode_id`, `display_name`, `content_ref` |
 | `put_file_revision_by_inode` | `inode_id`, `content_ref`, `expected_revision_no` |
+| `append_file` | `path`, `inline_content`, `expected_inode_id`, `expected_revision_no` |
+| `append_file_by_inode` | `inode_id`, `inline_content`, `expected_revision_no` |
 | `move_by_inode` | `inode_id`, `expected_binding_version`, `destination_parent_inode_id`, `destination_display_name`, `behavior`, `expected_destination_inode_id`, `expected_destination_revision_no` |
 | `delete_by_inode` | `inode_id`, `expected_binding_version`, `behavior` |
 | `delete_path` | `path`, `behavior`, `expected_inode_id` |
@@ -1580,6 +1584,14 @@ Content that a commit carries inline has no object to name, so it is identified 
 ```
 
 `sha256` is the lowercase hexadecimal SHA-256 of the complete content, and the fields appear in the order shown. A reference that accompanies inline content carries a SHA-256 checksum, which the writer computes from the bytes. The content ID and owner are excluded. The form follows how the request supplied the content, not where the bytes are stored: content supplied inline keeps this form if the writer stages it instead, and staged or uploaded content always keeps the reference form. The same bytes sent once inline and once as an uploaded object produce different fingerprints.
+
+The bytes an append adds have no reference until the writer plans the commit, so the `inline_content` member of `append_file` and `append_file_by_inode` uses a third form:
+
+```json
+{"kind":"append_v1","sha256":"<64 lowercase hex>","size_bytes":6}
+```
+
+`sha256` is the lowercase hexadecimal SHA-256 of the appended bytes alone, and `size_bytes` is their length.
 
 ### B.3 Preconditions
 

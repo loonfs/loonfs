@@ -10,13 +10,22 @@ use loonfs_core::metadata::{
     MetadataState as CoreMetadataState, ResolvedVisiblePath,
     TombstoneRowAction as CoreTombstoneAction, VisiblePathError,
 };
+use loonfs_core::publish::{
+    CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
+};
+use loonfs_core::time::Deadline;
 use loonfs_model::metadata::{
     DirentryBindingRecord as ModelBindingRecord, DirentryBindingState as ModelBindingState,
     InodeRecord as ModelInodeRecord, MetadataState as ModelMetadataState,
     SubtreeTombstoneAction as ModelTombstoneAction,
 };
 use loonfs_model::visibility::PathLookup;
+use loonfs_objectstore::keys::wal_prefix;
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::timing::StdMonotonicTimer;
+use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, MetadataRow};
+use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
@@ -24,6 +33,7 @@ use loonfs_types::{
     InodeId, InodeKind, NameKey, NamespaceNaming, RevisionNo, ROOT_INODE_ID,
 };
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use NamespaceNaming::{CaseInsensitive, CaseSensitive};
 
 type NormalizedInode = (u64, &'static str, u64, CommitId, ActorId, u64);
@@ -1067,6 +1077,117 @@ fn appends_publish_one_row_per_reference_with_the_longest_first() {
             ],
         ],
     );
+}
+
+/// Plans appends through the commit engine and replays the deltas it
+/// published: one commit that puts and appends twice, a restore, an append
+/// that starts a new chain from the restored revision, a copy appended to
+/// in its own commit, and an append to the original after the copy's
+/// append took its chain.
+#[tokio::test]
+async fn planned_appends_match_the_model() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = loonfs_types::NamespaceId::parse("appends").expect("namespace");
+    let context = crate::common::mutation_context("differential", 1_000);
+    crate::common::commit_split_support::bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("namespace");
+    let path = |path: &str| AbsolutePath::parse(path).expect("path");
+    let append = |target: &str, bytes: &[u8]| FilesystemOperation::AppendFile {
+        path: path(target),
+        inline_content: bytes.to_vec(),
+        expected_inode_id: None,
+        expected_revision_no: None,
+    };
+    let value = InlineContent::new(
+        namespace_id.clone(),
+        ContentId::generate(),
+        bytes::Bytes::from_static(b"one"),
+    );
+    let requests = [
+        vec![
+            FilesystemOperation::PutFile {
+                path: path("/log"),
+                content_ref: Some(value.content_ref().clone()),
+                inline_content: None,
+                behavior: loonfs_types::DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+            append("/log", b"two"),
+            append("/log", b"three"),
+        ],
+        vec![FilesystemOperation::RestoreRevision {
+            path: path("/log"),
+            source_revision_no: RevisionNo(1),
+        }],
+        vec![append("/log", b"four")],
+        vec![FilesystemOperation::CopyPath {
+            source_path: path("/log"),
+            destination_path: path("/copy"),
+            precondition: loonfs_types::DestinationPrecondition::default(),
+        }],
+        vec![append("/copy", b"five")],
+        vec![append("/log", b"six")],
+    ];
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    for (index, operations) in requests.into_iter().enumerate() {
+        let request = CommitRequest {
+            commit_id: CommitId::generate(),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            preconditions: Vec::new(),
+            operations,
+        };
+        let inline_content = if index == 0 {
+            vec![value.clone()]
+        } else {
+            Vec::new()
+        };
+        engine
+            .publish_batch(
+                &store,
+                [CommitCandidate::with_inline_content(
+                    request,
+                    Vec::new(),
+                    inline_content,
+                )],
+                &context,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
+            .await
+            .results
+            .pop()
+            .expect("one result")
+            .expect("commit");
+    }
+
+    let mut commits = Vec::new();
+    for key in store
+        .list_prefix(&wal_prefix(&namespace_id))
+        .await
+        .expect("list WAL")
+    {
+        let bytes = store.get(&key, None).await.expect("get").expect("WAL");
+        let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
+        commits.extend(wal.payload().records.iter().map(|record| {
+            record
+                .deltas
+                .iter()
+                .map(|delta| delta.delta.clone())
+                .collect::<Vec<_>>()
+        }));
+    }
+    assert_eq!(commits.len(), 6);
+    let model = assert_core_matches_model(CaseInsensitive, &["/log", "/copy"], &commits);
+    let chains: BTreeSet<_> = model
+        .content_publications
+        .iter()
+        .map(|row| &row.content_id)
+        .collect();
+    assert_eq!(chains.len(), 3);
 }
 
 fn core_bootstrap_state() -> CoreMetadataState {

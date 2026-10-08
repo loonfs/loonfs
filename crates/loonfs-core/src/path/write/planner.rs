@@ -3,6 +3,7 @@
 
 use super::intent::{CommitRequest, FilesystemOperation};
 use super::plan_access::{plan_update_access, plan_update_access_by_inode};
+use super::plan_append::{plan_append_file, plan_append_file_by_inode};
 use super::plan_attributes::{plan_update_attributes, plan_update_attributes_by_inode};
 use super::plan_by_inode::{
     plan_create_by_inode, plan_delete_by_inode, plan_move_by_inode,
@@ -17,8 +18,8 @@ use super::plan_transfer::{plan_copy_by_inode, plan_copy_file_path, plan_move_pa
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
 use crate::authorize::Authorizer;
 use crate::commit::{
-    validate_ops, CandidateAllocation, CommitFingerprint, CommitNumbering, PublishValidationView,
-    ValidatedCommitPlan,
+    validate_ops, AppendedContent, CandidateAllocation, CommitFingerprint, CommitNumbering,
+    PublishValidationView, ValidatedCommitPlan,
 };
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
@@ -94,6 +95,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
     let mut numbering = CommitNumbering::default();
     let mut deltas = Vec::new();
+    let mut appended: Vec<AppendedContent> = Vec::new();
     for (index, operation) in request.operations.iter().enumerate() {
         let unit = {
             let resolution_view = resolved.view();
@@ -107,15 +109,23 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                 .await
                 .map_err(|error| error.at_operation(index))?
         };
-        let unit_ops = unit.ops;
+        appended.extend(unit.appended);
         let unit_deltas = validate_ops(
-            &unit_ops,
+            &unit.ops,
             &mut resolved,
             &mut numbering,
             &request.commit_id,
             &request.actor_id,
             committed_at_ms,
-            |content_ref| candidate.content_digests(content_ref),
+            |content_ref| {
+                appended
+                    .iter()
+                    .find(|value| value.content_ref == *content_ref)
+                    .map_or_else(
+                        || candidate.content_digests(content_ref),
+                        |value| (value.hash_state.clone(), value.crc64nvme.clone()),
+                    )
+            },
         )
         .await
         .map_err(|error| error.at_operation(index))?;
@@ -132,6 +142,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         apply_after_seq: head.seq,
         assigned_seq: committed_seq,
         deltas,
+        appended,
     })
 }
 
@@ -208,6 +219,28 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 view,
             )
             .await
+        }
+        FilesystemOperation::AppendFile {
+            path,
+            inline_content,
+            expected_inode_id,
+            expected_revision_no,
+        } => {
+            plan_append_file(
+                path,
+                inline_content,
+                *expected_inode_id,
+                *expected_revision_no,
+                view,
+            )
+            .await
+        }
+        FilesystemOperation::AppendFileByInode {
+            inode_id,
+            inline_content,
+            expected_revision_no,
+        } => {
+            plan_append_file_by_inode(*inode_id, inline_content, *expected_revision_no, view).await
         }
         FilesystemOperation::DeletePath {
             path,

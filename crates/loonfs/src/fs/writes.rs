@@ -7,9 +7,10 @@ use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::Result;
 use crate::{
-    AccessState, ActorId, AttributeChanges, ChangeSeq, Commit, CommitId, CommitOptions, ContentRef,
-    CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, NamespaceId,
-    PutFileOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions,
+    AccessState, ActorId, AppendFileOptions, AttributeChanges, ChangeSeq, Commit, CommitId,
+    CommitOptions, ContentRef, CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId,
+    MoveOptions, NamespaceId, PutFileOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions,
+    UpdateAttributesOptions,
 };
 use crate::{LoonFs, Namespace, Writable};
 use futures::StreamExt;
@@ -533,6 +534,59 @@ impl Namespace<Writable> {
         self.core
             .load_namespace_catalog_cached(&self.namespace_id)
             .await
+    }
+
+    /// Adds bytes to the end of a file as its next revision.
+    pub async fn append_file(
+        &self,
+        absolute_path: &str,
+        bytes: &[u8],
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.append_file_with_options(absolute_path, bytes, actor, &AppendFileOptions::default())
+            .await
+    }
+
+    /// Adds bytes to the end of a file as its next revision.
+    ///
+    /// The path must name a visible file. The commit carries the bytes, from
+    /// 1 byte to 256 KiB. Without a guard, concurrent appends apply in commit
+    /// order, each to the result of the one before. A rerun with the same
+    /// bytes and commit ID replays.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.append_file",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "append_file",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
+    pub async fn append_file_with_options(
+        &self,
+        absolute_path: &str,
+        bytes: &[u8],
+        actor: &ActorId,
+        options: &AppendFileOptions,
+    ) -> Result<Commit> {
+        let span = tracing::Span::current();
+        self.core.record_trace_context(&span);
+        span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        self.commit_one(
+            actor,
+            &options.commit,
+            FilesystemOperation::AppendFile {
+                path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                inline_content: bytes.to_vec(),
+                expected_inode_id: options.expected_inode_id,
+                expected_revision_no: options.expected_revision_no,
+            },
+        )
+        .await
     }
 
     /// Creates a directory at an absolute path, failing when its parent is missing.
