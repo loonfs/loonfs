@@ -206,6 +206,7 @@ impl Namespace<Writable> {
     }
 
     // Namespace deletion lives in `fs/namespaces.rs`; mutation, commit, and
-    // upload operations in `fs/writes.rs` and `fs/uploads.rs`; snapshots in
-    // `fs/snapshots.rs`; and administrator recovery in `fs/maintenance.rs`.
+    // upload operations in `fs/writes.rs`, `fs/writes_by_inode.rs`, and
+    // `fs/uploads.rs`; snapshots in `fs/snapshots.rs`; and administrator
+    // recovery in `fs/maintenance.rs`.
 }
