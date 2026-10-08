@@ -10,7 +10,8 @@ use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition};
 use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
 use loonfs_types::{
     next_public_ordinal, AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo,
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+    ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, ContentRef, DisplayName, InodeId, InodeKind,
+    NameKey, RevisionNo, Sha256State,
 };
 
 #[derive(Debug, Default)]
@@ -46,12 +47,13 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     commit_id: &CommitId,
     actor: &ActorId,
     committed_at_ms: u64,
+    content_digests: impl Fn(&ContentRef) -> (Option<Sha256State>, Option<Checksum>),
 ) -> Result<Vec<WalCommitDelta>, CoreError> {
     let mut deltas = Vec::new();
 
     for op in ops {
         let op_index = numbering.reserve_op_index()?;
-        let operation_deltas = match op {
+        let mut operation_deltas = match op {
             CommitOp::CreateDirectory {
                 child_inode_id,
                 parent_inode_id,
@@ -187,6 +189,22 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 .await?
             }
         };
+        for delta in &mut operation_deltas {
+            if let WalDelta::AppendFileRevision {
+                content_ref,
+                hash_state,
+                crc64nvme,
+                ..
+            } = delta
+            {
+                let (state, crc) = content_digests(content_ref);
+                *hash_state = state;
+                *crc64nvme = crc.or_else(|| {
+                    (content_ref.checksum.algorithm == ChecksumAlgorithm::Crc64nvme)
+                        .then(|| content_ref.checksum.clone())
+                });
+            }
+        }
         view.apply_deltas_mut(commit_id, actor, committed_at_ms, &operation_deltas);
         deltas.extend(operation_deltas.into_iter().map(|delta| WalCommitDelta {
             semantic_operation_index: op_index,
@@ -274,6 +292,8 @@ async fn validate_create_file<S: ObjectStore + ?Sized>(
             inode_id: child_inode_id,
             revision_no: RevisionNo(1),
             content_ref: content_ref.clone(),
+            hash_state: None,
+            crc64nvme: None,
         },
     ])
 }
@@ -305,6 +325,8 @@ async fn validate_replace_file<S: ObjectStore + ?Sized>(
         inode_id,
         revision_no,
         content_ref: content_ref.clone(),
+        hash_state: None,
+        crc64nvme: None,
     }])
 }
 
@@ -337,6 +359,8 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
         inode_id,
         revision_no,
         content_ref: source_revision.content_ref,
+        hash_state: None,
+        crc64nvme: None,
     }])
 }
 

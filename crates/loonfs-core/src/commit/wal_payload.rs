@@ -17,7 +17,9 @@ pub(crate) fn wal_payload_from_prepared_commit(commit: &PreparedCommit) -> WalCo
             .iter()
             .map(|value| WalInlineContent {
                 content_id: value.content_ref().content_id.clone(),
+                offset: 0,
                 bytes: value.bytes().to_vec(),
+                base: None,
             })
             .collect(),
         deltas: prepared.deltas.clone(),

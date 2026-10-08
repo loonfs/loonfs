@@ -726,6 +726,12 @@
           "snapshot_id": {
             "$ref": "#/components/schemas/PinId",
             "description": "Read the file revision captured by this snapshot.\nCannot be combined with `revision_no`."
+          },
+          "start_offset": {
+            "description": "The first byte the grant reads. It names `[start_offset, size_bytes)`\nof the revision; a client that resumes asks for a new grant from the\nbytes it holds. Must be below the revision's size, except 0 for a\nrevision of zero bytes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -3528,7 +3534,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/downloads": {
       "post": {
-        "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
+        "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. The capability reads exactly `[start_offset, size_bytes)` of the object: it signs that `Range`, and `access.headers` carries it for the client to send unchanged. A client that resumes asks for a new grant from its offset. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
         "operationId": "create_download",
         "parameters": [
           {
@@ -3570,7 +3576,7 @@
                 }
               }
             },
-            "description": "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id"
+            "description": "Invalid path, revision, snapshot id, non-snapshot checkpoint, revision_no combined with snapshot_id, or start_offset at or past the file's size"
           },
           "401": {
             "content": {

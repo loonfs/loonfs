@@ -2,29 +2,32 @@
 
 use super::*;
 use crate::namespace::control::load_current_manifest;
-use crate::storage::content::content_object_key_for_ref;
+use crate::storage::content::{content_object_key_for_ref, CONTENT_READ_CHUNK_BYTES};
+use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
+use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError, OperationClass};
-use loonfs_types::ErrorCode;
+use loonfs_types::{Checksum, ContentRefKind, ErrorCode};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn family(operation: &RecordedOperation) -> Option<DurableObjectFamily> {
     parse_object_key(operation.key()).map(|key| key.family())
 }
 
+fn creates_content(operation: &RecordedOperation) -> bool {
+    matches!(
+        operation,
+        RecordedOperation::Put { .. } | RecordedOperation::PutImmutableStream { .. }
+    ) && family(operation) == Some(DurableObjectFamily::ContentBlob)
+}
+
 fn content_puts(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
     store
         .snapshot()
         .iter()
-        .filter_map(|operation| match operation {
-            RecordedOperation::Put { key, .. }
-                if family(operation) == Some(DurableObjectFamily::ContentBlob) =>
-            {
-                Some(key.clone())
-            }
-            _ => None,
-        })
+        .filter(|operation| creates_content(operation))
+        .map(|operation| operation.key().to_owned())
         .collect()
 }
 
@@ -290,10 +293,7 @@ pub(super) fn assert_content_before_metadata(store: &RecordingStore<LocalFsStore
     assert_eq!(
         operations[..first_metadata]
             .iter()
-            .filter(|operation| {
-                matches!(operation, RecordedOperation::Put { .. })
-                    && family(operation) == Some(DurableObjectFamily::ContentBlob)
-            })
+            .filter(|operation| creates_content(operation))
             .count(),
         count
     );
@@ -531,6 +531,87 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
     );
 }
 
+/// Publishes one inline value, then plants `existing` at its key before the
+/// fold, as a fold that got further would have left a longer object.
+async fn fold_over_longer_object(
+    existing: &'static [u8],
+) -> (
+    tempfile::TempDir,
+    std::sync::Arc<RecordingStore<LocalFsStore>>,
+    std::result::Result<(), CoreError>,
+    String,
+    loonfs_types::format::control::ManifestRef,
+    loonfs_types::NamespaceId,
+) {
+    let (directory, store, mut engine, context) = setup().await;
+    let value = inline(&engine.namespace_id, Bytes::from_static(b"right"));
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        candidate("longer", vec![value.clone()]),
+    )
+    .await
+    .expect("publish");
+    let input = engine.wal_fold_input().expect("tail");
+    let key = content_object_key_for_ref(value.content_ref()).expect("key");
+    store
+        .put(&key, Bytes::from_static(existing), PutMode::CreateIfAbsent)
+        .await
+        .expect("longer object");
+    store.reset();
+    let folded = fold_wal(&store, &engine.namespace_id).await.map(|_| ());
+    let manifest_before = input.basis.manifest().clone();
+    (
+        directory,
+        store,
+        folded,
+        key,
+        manifest_before,
+        engine.namespace_id.clone(),
+    )
+}
+
+#[tokio::test]
+async fn a_longer_object_with_the_pieces_in_place_is_another_folds_work() {
+    let (_directory, store, folded, key, before, namespace_id) =
+        fold_over_longer_object(b"right and longer").await;
+    folded.expect("the object holds the pieces, so the fold publishes");
+    assert_eq!(content_puts(&store), vec![key.clone()]);
+    assert_eq!(
+        store
+            .get(&key, None)
+            .await
+            .expect("get")
+            .expect("object")
+            .as_ref(),
+        b"right and longer",
+        "nothing rewrote the longer object"
+    );
+    let published = load_current_manifest(&store, &namespace_id)
+        .await
+        .expect("manifest");
+    assert_ne!(published.state.manifest(), before);
+}
+
+#[tokio::test]
+async fn a_longer_object_with_other_bytes_under_the_pieces_is_corruption() {
+    let (_directory, store, folded, key, before, namespace_id) =
+        fold_over_longer_object(b"wrong and longer").await;
+    let error = folded.expect_err("other bytes where the pieces belong");
+    assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+    assert_eq!(content_puts(&store), vec![key.clone()]);
+    assert_eq!(
+        load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("manifest")
+            .state
+            .manifest(),
+        before,
+        "the fold published nothing"
+    );
+}
+
 #[tokio::test]
 async fn a_materialization_transport_failure_remains_retryable() {
     let (_directory, store, mut engine, context) = setup().await;
@@ -623,9 +704,8 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
             .expect("WAL read")
             .expect("WAL object");
         let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("WAL decode");
-        expected.insert_inline_content(value.content_ref().clone(), value.bytes().clone());
         expected
-            .apply_commit(&wal_object.payload().records[0])
+            .apply_commit(&engine.namespace_id, &wal_object.payload().records[0])
             .expect("later rows");
     }
     let folded = fold_wal_tail(
@@ -667,4 +747,304 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         RecordedOperation::Get { key, .. } | RecordedOperation::GetWithMetadata { key, .. }
         if key.ends_with("hint.json") || key.starts_with(&wal_prefix(&engine.namespace_id))
     )));
+}
+
+#[tokio::test]
+async fn a_fold_extends_the_object_with_its_unfolded_pieces() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let appended = commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &original.content_id,
+        b"hello world",
+        5,
+        None,
+    )
+    .await;
+    let key = content_object_key_for_ref(&original).expect("content key");
+
+    store.reset();
+    fold_wal(&store, &namespace_id).await.expect("fold");
+    assert!(content_puts(&store).is_empty());
+    assert!(store.snapshot().contains(&RecordedOperation::Extend {
+        key: key.clone(),
+        bytes: 6,
+    }));
+    let held = store
+        .inner()
+        .head(&key)
+        .await
+        .expect("head")
+        .expect("object");
+    assert_eq!(held.size_bytes, 11);
+    assert_eq!(held.sha256, Some(appended.checksum));
+    assert_eq!(
+        read_file(&store, &namespace_id, RevisionNo(2)).await,
+        b"hello world"
+    );
+}
+
+#[tokio::test]
+async fn a_second_fold_finds_the_object_at_its_target_and_verifies_it() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &original.content_id,
+        b"hello world",
+        5,
+        None,
+    )
+    .await;
+    let anchor = crate::namespace::read_anchor::load_read_anchor(&*store, &namespace_id)
+        .await
+        .expect("anchor");
+    let tail = crate::namespace::read_anchor::project_anchor_tail(&*store, None, &anchor)
+        .await
+        .expect("tail");
+    assert_eq!(tail.contents().len(), 1);
+    let content = &tail.contents()[0];
+    fold_wal(&store, &namespace_id).await.expect("first fold");
+
+    store.reset();
+    let pieces = assemble_tail_content(content).expect("pieces");
+    write_tail_content(&*store, &tail, content, pieces.clone())
+        .await
+        .expect("a fold that lost the race finds the object extended");
+    assert_no_writes(&store);
+    assert_eq!(store.counts().heads, 1);
+
+    let key = content_object_key_for_ref(&original).expect("content key");
+    store
+        .put_overwrite(&key, Bytes::from_static(b"hello WORLD"))
+        .await
+        .expect("replace the object");
+    let error = write_tail_content(&*store, &tail, content, pieces)
+        .await
+        .expect_err("different bytes at the target length");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+}
+
+#[tokio::test]
+async fn a_chain_from_a_base_materializes_under_its_own_id() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let chained = commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &ContentId::generate(),
+        b"hello!!!",
+        5,
+        Some(ContentBase {
+            owner_namespace_id: namespace_id.clone(),
+            content_id: original.content_id.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        read_file(&store, &namespace_id, RevisionNo(2)).await,
+        b"hello!!!"
+    );
+
+    store.reset();
+    fold_wal(&store, &namespace_id).await.expect("fold");
+    let chain_key = content_object_key_for_ref(&chained).expect("chain key");
+    assert_eq!(content_puts(&store), std::slice::from_ref(&chain_key));
+    assert_eq!(
+        store
+            .inner()
+            .get(&chain_key, None)
+            .await
+            .expect("get")
+            .expect("chain object"),
+        b"hello!!!".as_slice()
+    );
+    let base_key = content_object_key_for_ref(&original).expect("base key");
+    let base = store
+        .inner()
+        .head(&base_key)
+        .await
+        .expect("head")
+        .expect("base");
+    assert_eq!(base.size_bytes, 5);
+    assert_eq!(
+        read_file(&store, &namespace_id, RevisionNo(2)).await,
+        b"hello!!!"
+    );
+}
+
+#[tokio::test]
+async fn a_chain_from_a_base_longer_than_a_chunk_streams_the_prefix_in_chunks() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, _) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let base_id = ContentId::generate();
+    let base_key = content_blob(&namespace_id, &base_id);
+    let prefix_bytes = CONTENT_READ_CHUNK_BYTES + 5;
+    let mut whole: Vec<u8> = (0..prefix_bytes).map(|index| (index % 251) as u8).collect();
+    store
+        .put(
+            &base_key,
+            Bytes::from(whole.clone()),
+            PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("base object");
+    whole.extend_from_slice(b"!!!");
+    let chained = commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &ContentId::generate(),
+        &whole,
+        prefix_bytes as usize,
+        Some(ContentBase {
+            owner_namespace_id: namespace_id.clone(),
+            content_id: base_id,
+        }),
+    )
+    .await;
+
+    store.reset();
+    fold_wal(&store, &namespace_id).await.expect("fold");
+    let chain_key = content_object_key_for_ref(&chained).expect("chain key");
+    assert_eq!(
+        store
+            .snapshot()
+            .into_iter()
+            .filter(creates_content)
+            .collect::<Vec<_>>(),
+        [RecordedOperation::PutImmutableStream {
+            key: chain_key.clone(),
+            sha256: Some(chained.checksum.clone()),
+            bytes: Some(whole.len() as u64),
+        }]
+    );
+    let base_gets: Vec<_> = store
+        .take_gets()
+        .into_iter()
+        .filter(|(key, _)| *key == base_key)
+        .collect();
+    assert_eq!(
+        base_gets,
+        [
+            (base_key.clone(), Some((0, CONTENT_READ_CHUNK_BYTES))),
+            (base_key, Some((CONTENT_READ_CHUNK_BYTES, prefix_bytes))),
+        ],
+        "the prefix is read one chunk at a time, never whole"
+    );
+    assert_eq!(
+        store
+            .inner()
+            .get(&chain_key, None)
+            .await
+            .expect("get")
+            .expect("chain object"),
+        whole
+    );
+}
+
+#[tokio::test]
+async fn a_chain_from_a_base_that_misses_its_reference_creates_nothing() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let chained = commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &ContentId::generate(),
+        b"HELLO!!!",
+        5,
+        Some(ContentBase {
+            owner_namespace_id: namespace_id.clone(),
+            content_id: original.content_id.clone(),
+        }),
+    )
+    .await;
+
+    store.reset();
+    let error = fold_wal(&store, &namespace_id)
+        .await
+        .expect_err("the base's bytes are not the reference's");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error:?}");
+    let chain_key = content_object_key_for_ref(&chained).expect("chain key");
+    assert_eq!(content_puts(&store), std::slice::from_ref(&chain_key));
+    assert_eq!(
+        store.inner().head(&chain_key).await.expect("head"),
+        None,
+        "the store created nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_crc_chain_from_a_base_creates_unattested_and_a_second_fold_reads_it_back() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let whole = b"hello!!!";
+    let content_id = ContentId::generate();
+    let chained = ContentRef {
+        kind: ContentRefKind::BlobV1,
+        owner_namespace_id: namespace_id.clone(),
+        content_id: content_id.clone(),
+        size_bytes: whole.len() as u64,
+        checksum: Checksum::crc64nvme(whole),
+    };
+    crate::test_support::ops::append_wal_commit(
+        &*store,
+        &namespace_id,
+        vec![WalDelta::AppendFileRevision {
+            delta_index: 0,
+            inode_id,
+            revision_no: RevisionNo(2),
+            content_ref: chained.clone(),
+            hash_state: None,
+            crc64nvme: Some(Checksum::crc64nvme(whole)),
+        }],
+        vec![WalInlineContent {
+            content_id,
+            offset: 5,
+            bytes: whole[5..].to_vec(),
+            base: Some(ContentBase {
+                owner_namespace_id: namespace_id.clone(),
+                content_id: original.content_id.clone(),
+            }),
+        }],
+    )
+    .await
+    .expect("commit piece");
+    let anchor = crate::namespace::read_anchor::load_read_anchor(&*store, &namespace_id)
+        .await
+        .expect("anchor");
+    let tail = crate::namespace::read_anchor::project_anchor_tail(&*store, None, &anchor)
+        .await
+        .expect("tail");
+    let content = &tail.contents()[0];
+
+    store.reset();
+    fold_wal(&store, &namespace_id).await.expect("first fold");
+    let chain_key = content_object_key_for_ref(&chained).expect("chain key");
+    assert!(store
+        .snapshot()
+        .contains(&RecordedOperation::PutImmutableStream {
+            key: chain_key,
+            sha256: None,
+            bytes: Some(whole.len() as u64),
+        }));
+
+    store.reset();
+    let pieces = assemble_tail_content(content).expect("pieces");
+    write_tail_content(&*store, &tail, content, pieces)
+        .await
+        .expect("a second fold accepts the object");
+    assert_no_writes(&store);
 }

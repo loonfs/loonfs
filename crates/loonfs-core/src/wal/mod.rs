@@ -16,6 +16,7 @@ pub(crate) use self::frame::ValidatedWalTail;
 use self::frame::WalTailLoadRequest;
 use self::frame::{PreparedWalObject, ReplayedWalTail, ValidatedWalObject};
 pub(crate) use self::frame::{WalObjectError, WalTailLoadError};
+pub(crate) use self::projected_tail::ProjectedContent;
 pub use self::projected_tail::ProjectedWalTail;
 pub(crate) use self::publish::publish_wal_object;
 pub(crate) use self::reader::{load_replayed_wal_tail, replay_discovered_tail, wal_object_exists};

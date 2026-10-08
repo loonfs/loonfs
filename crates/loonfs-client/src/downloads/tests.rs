@@ -86,6 +86,19 @@ async fn a_capability_failure_is_not_reported_as_no_direct_download() {
 }
 
 fn grant(content_ref: ContentRef, url: &str) -> CreateDownloadResponse {
+    grant_from(content_ref, url, 0)
+}
+
+/// A grant of `[start_offset, size_bytes)`, signing that range as a server
+/// does.
+fn grant_from(content_ref: ContentRef, url: &str, start_offset: u64) -> CreateDownloadResponse {
+    let headers = match content_ref.size_bytes {
+        0 => BTreeMap::new(),
+        size_bytes => BTreeMap::from([(
+            "range".to_owned(),
+            format!("bytes={start_offset}-{}", size_bytes - 1),
+        )]),
+    };
     CreateDownloadResponse {
         namespace_id: NamespaceId::parse("demo").expect("namespace id"),
         path: AbsolutePath::parse("/big.bin").expect("absolute path"),
@@ -94,7 +107,7 @@ fn grant(content_ref: ContentRef, url: &str) -> CreateDownloadResponse {
         access: ObjectTransferAccess::PresignedUrl {
             method: "GET".to_owned(),
             url: url.to_owned(),
-            headers: BTreeMap::new(),
+            headers,
             expires_at_ms: 0,
         },
     }
@@ -186,11 +199,9 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
         Outcome::Success(payload[held..].to_vec()),
     ]);
     let client = client_for(&transport);
+    let resumed = grant_from(content_ref, "http://example.invalid/object", held as u64);
     let mut download = client
-        .open_direct_download_at(
-            &grant(content_ref.clone(), "http://example.invalid/object"),
-            held as u64,
-        )
+        .open_direct_download(&resumed)
         .await
         .expect("resumed grant");
     download.fold_resumed_prefix(&payload[..held]);
@@ -198,10 +209,7 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
 
     // A prefix that is not the object's fails the whole download.
     let mut download = client
-        .open_direct_download_at(
-            &grant(content_ref, "http://example.invalid/object"),
-            held as u64,
-        )
+        .open_direct_download(&resumed)
         .await
         .expect("resumed grant");
     download.fold_resumed_prefix(&vec![0u8; held]);
@@ -244,7 +252,7 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
 }
 
 #[tokio::test]
-async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
+async fn a_resume_takes_a_new_grant_and_sends_the_headers_it_returns() {
     let payload = b"the first half and then the second half".to_vec();
     let held = 10;
     let content_ref = ContentRef::blob_v1(
@@ -252,17 +260,29 @@ async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
         ContentId::generate(),
         &payload,
     );
+    let issued = grant_from(content_ref, "http://example.invalid/object?signed", held);
 
-    let transport = scripted_transport::script([Outcome::Success(payload[held..].to_vec())]);
+    let transport = scripted_transport::script([
+        Outcome::Success(serde_json::to_vec(&issued).expect("encode grant")),
+        Outcome::Success(payload[held as usize..].to_vec()),
+    ]);
     let client = client_for(&transport);
-    let mut download = client
-        .open_direct_download_at(
-            &grant(content_ref, "http://example.invalid/object"),
-            held as u64,
+    let spec = NamespacePath::parse("demo", "/big.bin").expect("namespace path");
+    let resumed = client
+        .create_download_with_options(
+            &spec,
+            &DownloadOptions {
+                start_offset: held,
+                ..DownloadOptions::default()
+            },
         )
         .await
-        .expect("resumed grant");
-    download.fold_resumed_prefix(&payload[..held]);
+        .expect("a grant from the resume point");
+    let mut download = client
+        .open_direct_download(&resumed)
+        .await
+        .expect("open the new grant");
+    download.fold_resumed_prefix(&payload[..held as usize]);
     let mut received = Vec::new();
     while let Some(chunk) = download.next_chunk().await.expect("chunk") {
         received.extend_from_slice(&chunk);
@@ -270,20 +290,24 @@ async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
 
     assert_eq!(
         received,
-        payload[held..],
+        payload[held as usize..],
         "only the bytes past the resume point arrive"
     );
     let sent = transport.sent();
-    assert_eq!(sent.len(), 1);
+    assert_eq!(sent.len(), 2);
+    let request: serde_json::Value =
+        serde_json::from_slice(&sent[0].body).expect("grant request body");
+    assert_eq!(request["start_offset"], held, "{request}");
+    assert_eq!(sent[1].url, "http://example.invalid/object?signed");
     assert_eq!(
-        sent[0].header("range"),
-        Some("bytes=10-"),
-        "the rest is asked for by range: {sent:?}"
+        sent[1].header("range"),
+        Some("bytes=10-38"),
+        "the grant's signed range is sent as given: {sent:?}"
     );
 }
 
 #[tokio::test]
-async fn a_resumed_inode_download_asks_for_the_rest_and_verifies_the_whole_file() {
+async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
     let payload = b"the first half and then the second half".to_vec();
     let held = 10;
     let content_ref = ContentRef::blob_v1(
@@ -291,7 +315,7 @@ async fn a_resumed_inode_download_asks_for_the_rest_and_verifies_the_whole_file(
         ContentId::generate(),
         &payload,
     );
-    let path_grant = grant(content_ref, "http://example.invalid/object");
+    let path_grant = grant_from(content_ref, "http://example.invalid/object", held);
     let inode_grant = CreateDownloadByInodeResponse {
         namespace_id: path_grant.namespace_id,
         inode_id: loonfs_types::InodeId(1),
@@ -300,13 +324,28 @@ async fn a_resumed_inode_download_asks_for_the_rest_and_verifies_the_whole_file(
         access: path_grant.access,
     };
 
-    let transport = scripted_transport::script([Outcome::Success(payload[held..].to_vec())]);
+    let transport = scripted_transport::script([
+        Outcome::Success(serde_json::to_vec(&inode_grant).expect("encode grant")),
+        Outcome::Success(payload[held as usize..].to_vec()),
+    ]);
     let client = client_for(&transport);
-    let mut download = client
-        .open_direct_download_by_inode_at(&inode_grant, held as u64)
+    let resumed = client
+        .create_revision_download_by_inode_with_options(
+            &NamespaceId::parse("demo").expect("namespace id"),
+            loonfs_types::InodeId(1),
+            RevisionNo(1),
+            &DownloadOptions {
+                start_offset: held,
+                ..DownloadOptions::default()
+            },
+        )
         .await
-        .expect("resumed grant");
-    download.fold_resumed_prefix(&payload[..held]);
+        .expect("a grant from the resume point");
+    let mut download = client
+        .open_direct_download_by_inode(&resumed)
+        .await
+        .expect("open the new grant");
+    download.fold_resumed_prefix(&payload[..held as usize]);
     let mut received = Vec::new();
     while let Some(chunk) = download.next_chunk().await.expect("chunk") {
         received.extend_from_slice(&chunk);
@@ -314,15 +353,21 @@ async fn a_resumed_inode_download_asks_for_the_rest_and_verifies_the_whole_file(
 
     assert_eq!(
         received,
-        payload[held..],
+        payload[held as usize..],
         "only the bytes past the resume point arrive"
     );
     let sent = transport.sent();
-    assert_eq!(sent.len(), 1);
+    assert_eq!(sent.len(), 2);
+    assert!(
+        sent[0]
+            .url
+            .ends_with("/revisions/1/downloads?start_offset=10"),
+        "{sent:?}"
+    );
     assert_eq!(
-        sent[0].header("range"),
-        Some("bytes=10-"),
-        "the rest is asked for by range: {sent:?}"
+        sent[1].header("range"),
+        Some("bytes=10-38"),
+        "the grant's signed range is sent as given: {sent:?}"
     );
 }
 
@@ -344,14 +389,14 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     while whole.next_chunk().await.expect("chunk").is_some() {}
     assert_eq!(
         transport.sent()[0].header("range"),
-        None,
-        "a download of the whole object names no range"
+        Some("bytes=0-13"),
+        "a download names exactly the bytes of its reference"
     );
 
     let transport = scripted_transport::script([Outcome::Success(payload[4..].to_vec())]);
     let client = client_for(&transport);
     let mut resumed = client
-        .open_direct_download_at(&grant(content_ref, "http://example.invalid/object"), 4)
+        .open_direct_download(&grant_from(content_ref, "http://example.invalid/object", 4))
         .await
         .expect("resumed grant");
     let error = resumed

@@ -174,6 +174,30 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         .await
     }
 
+    /// [`Self::scan_range_page_for_lookup`] with each row's key, for a lookup
+    /// that pages by row key.
+    pub(crate) async fn scan_range_page_with_keys_for_lookup(
+        &self,
+        family: MetadataRowFamily,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+        limit: usize,
+        filter_probe: &str,
+    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.scan_range_page_rows(
+            family,
+            lower_bound,
+            upper_bound,
+            limit,
+            Some(filter_probe),
+            Readahead::Stored,
+        )
+        .await
+    }
+
     /// [`Self::scan_range_page`] for a point lookup within one filter key's
     /// range; see [`Self::scan_prefix_for_lookup`] for the probe contract.
     pub(crate) async fn scan_range_page_for_lookup(

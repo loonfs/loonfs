@@ -11,11 +11,11 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::inline_content::InlineContent;
 use base64::Engine as _;
 use loonfs_types::api::v0::ContentToken;
-use loonfs_types::{ContentId, ContentRef, NamespaceId, UploadId};
+use loonfs_types::{Checksum, ContentId, ContentRef, NamespaceId, Sha256State, UploadId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const TOKEN_VERSION: &str = "vct2";
+const TOKEN_VERSION: &str = "vct3";
 
 /// Evidence read from a durable upload session in its completed state.
 ///
@@ -25,13 +25,22 @@ const TOKEN_VERSION: &str = "vct2";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedUploadEvidence {
     content_ref: ContentRef,
+    hash_state: Option<Sha256State>,
+    crc64nvme: Option<Checksum>,
     completed_at_ms: u64,
 }
 
 impl CompletedUploadEvidence {
-    pub(crate) fn for_completed_session(content_ref: ContentRef, completed_at_ms: u64) -> Self {
+    pub(crate) fn for_completed_session(
+        content_ref: ContentRef,
+        hash_state: Option<Sha256State>,
+        crc64nvme: Option<Checksum>,
+        completed_at_ms: u64,
+    ) -> Self {
         Self {
             content_ref,
+            hash_state,
+            crc64nvme,
             completed_at_ms,
         }
     }
@@ -53,6 +62,8 @@ enum PreparedContentKind {
     Inline(InlineContent),
     Staged {
         content_ref: ContentRef,
+        hash_state: Option<Sha256State>,
+        crc64nvme: Option<Checksum>,
         expires_at_ms: u64,
         upload_id: Option<UploadId>,
     },
@@ -107,20 +118,40 @@ impl PreparedContent {
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_durable_content_write(content_ref: ContentRef) -> Self {
-        Self::for_completed_upload(content_ref, u64::MAX, None)
+        Self::for_completed_upload(content_ref, None, None, u64::MAX, None)
     }
 
     pub(crate) fn for_completed_upload(
         content_ref: ContentRef,
+        hash_state: Option<Sha256State>,
+        crc64nvme: Option<Checksum>,
         expires_at_ms: u64,
         upload_id: Option<UploadId>,
     ) -> Self {
         Self {
             kind: PreparedContentKind::Staged {
                 content_ref,
+                hash_state,
+                crc64nvme,
                 expires_at_ms,
                 upload_id,
             },
+        }
+    }
+
+    /// SHA-256 state after the content's bytes, when LoonFS had them.
+    pub fn hash_state(&self) -> Option<&Sha256State> {
+        match &self.kind {
+            PreparedContentKind::Inline(value) => Some(value.hash_state()),
+            PreparedContentKind::Staged { hash_state, .. } => hash_state.as_ref(),
+        }
+    }
+
+    /// CRC-64/NVME of the content's bytes, when LoonFS had them.
+    pub fn crc64nvme(&self) -> Option<&Checksum> {
+        match &self.kind {
+            PreparedContentKind::Inline(value) => Some(value.crc64nvme()),
+            PreparedContentKind::Staged { crc64nvme, .. } => crc64nvme.as_ref(),
         }
     }
 
@@ -166,6 +197,10 @@ impl PreparedContent {
 struct ContentTokenPayload {
     version: String,
     content_ref: ContentRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hash_state: Option<Sha256State>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    crc64nvme: Option<Checksum>,
     expires_at_ms: u64,
 }
 
@@ -210,6 +245,8 @@ pub fn mint_content_token(
     let payload = ContentTokenPayload {
         version: TOKEN_VERSION.to_owned(),
         content_ref: evidence.content_ref.clone(),
+        hash_state: evidence.hash_state.clone(),
+        crc64nvme: evidence.crc64nvme.clone(),
         expires_at_ms,
     };
     let payload_json = serde_json::to_vec(&payload)
@@ -266,6 +303,8 @@ pub fn verify_content_token(
 
     Ok(PreparedContent::for_completed_upload(
         payload.content_ref,
+        payload.hash_state,
+        payload.crc64nvme,
         payload.expires_at_ms,
         None,
     ))
@@ -305,20 +344,33 @@ mod tests {
     }
 
     fn evidence(content_ref: &ContentRef) -> CompletedUploadEvidence {
-        CompletedUploadEvidence::for_completed_session(content_ref.clone(), 1_000)
+        CompletedUploadEvidence::for_completed_session(content_ref.clone(), None, None, 1_000)
     }
 
     #[test]
     fn minted_content_token_passes_unchanged_into_embedded_verification() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
-        let content = ContentRef::blob_v1(namespace.clone(), ContentId::generate(), b"hello");
-        let token = mint_content_token("secret", &evidence(&content), 1_000).expect("mint");
+        let value = InlineContent::new(
+            namespace.clone(),
+            ContentId::generate(),
+            bytes::Bytes::from_static(b"hello"),
+        );
+        let content = value.content_ref().clone();
+        let evidence = CompletedUploadEvidence::for_completed_session(
+            content.clone(),
+            Some(value.hash_state().clone()),
+            Some(value.crc64nvme().clone()),
+            1_000,
+        );
+        let token = mint_content_token("secret", &evidence, 1_000).expect("mint");
         let catalog = catalog_entry(namespace);
 
         let prepared =
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
 
         assert_eq!(prepared.content_ref(), &content);
+        assert_eq!(prepared.hash_state(), Some(value.hash_state()));
+        assert_eq!(prepared.crc64nvme(), Some(value.crc64nvme()));
         assert!(prepared.admits(catalog.namespace_id(), &content, 1_000,));
     }
 
@@ -351,10 +403,10 @@ mod tests {
 
         assert_eq!(
             payload,
-            br#"{"version":"vct2","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
+            br#"{"version":"vct3","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"expires_at_ms":3601000}"#
         );
         let mut old_payload: serde_json::Value = serde_json::from_slice(&payload).expect("payload");
-        old_payload["version"] = serde_json::json!("vct1");
+        old_payload["version"] = serde_json::json!("vct2");
         let payload_part =
             super::base64_url(&serde_json::to_vec(&old_payload).expect("old payload"));
         let signature = loonfs_objectstore::crypto::hmac_sha256(b"secret", payload_part.as_bytes());

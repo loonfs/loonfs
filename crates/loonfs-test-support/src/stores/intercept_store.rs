@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, ExtendBase, ExtendedObject, ImmutableWriteError, MultipartPart,
+    ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt::Debug;
@@ -245,6 +245,39 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         Self::finish(&self.interceptor, &context, intercept, result, outcome)
     }
 
+    async fn put_immutable_verified_stream(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        sha256: Option<&Checksum>,
+        body: BoxStream<'_, Result<Bytes, ObjectStoreError>>,
+    ) -> Result<ObjectMetadata, ImmutableWriteError> {
+        let failed = |source| ImmutableWriteError::Transport {
+            object_key: key.to_owned(),
+            source,
+        };
+        let context = OperationContext::new(key, OperationKind::PutImmutableStream { sha256 });
+        let intercept = match self.interceptor.before(&context).await {
+            Intercept::FailBefore(error) => return Err(failed(error)),
+            intercept => intercept,
+        };
+        let result = self
+            .inner
+            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .await;
+        if intercept.calls_after() {
+            let outcome = match &result {
+                Ok(_) => Outcome::StreamedBytes(size_bytes),
+                Err(_) => Outcome::Failure,
+            };
+            self.interceptor.after(&context, &outcome);
+        }
+        match (intercept, result) {
+            (Intercept::FailAfter(error), Ok(_)) => Err(failed(error)),
+            (_, result) => result,
+        }
+    }
+
     async fn compare_and_swap(
         &self,
         key: &str,
@@ -268,6 +301,26 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
             .await;
         let outcome = result_outcome(&result);
         Self::finish(&self.interceptor, &context, intercept, result, outcome)
+    }
+
+    async fn extend_object(
+        &self,
+        key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let context = OperationContext::new(key, OperationKind::Extend { pieces: &pieces });
+        let intercept = match self.interceptor.before(&context).await {
+            Intercept::FailBefore(error) => return Err(error),
+            intercept => intercept,
+        };
+        let extended = self
+            .inner
+            .extend_object(key, base, pieces.clone(), result)
+            .await;
+        let outcome = result_outcome(&extended);
+        Self::finish(&self.interceptor, &context, intercept, extended, outcome)
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {

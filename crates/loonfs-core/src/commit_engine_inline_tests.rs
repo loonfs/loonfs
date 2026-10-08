@@ -13,9 +13,12 @@ use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
 use loonfs_types::api::v0::PathEntryKind;
-use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalDelta};
+use loonfs_types::format::wal::{
+    decode_wal_object_envelope_zstd, ContentBase, WalDelta, WalInlineContent,
+};
 use loonfs_types::{
-    AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FoldWalOutcome, WriterId,
+    AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FoldWalOutcome, InodeId,
+    RevisionNo, WriterId,
 };
 
 async fn setup() -> (
@@ -99,6 +102,95 @@ async fn publish(
         .expect("result")
 }
 
+/// Publishes `bytes` inline at `/file-0` and folds it into its object.
+async fn folded_file(
+    store: &RecordingStore<LocalFsStore>,
+    engine: &mut NamespaceCommitEngine,
+    context: &MutationContext,
+    bytes: &'static [u8],
+) -> (InodeId, ContentRef) {
+    let value = inline(&engine.namespace_id, Bytes::from_static(bytes));
+    publish(
+        engine,
+        store,
+        context,
+        candidate("file", vec![value.clone()]),
+    )
+    .await
+    .expect("publish");
+    fold_wal(store, &engine.namespace_id).await.expect("fold");
+    let inode_id = load_current_metadata_view(store, &engine.namespace_id)
+        .await
+        .expect("view")
+        .resolve_path(
+            "/file-0",
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("entry")
+        .inode_id;
+    (inode_id, value.content_ref().clone())
+}
+
+/// Commits `whole[offset..]` as the one entry of `content_id`, with a
+/// revision of `file` naming all of `whole`, as an append writes them.
+async fn commit_piece(
+    store: &RecordingStore<LocalFsStore>,
+    namespace_id: &NamespaceId,
+    file: (InodeId, RevisionNo),
+    content_id: &ContentId,
+    whole: &[u8],
+    offset: usize,
+    base: Option<ContentBase>,
+) -> ContentRef {
+    let mut hash_state = loonfs_types::Sha256State::new();
+    hash_state.update(whole);
+    let content_ref =
+        ContentRef::blob_v1_streamed(namespace_id.clone(), content_id.clone(), &hash_state);
+    crate::test_support::ops::append_wal_commit(
+        store,
+        namespace_id,
+        vec![WalDelta::AppendFileRevision {
+            delta_index: 0,
+            inode_id: file.0,
+            revision_no: file.1,
+            content_ref: content_ref.clone(),
+            hash_state: Some(hash_state),
+            crc64nvme: Some(loonfs_types::Checksum::crc64nvme(whole)),
+        }],
+        vec![WalInlineContent {
+            content_id: content_id.clone(),
+            offset: offset as u64,
+            bytes: whole[offset..].to_vec(),
+            base,
+        }],
+    )
+    .await
+    .expect("commit piece");
+    content_ref
+}
+
+async fn read_file(
+    store: &RecordingStore<LocalFsStore>,
+    namespace_id: &NamespaceId,
+    revision_no: RevisionNo,
+) -> Vec<u8> {
+    load_current_metadata_view(store, namespace_id)
+        .await
+        .expect("view")
+        .get_file_revision_bytes(
+            store,
+            "/file-0",
+            revision_no,
+            None,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("read")
+        .bytes
+}
+
 fn assert_no_writes(store: &RecordingStore<LocalFsStore>) {
     let counts = store.counts();
     assert_eq!(counts.puts, 0);
@@ -141,13 +233,16 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
     assert_eq!(record.inline_content.len(), values.len());
     for (entry, value) in record.inline_content.iter().zip(values.iter().rev()) {
         assert_eq!(entry.content_id, value.content_ref().content_id);
+        assert_eq!((entry.offset, &entry.base), (0, &None));
         assert_eq!(entry.bytes.as_slice(), value.bytes().as_ref());
         let expected_reference = value.content_ref();
         assert!(record.deltas.iter().any(|delta| {
             matches!(
                 &delta.delta,
-                WalDelta::AppendFileRevision { content_ref, .. }
+                WalDelta::AppendFileRevision { content_ref, hash_state, crc64nvme, .. }
                     if content_ref == expected_reference
+                        && hash_state.as_ref() == Some(value.hash_state())
+                        && crc64nvme.as_ref() == Some(value.crc64nvme())
             )
         }));
     }

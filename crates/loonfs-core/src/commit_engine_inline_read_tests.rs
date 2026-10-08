@@ -110,7 +110,7 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                         .resolve_file_content(&path, &context, None)
                         .await
                         .expect("resolve");
-                    assert!(matches!(target.location, ContentLocation::Tail { .. }));
+                    assert!(target.location.is_resident());
                     if method == "speculative" {
                         engine
                             .get_speculative_file_content(&target)
@@ -217,12 +217,14 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     assert_eq!(context.head_state.stats().cached_decoded_bytes, tail_bytes);
     let cloned = tail.as_ref().clone();
     assert_eq!(
-        tail.inline_content(value.content_ref())
-            .expect("bytes")
+        tail.content(value.content_ref()).expect("bytes").pieces[0]
+            .bytes
             .as_ptr(),
         cloned
-            .inline_content(value.content_ref())
+            .content(value.content_ref())
             .expect("cloned bytes")
+            .pieces[0]
+            .bytes
             .as_ptr()
     );
     let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
@@ -358,11 +360,10 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
     let view = load_current_metadata_view(&store, &publisher.namespace_id)
         .await
         .expect("view");
-    assert!(matches!(
-        view.resolve_content_location(&foreign)
-            .expect("foreign location"),
-        ContentLocation::Object { .. }
-    ));
+    assert!(!view
+        .resolve_content_location(&foreign)
+        .expect("foreign location")
+        .has_pieces());
     assert_no_writes(&store);
     let stored = store_bytes_as_content(&store, &publisher.namespace_id, b"object")
         .await
@@ -383,7 +384,7 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
         .expect("publish object");
     let context = fresh_context(&store, &publisher.namespace_id).await;
     let path_target = engine
-        .direct_download_target("/object", None, &context)
+        .direct_download_target("/object", None, 0, &context)
         .await
         .expect("object download");
     let inode_id = engine
@@ -393,7 +394,7 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
         .entry
         .inode_id;
     let inode_target = engine
-        .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), &context)
+        .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), 0, &context)
         .await
         .expect("inode download");
     assert_eq!(path_target.object_key, stored.object_key());
@@ -402,9 +403,16 @@ async fn foreign_references_resolve_to_objects_and_object_downloads_do_not_write
 
 #[tokio::test]
 async fn direct_downloads_materialize_once_and_do_not_write_after_a_fold() {
-    for fold_first in [false, true] {
+    // A value of zero bytes has no piece, and its grant must still find an
+    // object, so it is written like any other.
+    for (bytes, fold_first) in [
+        (&b"download"[..], false),
+        (&b"download"[..], true),
+        (&b""[..], false),
+        (&b""[..], true),
+    ] {
         let (_directory, store, mut publisher, mutation_context) = setup().await;
-        let value = inline(&publisher.namespace_id, Bytes::from_static(b"download"));
+        let value = inline(&publisher.namespace_id, Bytes::copy_from_slice(bytes));
         publish(
             &mut publisher,
             &store,
@@ -430,11 +438,11 @@ async fn direct_downloads_materialize_once_and_do_not_write_after_a_fold() {
         store.reset();
         for _ in 0..2 {
             let target = engine
-                .direct_download_target("/download-0", None, &context)
+                .direct_download_target("/download-0", None, 0, &context)
                 .await
                 .expect("path download");
             let inode_target = engine
-                .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), &context)
+                .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), 0, &context)
                 .await
                 .expect("inode download");
             assert_eq!(target.object_key, key);
@@ -487,11 +495,11 @@ async fn refused_materialization_leaves_proxied_content_readable() {
     store.reset();
     let errors = [
         engine
-            .direct_download_target("/denied-0", None, &context)
+            .direct_download_target("/denied-0", None, 0, &context)
             .await
             .expect_err("write denied"),
         engine
-            .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), &context)
+            .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), 0, &context)
             .await
             .expect_err("write denied"),
     ];
@@ -583,7 +591,7 @@ async fn inline_checksum_failures_match_object_validation() {
     assert_no_content_requests(&store);
     store.reset();
     let download_error = engine
-        .direct_download_target("/valid-0", None, &context)
+        .direct_download_target("/valid-0", None, 0, &context)
         .await
         .expect_err("corrupt download");
     assert_eq!(download_error.to_string(), error.to_string());
@@ -599,7 +607,8 @@ async fn inline_checksum_failures_match_object_validation() {
         .put(&key, Bytes::from_static(b"wrong"), PutMode::CreateIfAbsent)
         .await
         .expect("bad object");
-    let expected = ContentLocation::Object { object_key: key }
+    let expected = ContentLocation::resolve(None, &corrupt_ref)
+        .expect("object location")
         .get_bytes(&store, &corrupt_ref)
         .await
         .expect_err("object mismatch");
@@ -647,7 +656,7 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
                 .resolve_file_content(&path, &context, None)
                 .await
                 .expect("target");
-            assert!(matches!(target.location, ContentLocation::Object { .. }));
+            assert!(!target.location.has_pieces());
             store.reset();
             assert_eq!(
                 engine
@@ -657,7 +666,97 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
                     .bytes,
                 value.bytes().as_ref()
             );
-            assert!(store.snapshot().iter().any(|operation| matches!(operation, RecordedOperation::Get { key, .. } if key == target.location.object_key())));
+            assert!(store.snapshot().iter().any(|operation| matches!(operation, RecordedOperation::Get { key, .. } | RecordedOperation::Head { key } if key == target.location.object_key())));
         }
     }
+}
+
+fn content_gets(store: &RecordingStore<LocalFsStore>) -> Vec<(String, Option<(u64, u64)>)> {
+    store
+        .take_gets()
+        .into_iter()
+        .filter(|(key, _)| {
+            matches!(
+                loonfs_objectstore::layout::parse_object_key(key),
+                Some(key) if key.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_reference_with_unfolded_pieces_reads_its_object_prefix_then_the_pieces() {
+    let (_directory, store, mut publisher, context) = setup().await;
+    let namespace_id = publisher.namespace_id.clone();
+    let (inode_id, original) = folded_file(&store, &mut publisher, &context, b"hello").await;
+    commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &original.content_id,
+        b"hello world",
+        5,
+        None,
+    )
+    .await;
+    let key = content_blob(&namespace_id, &original.content_id);
+    let engine = NamespaceEngine::reader(&store, namespace_id.clone());
+    let read_context = fresh_context(&store, &namespace_id).await;
+
+    store.reset();
+    let buffered = engine
+        .get_file("/file-0", &read_context, None)
+        .await
+        .expect("buffered read")
+        .bytes;
+    assert_eq!(buffered, b"hello world");
+    assert_eq!(content_gets(&store), [(key.clone(), Some((0, 5)))]);
+
+    let mut stream = engine
+        .read_file_stream(
+            "/file-0",
+            &read_context,
+            None,
+            NonZeroU64::new(4).expect("chunk size"),
+            0,
+        )
+        .await
+        .expect("stream");
+    let mut streamed = Vec::new();
+    while let Some(chunk) = stream.next_chunk().await.expect("verified chunk") {
+        streamed.extend_from_slice(&chunk);
+    }
+    assert_eq!(streamed, b"hello world");
+}
+
+#[tokio::test]
+async fn a_reference_older_than_its_object_reads_only_its_prefix() {
+    let (_directory, store, mut publisher, context) = setup().await;
+    let namespace_id = publisher.namespace_id.clone();
+    let (inode_id, original) = folded_file(&store, &mut publisher, &context, b"hello").await;
+    commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &original.content_id,
+        b"hello world",
+        5,
+        None,
+    )
+    .await;
+    fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold the append");
+    let key = content_blob(&namespace_id, &original.content_id);
+
+    store.reset();
+    assert_eq!(
+        read_file(&store, &namespace_id, RevisionNo(1)).await,
+        b"hello"
+    );
+    assert_eq!(content_gets(&store), [(key.clone(), Some((0, 5)))]);
+    assert_eq!(
+        read_file(&store, &namespace_id, RevisionNo(2)).await,
+        b"hello world"
+    );
 }

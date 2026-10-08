@@ -246,16 +246,10 @@ impl DirectGetIssuer for GcsV4Presigner {
         request: PresignedGetRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        // No required headers, so `host` is the only name in
-        // `X-Goog-SignedHeaders` and the only line in the canonical headers.
-        // A `Range` the client adds is therefore outside the signature
-        // entirely, and one issued URL serves ranged, resumed, and parallel
-        // reads of the object without another round trip to the server.
-        // Adding a required header here would silently cost that.
         self.presign(
             "GET",
             request.object_key,
-            BTreeMap::new(),
+            request.signed_headers(),
             request.expires_in,
             now,
         )
@@ -323,11 +317,17 @@ mod tests {
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
     };
     use crate::test_support::{gcs_fixture_service_account_key_file, GCS_FIXTURE_CLIENT_EMAIL};
-    use crate::ObjectStoreError;
+    use crate::{ByteRange, ObjectStoreError};
     use loonfs_types::ChecksumAlgorithm;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CONTENT_KEY: &str = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
+    /// The bytes a read grant names: a resume from byte 10 of a 39-byte
+    /// reference.
+    const GRANT: ByteRange = ByteRange {
+        start_inclusive: 10,
+        end_exclusive: 39,
+    };
     /// 2023-11-14T22:13:20Z, the instant every expected signature below was
     /// produced at.
     const SIGNING_EPOCH_SECS: u64 = 1_700_000_000;
@@ -345,10 +345,10 @@ mod tests {
 
     // Independent Python canonicalization and OpenSSL signing pin the exact request.
     const PUT_PREFIXED_SIGNATURE: &str = "a6e71b5a0046de4486b7a16341153ba9c499fefd27a122248580d0bfc7e3abe453d9dae811a479f7c48467d706cfcc5cc9a0b8b9195129a1d0f1fd21da2828141f4c305b09b1e5277d52adc683810a65bb4612ad71033004723c1971f017aec0a4b6147c872380b94468a8355887ab56cd69906c4ab208015b68b9af5ac84702cedc1459911d96c2cb72dad19e89006119e2f355af281ff48b3a4ef5a5a597f72582829f51fc8d4705b087b22a0efbc8c0374db177aea60276553d8b635ed0d40c7f3aa380a34052741837b4477804e06c6dbb554b6fff2f86557a4fbd5ca3c58d7807756fcc6ce418d42bd4026c01e4473500c305441731aa8be68cf975e00e";
-    const GET_PREFIXED_SIGNATURE: &str = "58232d0a69c6b381284f09344e217259a400875d39b2e0e7d4d52dbe148e2db9f952f994f2ff0a20a46ed5c438000931b7c9ec412f725d438f1dcd7a4bfa422bb3f1b69b88081afb16c353fa294c076aa9aaa51ee279bc7d312391ee33cf4a070cc100c97816fb9f19fc807c3213ba2000341a6a886fd4687bb97ba6a4f27dd7266dbcb9cc31a184a3e996312810115377235413bf292a0e708e9a47d3f06404658d6e38145c5f06497d8d5bcaf944a0b6be88d6e9bae713d9ef80bba74849a1b4e82e71682d9e813d27f5ba915b3a351d2da72fa8ffa92d5a8b83e24f5a01446e797155de1d74d9ebddd0fa8a136716d8d441516dfa6da0e23699a274a9ed84";
+    const GET_PREFIXED_SIGNATURE: &str = "8ca0497a06d4bce1ae1c08c5d6162de145018ca165aee0f629722f78bb98ddc944819be439cf6bbde60c64abcf814137debe2b16c3819202573a444313f94e6f74c058f34922c698f6c849af142f15b04b24123e1b651970fa23e3ded67c670f5b9d26234cc8a6248cc0eebccbd4165cb10bc7504e0826c85a31a97b08a50b4b74f72847dda604e7e75438dfcc19fe99bcb0881b805c37157fcfdf630227e01c44251231761d5c194c0173254e3f2e99ec1f6b72f1ea94936b017034ef4aca923804c4b479014c1a8d0aee8f21218c4a8ee1d67ba0e97ebb4117200921c0b7d11effd8bf81d37476764ed8b4318788a1baab657e72fa6e266a148797d423975c";
     const HEAD_PREFIXED_SIGNATURE: &str = "68bc280612724b108e0692aff38037c8c7604e3fa3bf3cfe97b4e58e5f5ff8de8d8743b3319399c072d2ba5a3c80320f0744fdabe989388238d45810bf0e87d1f5809e49da2cba2874b3a4cbdb4382854f243d11997172b9799398d11f3a55ee5a0daab7e9f116be9b302ea17bf047ab27ddbcb326c33fca46fa99fe3e8231e465b9642b34710164f68bdbcaa73bd1f5750fea1d14fbf942210d64d44310ddfb81549263a9a28ae5c5e0a84922ef5cedbc4ee4f1b197609a16ad63e5c3c3951ea1d3eaeb7962f0300916564a8a10601961ce80542b6cf9eab6fcf525cf14a67a5a0672813678cbf80840f07b2e959e6415b214cdc2596c5ebbeaf0ea12104985";
     const PUT_UNPREFIXED_SIGNATURE: &str = "201e2951edf8d3d2da08d8dcb9bea6318dda0a2927480717202ce6294c694aeb98fb8f128f73470b790decc1e38e5c5fdb454e3c5fb438c10bbdc3f1e0a2b5f73cb8f160477ae507ea7ccf6cee93d00420b936558c94673d932c8854b5864466035c6fa5e8a4c17c9e6be5908f1659c13a1720b24da96537fe641816074391d752d8d0feb8307faa95003601d05918ae9602e23b40abf4afb734065ed528404981ff9d0f5d8e46cac190dbe69b63c96d302d4eecf8c01e041015817a8287621e8e32ac3b2060f84e0827ccf0f86871c57dc6180d68ef72b9be42ee6573be53ca4621f38eccb32077a2869d7906f6ea7064eb2a03d1ac72a0ff0a40f8d2bdb741";
-    const GET_ESCAPED_SIGNATURE: &str = "48f24d8ec39422d1cf01b7b1051bfb4745edfbe4b3214b6d62ba8ddb740fb7545792e63cc1b7dcc2224f9d13cb4c8d038b6e413771c4fed5c7486a7e903686819cc0912147bb42ebf5ae1d7aae8e08c9d3861e7705e55907fb0e779c8415f1c9545d83feee4a9391daa4b06af47ec5adf42a207da7cfd0c5d7df69d6a11f79c4854f8bb1e8db10e2334f894d1b62a40fe66b68a8b9a738ae9c458eaa7003da710377dd0865cb11cdf14dda05419ab4506f23c813d8ab572f306eee16c7a6de67f72ed6c45dd224cb4843d8caa07f768d2d471062782a4d352434dd553650acea94b73c19295c204cd5c3172b8e29db11bf626bd80148553ce774d0a82c7f83ac";
+    const GET_ESCAPED_SIGNATURE: &str = "69f413dc31744f07063ec59fba35a7eb2e7853f65173ee5fe889d34994c046cc51f8d4517db671e90a64720e5aeb2d2583195043bcb5ef8b9c60b3f32af19e2fc3bcbb5cfbc0ad808236920b106987237a85bc45dbc22ddd8c2592330b4869b3885380376345fcd279252945a95139466e50b6d650dcff4e364c7705ea73514a73a045ad4245cb1a5f2debc5e04832a87c214b8ba302e8500f53ded590b24e92ad0d790f00afc0d1530b9605021532cf6eab6da0b79bd675843fe10e816fa5152922983741797f7bbaa722b023d14986f0f922b8c9165d38ece5d343b33d306a9cb6615f10e16dc277b269ce2dc0f8e80c3a4237b00f0dc51347e35f08761e01";
 
     fn signing_time() -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(SIGNING_EPOCH_SECS)
@@ -406,11 +406,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn presigned_get_signs_only_the_host_so_range_stays_unsigned() {
+    async fn presigned_get_signs_the_range_it_grants_and_returns_it_as_a_header() {
         let signed = presigner(Some("tenant-a"))
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: EXPIRES_IN,
                 },
                 signing_time(),
@@ -419,16 +420,15 @@ mod tests {
             .expect("presign get");
 
         assert_eq!(signed.method, "GET");
-        assert!(
-            signed.headers.is_empty(),
-            "a read capability requires the client to send nothing"
+        assert_eq!(
+            signed.headers,
+            std::collections::BTreeMap::from([("range".to_owned(), "bytes=10-38".to_owned())])
         );
-        assert!(!signed.url.to_ascii_lowercase().contains("range"));
         assert_eq!(
             signed.url,
             format!(
                 "https://storage.googleapis.com/bucket/tenant-a/{CONTENT_KEY}?{EXPECTED_CREDENTIAL}\
-                 &X-Goog-SignedHeaders=host&X-Goog-Signature={GET_PREFIXED_SIGNATURE}"
+                 &X-Goog-SignedHeaders=host%3Brange&X-Goog-Signature={GET_PREFIXED_SIGNATURE}"
             )
         );
     }
@@ -475,6 +475,7 @@ mod tests {
                 .presign_get(
                     PresignedGetRequest {
                         object_key: CONTENT_KEY,
+                        range: GRANT,
                         expires_in: EXPIRES_IN,
                     },
                     signing_time(),
@@ -523,6 +524,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key:
                         "namespaces/a b/c+d/e~f/content/con_0123456789abcdef0123456789abcdef",
+                    range: GRANT,
                     expires_in: EXPIRES_IN,
                 },
                 signing_time(),
@@ -535,7 +537,7 @@ mod tests {
             format!(
                 "https://storage.googleapis.com/bucket/tenant-a/namespaces\
                  /a%20b/c%2Bd/e~f/content/con_0123456789abcdef0123456789abcdef?{EXPECTED_CREDENTIAL}\
-                 &X-Goog-SignedHeaders=host&X-Goog-Signature={GET_ESCAPED_SIGNATURE}"
+                 &X-Goog-SignedHeaders=host%3Brange&X-Goog-Signature={GET_ESCAPED_SIGNATURE}"
             )
         );
     }
@@ -548,6 +550,7 @@ mod tests {
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: EXPIRES_IN,
                 },
                 signing_time(),
@@ -578,6 +581,7 @@ mod tests {
                 .presign_get(
                     PresignedGetRequest {
                         object_key: CONTENT_KEY,
+                        range: GRANT,
                         expires_in,
                     },
                     signing_time(),

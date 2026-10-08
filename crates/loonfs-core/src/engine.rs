@@ -25,8 +25,8 @@ use crate::protocol::{
     ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::storage::content::{
-    open_content_import_reader, validate_loaded_content_bytes, ContentLocation,
-    DurableContentValidationError, FileContentStream, StreamedPayloadKind,
+    open_content_import_reader, ContentLocation, DurableContentValidationError, FileContentStream,
+    StreamedPayloadKind,
 };
 use crate::storage::content_admission::PreparedContent;
 use loonfs_objectstore::{ByteStream, ObjectStore};
@@ -71,7 +71,8 @@ pub struct ResolvedFileContent {
     pub entry: PathEntry,
     /// Complete immutable identity to compare after current-path validation.
     pub content_ref: ContentRef,
-    /// Location resolved in the entry's metadata view, retaining any inline bytes.
+    /// Location resolved in the entry's metadata view, retaining any pieces
+    /// its WAL tail holds.
     pub location: ContentLocation,
 }
 
@@ -563,7 +564,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         })
     }
 
-    /// Verifies at most 64 KiB of speculative content, plus an overflow byte.
+    /// Verifies at most 64 KiB of speculative content.
     /// These bytes alone do not establish current path visibility.
     pub async fn get_speculative_file_content(
         &self,
@@ -588,9 +589,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Opens a chunked stream for the file resolved from the pinned read context.
     ///
-    /// Object reads fetch `chunk_bytes` at a time. Tail reads retain their inline
-    /// bytes. The buffered-read size limit does not apply. Later commits cannot
-    /// change the bytes being read.
+    /// The object prefix is fetched `chunk_bytes` at a time, and pieces the tail
+    /// holds are retained. The buffered-read size limit does not apply. Later
+    /// commits cannot change the bytes being read.
     ///
     /// When `start_offset` is nonzero, the caller must pass the skipped prefix to
     /// [`FileContentStream::fold_resumed_prefix`] before fetching more data. This
@@ -675,13 +676,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         path: impl AsRef<str>,
         revision_no: Option<RevisionNo>,
+        start_offset: u64,
         context: &RuntimeReadContext,
     ) -> Result<DirectDownloadTarget> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.direct_download_target(&self.store, path.as_ref(), revision_no, &access)
-            .await
+        view.direct_download_target(
+            &self.store,
+            path.as_ref(),
+            revision_no,
+            start_offset,
+            &access,
+        )
+        .await
     }
 
     /// Prepares inode content for a direct download: a retained revision, or
@@ -690,13 +698,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         inode_id: InodeId,
         revision_no: Option<RevisionNo>,
+        start_offset: u64,
         context: &RuntimeReadContext,
     ) -> Result<DirectDownloadByInodeTarget> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.direct_download_target_by_inode(&self.store, inode_id, revision_no, &access)
-            .await
+        view.direct_download_target_by_inode(
+            &self.store,
+            inode_id,
+            revision_no,
+            start_offset,
+            &access,
+        )
+        .await
     }
 
     /// Returns the current entry for a visible inode.
@@ -785,20 +800,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::resolve_current_files(&view, inode_ids, &access).await
     }
 
-    /// Resolves a reference in the owner's pinned view and verifies resident bytes.
+    /// Resolves a reference in the owner's pinned view.
     pub async fn resolve_content_location(
         &self,
         content_ref: &ContentRef,
         context: &RuntimeReadContext,
     ) -> Result<ContentLocation> {
-        let location = self
-            .load_read_view(context)
+        self.load_read_view(context)
             .await?
-            .resolve_content_location(content_ref)?;
-        if let ContentLocation::Tail { bytes, object_key } = &location {
-            validate_loaded_content_bytes(object_key.clone(), content_ref, bytes)?;
-        }
-        Ok(location)
+            .resolve_content_location(content_ref)
     }
 
     /// Reads and verifies the bytes named by a published reference.
@@ -817,11 +827,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self.require_administrator(context).await?;
         self.ensure_live_context(context)?;
         let view = self.load_read_view(context).await?;
-        if view
+        if !view
             .metadata_view()
             .find_content_publication(&content_ref.content_id)
             .await?
-            .is_none()
         {
             return Err(CoreError::PathNotFound(content_ref.content_id.to_string()));
         }
@@ -1129,26 +1138,33 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Imports an existing object under a fresh identity owned by this
+    /// Imports existing content under a fresh identity owned by this
     /// namespace.
     ///
     /// A content reference locates bytes but does not identify the namespace
-    /// whose upload session keeps them alive. This streams the source object
+    /// whose upload session keeps them alive. This streams the source bytes
     /// chunk by chunk into a new local upload session, verifying the claimed
     /// size and checksum against what was staged, so collection in the source
-    /// namespace cannot invalidate a later publication here.
+    /// namespace cannot invalidate a later publication here. `owner_location`
+    /// is where the owner's view finds the bytes; without one, they are read
+    /// from the content object.
     pub async fn import_content_ref(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         subject_id: Option<&loonfs_types::SubjectId>,
         content_ref: &ContentRef,
+        owner_location: Option<ContentLocation>,
     ) -> Result<PreparedContent>
     where
         S: Clone + 'static,
     {
         let catalog = self.own_catalog(catalog)?;
         let context = self.mutation_context()?;
-        let body = open_content_import_reader(self.store.clone(), content_ref).await?;
+        let location = match owner_location {
+            Some(location) => location,
+            None => ContentLocation::resolve(None, content_ref)?,
+        };
+        let body = open_content_import_reader(self.store.clone(), location, content_ref).await?;
         crate::protocol::stage_owned_stream(
             &self.store,
             catalog,

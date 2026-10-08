@@ -31,7 +31,7 @@ use loonfs_types::format::manifest::{
     METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::wal::{
-    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, WalCommitDelta,
+    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, ContentBase, WalCommitDelta,
     WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
 };
 use loonfs_types::{
@@ -39,7 +39,7 @@ use loonfs_types::{
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
     CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
     MetadataSegmentId, NameKey, NamespaceId, NamespaceNaming, PinId, PrincipalId, PrincipalScope,
-    RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
+    RevisionNo, RunNo, Sha256State, UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -131,6 +131,13 @@ fn sample_content_ref() -> ContentRef {
         content_id("con_0123456789abcdef0123456789abcdef"),
         b"golden bytes",
     )
+}
+
+/// The SHA-256 state a writer records after `golden bytes`.
+fn sample_hash_state() -> Sha256State {
+    let mut state = Sha256State::new();
+    state.update(b"golden bytes");
+    state
 }
 
 /// A reference whose only evidence is a provider-computed full-object CRC.
@@ -281,6 +288,8 @@ fn sample_wal_payload() -> WalObjectPayload {
                 inode_id: InodeId(5),
                 revision_no: RevisionNo(2),
                 content_ref: sample_content_ref(),
+                hash_state: None,
+                crc64nvme: None,
             },
         },
         WalCommitDelta {
@@ -344,14 +353,39 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
     without_inline_content.committed_seq = ChangeSeq(3);
     without_inline_content.commit_id =
         CommitId::parse("c_00000000000000000000000000000043").expect("valid commit id");
+    for delta in &mut payload.records[0].deltas {
+        if let WalDelta::AppendFileRevision {
+            hash_state,
+            crc64nvme,
+            ..
+        } = &mut delta.delta
+        {
+            *hash_state = Some(sample_hash_state());
+            *crc64nvme = Some(Checksum::crc64nvme(b"golden bytes"));
+        }
+    }
+    let chain_id = content_id("con_00112233445566778899aabbccddeeff");
     payload.records[0].inline_content = vec![
         WalInlineContent {
             content_id: sample_content_ref().content_id,
+            offset: 0,
             bytes: b"golden bytes".to_vec(),
+            base: None,
         },
         WalInlineContent {
             content_id: content_id("con_fedcba9876543210fedcba9876543210"),
+            offset: 0,
             bytes: Vec::new(),
+            base: None,
+        },
+        WalInlineContent {
+            content_id: chain_id.clone(),
+            offset: 6,
+            bytes: b" chain".to_vec(),
+            base: Some(ContentBase {
+                owner_namespace_id: namespace_id(),
+                content_id: sample_content_ref().content_id,
+            }),
         },
     ];
     let empty_content_ref = ContentRef::blob_v1(
@@ -366,6 +400,19 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             inode_id: InodeId(6),
             revision_no: RevisionNo(1),
             content_ref: empty_content_ref,
+            hash_state: None,
+            crc64nvme: None,
+        },
+    });
+    payload.records[0].deltas.push(WalCommitDelta {
+        semantic_operation_index: 6,
+        delta: WalDelta::AppendFileRevision {
+            delta_index: 7,
+            inode_id: InodeId(7),
+            revision_no: RevisionNo(2),
+            content_ref: ContentRef::blob_v1(namespace_id(), chain_id, b"golden chain"),
+            hash_state: None,
+            crc64nvme: None,
         },
     });
     payload.head_seq = ChangeSeq(3);
@@ -741,6 +788,8 @@ fn control_objects_match_golden_bytes() {
             status: UploadSessionRecordStatus::Completed {
                 completed_at_ms: 2_000,
                 content_ref: sample_content_ref(),
+                hash_state: Some(sample_hash_state()),
+                crc64nvme: Some(Checksum::crc64nvme(b"golden bytes")),
             },
         },
     );
@@ -796,7 +845,11 @@ fn control_objects_match_golden_bytes() {
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             subject_id: None,
             mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged(sample_content_ref()),
+                staging: ProxiedStaging::Staged {
+                    content_ref: sample_content_ref(),
+                    hash_state: sample_hash_state(),
+                    crc64nvme: Checksum::crc64nvme(b"golden bytes"),
+                },
             },
             status: UploadSessionRecordStatus::Open {
                 expires_at_ms: 87_400_000,
@@ -813,7 +866,11 @@ fn control_objects_match_golden_bytes() {
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             subject_id: Some(loonfs_types::SubjectId::parse("usr_ada").expect("subject id")),
             mode: UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged(sample_content_ref()),
+                staging: ProxiedStaging::Staged {
+                    content_ref: sample_content_ref(),
+                    hash_state: sample_hash_state(),
+                    crc64nvme: Checksum::crc64nvme(b"golden bytes"),
+                },
             },
             status: UploadSessionRecordStatus::Open {
                 expires_at_ms: 87_400_000,
@@ -1717,6 +1774,8 @@ fn wal_delta_wire_tags_match_spec_names() {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(1),
                 content_ref: sample_content_ref(),
+                hash_state: None,
+                crc64nvme: None,
             }),
             "append_file_revision",
         ),
@@ -2607,6 +2666,9 @@ fn sample_content_publication_row() -> MetadataRow {
         content_id: sample_content_ref().content_id,
         committed_seq: ChangeSeq(2),
         delta_index: 3,
+        size_bytes: 12,
+        hash_state: Some(sample_hash_state()),
+        crc64nvme: Some(Checksum::crc64nvme(b"golden bytes")),
     })
 }
 
@@ -2614,7 +2676,7 @@ fn sample_content_publication_row() -> MetadataRow {
 fn content_publication_rows_match_golden_bytes_and_lookup_grammar() {
     let row = sample_content_publication_row();
     let key = format!(
-        "content-publication-{}-00000000000000000002",
+        "content-publication-{}-18446744073709551603-00000000000000000002",
         sample_content_ref().content_id
     );
     assert_eq!(row.row_key(), key);

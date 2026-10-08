@@ -8,10 +8,10 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::Stream;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-    StoredObjectChecksum,
+    ByteRange, ByteStream, ExtendBase, ExtendedObject, ImmutableWriteError, ObjectBody,
+    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
-use loonfs_types::{EffectiveLimit, Page};
+use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -386,6 +386,52 @@ where
         }
         self.push_trace(op, "put_streamed", None, result_class(&result));
         result
+    }
+
+    /// Traces verified streamed creates without injecting scheduled write
+    /// faults, like streamed writes.
+    async fn put_immutable_verified_stream(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        sha256: Option<&Checksum>,
+        body: BoxStream<'_, Result<Bytes, ObjectStoreError>>,
+    ) -> Result<ObjectMetadata, ImmutableWriteError> {
+        let op = self.next_object_op(ObjectOperationKind::PutIfAbsent, key);
+        let result = self
+            .inner
+            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .await;
+        let class = match &result {
+            Ok(_) => {
+                self.remember_successful_write(key);
+                SimEventResult::Ok
+            }
+            Err(ImmutableWriteError::Transport { source, .. }) => error_result_class(source),
+            Err(_) => SimEventResult::Error {
+                class: "precondition_failed".to_owned(),
+            },
+        };
+        self.push_trace(op, "put_immutable_verified_stream", None, class);
+        result
+    }
+
+    /// Traces extensions, a write conditional on the base's compare token,
+    /// without injecting scheduled write faults, like streamed writes.
+    async fn extend_object(
+        &self,
+        key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOperationKind::CompareAndSwap, key);
+        let extended = self.inner.extend_object(key, base, pieces, result).await;
+        if extended.is_ok() {
+            self.remember_successful_write(key);
+        }
+        self.push_trace(op, "extend_object", None, result_class(&extended));
+        extended
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {

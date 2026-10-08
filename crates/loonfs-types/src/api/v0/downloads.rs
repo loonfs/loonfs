@@ -21,6 +21,16 @@ pub struct CreateDownloadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub snapshot_id: Option<PinId>,
+    /// The first byte the grant reads. It names `[start_offset, size_bytes)`
+    /// of the revision; a client that resumes asks for a new grant from the
+    /// bytes it holds. Must be below the revision's size, except 0 for a
+    /// revision of zero bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub start_offset: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// A presigned URL for one content object.
@@ -119,6 +129,12 @@ mod tests {
             r#"{"path":"/docs/report.txt","snapshot_id":"invalid"}"#,
         )
         .is_err());
+
+        assert_eq!(request.start_offset, 0);
+        let resumed: CreateDownloadRequest =
+            serde_json::from_str(r#"{"path":"/docs/report.txt","start_offset":10}"#)
+                .expect("decode resumed request");
+        assert_eq!(resumed.start_offset, 10);
 
         assert!(
             serde_json::from_str::<CreateDownloadRequest>(

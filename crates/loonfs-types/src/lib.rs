@@ -115,7 +115,7 @@ pub use commit_identity::{
 };
 pub use content::{
     Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentRef, ContentRefKind,
-    ContentRefValidationError, Crc32c, Crc64Nvme, Sha256, StreamingChecksum,
+    ContentRefValidationError, Crc32c, Crc64Nvme, Sha256State, StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};

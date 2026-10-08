@@ -1044,7 +1044,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
             .map(|_| inode_id)
             .map_err(|error| error.code());
         let current_download_result = reader
-            .direct_download_target_by_inode(inode_id, None, &context)
+            .direct_download_target_by_inode(inode_id, None, 0, &context)
             .await
             .map(|target| target.inode_id)
             .map_err(|error| error.code());
@@ -1140,7 +1140,7 @@ async fn history_needs_the_history_right() {
             );
             assert_eq!(
                 engine
-                    .direct_download_target("/team/file", Some(revision), &context)
+                    .direct_download_target("/team/file", Some(revision), 0, &context)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.code()),
@@ -1148,7 +1148,7 @@ async fn history_needs_the_history_right() {
             );
             assert_eq!(
                 engine
-                    .direct_download_target_by_inode(inode_id, Some(revision), &context)
+                    .direct_download_target_by_inode(inode_id, Some(revision), 0, &context)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.code()),

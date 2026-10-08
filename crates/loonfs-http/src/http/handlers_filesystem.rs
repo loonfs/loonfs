@@ -22,8 +22,8 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{
-    payload_class, ChangeSeq, ErrorCode, InodeId, ListOptions, Namespace, PinId, ReadOnly,
-    ReadView, StatOptions, TraceMode, TraceStoreKind,
+    payload_class, ChangeSeq, DownloadOptions, ErrorCode, InodeId, ListOptions, Namespace, PinId,
+    ReadOnly, ReadView, StatOptions, TraceMode, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ApiError;
@@ -172,12 +172,17 @@ impl ReadTarget {
         &self,
         path: &str,
         revision_no: Option<RevisionNo>,
+        options: &DownloadOptions,
     ) -> loonfs::Result<loonfs::downloads::DirectDownloadTarget> {
         match self {
-            Self::Snapshot(view) => view.create_download(path).await,
+            Self::Snapshot(view) => view.create_download_with_options(path, options).await,
             Self::Live(namespace) => match revision_no {
-                Some(revision_no) => namespace.create_revision_download(path, revision_no).await,
-                None => namespace.create_download(path).await,
+                Some(revision_no) => {
+                    namespace
+                        .create_revision_download_with_options(path, revision_no, options)
+                        .await
+                }
+                None => namespace.create_download_with_options(path, options).await,
             },
         }
     }
@@ -185,10 +190,18 @@ impl ReadTarget {
     pub(super) async fn create_download_by_inode(
         &self,
         inode_id: InodeId,
+        options: &DownloadOptions,
     ) -> loonfs::Result<loonfs::downloads::DirectDownloadByInodeTarget> {
         match self {
-            Self::Snapshot(view) => view.create_download_by_inode(inode_id).await,
-            Self::Live(namespace) => namespace.create_download_by_inode(inode_id).await,
+            Self::Snapshot(view) => {
+                view.create_download_by_inode_with_options(inode_id, options)
+                    .await
+            }
+            Self::Live(namespace) => {
+                namespace
+                    .create_download_by_inode_with_options(inode_id, options)
+                    .await
+            }
         }
     }
 

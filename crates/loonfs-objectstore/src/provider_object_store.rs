@@ -6,7 +6,7 @@ use crate::keyspace::{
     normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
     unscope_listed_key,
 };
-use crate::object_store::Result;
+use crate::object_store::{collect_stream, Result};
 use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -228,7 +228,7 @@ pub(crate) trait MultipartController: Send + Sync {
         &self,
         key: &str,
         head: Bytes,
-        rest: PartReader,
+        rest: PartReader<'_>,
         sha256: Option<&Checksum>,
     ) -> Result<ObjectMetadata>;
 
@@ -482,16 +482,16 @@ impl ProviderObjectStore {
 /// Chunk boundaries in the source stream carry no meaning, so a chunk that
 /// straddles a part boundary is split and its tail carried into the next
 /// part. A stream that ends exactly on a boundary produces no final part.
-pub(crate) struct PartReader {
-    body: ByteStream,
+pub(crate) struct PartReader<'a> {
+    body: BoxStream<'a, Result<Bytes>>,
     /// The tail of a chunk that overran the part being cut.
     carry: Option<Bytes>,
     part_bytes: usize,
     exhausted: bool,
 }
 
-impl PartReader {
-    pub(crate) fn new(body: ByteStream, part_bytes: usize) -> Self {
+impl<'a> PartReader<'a> {
+    pub(crate) fn new(body: BoxStream<'a, Result<Bytes>>, part_bytes: usize) -> Self {
         Self {
             body,
             carry: None,
@@ -638,9 +638,9 @@ impl MultipartWrite<'_> {
         &self,
         upload_id: &provider_store::MultipartId,
         head: Bytes,
-        mut parts_reader: PartReader,
+        mut parts_reader: PartReader<'_>,
         mode: &PutMode,
-    ) -> Result<u64> {
+    ) -> Result<ObjectMetadata> {
         let mut size_bytes = head.len() as u64;
         let mut parts = vec![self.upload_part(upload_id, 0, head).await?];
 
@@ -665,7 +665,7 @@ impl MultipartWrite<'_> {
             .complete_multipart(self.path, upload_id, parts)
             .await
         {
-            Ok(_) => Ok(size_bytes),
+            Ok(result) => Ok(self.store.metadata_from_put_result(result, size_bytes)),
             Err(err) => Err(map_provider_error(self.key, err)),
         }
     }
@@ -1013,7 +1013,7 @@ impl ObjectStore for ProviderObjectStore {
     /// against a separate read of the key after the payload is consumed and
     /// immediately before completion.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
-        let path = self.to_path(key)?;
+        self.to_path(key)?;
         self.validate_compare_token(key, &mode)?;
         let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
         let head = reader.next_part().await?.unwrap_or_else(Bytes::new);
@@ -1022,36 +1022,35 @@ impl ObjectStore for ProviderObjectStore {
             self.put(key, head, mode).await?;
             return Ok(size_bytes);
         }
-        if let (PutMode::CreateIfAbsent, Some(controller)) = (&mode, &self.multipart_controller) {
-            return controller
-                .put_if_absent(key, head, reader, None)
-                .await
-                .map(|metadata| metadata.size_bytes);
-        }
+        self.put_parts(key, head, reader, mode, None)
+            .await
+            .map(|metadata| metadata.size_bytes)
+    }
 
-        let upload = MultipartWrite {
-            store: self,
-            multipart: Arc::clone(&self.multipart),
-            key,
-            path: &path,
-        };
-        let (upload_id, mut abort_on_drop) = upload.create(0).await?;
-        let result = upload
-            .upload_stream_and_complete(&upload_id, head, reader, &mode)
-            .await;
-        match result {
-            Ok(size_bytes) => {
-                abort_on_drop.disarm();
-                Ok(size_bytes)
+    /// A body below the multipart threshold is buffered and takes the
+    /// attested single-request create. A longer one is cut into parts as it
+    /// arrives and goes through [`Self::put_parts`].
+    async fn put_immutable_verified_stream(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        sha256: Option<&Checksum>,
+        body: BoxStream<'_, Result<Bytes>>,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        let created = async {
+            if size_bytes < self.multipart_geometry.threshold_bytes {
+                let bytes = collect_stream(body).await?;
+                return self
+                    .put_attested(key, bytes, PutMode::CreateIfAbsent, sha256.cloned())
+                    .await;
             }
-            Err(err) => {
-                // Best effort, and harmless when the failure raced a landed
-                // completion: the upload id no longer exists then.
-                upload.abort(&upload_id).await;
-                abort_on_drop.disarm();
-                Err(err)
-            }
+            let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
+            let head = reader.next_part().await?.unwrap_or_default();
+            self.put_parts(key, head, reader, PutMode::CreateIfAbsent, sha256)
+                .await
         }
+        .await;
+        crate::immutable_write::decide_created(self, key, sha256, created).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
@@ -1314,6 +1313,42 @@ impl ProviderObjectStore {
             }
             Err(err) => Err(map_provider_error(key, err)),
         }
+    }
+
+    /// Uploads `head` and then every part of `rest`. A create-if-absent goes
+    /// through the provider's own conditional create where it has one, which
+    /// records `sha256` when the upload starts. Elsewhere the upstream
+    /// multipart upload checks `mode` against a `head` before completion and
+    /// records no attestation.
+    async fn put_parts(
+        &self,
+        key: &str,
+        head: Bytes,
+        rest: PartReader<'_>,
+        mode: PutMode,
+        sha256: Option<&Checksum>,
+    ) -> Result<ObjectMetadata> {
+        if let (PutMode::CreateIfAbsent, Some(controller)) = (&mode, &self.multipart_controller) {
+            return controller.put_if_absent(key, head, rest, sha256).await;
+        }
+        let path = self.to_path(key)?;
+        let upload = MultipartWrite {
+            store: self,
+            multipart: Arc::clone(&self.multipart),
+            key,
+            path: &path,
+        };
+        let (upload_id, mut abort_on_drop) = upload.create(0).await?;
+        let result = upload
+            .upload_stream_and_complete(&upload_id, head, rest, &mode)
+            .await;
+        if result.is_err() {
+            // Best effort, and harmless when the failure raced a landed
+            // completion: the upload id no longer exists then.
+            upload.abort(&upload_id).await;
+        }
+        abort_on_drop.disarm();
+        result
     }
 
     fn map_put_mode(&self, mode: PutMode) -> provider_store::PutMode {
@@ -2885,7 +2920,7 @@ mod tests {
             &self,
             _key: &str,
             head: Bytes,
-            mut rest: PartReader,
+            mut rest: PartReader<'_>,
             sha256: Option<&Checksum>,
         ) -> Result<ObjectMetadata> {
             self.creates.fetch_add(1, Ordering::SeqCst);
@@ -2940,6 +2975,29 @@ mod tests {
         assert_eq!(written.size_bytes, payload.len() as u64);
         assert_eq!(written.sha256, Some(Checksum::sha256(&payload)));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+
+        let written = store
+            .put_immutable_verified_stream(
+                MULTIPART_KEY,
+                payload.len() as u64,
+                Some(&Checksum::sha256(&payload)),
+                streamed(&payload, 100),
+            )
+            .await
+            .expect("a large streamed verified write creates through the controller");
+        assert_eq!(controller.creates.load(Ordering::SeqCst), 2);
+        assert_eq!(written.size_bytes, payload.len() as u64);
+        assert_eq!(written.sha256, Some(Checksum::sha256(&payload)));
+
+        let small = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
+        store
+            .put_immutable_verified_stream(small, 10, None, streamed(&payload[..10], 4))
+            .await
+            .expect("a small streamed verified write is one request");
+        assert_eq!(controller.creates.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
+        let held = store.head(small).await.expect("head").expect("object");
+        assert_eq!(held.sha256, None, "no attestation was asked for");
     }
 
     #[tokio::test]

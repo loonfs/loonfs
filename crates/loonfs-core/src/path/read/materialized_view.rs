@@ -21,6 +21,7 @@ use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::mutation_path::parse_absolute_path_for_core;
 use crate::storage::content::ContentLocation;
+use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
@@ -131,6 +132,9 @@ pub struct DirectDownloadTarget {
     pub revision_no: RevisionNo,
     /// Identity, byte length, and checksum evidence for those bytes.
     pub content_ref: ContentRef,
+    /// The first byte the download reads: it reads
+    /// `[start_offset, content_ref.size_bytes)`.
+    pub start_offset: u64,
     /// Logical unscoped object key an issuer signs a read of.
     pub object_key: String,
 }
@@ -144,6 +148,9 @@ pub struct DirectDownloadByInodeTarget {
     pub revision_no: RevisionNo,
     /// Content identity, size, and checksum.
     pub content_ref: ContentRef,
+    /// The first byte the download reads: it reads
+    /// `[start_offset, content_ref.size_bytes)`.
+    pub start_offset: u64,
     /// Object key used to sign the read.
     pub object_key: String,
 }
@@ -386,11 +393,61 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(ContentLocation::resolve(Some(&self.wal_tail), content_ref)?)
     }
 
+    /// The object key a direct download from `start_offset` signs. An
+    /// offset at or past the reference's end is refused before anything is
+    /// written, and a reference of zero bytes takes only offset 0. A
+    /// reference whose bytes the tail still holds is written to its object
+    /// first, as a fold would, unless the object already holds them.
+    async fn download_object_key(
+        &self,
+        store: &S,
+        content_ref: &ContentRef,
+        start_offset: u64,
+    ) -> Result<String> {
+        if start_offset != 0 && start_offset >= content_ref.size_bytes {
+            return Err(CoreError::ResumeOffsetOutOfRange {
+                start_offset,
+                size_bytes: content_ref.size_bytes,
+            });
+        }
+        let location = self.resolve_content_location(content_ref)?;
+        let object_key = location.object_key();
+        // A value of zero bytes has no piece to assemble, but its object
+        // must exist for the grant to be served.
+        let Some(content) = self
+            .wal_tail
+            .content(content_ref)
+            .filter(|_| location.has_pieces() || content_ref.size_bytes == 0)
+        else {
+            return Ok(object_key.to_owned());
+        };
+        let pieces = assemble_tail_content(content)?;
+        let held = store
+            .head(object_key)
+            .await
+            .map_err(|error| CoreError::store(object_key, &error))?;
+        if held.is_none_or(|metadata| metadata.size_bytes < content_ref.size_bytes) {
+            write_tail_content(store, &self.wal_tail, content, pieces)
+                .await
+                .map_err(|error| match error {
+                    CoreError::Store {
+                        class: crate::error::StoreFailureClass::PermissionDenied,
+                        ..
+                    } => CoreError::ContentNotMaterialized {
+                        content_id: content_ref.content_id.clone(),
+                    },
+                    error => error,
+                })?;
+        }
+        Ok(object_key.to_owned())
+    }
+
     pub(crate) async fn direct_download_target(
         &self,
         store: &S,
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
+        start_offset: u64,
         access: &ReadAccess<'_, S>,
     ) -> Result<DirectDownloadTarget> {
         let (entry, content_ref) = self
@@ -403,14 +460,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             });
         };
         let object_key = self
-            .resolve_content_location(&content_ref)?
-            .materialize_download_key(store, &content_ref)
+            .download_object_key(store, &content_ref, start_offset)
             .await?;
 
         Ok(DirectDownloadTarget {
             absolute_path: entry.path,
             revision_no,
             content_ref,
+            start_offset,
             object_key,
         })
     }
@@ -492,6 +549,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &S,
         inode_id: InodeId,
         revision_no: Option<RevisionNo>,
+        start_offset: u64,
         access: &ReadAccess<'_, S>,
     ) -> Result<DirectDownloadByInodeTarget> {
         let revision = match revision_no {
@@ -502,13 +560,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             None => self.current_revision_for_inode(inode_id, access).await?,
         };
         let object_key = self
-            .resolve_content_location(&revision.content_ref)?
-            .materialize_download_key(store, &revision.content_ref)
+            .download_object_key(store, &revision.content_ref, start_offset)
             .await?;
         Ok(DirectDownloadByInodeTarget {
             inode_id,
             revision_no: revision.revision_no,
             content_ref: revision.content_ref,
+            start_offset,
             object_key,
         })
     }

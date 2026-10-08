@@ -5,7 +5,6 @@ use super::ProjectedWalTail;
 use super::{ReplayedWalTail, ValidatedWalObject, ValidatedWalTail};
 use crate::commit::next_inode_after;
 use crate::namespace::state::NamespaceReadState;
-use bytes::Bytes;
 use loonfs_types::format::wal::{WalCommitDelta, WalDelta, WalObjectEnvelope};
 use loonfs_types::{ChangeSeq, InodeId};
 
@@ -39,27 +38,10 @@ pub(crate) fn replay_wal_records(
     let payload = object.envelope().payload();
 
     for record in &payload.records {
-        for value in &record.inline_content {
-            let content_ref = record
-                .deltas
-                .iter()
-                .find_map(|delta| match &delta.delta {
-                    WalDelta::AppendFileRevision { content_ref, .. }
-                        if content_ref.content_id == value.content_id
-                            && content_ref.owner_namespace_id == payload.namespace_id =>
-                    {
-                        Some(content_ref)
-                    }
-                    _ => None,
-                })
-                .expect("decoded inline content should have a same-commit reference");
-            current_tail
-                .insert_inline_content(content_ref.clone(), Bytes::copy_from_slice(&value.bytes));
-        }
         current_head.seq = record.committed_seq;
         current_head.next_inode_id =
             replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
-        current_tail.apply_commit(record)?;
+        current_tail.apply_commit(&payload.namespace_id, record)?;
     }
 
     Ok(ReplayedWalTail {

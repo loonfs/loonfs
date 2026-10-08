@@ -66,8 +66,10 @@ pub(super) fn resumable_bytes(destination: &Path, meta: &PartialMeta) -> u64 {
     let Ok(metadata) = std::fs::metadata(&partial_path) else {
         return 0;
     };
-    // A partial file cannot be reused if it is longer than the content.
-    if metadata.len() > meta.size_bytes {
+    // A partial file cannot be reused if it is longer than the content, and
+    // one as long as the content starts over, because a grant names at
+    // least one byte.
+    if metadata.len() >= meta.size_bytes {
         return 0;
     }
     metadata.len()

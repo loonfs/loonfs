@@ -388,7 +388,7 @@ impl MultipartController for S3RequestSigner {
         &self,
         key: &str,
         head: Bytes,
-        mut rest: PartReader,
+        mut rest: PartReader<'_>,
         sha256: Option<&Checksum>,
     ) -> Result<ObjectMetadata> {
         let upload_id = self.create_upload(key, sha256).await?;
@@ -620,19 +620,12 @@ impl S3RequestSigner {
             .presign_get(
                 PresignedGetRequest {
                     object_key: key,
+                    range: range.clone(),
                     expires_in: MULTIPART_CONTROL_TTL,
                 },
                 Self::signing_time(),
             )
             .await?;
-        signed.headers.insert(
-            "range".to_owned(),
-            format!(
-                "bytes={}-{}",
-                range.start_inclusive,
-                range.end_exclusive - 1
-            ),
-        );
         signed
             .headers
             .insert("if-match".to_owned(), etag.to_owned());

@@ -418,6 +418,10 @@ mod shared_cache_tests {
             .presign_get(
                 PresignedGetRequest {
                     object_key: "content",
+                    range: crate::ByteRange {
+                        start_inclusive: 0,
+                        end_exclusive: 1,
+                    },
                     expires_in: Duration::from_secs(900),
                 },
                 now,

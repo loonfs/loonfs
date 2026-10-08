@@ -8,9 +8,9 @@ use crate::sst_blocks::BlockHandle;
 use crate::wal::WalCommitPayload;
 use crate::CompactorEpoch;
 use crate::{
-    AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo, ChangeSeq, CommitId,
-    ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
-    NamespaceId, RevisionNo, RunNo,
+    AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo, ChangeSeq, Checksum,
+    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo,
+    MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo, Sha256State,
 };
 use crate::{NamespaceNaming, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
@@ -410,16 +410,26 @@ impl ActiveDeletionRecord {
     }
 }
 
-/// Evidence retained at every retention floor.
+/// Evidence retained at every retention floor that a commit published a
+/// reference to one content id, and the head of that id's chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContentPublicationRecord {
     /// Stored directly in the row key and Bloom filter key.
     pub content_id: ContentId,
-    /// Distinguishes later publications of the same content.
+    /// Distinguishes later publications of the same reference.
     pub committed_seq: ChangeSeq,
-    /// First publishing delta when a commit uses this content more than once.
+    /// First publishing delta when a commit uses this reference more than once.
     pub delta_index: u32,
+    /// Length the reference names. The longest sorts first, so the first
+    /// row under an id's prefix is its chain head.
+    pub size_bytes: u64,
+    /// SHA-256 state after the reference's bytes, copied from the delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash_state: Option<Sha256State>,
+    /// CRC-64/NVME of the reference's bytes, copied from the delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crc64nvme: Option<Checksum>,
 }
 
 /// Indexes one retained commit by the caller's idempotency key.
@@ -673,9 +683,11 @@ impl MetadataRow {
                 lookup_keys::commit_receipt_row_key(record.commit_id.as_str(), record.committed_seq)
             }
             Self::Commit(record) => lookup_keys::commit_row_key(record.committed_seq),
-            Self::ContentPublication(record) => {
-                lookup_keys::content_publication_row_key(&record.content_id, record.committed_seq)
-            }
+            Self::ContentPublication(record) => lookup_keys::content_publication_row_key(
+                &record.content_id,
+                record.size_bytes,
+                record.committed_seq,
+            ),
             Self::AttributesRevision(record) => lookup_keys::attributes_row_key(
                 record.inode_id,
                 record.attributes_revision_no,
@@ -918,14 +930,17 @@ pub mod lookup_keys {
         format!("{}-", content_publication_probe(content_id))
     }
 
-    /// Orders publications by content identity and commit sequence.
+    /// Orders publications by content identity, longest reference first,
+    /// then by commit sequence.
     pub(super) fn content_publication_row_key(
         content_id: &ContentId,
+        size_bytes: u64,
         committed_seq: ChangeSeq,
     ) -> String {
         format!(
-            "{}{:020}",
+            "{}{:020}-{:020}",
             content_publication_prefix(content_id),
+            u64::MAX - size_bytes,
             committed_seq.0
         )
     }
@@ -1868,6 +1883,9 @@ mod tests {
                         .expect("valid content id"),
                     committed_seq: ChangeSeq(12),
                     delta_index: 3,
+                    size_bytes: 5,
+                    hash_state: None,
+                    crc64nvme: None,
                 }),
             ),
             (

@@ -20,9 +20,7 @@ use crate::namespace::control::CurrentManifest;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::read_working_memory::ReadWorkingMemory;
-use crate::storage::content::{
-    content_object_key_for_ref, materialize_content, validate_loaded_content_bytes,
-};
+use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
 use crate::store_waves::STORE_WRITE_WAVE;
 use crate::time::Deadline;
 use crate::wal::replay_discovered_tail;
@@ -238,7 +236,7 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
         })));
     }
 
-    materialize_inline_content(store, projection).await?;
+    materialize_tail_content(store, projection).await?;
     publish_fold(store, namespace_id, projection, deadline, policy).await
 }
 
@@ -283,23 +281,23 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
     })))
 }
 
-async fn materialize_inline_content<S: ObjectStore + ?Sized>(
+/// Writes every piece the tail holds into its content object. Every chain
+/// is assembled, and checked where memory allows, before anything is
+/// written.
+async fn materialize_tail_content<S: ObjectStore + ?Sized>(
     store: &S,
     projection: &ManifestProjection<'_, S>,
 ) -> Result<()> {
-    let values = projection
-        .tail_state
-        .inline_values()
-        .map(|value| {
-            let key = content_object_key_for_ref(&value.content_ref)?;
-            validate_loaded_content_bytes(key.clone(), &value.content_ref, &value.bytes)?;
-            Ok((key, value))
-        })
+    let tail = projection.tail_state.as_ref();
+    let assembled = tail
+        .contents()
+        .iter()
+        .map(|content| Ok((content, assemble_tail_content(content)?)))
         .collect::<Result<Vec<_>>>()?;
     // In a live namespace, failed folds leave committed content for the next fold.
-    stream::iter(values.into_iter().map(Ok))
-        .try_for_each_concurrent(STORE_WRITE_WAVE, |(object_key, value)| async move {
-            materialize_content(store, &object_key, &value.content_ref, value.bytes.clone()).await
+    stream::iter(assembled.into_iter().map(Ok))
+        .try_for_each_concurrent(STORE_WRITE_WAVE, |(content, pieces)| {
+            write_tail_content(store, tail, content, pieces)
         })
         .await
 }

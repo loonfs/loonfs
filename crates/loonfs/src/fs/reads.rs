@@ -6,10 +6,10 @@ use crate::execution_budget::BudgetPermit;
 use crate::Result;
 use crate::{
     ChangeSeq, CheckpointFilesPage, CheckpointFilesPageCursor, ContentRef, CoreError,
-    CurrentFileState, Error, FileBytes, FileContentStream, InodeId, ListChangesResponse,
-    ListCheckpointFilesOptions, ListFileRevisionsResponse, ListInodeChildrenResponse, ListOptions,
-    ListPathEntriesResponse, Namespace, NamespaceId, PathEntry, PinId, ReadFileStreamOptions,
-    RevisionNo, SharedObjectStore, StatOptions,
+    CurrentFileState, DownloadOptions, Error, FileBytes, FileContentStream, InodeId,
+    ListChangesResponse, ListCheckpointFilesOptions, ListFileRevisionsResponse,
+    ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, Namespace, NamespaceId,
+    PathEntry, PinId, ReadFileStreamOptions, RevisionNo, SharedObjectStore, StatOptions,
 };
 use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use loonfs_types::{
@@ -480,11 +480,22 @@ impl ReadView {
 
     /// Resolves the file selected by this view for a direct download.
     pub async fn create_download(&self, absolute_path: &str) -> Result<DirectDownloadTarget> {
+        self.create_download_with_options(absolute_path, &DownloadOptions::default())
+            .await
+    }
+
+    /// Resolves the file selected by this view for a direct download, as
+    /// `options` asks.
+    pub async fn create_download_with_options(
+        &self,
+        absolute_path: &str,
+        options: &DownloadOptions,
+    ) -> Result<DirectDownloadTarget> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
             Ok(self
                 .engine
-                .direct_download_target(absolute_path, None, &self.context)
+                .direct_download_target(absolute_path, None, options.start_offset, &self.context)
                 .await?)
         })
         .await
@@ -548,11 +559,27 @@ impl ReadView {
         &self,
         inode_id: InodeId,
     ) -> Result<DirectDownloadByInodeTarget> {
+        self.create_download_by_inode_with_options(inode_id, &DownloadOptions::default())
+            .await
+    }
+
+    /// Resolves the revision of a file inode that this view selects for a
+    /// direct download, as `options` asks.
+    pub async fn create_download_by_inode_with_options(
+        &self,
+        inode_id: InodeId,
+        options: &DownloadOptions,
+    ) -> Result<DirectDownloadByInodeTarget> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
             Ok(self
                 .engine
-                .direct_download_target_by_inode(inode_id, None, &self.context)
+                .direct_download_target_by_inode(
+                    inode_id,
+                    None,
+                    options.start_offset,
+                    &self.context,
+                )
                 .await?)
         })
         .await
@@ -1050,6 +1077,13 @@ impl<M> Namespace<M> {
     ///
     /// See the API specification's download transport contract. The handle's
     /// `max_read_content_bytes` does not apply to direct downloads.
+    pub async fn create_download(&self, absolute_path: &str) -> Result<DirectDownloadTarget> {
+        self.create_download_with_options(absolute_path, &DownloadOptions::default())
+            .await
+    }
+
+    /// Prepares the content object of a file's current revision for a direct
+    /// download, as `options` asks. See [`Self::create_download`].
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.create_download",
@@ -1062,12 +1096,31 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_download(&self, absolute_path: &str) -> Result<DirectDownloadTarget> {
-        self.direct_download(absolute_path, None).await
+    pub async fn create_download_with_options(
+        &self,
+        absolute_path: &str,
+        options: &DownloadOptions,
+    ) -> Result<DirectDownloadTarget> {
+        self.direct_download(absolute_path, None, options).await
     }
 
     /// Prepares the content object of one retained file revision for a
     /// direct download. See [`Self::create_download`].
+    pub async fn create_revision_download(
+        &self,
+        absolute_path: &str,
+        revision_no: RevisionNo,
+    ) -> Result<DirectDownloadTarget> {
+        self.create_revision_download_with_options(
+            absolute_path,
+            revision_no,
+            &DownloadOptions::default(),
+        )
+        .await
+    }
+
+    /// Prepares the content object of one retained file revision for a
+    /// direct download, as `options` asks. See [`Self::create_download`].
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.create_revision_download",
@@ -1080,25 +1133,29 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_revision_download(
+    pub async fn create_revision_download_with_options(
         &self,
         absolute_path: &str,
         revision_no: RevisionNo,
+        options: &DownloadOptions,
     ) -> Result<DirectDownloadTarget> {
-        self.direct_download(absolute_path, Some(revision_no)).await
+        self.direct_download(absolute_path, Some(revision_no), options)
+            .await
     }
 
     async fn direct_download(
         &self,
         absolute_path: &str,
         revision_no: Option<RevisionNo>,
+        options: &DownloadOptions,
     ) -> Result<DirectDownloadTarget> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
+        let start_offset = options.start_offset;
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
                 let target = engine
-                    .direct_download_target(absolute_path, revision_no, &read_context)
+                    .direct_download_target(absolute_path, revision_no, start_offset, &read_context)
                     .await?;
                 Ok(target)
             })
@@ -1107,6 +1164,16 @@ impl<M> Namespace<M> {
 
     /// Prepares the content object of the current revision of a visible file
     /// inode, wherever it is bound, for a direct download.
+    pub async fn create_download_by_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<DirectDownloadByInodeTarget> {
+        self.create_download_by_inode_with_options(inode_id, &DownloadOptions::default())
+            .await
+    }
+
+    /// Prepares the content object of the current revision of a visible file
+    /// inode for a direct download, as `options` asks.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.create_download_by_inode",
@@ -1119,15 +1186,31 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_download_by_inode(
+    pub async fn create_download_by_inode_with_options(
         &self,
         inode_id: InodeId,
+        options: &DownloadOptions,
     ) -> Result<DirectDownloadByInodeTarget> {
-        self.direct_download_by_inode(inode_id, None).await
+        self.direct_download_by_inode(inode_id, None, options).await
     }
 
     /// Prepares the content object of one retained inode revision for a
     /// direct download, without requiring a current path.
+    pub async fn create_revision_download_by_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<DirectDownloadByInodeTarget> {
+        self.create_revision_download_by_inode_with_options(
+            inode_id,
+            revision_no,
+            &DownloadOptions::default(),
+        )
+        .await
+    }
+
+    /// Prepares the content object of one retained inode revision for a
+    /// direct download, as `options` asks.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.create_revision_download_by_inode",
@@ -1140,12 +1223,13 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_revision_download_by_inode(
+    pub async fn create_revision_download_by_inode_with_options(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
+        options: &DownloadOptions,
     ) -> Result<DirectDownloadByInodeTarget> {
-        self.direct_download_by_inode(inode_id, Some(revision_no))
+        self.direct_download_by_inode(inode_id, Some(revision_no), options)
             .await
     }
 
@@ -1153,13 +1237,20 @@ impl<M> Namespace<M> {
         &self,
         inode_id: InodeId,
         revision_no: Option<RevisionNo>,
+        options: &DownloadOptions,
     ) -> Result<DirectDownloadByInodeTarget> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
+        let start_offset = options.start_offset;
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
                 let target = engine
-                    .direct_download_target_by_inode(inode_id, revision_no, &read_context)
+                    .direct_download_target_by_inode(
+                        inode_id,
+                        revision_no,
+                        start_offset,
+                        &read_context,
+                    )
                     .await?;
                 Ok(target)
             })

@@ -1005,9 +1005,9 @@ The table below lists the retry class for every v0 operation.
 | Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&snapshot_id=...` (`revision_no` and `snapshot_id` are optional and mutually exclusive) |
 | Read current file content by inode | `get_file_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/content?snapshot_id=...` (`snapshot_id` is optional) |
 | Read prior file content by inode | `get_file_revision_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
-| Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` with body `path`, optional `revision_no`, and optional `snapshot_id` (`snapshot_id` cannot be combined with `revision_no`) |
-| Start a current download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads?snapshot_id=...` with no body (`snapshot_id` is optional) |
-| Start a revision download by inode | `create_revision_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with no body |
+| Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` with body `path`, optional `revision_no`, optional `snapshot_id`, and optional `start_offset` (`snapshot_id` cannot be combined with `revision_no`; `start_offset` defaults to 0) |
+| Start a current download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads?snapshot_id=...&start_offset=...` with no body (`snapshot_id` and `start_offset` are optional) |
+| Start a revision download by inode | `create_revision_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads?start_offset=...` with no body (`start_offset` is optional) |
 | List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits`; requires the `Loonfs-Actor` header |
 | Create an upload session | `create_upload` | `not_idempotent` | `POST /v0/namespaces/{ns}/uploads`; returns the open session |
@@ -2850,20 +2850,21 @@ bypass that service limit and keep object traffic off the server. So
 any direct write — the read is not a separate decision, and a deployment
 that offers none of them cannot have created such a file in the first place.
 
-A direct download requires a content object. If a file's bytes are still in the
-WAL and no object exists yet, the server writes one before returning a download
-URL. If the deployment cannot write that object, the request returns
-`content_not_materialized`. Read through the proxied content route, which can
-serve the WAL bytes directly, or retry after a fold writes the object.
+A direct download requires a content object that holds the file's bytes. If
+some of them are still in the WAL, the server writes them into the content
+object, as a fold would, before returning a download URL. If the deployment
+cannot write that object, the request returns `content_not_materialized`.
+Read through the proxied content route, which can serve the WAL bytes
+directly, or retry after a fold writes the object.
 
 `POST /v0/namespaces/{ns}/filesystem/downloads` takes a path and, optionally,
-the revision to read in its JSON body:
+the revision to read and the first byte to read in its JSON body:
 
 ```json
-{ "path": "/docs/report.txt", "revision_no": 3 }
+{ "path": "/docs/report.txt", "revision_no": 3, "start_offset": 1048576 }
 ```
 
-The body may instead include `snapshot_id` to read a snapshot; it cannot be combined with `revision_no`.
+The body may instead include `snapshot_id` to read a snapshot; it cannot be combined with `revision_no`. `start_offset` defaults to 0.
 
 The response is a short-lived read capability plus everything the reader
 checks the arriving bytes against:
@@ -2884,6 +2885,7 @@ checks the arriving bytes against:
     "kind": "presigned_url",
     "method": "GET",
     "url": "https://bucket.s3.us-east-1.amazonaws.com/...&X-Amz-Signature=...",
+    "headers": { "range": "bytes=1048576-314572799" },
     "expires_at_ms": 1780000000000
   }
 }
@@ -2891,7 +2893,8 @@ checks the arriving bytes against:
 
 The inode revision form is
 `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`.
-The request has no body and its response does not include a path:
+The request has no body, takes `start_offset` as an optional query
+parameter, and its response does not include a path:
 
 ```json
 {
@@ -2909,6 +2912,7 @@ The request has no body and its response does not include a path:
     "kind": "presigned_url",
     "method": "GET",
     "url": "https://bucket.s3.us-east-1.amazonaws.com/...&X-Amz-Signature=...",
+    "headers": { "range": "bytes=0-314572799" },
     "expires_at_ms": 1780000000000
   }
 }
@@ -2917,37 +2921,52 @@ The request has no body and its response does not include a path:
 `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current
 revision of a visible file inode and returns the same response. It has no
 body. Its optional `snapshot_id` query parameter grants the revision that
-snapshot captured instead.
+snapshot captured instead, and its optional `start_offset` query parameter
+is the first byte to read.
 
 The download routes use the same provider support check and access format.
 The inode revision route remains available after a rename or deletion while
 the revision is retained. The current inode route follows the inode across
 renames and returns `inode_not_found` once it is deleted.
 
-Four properties follow from the shape, and clients may rely on all of them.
+Five properties follow from the shape, and clients may rely on all of them.
 
-**The grant names one immutable object.** A commit that replaces the file
-writes a new content object and leaves this one alone, so an issued
-capability does not go stale when the path moves on, and it reads the
+**The grant names exactly `[start_offset, size_bytes)` of one object.**
+`content_ref.size_bytes` bytes from the start of the object are the
+revision's bytes, and they never change. A commit that replaces the file
+writes a new content object and leaves this one alone, and an append adds
+bytes after the end of an object without changing the bytes before it. So an
+issued capability does not go stale when the path moves on, and it reads the
 revision it was issued for rather than whatever is current when it is used.
 
-**No headers are required, and `Range` is free.** The signed header set is
-the host and nothing else, so a client may range, resume after a broken
-connection, or fetch windows in parallel on the one URL without another round
-trip to the server. A server implementation must not sign a `Range` header
-into the capability; doing so would bind it to a single window.
+**A client sends the headers as given.** The capability signs
+`Range: bytes={start_offset}-{size_bytes - 1}`, and `access.headers` carries
+that header. A client sends `access.headers` unchanged and adds no `Range` of
+its own. The object can be longer than the revision, and the provider
+refuses any other range, so a capability for a revision never reads the
+bytes an append adds after it. A client still treats a longer response as a
+failure. A revision of zero bytes has one grant, from offset 0, which signs
+no range: there is no byte to name, and an object of zero bytes is never
+extended. Such a grant needs no request.
+
+**To resume, ask for a new grant.** One grant serves one range. A client
+that holds the first `n` bytes asks for a grant with `start_offset` `n`.
+`start_offset` at or past `size_bytes` answers `invalid_request` with `param`
+`start_offset`, so a client that holds every byte asks for nothing.
 
 **The client verifies the complete file.** It checks the byte length and
 recomputes the algorithm in `content_ref.checksum`. This applies to SHA-256,
-CRC-64/NVME, and CRC-32C, including downloads assembled from ranged or resumed
-requests. A mismatch fails the download.
+CRC-64/NVME, and CRC-32C, including downloads resumed from an offset, whose
+client folds the bytes it already holds into the check. A mismatch fails the
+download.
 
 **The raw object key is never exposed.** A client learns a URL that expires,
 the same way a `direct_put` client does.
 
 The capability is short-lived — a transfer's worth of time, not a session's.
-A reader that runs out of time asks for another grant, which costs one small
-request and no retransfer. A deployment that cannot presign reads answers 501
+A reader that runs out of time asks for another grant from the byte it
+reached, which costs one small request and no retransfer. A deployment that
+cannot presign reads answers 501
 `not_supported` with `feature = "filesystem.downloads.direct_get"`, and its proxied
 read stays available under its own limit; because such a deployment cannot
 presign writes either, no file it holds can be larger than it will proxy.

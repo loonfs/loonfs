@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use loonfs_objectstore::{ByteRange, PutMode};
+use loonfs_types::Checksum;
 
 use super::Outcome;
 
@@ -26,6 +27,8 @@ pub enum OperationClass {
     PutCreateIfAbsent,
     /// Compare-and-swap calls and CAS-mode puts.
     CompareAndSwap,
+    /// Extensions of an existing object.
+    Extend,
     /// Deletes.
     Delete,
     /// Prefix-list calls.
@@ -45,7 +48,10 @@ impl OperationClass {
             ),
             Self::Put => matches!(
                 kind,
-                OperationKind::Put { .. } | OperationKind::PutStreamed { .. }
+                OperationKind::Put { .. }
+                    | OperationKind::PutStreamed { .. }
+                    | OperationKind::PutImmutableStream { .. }
+                    | OperationKind::Extend { .. }
             ),
             Self::PutOverwrite => matches!(
                 kind,
@@ -63,7 +69,7 @@ impl OperationClass {
                     ..
                 } | OperationKind::PutStreamed {
                     mode: PutMode::CreateIfAbsent,
-                }
+                } | OperationKind::PutImmutableStream { .. }
             ),
             Self::CompareAndSwap => matches!(
                 kind,
@@ -76,6 +82,7 @@ impl OperationClass {
                         mode: PutMode::CompareAndSwap { .. },
                     }
             ),
+            Self::Extend => matches!(kind, OperationKind::Extend { .. }),
             Self::Delete => matches!(kind, OperationKind::Delete),
             Self::List => matches!(kind, OperationKind::List),
         }
@@ -129,9 +136,18 @@ impl<'a> OperationContext<'a> {
                 mode: (*mode).clone(),
                 bytes: outcome.streamed_bytes(),
             },
+            OperationKind::PutImmutableStream { sha256 } => RecordedOperation::PutImmutableStream {
+                key: self.key.to_owned(),
+                sha256: sha256.cloned(),
+                bytes: outcome.streamed_bytes(),
+            },
             OperationKind::CompareAndSwap { bytes, .. } => RecordedOperation::CompareAndSwap {
                 key: self.key.to_owned(),
                 bytes: bytes.len(),
+            },
+            OperationKind::Extend { pieces } => RecordedOperation::Extend {
+                key: self.key.to_owned(),
+                bytes: pieces.len(),
             },
             OperationKind::Delete => RecordedOperation::Delete {
                 key: self.key.to_owned(),
@@ -167,12 +183,22 @@ pub enum OperationKind<'a> {
         /// Write mode supplied by the caller.
         mode: &'a PutMode,
     },
+    /// A `put_immutable_verified_stream` call.
+    PutImmutableStream {
+        /// Attestation supplied by the caller.
+        sha256: Option<&'a Checksum>,
+    },
     /// A `compare_and_swap` call.
     CompareAndSwap {
         /// Expected current etag.
         expected_etag: &'a str,
         /// Bytes supplied by the caller.
         bytes: &'a Bytes,
+    },
+    /// An `extend_object` call.
+    Extend {
+        /// Bytes appended to the object.
+        pieces: &'a Bytes,
     },
     /// A `delete` call.
     Delete,
@@ -206,8 +232,16 @@ pub enum RecordedOperation {
         mode: PutMode,
         bytes: Option<u64>,
     },
+    /// A streamed create-if-absent with the attestation it asked for.
+    PutImmutableStream {
+        key: String,
+        sha256: Option<Checksum>,
+        bytes: Option<u64>,
+    },
     /// A compare-and-swap call.
     CompareAndSwap { key: String, bytes: usize },
+    /// An extension of an existing object by `bytes`.
+    Extend { key: String, bytes: usize },
     /// A delete.
     Delete { key: String },
     /// A prefix-list call.
@@ -223,7 +257,9 @@ impl RecordedOperation {
             | Self::GetWithMetadata { key, .. }
             | Self::Put { key, .. }
             | Self::PutStreamed { key, .. }
+            | Self::PutImmutableStream { key, .. }
             | Self::CompareAndSwap { key, .. }
+            | Self::Extend { key, .. }
             | Self::Delete { key } => key,
             Self::List { prefix } => prefix,
         }
@@ -240,7 +276,11 @@ impl RecordedOperation {
             }
             OperationClass::Put => matches!(
                 self,
-                Self::Put { .. } | Self::PutStreamed { .. } | Self::CompareAndSwap { .. }
+                Self::Put { .. }
+                    | Self::PutStreamed { .. }
+                    | Self::PutImmutableStream { .. }
+                    | Self::CompareAndSwap { .. }
+                    | Self::Extend { .. }
             ),
             OperationClass::PutOverwrite => matches!(
                 self,
@@ -260,7 +300,7 @@ impl RecordedOperation {
                 } | Self::PutStreamed {
                     mode: PutMode::CreateIfAbsent,
                     ..
-                }
+                } | Self::PutImmutableStream { .. }
             ),
             OperationClass::CompareAndSwap => matches!(
                 self,
@@ -274,6 +314,7 @@ impl RecordedOperation {
                         ..
                     }
             ),
+            OperationClass::Extend => matches!(self, Self::Extend { .. }),
             OperationClass::Delete => matches!(self, Self::Delete { .. }),
             OperationClass::List => matches!(self, Self::List { .. }),
         }

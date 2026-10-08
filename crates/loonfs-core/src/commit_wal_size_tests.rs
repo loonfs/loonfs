@@ -86,6 +86,8 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(MAX_PUBLIC_INTEGER - 1),
                 content_ref: content_ref.clone(),
+                hash_state: None,
+                crc64nvme: None,
             },
             WalDelta::AppendAttributesRevision {
                 delta_index: 4,

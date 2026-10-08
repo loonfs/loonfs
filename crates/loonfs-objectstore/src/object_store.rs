@@ -373,7 +373,7 @@ pub type Result<T> = std::result::Result<T, ObjectStoreError>;
 
 /// Drains a byte stream into one buffer, for implementations that cannot
 /// write incrementally.
-pub(crate) async fn collect_stream(mut body: ByteStream) -> Result<Bytes> {
+pub(crate) async fn collect_stream(mut body: BoxStream<'_, Result<Bytes>>) -> Result<Bytes> {
     use futures::StreamExt as _;
 
     let mut buffered = bytes::BytesMut::new();
@@ -600,6 +600,38 @@ pub trait ObjectStore: Send + Sync + Debug {
         crate::immutable_write::put(self, key, bytes).await
     }
 
+    /// Creates `key` from `body`, a stream of `size_bytes` bytes, only while
+    /// the key is absent, and records `sha256`, when given, as the object's
+    /// attestation.
+    ///
+    /// A body below one part is buffered and takes the single-request
+    /// create. A longer one goes through the provider's conditional
+    /// multipart create, with the attestation set when the upload starts, so
+    /// the body is never held whole. The body may borrow, for a caller that
+    /// streams it out of this store. An error item ends the write before
+    /// anything is created. A key found occupied is decided by one `head`
+    /// against `sha256`, as [`Self::put_immutable_verified`] decides it;
+    /// without `sha256` it answers
+    /// [`crate::ImmutableWriteError::Unattested`]. A stream cannot be sent
+    /// twice, so a transport failure is returned rather than retried.
+    ///
+    /// The default buffers the body and creates it through [`Self::put`],
+    /// which attests the body's own SHA-256.
+    async fn put_immutable_verified_stream(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        sha256: Option<&Checksum>,
+        body: BoxStream<'_, Result<Bytes>>,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        let _ = size_bytes;
+        let created = match collect_stream(body).await {
+            Ok(bytes) => self.put(key, bytes, PutMode::CreateIfAbsent).await,
+            Err(error) => Err(error),
+        };
+        crate::immutable_write::decide_created(self, key, sha256, created).await
+    }
+
     /// Appends `pieces` to the object at `key`, which must still hold
     /// `base.length` bytes under the version `base.etag`, and records
     /// `result.sha256` as the new version's attestation.
@@ -740,6 +772,18 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().put_immutable_verified(key, bytes).await
     }
 
+    async fn put_immutable_verified_stream(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        sha256: Option<&Checksum>,
+        body: BoxStream<'_, Result<Bytes>>,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        self.as_ref()
+            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .await
+    }
+
     async fn extend_object(
         &self,
         key: &str,
@@ -855,6 +899,18 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         (*self).put_immutable_verified(key, bytes).await
+    }
+
+    async fn put_immutable_verified_stream(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        sha256: Option<&Checksum>,
+        body: BoxStream<'_, Result<Bytes>>,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        (*self)
+            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .await
     }
 
     async fn extend_object(

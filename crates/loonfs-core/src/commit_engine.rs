@@ -28,7 +28,10 @@ use loonfs_types::format::wal::{
 };
 #[cfg(test)]
 use loonfs_types::ChangeSeq;
-use loonfs_types::{CommitId, ContentId, DeleteNamespaceResponse, ManifestNo, NamespaceId};
+use loonfs_types::{
+    Checksum, CommitId, ContentId, ContentRef, DeleteNamespaceResponse, ManifestNo, NamespaceId,
+    Sha256State,
+};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -211,6 +214,33 @@ impl CommitCandidate {
         if let ContentPreparation::Ready(proofs) = &mut self.content {
             proofs.push(proof);
         }
+    }
+
+    /// The SHA-256 state and CRC-64/NVME this candidate carries for the
+    /// bytes behind `content_ref`, when it carries them.
+    pub(crate) fn content_digests(
+        &self,
+        content_ref: &ContentRef,
+    ) -> (Option<Sha256State>, Option<Checksum>) {
+        if let Some(value) = self
+            .inline_content
+            .iter()
+            .find(|value| value.content_ref() == content_ref)
+        {
+            return (
+                Some(value.hash_state().clone()),
+                Some(value.crc64nvme().clone()),
+            );
+        }
+        let ContentPreparation::Ready(proofs) = &self.content else {
+            return (None, None);
+        };
+        proofs
+            .iter()
+            .find(|proof| proof.content_ref() == content_ref)
+            .map_or((None, None), |proof| {
+                (proof.hash_state().cloned(), proof.crc64nvme().cloned())
+            })
     }
 
     pub fn inline_content_bytes(&self) -> usize {
@@ -985,19 +1015,11 @@ impl NamespaceCommitEngine {
                     None,
                 );
             }
-            PublishViewEffect::Advanced {
-                records,
-                inline_content,
-                head,
-            } => {
+            PublishViewEffect::Advanced { records, head } => {
                 projection.position.wal_tail_objects += 1;
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
-                for value in &inline_content {
-                    tail_state
-                        .insert_inline_content(value.content_ref().clone(), value.bytes().clone());
-                }
                 for record in &records {
-                    if let Err(error) = tail_state.apply_commit(record) {
+                    if let Err(error) = tail_state.apply_commit(&self.namespace_id, record) {
                         // The WAL is already durable. Discard this cache; replay
                         // and folding will report the accounting error.
                         tracing::error!(%error, "could not update the committed WAL projection");
@@ -1009,7 +1031,7 @@ impl NamespaceCommitEngine {
                         );
                     }
                 }
-                if let Err(error) = projection.apply_fold_records(&inline_content, &records) {
+                if let Err(error) = projection.apply_fold_records(&self.namespace_id, &records) {
                     tracing::error!(%error, "could not update the committed WAL projection");
                     self.invalidate_projection();
                     return (

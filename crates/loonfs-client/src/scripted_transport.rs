@@ -26,6 +26,7 @@ pub(crate) struct SentRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body_chunks: Vec<usize>,
+    pub body: Vec<u8>,
 }
 
 impl SentRequest {
@@ -107,6 +108,7 @@ impl Service<Request<Body>> for ScriptedTransport {
                     })
                     .collect(),
                 body_chunks: Vec::new(),
+                body: Vec::new(),
             });
             (
                 state
@@ -122,12 +124,10 @@ impl Service<Request<Body>> for ScriptedTransport {
             while let Some(frame) = body.frame().await {
                 let frame = frame?;
                 if let Some(bytes) = frame.data_ref() {
-                    state
-                        .lock()
-                        .expect("script lock should not be poisoned")
-                        .sent[index]
-                        .body_chunks
-                        .push(bytes.len());
+                    let mut state = state.lock().expect("script lock should not be poisoned");
+                    let sent = &mut state.sent[index];
+                    sent.body_chunks.push(bytes.len());
+                    sent.body.extend_from_slice(bytes);
                 }
             }
             match outcome {

@@ -12,7 +12,6 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::{load_read_anchor, NamespaceReadAnchor};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
-use crate::storage::inline_content::InlineContent;
 use crate::wal::ProjectedWalTail;
 use crate::wal::{replay_discovered_tail, ValidatedWalTail, WalObjectError};
 use loonfs_objectstore::ObjectStore;
@@ -76,7 +75,7 @@ pub(crate) struct FoldInProgress {
     /// The head the fold was taken at: its `wal_no` is the boundary the
     /// published manifest will fold through.
     from: NamespaceReadState,
-    /// Rows and inline content of every commit published since `from`.
+    /// Rows and content pieces of every commit published since `from`.
     since: Arc<ProjectedWalTail>,
     wal_objects_since: u64,
 }
@@ -124,16 +123,13 @@ impl PublishTailPosition {
 impl PublishTailProjection {
     pub(crate) fn apply_fold_records(
         &mut self,
-        inline_content: &[InlineContent],
+        namespace_id: &NamespaceId,
         records: &[WalCommitPayload],
     ) -> std::result::Result<(), WalObjectError> {
         if let Some(fold) = &mut self.position.fold {
             let since = Arc::make_mut(&mut fold.since);
-            for value in inline_content {
-                since.insert_inline_content(value.content_ref().clone(), value.bytes().clone());
-            }
             for record in records {
-                since.apply_commit(record)?;
+                since.apply_commit(namespace_id, record)?;
             }
             fold.wal_objects_since += 1;
         }

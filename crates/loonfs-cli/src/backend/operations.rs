@@ -105,7 +105,14 @@ impl ResolvedTarget {
             let grant = match revision_no {
                 Some(revision_no) => {
                     self.client
-                        .create_revision_download(spec, revision_no)
+                        .create_revision_download_with_options(
+                            spec,
+                            revision_no,
+                            &DownloadOptions {
+                                start_offset,
+                                ..DownloadOptions::default()
+                            },
+                        )
                         .await?
                 }
                 None => {
@@ -114,6 +121,7 @@ impl ResolvedTarget {
                             spec,
                             &DownloadOptions {
                                 snapshot_id: snapshot_id.cloned(),
+                                start_offset,
                             },
                         )
                         .await?
@@ -121,11 +129,7 @@ impl ResolvedTarget {
             };
             return Ok(FileDownload::Direct {
                 revision_no: grant.revision_no,
-                stream: Box::new(
-                    self.client
-                        .open_direct_download_at(&grant, start_offset)
-                        .await?,
-                ),
+                stream: Box::new(self.client.open_direct_download(&grant).await?),
                 resumed_from: start_offset,
             });
         }

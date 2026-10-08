@@ -2,13 +2,23 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
+use std::collections::BTreeMap;
 
 /// Options for a download of a file's content by path or by inode.
+///
+/// `snapshot_id` has no field in the runtime's `DownloadOptions`, which
+/// reads a snapshot through a read view.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
     /// Download the file revision captured by this snapshot instead of the
     /// current one.
     pub snapshot_id: Option<PinId>,
+    /// The first byte the grant reads, for a caller that already holds the
+    /// bytes below it. A grant names `[start_offset, size_bytes)` and
+    /// nothing else, so a resume asks for a new grant. An offset at or past
+    /// the end answers `invalid_request`; a revision of zero bytes takes
+    /// only 0.
+    pub start_offset: u64,
 }
 
 /// A direct download returned in verified, bounded chunks.
@@ -129,14 +139,13 @@ impl Client {
 
     /// Requests short-lived direct access to a file's content: the current
     /// revision, or the revision a snapshot captured when the options name
-    /// one.
+    /// one, from the offset the options name.
     pub async fn create_download_with_options(
         &self,
         spec: &NamespacePath,
         options: &DownloadOptions,
     ) -> Result<CreateDownloadResponse> {
-        self.request_download(spec, None, options.snapshot_id.clone())
-            .await
+        self.request_download(spec, None, options).await
     }
 
     /// Requests short-lived direct access to one retained revision of a file.
@@ -145,14 +154,28 @@ impl Client {
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<CreateDownloadResponse> {
-        self.request_download(spec, Some(revision_no), None).await
+        self.create_revision_download_with_options(spec, revision_no, &DownloadOptions::default())
+            .await
+    }
+
+    /// Requests short-lived direct access to one retained revision of a
+    /// file, from the offset the options name. A revision cannot be
+    /// combined with a snapshot.
+    pub async fn create_revision_download_with_options(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+        options: &DownloadOptions,
+    ) -> Result<CreateDownloadResponse> {
+        self.request_download(spec, Some(revision_no), options)
+            .await
     }
 
     async fn request_download(
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
-        snapshot_id: Option<PinId>,
+        options: &DownloadOptions,
     ) -> Result<CreateDownloadResponse> {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/downloads",
@@ -162,7 +185,8 @@ impl Client {
         let request = CreateDownloadRequest {
             path: spec.absolute_path().clone(),
             revision_no,
-            snapshot_id,
+            snapshot_id: options.snapshot_id.clone(),
+            start_offset: options.start_offset,
         };
         // A grant creates nothing and names nothing new, so asking twice
         // costs two URLs and changes no state: this one may be resent.
@@ -191,7 +215,7 @@ impl Client {
 
     /// Requests direct access to the content of a visible file inode,
     /// wherever it is bound: the current revision, or the revision a snapshot
-    /// captured when the options name one.
+    /// captured when the options name one, from the offset the options name.
     pub async fn create_download_by_inode_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -199,18 +223,12 @@ impl Client {
         options: &DownloadOptions,
     ) -> Result<CreateDownloadByInodeResponse> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        let mut query = QueryBuilder::new(format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
-            self.base_url
-        ));
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        let url = query.finish();
-        self.request_json::<(), CreateDownloadByInodeResponse>(
-            self.post(&url),
-            None,
-            SendPolicy::Retry,
+        self.request_download_by_inode(
+            format!(
+                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+                self.base_url
+            ),
+            options,
         )
         .await
     }
@@ -223,11 +241,49 @@ impl Client {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<CreateDownloadByInodeResponse> {
+        self.create_revision_download_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            revision_no,
+            &DownloadOptions::default(),
+        )
+        .await
+    }
+
+    /// Requests direct access to one retained inode revision, without
+    /// requiring a current path, from the offset the options name. A
+    /// revision cannot be combined with a snapshot.
+    pub async fn create_revision_download_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        options: &DownloadOptions,
+    ) -> Result<CreateDownloadByInodeResponse> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
-            self.base_url
-        );
+        self.request_download_by_inode(
+            format!(
+                "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+                self.base_url
+            ),
+            options,
+        )
+        .await
+    }
+
+    async fn request_download_by_inode(
+        &self,
+        url: String,
+        options: &DownloadOptions,
+    ) -> Result<CreateDownloadByInodeResponse> {
+        let mut query = QueryBuilder::new(url);
+        if let Some(snapshot_id) = &options.snapshot_id {
+            query.push("snapshot_id", snapshot_id.as_str());
+        }
+        if options.start_offset != 0 {
+            query.push("start_offset", options.start_offset);
+        }
+        let url = query.finish();
         self.request_json::<(), CreateDownloadByInodeResponse>(
             self.post(&url),
             None,
@@ -236,47 +292,28 @@ impl Client {
         .await
     }
 
-    /// Opens a download grant from the start of the object.
+    /// Opens a download grant, sending the headers it carries unchanged.
+    ///
+    /// The grant names `[start_offset, size_bytes)` of one object and the
+    /// stream starts where it does. For a grant from a nonzero offset, call
+    /// [`DirectDownloadStream::fold_resumed_prefix`] with the bytes below it
+    /// before reading, so the final checksum covers the complete object.
     pub async fn open_direct_download(
         &self,
         download: &CreateDownloadResponse,
-    ) -> Result<DirectDownloadStream> {
-        self.open_direct_download_at(download, 0).await
-    }
-
-    /// Opens a download grant at `start_offset`.
-    ///
-    /// The offset is sent in an unsigned `Range` header, so the same grant can
-    /// serve a complete or resumed download. For a nonzero offset, call
-    /// [`DirectDownloadStream::fold_resumed_prefix`] before reading so the
-    /// final checksum covers the complete object.
-    pub async fn open_direct_download_at(
-        &self,
-        download: &CreateDownloadResponse,
-        start_offset: u64,
     ) -> Result<DirectDownloadStream> {
         self.open_direct_download_target(
             &download.access,
             &download.content_ref,
             download.path.to_string(),
-            start_offset,
         )
         .await
     }
 
-    /// Opens an inode download from the start of the object.
+    /// Opens an inode download grant. See [`Self::open_direct_download`].
     pub async fn open_direct_download_by_inode(
         &self,
         download: &CreateDownloadByInodeResponse,
-    ) -> Result<DirectDownloadStream> {
-        self.open_direct_download_by_inode_at(download, 0).await
-    }
-
-    /// Opens an inode download from `start_offset`.
-    pub async fn open_direct_download_by_inode_at(
-        &self,
-        download: &CreateDownloadByInodeResponse,
-        start_offset: u64,
     ) -> Result<DirectDownloadStream> {
         self.open_direct_download_target(
             &download.access,
@@ -286,7 +323,6 @@ impl Client {
                 loonfs_types::public_inode_id::encode(download.inode_id),
                 download.revision_no
             ),
-            start_offset,
         )
         .await
     }
@@ -296,7 +332,6 @@ impl Client {
         access: &ObjectTransferAccess,
         content_ref: &ContentRef,
         target: String,
-        start_offset: u64,
     ) -> Result<DirectDownloadStream> {
         let ObjectTransferAccess::PresignedUrl {
             method,
@@ -309,20 +344,17 @@ impl Client {
                 "unsupported presigned download method `{method}`"
             )));
         }
-        if start_offset > content_ref.size_bytes {
-            return Err(ClientError::Http(format!(
-                "cannot resume a download of `{target}` at offset {start_offset} of {} bytes",
-                content_ref.size_bytes
-            )));
-        }
-        let mut request = WireRequest::presigned(http::Method::GET, url);
-        for (name, value) in headers {
-            request = request.header(name, value);
-        }
-        if start_offset > 0 {
-            request = request.header("range", format!("bytes={start_offset}-"));
-        }
-        let body = self.call_for_response_stream(&request).await?;
+        let start_offset = granted_start(headers, content_ref, &target)?;
+        // A grant of zero bytes signs no range and needs no request.
+        let body = if start_offset == content_ref.size_bytes {
+            futures::stream::empty().boxed()
+        } else {
+            let mut request = WireRequest::presigned(http::Method::GET, url);
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            self.call_for_response_stream(&request).await?
+        };
         Ok(DirectDownloadStream {
             body,
             expected: content_ref.clone(),
@@ -375,6 +407,36 @@ impl Client {
             .await
             .map_err(|err| ClientError::Io(format!("write of `{path}` failed: {err}")))?;
         Ok(size_bytes)
+    }
+}
+
+/// The first byte a grant reads: the start of the `Range` it signed, which
+/// ends at the reference's last byte, or 0 for a grant that signs none.
+fn granted_start(
+    headers: &BTreeMap<String, String>,
+    content_ref: &ContentRef,
+    target: &str,
+) -> Result<u64> {
+    let Some((_, range)) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+    else {
+        return Ok(0);
+    };
+    let granted = range
+        .strip_prefix("bytes=")
+        .and_then(|range| range.split_once('-'))
+        .and_then(|(first, last)| Some((first.parse::<u64>().ok()?, last.parse::<u64>().ok()?)));
+    match granted {
+        Some((first, last))
+            if first <= last && last.checked_add(1) == Some(content_ref.size_bytes) =>
+        {
+            Ok(first)
+        }
+        _ => Err(ClientError::Protocol(format!(
+            "the grant for `{target}` signs `range: {range}`, which does not end at its {} bytes",
+            content_ref.size_bytes
+        ))),
     }
 }
 

@@ -115,6 +115,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             &request.commit_id,
             &request.actor_id,
             committed_at_ms,
+            |content_ref| candidate.content_digests(content_ref),
         )
         .await
         .map_err(|error| error.at_operation(index))?;

@@ -16,7 +16,7 @@ use loonfs_model::metadata::{
     SubtreeTombstoneAction as ModelTombstoneAction,
 };
 use loonfs_model::visibility::PathLookup;
-use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition};
+use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, MetadataRow};
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
@@ -248,6 +248,8 @@ fn create_file(
             inode_id,
             revision_no: RevisionNo(1),
             content_ref,
+            hash_state: None,
+            crc64nvme: None,
         },
     ]
 }
@@ -263,6 +265,8 @@ fn append_revision(
         inode_id,
         revision_no,
         content_ref,
+        hash_state: None,
+        crc64nvme: None,
     }]
 }
 
@@ -1026,6 +1030,45 @@ fn repeated_content_in_one_commit_emits_one_publication() {
     assert_core_matches_model(CaseInsensitive, &["/one", "/two"], &[deltas]);
 }
 
+#[test]
+fn appends_publish_one_row_per_reference_with_the_longest_first() {
+    let content_id = ContentId::generate();
+    let namespace_id = content_ref("unused").owner_namespace_id;
+    let appended = |delta_index, revision_no, bytes: &[u8]| {
+        let mut hash_state = loonfs_types::Sha256State::new();
+        hash_state.update(bytes);
+        WalDelta::AppendFileRevision {
+            delta_index,
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(revision_no),
+            content_ref: ContentRef::blob_v1(namespace_id.clone(), content_id.clone(), bytes),
+            hash_state: Some(hash_state),
+            crc64nvme: Some(loonfs_types::Checksum::crc64nvme(bytes)),
+        }
+    };
+    let mut first = create_file(
+        CaseInsensitive,
+        0,
+        InodeId(2),
+        InodeId(1),
+        "log",
+        ContentRef::blob_v1(namespace_id.clone(), content_id.clone(), b"one"),
+    );
+    first.push(appended(3, 2, b"one two"));
+    assert_core_matches_model(
+        CaseInsensitive,
+        &["/log"],
+        &[
+            first,
+            vec![
+                appended(0, 3, b"one two three"),
+                appended(1, 4, b"one two three four"),
+                appended(2, 5, b"one two three four"),
+            ],
+        ],
+    );
+}
+
 fn core_bootstrap_state() -> CoreMetadataState {
     CoreMetadataState::default().apply_committed_wal_deltas(
         ChangeSeq(0),
@@ -1081,22 +1124,62 @@ fn assert_core_matches_model(
     let published: BTreeSet<_> = core_state
         .revisions()
         .iter()
-        .map(|row| (&row.content_ref.content_id, row.committed_seq))
+        .map(|row| {
+            (
+                &row.content_ref.content_id,
+                row.content_ref.size_bytes,
+                row.committed_seq,
+            )
+        })
         .collect();
     assert_eq!(core_state.content_publications().len(), published.len());
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
+    let mut core_publications: Vec<_> = core_state
+        .content_publications()
+        .iter()
+        .map(|row| {
+            (
+                MetadataRow::ContentPublication(row.clone()).row_key(),
+                (
+                    &row.content_id,
+                    row.committed_seq,
+                    row.delta_index,
+                    row.size_bytes,
+                    &row.hash_state,
+                    &row.crc64nvme,
+                ),
+            )
+        })
+        .collect();
+    core_publications.sort_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(
-        core_state
-            .content_publications()
-            .iter()
-            .map(|row| (&row.content_id, row.committed_seq, row.delta_index))
+        core_publications
+            .into_iter()
+            .map(|(_, row)| row)
             .collect::<Vec<_>>(),
         model_state
-            .content_publications
-            .iter()
-            .map(|row| (&row.content_id, row.committed_seq, row.delta_index))
+            .content_publications_in_key_order()
+            .into_iter()
+            .map(|row| (
+                &row.content_id,
+                row.committed_seq,
+                row.delta_index,
+                row.size_bytes,
+                &row.hash_state,
+                &row.crc64nvme,
+            ))
             .collect::<Vec<_>>()
     );
+    for (content_id, _, _) in &published {
+        assert_eq!(
+            core_state
+                .content_head(content_id)
+                .map(|head| (head.size_bytes, head.committed_seq)),
+            model_state
+                .content_head(content_id)
+                .map(|head| (head.size_bytes, head.committed_seq))
+        );
+    }
     model_state
 }
 

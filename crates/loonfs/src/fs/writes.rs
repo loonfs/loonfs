@@ -466,23 +466,15 @@ impl Namespace<Writable> {
             .await?;
         owner.require_administrator(&context).await?;
         // Forks pin manifests, so inherited content from a deleted owner is already an object.
-        if !context.head.status.is_deleted() {
-            if let loonfs_core::content::ContentLocation::Tail { bytes, .. } = owner
-                .resolve_content_location(&content_ref, &context)
-                .await?
-            {
-                return Ok(engine
-                    .stage_owned_bytes(
-                        &catalog,
-                        self.core
-                            .subject
-                            .as_ref()
-                            .map(|subject| &subject.subject_id),
-                        &bytes,
-                    )
-                    .await?);
-            }
-        }
+        let owner_location = if context.head.status.is_deleted() {
+            None
+        } else {
+            Some(
+                owner
+                    .resolve_content_location(&content_ref, &context)
+                    .await?,
+            )
+        };
         match engine
             .import_content_ref(
                 &catalog,
@@ -491,6 +483,7 @@ impl Namespace<Writable> {
                     .as_ref()
                     .map(|subject| &subject.subject_id),
                 &content_ref,
+                owner_location,
             )
             .await
         {

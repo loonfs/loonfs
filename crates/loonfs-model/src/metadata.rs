@@ -10,7 +10,9 @@
 
 use crate::Result;
 use loonfs_types::format::wal::WalDelta;
-use loonfs_types::{ActorId, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
+use loonfs_types::{
+    ActorId, ChangeSeq, Checksum, CommitId, ContentRef, InodeId, InodeKind, RevisionNo, Sha256State,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetadataState {
@@ -51,11 +53,16 @@ pub enum DirentryBindingState {
     Unbound,
 }
 
+/// One commit's publication of a reference to a content id, with what its
+/// delta recorded about the reference's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentPublicationRecord {
     pub content_id: loonfs_types::ContentId,
     pub committed_seq: ChangeSeq,
     pub delta_index: u32,
+    pub size_bytes: u64,
+    pub hash_state: Option<Sha256State>,
+    pub crc64nvme: Option<Checksum>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,9 +232,14 @@ impl MetadataState {
                     inode_id,
                     revision_no,
                     content_ref,
+                    hash_state,
+                    crc64nvme,
                 } => {
+                    // A commit names one reference once: a later delta that
+                    // repeats it shares the first delta's row.
                     if !metadata_state.content_publications.iter().any(|row| {
                         row.content_id == content_ref.content_id
+                            && row.size_bytes == content_ref.size_bytes
                             && row.committed_seq == committed_seq
                     }) {
                         metadata_state
@@ -236,6 +248,9 @@ impl MetadataState {
                                 content_id: content_ref.content_id.clone(),
                                 committed_seq,
                                 delta_index: *delta_index,
+                                size_bytes: content_ref.size_bytes,
+                                hash_state: hash_state.clone(),
+                                crc64nvme: crc64nvme.clone(),
                             });
                     }
                     metadata_state.revisions.push(RevisionRecord {
@@ -352,6 +367,31 @@ impl MetadataState {
 
         metadata_state.check_bindings(committed_seq)?;
         Ok(metadata_state)
+    }
+
+    /// The publication rows in row-key order: by content id, the longest
+    /// reference first, then by commit.
+    pub fn content_publications_in_key_order(&self) -> Vec<&ContentPublicationRecord> {
+        let mut rows: Vec<_> = self.content_publications.iter().collect();
+        rows.sort_by_key(|row| {
+            (
+                row.content_id.as_str(),
+                std::cmp::Reverse(row.size_bytes),
+                row.committed_seq,
+            )
+        });
+        rows
+    }
+
+    /// The chain head of a content id: its first publication row in
+    /// row-key order.
+    pub fn content_head(
+        &self,
+        content_id: &loonfs_types::ContentId,
+    ) -> Option<&ContentPublicationRecord> {
+        self.content_publications_in_key_order()
+            .into_iter()
+            .find(|row| &row.content_id == content_id)
     }
 }
 
