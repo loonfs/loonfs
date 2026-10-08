@@ -438,6 +438,18 @@ fn openapi_documents_current_server_paths() {
     );
     assert_query_params(
         paths,
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
+        "get",
+        &["snapshot_id"],
+    );
+    assert_query_params(
+        paths,
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+        "post",
+        &["snapshot_id"],
+    );
+    assert_query_params(
+        paths,
         "/v0/namespaces/{namespace_id}/changes",
         "get",
         &["after_seq", "limit", "snapshot_id"],

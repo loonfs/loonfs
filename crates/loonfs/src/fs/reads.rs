@@ -455,8 +455,7 @@ impl ReadView {
     }
 
     /// Streams the file selected by this view in bounded chunks, as
-    /// `options` asks. A view reads one state, so `options` may not name a
-    /// revision.
+    /// `options` asks.
     pub async fn read_file_stream_with_options(
         &self,
         absolute_path: &str,
@@ -464,12 +463,6 @@ impl ReadView {
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
-            if options.revision_no.is_some() {
-                return Err(CoreError::InvalidCheckpointRequest(
-                    "revision_no cannot be combined with a snapshot read".to_owned(),
-                )
-                .into());
-            }
             Ok(self
                 .engine
                 .read_file_stream(
@@ -491,6 +484,56 @@ impl ReadView {
             Ok(self
                 .engine
                 .direct_download_target(absolute_path, None, &self.context)
+                .await?)
+        })
+        .await
+    }
+
+    /// Reads the revision of a file inode that this view selects, wherever
+    /// the view binds it, plus the entry it came from.
+    pub async fn read_file_by_inode(&self, inode_id: InodeId) -> Result<FileBytes> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.read(async {
+            Ok(self
+                .engine
+                .get_file_by_inode(
+                    inode_id,
+                    &self.context,
+                    self.core.inner.config.max_read_content_bytes,
+                )
+                .await?)
+        })
+        .await
+    }
+
+    /// Streams the revision of a file inode that this view selects in
+    /// bounded chunks. Complete verification requires consuming the stream
+    /// to its end.
+    pub async fn read_file_stream_by_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.read(async {
+            Ok(self
+                .engine
+                .read_file_stream_by_inode(inode_id, None, &self.context)
+                .await?)
+        })
+        .await
+    }
+
+    /// Resolves the revision of a file inode that this view selects for a
+    /// direct download.
+    pub async fn create_download_by_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<DirectDownloadByInodeTarget> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.read(async {
+            Ok(self
+                .engine
+                .direct_download_target_by_inode(inode_id, None, &self.context)
                 .await?)
         })
         .await
@@ -955,6 +998,15 @@ impl<M> Namespace<M> {
         absolute_path: &str,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.file_stream(absolute_path, None, options).await
+    }
+
+    async fn file_stream(
+        &self,
+        absolute_path: &str,
+        revision_no: Option<RevisionNo>,
+        options: &ReadFileStreamOptions,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
         let options = *options;
@@ -964,7 +1016,7 @@ impl<M> Namespace<M> {
                     .read_file_stream(
                         absolute_path,
                         &read_context,
-                        options.revision_no,
+                        revision_no,
                         options.chunk_bytes,
                         options.start_offset,
                     )
@@ -1410,6 +1462,48 @@ impl<M> Namespace<M> {
                     .await?;
                 Ok(read)
             })
+            .await
+    }
+
+    /// Reads one historical file revision by path as bounded chunks instead
+    /// of one buffer.
+    ///
+    /// See [`Self::read_file_stream_with_options`] for how the stream is
+    /// verified.
+    pub async fn read_file_revision_stream(
+        &self,
+        absolute_path: &str,
+        revision_no: RevisionNo,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.read_file_revision_stream_with_options(
+            absolute_path,
+            revision_no,
+            &ReadFileStreamOptions::default(),
+        )
+        .await
+    }
+
+    /// Reads one historical file revision by path as bounded chunks, as
+    /// `options` asks. See [`Self::read_file_stream_with_options`].
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.read_file_revision_stream",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "read_file_revision_stream",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn read_file_revision_stream_with_options(
+        &self,
+        absolute_path: &str,
+        revision_no: RevisionNo,
+        options: &ReadFileStreamOptions,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        self.file_stream(absolute_path, Some(revision_no), options)
             .await
     }
 

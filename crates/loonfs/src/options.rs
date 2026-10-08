@@ -13,9 +13,10 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 pub use loonfs_types::options::{
     AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateDirectoryOptions,
-    DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions,
-    PutFileOptions, StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
-    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions,
+    ListOptions, MoveOptions, PutFileOptions, StatOptions, UndeleteDestination, UndeleteOptions,
+    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    UpdateAttributesOptions,
 };
 
 /// Overrides for the metadata-upkeep action.
@@ -108,8 +109,6 @@ pub struct CreateCheckpointOptions {
 /// Options for a streaming file read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadFileStreamOptions {
-    /// Read this retained revision instead of the current content.
-    pub revision_no: Option<loonfs_types::RevisionNo>,
     /// Bytes one ranged read fetches, which is the most of the file the read
     /// holds at once. Defaults to
     /// [`CONTENT_READ_CHUNK_BYTES`](loonfs_core::CONTENT_READ_CHUNK_BYTES);
@@ -132,7 +131,6 @@ pub struct ReadFileStreamOptions {
 impl Default for ReadFileStreamOptions {
     fn default() -> Self {
         Self {
-            revision_no: None,
             chunk_bytes: const { NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES).unwrap() },
             start_offset: 0,
         }

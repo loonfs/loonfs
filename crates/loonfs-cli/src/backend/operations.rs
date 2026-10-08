@@ -129,17 +129,24 @@ impl ResolvedTarget {
                 resumed_from: start_offset,
             });
         }
-        Ok(FileDownload::Proxied(
-            self.client
-                .read_file_stream_with_options(
-                    spec,
-                    &ReadFileOptions {
-                        revision_no,
-                        snapshot_id: snapshot_id.cloned(),
-                    },
-                )
-                .await?,
-        ))
+        let stream = match revision_no {
+            Some(revision_no) => {
+                self.client
+                    .read_file_revision_stream(spec, revision_no)
+                    .await?
+            }
+            None => {
+                self.client
+                    .read_file_stream_with_options(
+                        spec,
+                        &ReadFileOptions {
+                            snapshot_id: snapshot_id.cloned(),
+                        },
+                    )
+                    .await?
+            }
+        };
+        Ok(FileDownload::Proxied(stream))
     }
 
     pub(crate) async fn put_file_stream(

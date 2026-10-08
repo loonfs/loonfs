@@ -619,13 +619,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
     assert_eq!(
         harness
             .client
-            .read_file_with_options(
-                &target,
-                &loonfs_client::ReadFileOptions {
-                    revision_no: Some(RevisionNo(1)),
-                    snapshot_id: None
-                }
-            )
+            .read_file_revision(&target, RevisionNo(1))
             .await
             .expect("read path revision"),
         b"one"

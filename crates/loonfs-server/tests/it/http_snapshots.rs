@@ -529,7 +529,6 @@ async fn snapshot_file_read_returns_the_captured_state() {
         .read_file_with_options(
             &path,
             &ReadFileOptions {
-                revision_no: None,
                 snapshot_id: Some(snapshot.snapshot_id),
             },
         )

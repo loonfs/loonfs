@@ -4,7 +4,8 @@
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::{start_server, TestServer};
-use loonfs_client::NamespacePath;
+use futures::StreamExt;
+use loonfs_client::{DownloadOptions, NamespacePath, ReadFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::api::v0::ListChangesResponse;
@@ -83,6 +84,17 @@ fn post_json<T: DeserializeOwned>(url: &str, body: serde_json::Value) -> ApiResu
                 .post(url)
                 .set("authorization", "Bearer test-token")
                 .send_json(body.clone()),
+        )
+    })
+}
+
+fn post_empty<T: DeserializeOwned>(url: &str) -> ApiResult<T> {
+    retry_result_on_macos_teardown_einval(|| {
+        decode_json_response(
+            raw_agent()
+                .post(url)
+                .set("authorization", "Bearer test-token")
+                .call(),
         )
     })
 }
@@ -368,6 +380,82 @@ async fn snapshot_reads_answer_the_captured_namespace() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_snapshot_server(temp_dir.path(), "snapshot-inode-reads").await;
+    let namespace = namespace_id("snapshot-inode-reads");
+    harness
+        .client
+        .create_namespace(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            loonfs_types::NamespaceAccess::unrestricted(),
+        )
+        .await
+        .expect("create namespace");
+    let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
+    harness
+        .client
+        .put_file(&keep, b"captured bytes", &loonfs_test_support::test_actor())
+        .await
+        .expect("create file");
+    let inode_id = harness
+        .client
+        .stat(&keep)
+        .await
+        .expect("stat file")
+        .inode_id;
+    let snapshot = create_snapshot(
+        &harness.server_url,
+        namespace.as_str(),
+        "inode-reads",
+        10_000,
+    );
+    harness
+        .client
+        .put_file_with_options(
+            &keep,
+            b"current bytes",
+            &loonfs_test_support::test_actor(),
+            &replace_file_options(),
+        )
+        .await
+        .expect("replace file");
+
+    let pinned = ReadFileOptions {
+        snapshot_id: Some(snapshot.snapshot_id.clone()),
+    };
+    assert_eq!(
+        harness
+            .client
+            .read_file_by_inode_with_options(&namespace, inode_id, &pinned)
+            .await
+            .expect("snapshot read by inode"),
+        b"captured bytes"
+    );
+    let mut stream = harness
+        .client
+        .read_file_stream_by_inode_with_options(&namespace, inode_id, &pinned)
+        .await
+        .expect("snapshot stream by inode");
+    let mut streamed = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        streamed.extend_from_slice(&chunk.expect("content chunk"));
+    }
+    assert_eq!(streamed, b"captured bytes");
+    assert_eq!(
+        harness
+            .client
+            .read_file_by_inode(&namespace, inode_id)
+            .await
+            .expect("current read by inode"),
+        b"current bytes"
+    );
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_snapshot_server(temp_dir.path(), "snapshot-change-feed").await;
@@ -555,6 +643,43 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         assert_eq!(error.0, 404, "route {name}");
         assert_eq!(error.1.code, "snapshot_not_found", "route {name}");
     }
+    let inode_id = harness
+        .client
+        .stat(&keep)
+        .await
+        .expect("stat file")
+        .inode_id;
+    for error in [
+        harness
+            .client
+            .read_file_by_inode_with_options(
+                &namespace,
+                inode_id,
+                &ReadFileOptions {
+                    snapshot_id: Some(deleted.snapshot_id.clone()),
+                },
+            )
+            .await
+            .map(|_| ())
+            .expect_err("deleted snapshot read by inode must fail"),
+        harness
+            .client
+            .create_download_by_inode_with_options(
+                &namespace,
+                inode_id,
+                &DownloadOptions {
+                    snapshot_id: Some(deleted.snapshot_id.clone()),
+                },
+            )
+            .await
+            .map(|_| ())
+            .expect_err("deleted snapshot download by inode must fail"),
+    ] {
+        assert_eq!(
+            error.code(),
+            Some(loonfs_types::ErrorCode::SnapshotNotFound)
+        );
+    }
 
     let checkpoint = harness
         .client
@@ -614,10 +739,24 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
             &download_url(&harness.server_url, namespace.as_str()),
             serde_json::json!({"path": "/keep.txt", "revision_no": 1, "snapshot_id": live.snapshot_id}),
         ),
+        get_bytes(&format!(
+            "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/content?snapshot_id={}",
+            harness.server_url,
+            loonfs_types::public_inode_id::encode(inode_id),
+            live.snapshot_id
+        ))
+        .map(|_| serde_json::Value::Null),
+        post_empty::<serde_json::Value>(&format!(
+            "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/downloads?snapshot_id={}",
+            harness.server_url,
+            loonfs_types::public_inode_id::encode(inode_id),
+            live.snapshot_id
+        )),
     ] {
         let (status, error) = result.expect_err("revision and snapshot must conflict");
         assert_eq!(status, 400);
         assert_eq!(error.code, "invalid_request");
+        assert_eq!(error.param.as_deref(), Some("revision_no"));
         assert!(error.message.contains("revision_no"));
         assert!(error.message.contains("snapshot_id"));
     }

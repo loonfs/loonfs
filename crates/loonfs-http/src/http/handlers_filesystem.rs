@@ -144,14 +144,27 @@ impl ReadTarget {
         }
     }
 
-    pub(super) async fn read_file_stream_with_options(
+    pub(super) async fn read_file_stream(
         &self,
         path: &str,
-        options: &loonfs::ReadFileStreamOptions,
+        revision_no: Option<RevisionNo>,
     ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
         match self {
-            Self::Snapshot(view) => view.read_file_stream_with_options(path, options).await,
-            Self::Live(namespace) => namespace.read_file_stream_with_options(path, options).await,
+            Self::Snapshot(view) => view.read_file_stream(path).await,
+            Self::Live(namespace) => match revision_no {
+                Some(revision_no) => namespace.read_file_revision_stream(path, revision_no).await,
+                None => namespace.read_file_stream(path).await,
+            },
+        }
+    }
+
+    pub(super) async fn read_file_stream_by_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> loonfs::Result<loonfs::FileContentStream<loonfs::SharedObjectStore>> {
+        match self {
+            Self::Snapshot(view) => view.read_file_stream_by_inode(inode_id).await,
+            Self::Live(namespace) => namespace.read_file_stream_by_inode(inode_id).await,
         }
     }
 
@@ -166,6 +179,16 @@ impl ReadTarget {
                 Some(revision_no) => namespace.create_revision_download(path, revision_no).await,
                 None => namespace.create_download(path).await,
             },
+        }
+    }
+
+    pub(super) async fn create_download_by_inode(
+        &self,
+        inode_id: InodeId,
+    ) -> loonfs::Result<loonfs::downloads::DirectDownloadByInodeTarget> {
+        match self {
+            Self::Snapshot(view) => view.create_download_by_inode(inode_id).await,
+            Self::Live(namespace) => namespace.create_download_by_inode(inode_id).await,
         }
     }
 
@@ -340,12 +363,8 @@ pub(super) async fn get_file_bytes(
     reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no)?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let permit = acquire_download_permit(&state)?;
-    let options = loonfs::ReadFileStreamOptions {
-        revision_no,
-        ..Default::default()
-    };
     let stream = target
-        .read_file_stream_with_options(&path, &options)
+        .read_file_stream(&path, revision_no)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(&namespace_id, error)

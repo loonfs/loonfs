@@ -220,13 +220,7 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .expect("replace");
 
     let historical = namespace
-        .read_file_stream_with_options(
-            PATH,
-            &ReadFileStreamOptions {
-                revision_no: Some(RevisionNo(1)),
-                ..chunked()
-            },
-        )
+        .read_file_revision_stream_with_options(PATH, RevisionNo(1), &chunked())
         .await
         .expect("historical stream");
     let view = namespace
@@ -255,16 +249,4 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         assert_eq!(read, payload);
     }
     assert!(watched.peaks().peak_live_bytes <= CHUNK_BYTES);
-    assert!(
-        view.read_file_stream_with_options(
-            PATH,
-            &ReadFileStreamOptions {
-                revision_no: Some(RevisionNo(1)),
-                ..chunked()
-            }
-        )
-        .await
-        .is_err(),
-        "snapshot and revision cannot be combined"
-    );
 }

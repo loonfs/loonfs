@@ -1,9 +1,9 @@
 //! Direct-download negotiation, grants, and verified response streams.
 
 use super::*;
-use crate::transport::SendPolicy;
+use crate::transport::{QueryBuilder, SendPolicy};
 
-/// Options for a download of a file's content by path.
+/// Options for a download of a file's content by path or by inode.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
     /// Download the file revision captured by this snapshot instead of the
@@ -181,11 +181,32 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> Result<CreateDownloadByInodeResponse> {
+        self.create_download_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            &DownloadOptions::default(),
+        )
+        .await
+    }
+
+    /// Requests direct access to the content of a visible file inode,
+    /// wherever it is bound: the current revision, or the revision a snapshot
+    /// captured when the options name one.
+    pub async fn create_download_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        options: &DownloadOptions,
+    ) -> Result<CreateDownloadByInodeResponse> {
         let inode_id = loonfs_types::public_inode_id::encode(inode_id);
-        let url = format!(
+        let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
             self.base_url
-        );
+        ));
+        if let Some(snapshot_id) = &options.snapshot_id {
+            query.push("snapshot_id", snapshot_id.as_str());
+        }
+        let url = query.finish();
         self.request_json::<(), CreateDownloadByInodeResponse>(
             self.post(&url),
             None,

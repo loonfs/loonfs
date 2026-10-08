@@ -7575,7 +7575,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content": {
       "get": {
-        "description": "Reads and verifies the current revision of a visible file inode, wherever it is bound. Unknown or hidden inodes answer `inode_not_found`.",
+        "description": "Reads and verifies the current revision of a visible file inode, wherever it is bound, or the revision a live snapshot captured. Unknown or hidden inodes answer `inode_not_found`.",
         "operationId": "get_file_bytes_by_inode",
         "parameters": [
           {
@@ -7596,6 +7596,15 @@
             "schema": {
               "pattern": "^ino_[1-9][0-9]*$",
               "type": "string"
+            }
+          },
+          {
+            "description": "Use the file revision captured by this snapshot",
+            "in": "query",
+            "name": "snapshot_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -7623,7 +7632,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID"
+            "description": "Invalid inode ID, snapshot id, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -7643,7 +7652,7 @@
                 }
               }
             },
-            "description": "Namespace or visible inode not found"
+            "description": "Namespace, visible inode, or snapshot not found"
           },
           "409": {
             "content": {
@@ -7663,7 +7672,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "413": {
             "content": {
@@ -7693,7 +7702,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads": {
       "post": {
-        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound. The request has no body and the response does not include a path.",
+        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound, or of the revision a live snapshot captured. The request has no body and the response does not include a path.",
         "operationId": "create_download_by_inode",
         "parameters": [
           {
@@ -7714,6 +7723,15 @@
             "schema": {
               "pattern": "^ino_[1-9][0-9]*$",
               "type": "string"
+            }
+          },
+          {
+            "description": "Use the file revision captured by this snapshot",
+            "in": "query",
+            "name": "snapshot_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PinId"
             }
           }
         ],
@@ -7736,7 +7754,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID"
+            "description": "Invalid inode ID, snapshot id, or non-snapshot checkpoint"
           },
           "401": {
             "content": {
@@ -7756,7 +7774,7 @@
                 }
               }
             },
-            "description": "Namespace or visible inode not found"
+            "description": "Namespace, visible inode, or snapshot not found"
           },
           "409": {
             "content": {
@@ -7776,7 +7794,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted or snapshot deleted or expired"
           },
           "501": {
             "content": {
@@ -7993,7 +8011,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID or revision number"
+            "description": "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision"
           },
           "401": {
             "content": {
@@ -8115,7 +8133,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID or revision number"
+            "description": "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision"
           },
           "401": {
             "content": {

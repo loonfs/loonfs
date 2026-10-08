@@ -3,12 +3,14 @@
 use super::download_body::streamed_download_response;
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
-use super::handlers_filesystem::{parse_optional_snapshot_id, read_target, PageQuery};
+use super::handlers_filesystem::{
+    parse_optional_snapshot_id, read_target, reject_snapshot_with_revision, PageQuery,
+};
 use super::query_params::{
     checked_cursor, invalid_path_id_error, parse_include_attributes, parse_revision_no,
     resolve_page_limit,
 };
-use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
+use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
@@ -35,6 +37,14 @@ pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
     // Public inode ids use numeric encoding rather than generated string ids.
     public_inode_id::decode(value)
         .map_err(|error| invalid_path_id_error("inode_id", value, error.reason()))
+}
+
+/// The query of the inode content and download routes. A revision route
+/// takes it only to refuse a snapshot with the error the path routes give.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InodeContentQuery {
+    pub(super) snapshot_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -230,18 +240,19 @@ pub(super) async fn list_file_revisions_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         tag = "inodes",
         summary = "Read file by inode",
-        description = "Reads and verifies the current revision of a visible file inode, wherever it is bound. Unknown or hidden inodes answer `inode_not_found`.",
+        description = "Reads and verifies the current revision of a visible file inode, wherever it is bound, or the revision a live snapshot captured. Unknown or hidden inodes answer `inode_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
+            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
+            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the file revision captured by this snapshot")
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID", body = ApiError),
+            (status = 400, description = "Invalid inode ID, snapshot id, or non-snapshot checkpoint", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or visible inode not found", body = ApiError),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
             (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
             (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ApiError),
             crate::http::openapi::UnavailableResponses
         )
@@ -252,14 +263,15 @@ pub(super) async fn get_file_bytes_by_inode(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
-    AppQuery(_): AppQuery<NoQuery>,
+    AppQuery(query): AppQuery<InodeContentQuery>,
 ) -> Result<Response, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
-    let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let permit = acquire_download_permit(&state)?;
-    let stream = namespace
+    let stream = target
         .read_file_stream_by_inode(inode_id)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
@@ -288,7 +300,7 @@ pub(super) async fn get_file_bytes_by_inode(
         ),
         responses(
             (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID or revision number", body = ApiError),
+            (status = 400, description = "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
             (status = 409, description = "Inode is not a file", body = ApiError),
@@ -303,13 +315,15 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
-    AppQuery(_): AppQuery<NoQuery>,
+    AppQuery(query): AppQuery<InodeContentQuery>,
 ) -> Result<Response, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
+    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
+    reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no))?;
     let permit = acquire_download_permit(&state)?;
     let stream = namespace
         .read_file_revision_stream_by_inode(inode_id, revision_no)
