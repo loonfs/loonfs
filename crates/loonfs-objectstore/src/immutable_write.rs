@@ -3,10 +3,11 @@
 use crate::retry::{next_retry_backoff, transport_retry_pause, DEFAULT};
 use crate::timing::StdMonotonicTimer;
 use crate::{
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, PROVIDER_MULTIPART_THRESHOLD_BYTES,
+    ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use bytes::Bytes;
-use loonfs_types::OperationDeadline;
+use loonfs_types::{ChecksumAlgorithm, OperationDeadline};
 use thiserror::Error;
 
 /// Failure to verify that an immutable key contains the requested bytes.
@@ -49,17 +50,27 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
     let timer = StdMonotonicTimer::default();
     let retry_policy = DEFAULT;
-    let mode = if bytes.len() as u64 >= PROVIDER_MULTIPART_THRESHOLD_BYTES {
-        PutMode::Overwrite
-    } else {
-        PutMode::CreateIfAbsent
-    };
+    let overwrite = bytes.len() as u64 >= PROVIDER_MULTIPART_THRESHOLD_BYTES;
     let deadline = OperationDeadline::start(&timer, retry_policy.operation_deadline);
     let mut retries = 0;
     let mut ambiguous_transport = None;
 
     loop {
-        match store.put(key, bytes.clone(), mode.clone()).await {
+        let attempt = if overwrite {
+            // An overwrite cannot refuse an occupied key, so every attempt,
+            // retries included, compares the key before writing.
+            match compare_existing(store, key, &bytes).await {
+                Ok(ImmutableReadback::Missing) => {
+                    store.put(key, bytes.clone(), PutMode::Overwrite).await
+                }
+                Ok(ImmutableReadback::Identical(metadata)) => return Ok(metadata),
+                Ok(ImmutableReadback::Different) => return Err(different_object(key)),
+                Err(error) => Err(error),
+            }
+        } else {
+            store.put(key, bytes.clone(), PutMode::CreateIfAbsent).await
+        };
+        match attempt {
             Ok(metadata) => return Ok(metadata),
             Err(error @ ObjectStoreError::PreconditionFailed { .. }) => {
                 return resolve_readback(store, key, &bytes, ambiguous_transport.unwrap_or(error))
@@ -95,9 +106,7 @@ async fn resolve_readback<S: ObjectStore + ?Sized>(
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
     match readback(store, key, expected).await {
         Ok(ImmutableReadback::Identical(metadata)) => Ok(metadata),
-        Ok(ImmutableReadback::Different) => Err(ImmutableWriteError::DifferentObject {
-            object_key: key.to_owned(),
-        }),
+        Ok(ImmutableReadback::Different) => Err(different_object(key)),
         Ok(ImmutableReadback::Missing) => Err(transport(key, original)),
         Err(verify_error @ ObjectStoreError::Transport { .. }) => {
             let source = ObjectStoreError::transport(
@@ -130,6 +139,59 @@ pub(crate) async fn readback<S: ObjectStore + ?Sized>(
         }
         Some(_) => Ok(ImmutableReadback::Different),
         None => Ok(ImmutableReadback::Missing),
+    }
+}
+
+/// Compares what `key` holds with `expected` without writing.
+///
+/// A stored size or checksum that differs decides without a download, and so
+/// does a matching stored SHA-256. A CRC never confirms identity on its own,
+/// because different bytes can share a CRC. After a matching CRC, or when the
+/// store keeps no checksum, the object is read, but never more than one byte
+/// past the length of `expected`. An identical object reports only its size.
+async fn compare_existing<S: ObjectStore + ?Sized>(
+    store: &S,
+    key: &str,
+    expected: &Bytes,
+) -> crate::Result<ImmutableReadback> {
+    let size_bytes = expected.len() as u64;
+    let identical = match store.head_stored_checksum(key).await {
+        Ok(None) => return Ok(ImmutableReadback::Missing),
+        Ok(Some(stored))
+            if stored.size_bytes != size_bytes || !stored.checksum.matches(expected) =>
+        {
+            false
+        }
+        Ok(Some(stored)) if stored.checksum.algorithm == ChecksumAlgorithm::Sha256 => true,
+        Ok(Some(_))
+        | Err(ObjectStoreError::StoredChecksumMissing { .. } | ObjectStoreError::Unsupported(_)) => {
+            // The extra byte tells a longer object apart from this payload.
+            let range = ByteRange {
+                start_inclusive: 0,
+                end_exclusive: size_bytes + 1,
+            };
+            match store.get(key, Some(range)).await? {
+                Some(existing) => existing == *expected,
+                None => return Ok(ImmutableReadback::Missing),
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(if identical {
+        ImmutableReadback::Identical(ObjectMetadata {
+            etag: None,
+            version: None,
+            size_bytes,
+            last_modified_ms: None,
+        })
+    } else {
+        ImmutableReadback::Different
+    })
+}
+
+fn different_object(key: &str) -> ImmutableWriteError {
+    ImmutableWriteError::DifferentObject {
+        object_key: key.to_owned(),
     }
 }
 

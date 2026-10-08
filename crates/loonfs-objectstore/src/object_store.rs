@@ -547,13 +547,22 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Writes `bytes` under an immutable `key` and accepts success only when
     /// the key contains exactly those bytes.
     ///
+    /// At every size, a key that already holds different bytes answers
+    /// [`crate::ImmutableWriteError::DifferentObject`] and is left unchanged.
     /// Payloads below [`crate::PROVIDER_MULTIPART_THRESHOLD_BYTES`] use
-    /// create-if-absent; payloads at or above that threshold use the store's
-    /// multipart-capable overwrite path. Transport retries are safe only
+    /// create-if-absent. Payloads at or above that threshold use the store's
+    /// multipart-capable overwrite path, which cannot refuse an occupied key,
+    /// so each attempt first compares the object at the key and writes only
+    /// to an absent key. A stored SHA-256 decides that comparison without a
+    /// download. A stored CRC never confirms identity on its own, because
+    /// different bytes can share a CRC. After a matching CRC, or when the
+    /// store keeps no checksum, the comparison reads the object's bytes.
+    /// Transport retries, and writers racing that comparison, are safe only
     /// because every writer allowed to name this immutable key must supply
     /// identical bytes. Mutable keys must use [`Self::put`] and own their
     /// protocol-specific ambiguity resolution.
-    /// Returns metadata from the confirmed write or exact read-back.
+    /// Returns metadata from the confirmed write or exact read-back. An
+    /// identical object found before a large write reports only its size.
     async fn put_immutable_verified(
         &self,
         key: &str,
