@@ -131,7 +131,13 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                     };
                     let mut stream = if method == "inode_stream" {
                         engine
-                            .read_file_stream_by_inode(inode_id, Some(RevisionNo(1)), &context)
+                            .read_file_stream_by_inode(
+                                inode_id,
+                                Some(RevisionNo(1)),
+                                &context,
+                                NonZeroU64::new(2).expect("chunk size"),
+                                start_offset as u64,
+                            )
                             .await
                             .expect("inode stream")
                     } else {
