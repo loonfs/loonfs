@@ -47,7 +47,7 @@ A fork is a new namespace initialized from a retained view of another namespace.
 
 The root directory has inode ID `1`. A newly created namespace starts at sequence `0`, with inode ID `2` available for allocation. New inode IDs are allocated monotonically as part of metadata publication. Renaming a file does not change its inode ID. Deleting a file and creating another at the same path allocates a different ID.
 
-There are two inode kinds: `dir` and `file`. An inode records the item's kind and creation metadata. Its current parent and name are represented by directory bindings, and its file contents are represented by revisions. Neither the path nor the current content reference is stored on the inode row itself.
+Version 1 defines two inode kinds: `dir` and `file`. Section 12.5 reserves a third kind, `link`. An inode records the item's kind and creation metadata. Its current parent and name are represented by directory bindings, and its file contents are represented by revisions. Neither the path nor the current content reference is stored on the inode row itself.
 
 ### 1.2 Commits and revisions
 
@@ -103,7 +103,7 @@ A change to any name-key mapping changes the format semantics, even if the seria
 
 ### 1.5 File contents and ownership
 
-Each file revision contains one `ContentRef`. The current kind, `blob_v1`, identifies a complete file whose bytes are stored as one immutable content object. The object's bytes are the file bytes; LoonFS does not add an envelope around the content object.
+Each file revision contains one `ContentRef`. The current kind, `blob_v1`, identifies a complete file whose bytes are stored as one immutable content object. The object's bytes are the file bytes; LoonFS does not add an envelope around the content object. `blob_v1` is the only content reference kind. Content derived from other content, such as a future differential update, is a source of the bytes behind an ordinary `blob_v1` reference, never a second kind.
 
 A reference contains the original owner namespace, a random content ID that is never reused, the complete size, and a full-object checksum. It does not contain a bucket address or object-store path.
 
@@ -1071,13 +1071,15 @@ Per-block CRC32C verifies ranged block reads against their handles. It is not th
 
 Authoritative durable envelopes and their nested payloads reject unknown fields. This includes immutable objects: WAL folding and compaction re-encode their contents, so accepting an unknown field and dropping it in a successor would lose durable meaning.
 
-`ContentRef` and `Checksum` are closed shapes wherever they appear. They evolve through supported `kind` or `algorithm` values, not additional fields on an existing closed shape. Unknown content kinds and checksum algorithms are rejected. A new content kind requires a supported version change for every durable family containing that reference.
+`ContentRef` and `Checksum` are closed shapes wherever they appear. Each content kind and each checksum algorithm is its own closed shape. A new kind or algorithm is a new shape. Unknown content kinds and checksum algorithms are rejected. A new content kind requires a supported version change for every durable family containing that reference.
 
 API request bodies also reject unknown fields, including nested fields, so a misspelled precondition cannot silently become a request without that precondition. Response bodies generally tolerate additions, except for shared closed shapes. The companion API specification defines those transport rules.
 
-The owning envelope's `format_version` governs its entire payload, including nested objects and collection semantics. A payload does not add an independent format-version field. A metadata segment is a separate object. Its descriptor's `encoding` names the version of that object's block layout, not a version of the manifest payload. The manifest version governs the descriptor itself. A manifest may name different encodings for different segments. A reader rejects a manifest that names an encoding it does not support, before it opens any segment. Grep segments are interpreted under the version of the grep manifest that references them. A name such as `blob_v1` identifies a closed content strategy; it is not permission to ignore the owning family's version.
+The owning envelope's `format_version` governs its entire payload, including nested objects and collection semantics. A payload does not add an independent format-version field. A metadata segment is a separate object. Its descriptor's `encoding` is the segment's own version, and it covers both the block layout of Appendix A.7 and the row-kind schema of Appendix A.6. Because each segment carries its own encoding, one manifest may list segments of different encodings. Compaction migrates the rows it rewrites to the encoding of the segments it writes. The encoding is not a version of the manifest payload; the manifest version governs the descriptor itself. A `commit` row carries the deltas of its WAL commit record, so the `commits` family's encoding changes whenever the WAL delta vocabulary changes. A reader rejects a manifest that names an encoding it does not support, before it opens any segment. Grep segments are interpreted under the version of the grep manifest that references them. A name such as `blob_v1` identifies a closed content strategy; it is not permission to ignore the owning family's version.
 
 After the stable format is released, a change to a field's name, presence, type, tag, encoding, or governed semantics requires a new owning-family version. Collection-protocol changes can require a version gate even when most stored fields remain unchanged. An implementation must not operate on a newer protocol merely because it can deserialize a subset of its fields. The rule applies to every role that mutates durable state: publishing a successor manifest or WAL object, compacting, creating or changing pins, advancing retention, collecting, and maintaining an extension. Each of those roles loads the current manifest before it publishes, or is fenced by the epoch that a newer binary claims when it first publishes, and an unsupported version is rejected at load. A process that was running when a newer version was published therefore stops mutating durable state at its next publication attempt, and a collection pass stops at its next start.
+
+A reader accepts every released version of a family up to its own and rejects a newer one. Segment encodings follow the same rule. Pins and fork bases freeze manifests by checksum and keep their segments for as long as any pin or fork lives, so objects written by any earlier release can stay in use. A writer emits the lowest version that can express the object it writes. An upgraded binary therefore writes objects that an older binary can read until an object needs a newer version.
 
 Golden fixtures pin the reference encodings in `crates/loonfs-types/tests/golden_formats.rs` and the grep fixtures. Fingerprint vectors additionally pin canonical JSON bytes and digests. Validating a new release requires preserving the meaning of retained data, not just recompiling its type definitions.
 
@@ -1097,7 +1099,11 @@ An extension must remain rebuildable from authoritative core state. Its absence 
 
 ### 12.5 Reserved functionality
 
-The current inode kinds are `file` and `dir`. Mount creation and traversal are not defined by this version; no standard operation creates a mount.
+Version 1 defines the inode kinds `file` and `dir`. The kind `link` is reserved, not defined. A link is an inode with exactly one parent binding and an immutable target inode id. Path resolution substitutes the target for the link. Version 1 has no row, delta, or operation for links.
+
+In version 1, an inode never has more than one parent binding. For a directory the rule is permanent: bindings that give a directory several parents are outside the format in every version.
+
+Mount creation and traversal are not defined by this version; no standard operation creates a mount.
 
 ## Appendix A. Durable records and byte encodings
 
@@ -1112,7 +1118,7 @@ The three control-object kinds are `hint`, `pin`, and `upload_session`.
 | WAL object | `wal_object` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
 | Namespace manifest | `manifest` | Uncompressed JSON | 1 |
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
-| Metadata segment | No envelope | Block sections described in A.7 | 1, named by the segment descriptor's `encoding` |
+| Metadata segment | No envelope | Block sections described in A.7, holding the rows described in A.6 | 1, named by the segment descriptor's `encoding` |
 | Pin record | `pin` | Uncompressed JSON | 1 |
 | Upload session | `upload_session` | Uncompressed JSON | 1 |
 | Content object | No envelope | Complete file bytes | Referenced as `blob_v1` |
@@ -1222,7 +1228,7 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`. Tier is `delta` or `
 | `owner_namespace_id` | Namespace storing the segment. |
 | `segment_id` | Immutable generated segment identity. |
 | `family` | Metadata row family. |
-| `encoding` | Required unsigned integer that names the segment's block encoding. The value is 1. |
+| `encoding` | Required unsigned integer that names the segment's version, which covers its block layout and its rows. The value is 1. |
 | `row_count` | Positive number of stored rows. |
 | `min_row_key`, `max_row_key` | Inclusive key range. |
 | `index_block`, `filter_block` | Index and filter handles. |
@@ -1362,7 +1368,7 @@ A segment is a concatenation of independently readable sections:
 
 There is no segment header or footer. The manifest descriptor supplies the filter and index handles; the index supplies the data-block handles. A segment cannot be opened from its own bytes without the necessary descriptor information.
 
-A metadata segment descriptor's `encoding` names the version of this layout. Grep segments take their version from the grep manifest that references them.
+A metadata segment descriptor's `encoding` names the version of this layout and of the rows its data blocks hold. Grep segments take their version from the grep manifest that references them.
 
 Each handle is an encoded object with the following fields:
 

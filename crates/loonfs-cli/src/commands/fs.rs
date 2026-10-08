@@ -36,8 +36,8 @@ use loonfs_types::api::v0::UploadSessionStatus;
 use loonfs_types::PinId;
 use loonfs_types::{
     AbsolutePath, AttributeKey, AttributeValue, AttributesRevisionNo, ChangeSeq, Commit, CommitId,
-    DeleteDirectoryBehavior, DestinationBehavior, InodeKind, ListPathEntriesResponse, NamespaceId,
-    RevisionNo,
+    DeleteDirectoryBehavior, DestinationBehavior, EntryInodeKind, ListPathEntriesResponse,
+    NamespaceId, RevisionNo,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -485,7 +485,7 @@ pub(crate) async fn run_filesystem_get(
         .await
         .map_err(|error| context.fail(kind, error))?;
     if args.recursive {
-        if entry.inode_kind() != InodeKind::Directory {
+        if entry.inode_kind() != EntryInodeKind::Directory {
             return Err(context.fail(
                 kind,
                 CliError::invalid_request(format!(
@@ -525,7 +525,7 @@ pub(crate) async fn run_filesystem_get(
         )
         .await;
     }
-    if entry.inode_kind() == InodeKind::Directory {
+    if entry.inode_kind() == EntryInodeKind::Directory {
         return Err(context.fail(
             kind,
             CliError::invalid_request(format!(
@@ -1416,7 +1416,7 @@ async fn resolve_transfer_destination(
         // report: either way this is not a directory to land inside.
         return Ok(named);
     };
-    if existing.inode_kind() != InodeKind::Directory {
+    if existing.inode_kind() != EntryInodeKind::Directory {
         return Ok(named);
     }
     let leaf = loonfs_types::DisplayName::parse(source_leaf)
@@ -1504,7 +1504,7 @@ async fn run_filesystem_transfer(
             .await
             .map_err(|error| context.fail(kind, error))?;
         if args.recursive {
-            if entry.inode_kind() != InodeKind::Directory {
+            if entry.inode_kind() != EntryInodeKind::Directory {
                 return Err(context.fail(
                     kind,
                     CliError::invalid_request(format!(
@@ -1534,7 +1534,7 @@ async fn run_filesystem_transfer(
             )
             .await;
         }
-        if entry.inode_kind() == InodeKind::Directory {
+        if entry.inode_kind() == EntryInodeKind::Directory {
             return Err(context.fail(
                 kind,
                 CliError::invalid_request(format!(

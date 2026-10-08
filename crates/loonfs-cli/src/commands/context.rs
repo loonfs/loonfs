@@ -9,8 +9,8 @@ use crate::resolve::{
 };
 use loonfs_client::{CreateDirectoryOptions, NamespacePath};
 use loonfs_types::{
-    AbsolutePath, ActorId, ChangeSeq, Commit, ErrorCode, InodeId, InodeKind, NamespaceId, PinId,
-    PublicOrdinalRangeError,
+    AbsolutePath, ActorId, ChangeSeq, Commit, EntryInodeKind, ErrorCode, InodeId, NamespaceId,
+    PinId, PublicOrdinalRangeError,
 };
 use std::path::{Path, PathBuf};
 
@@ -45,7 +45,7 @@ pub(crate) async fn create_directory_tolerating_existing(
         Ok(result) => Ok(RemoteDirectoryOutcome::Created(result)),
         Err(error) if error.code == ErrorCode::PathConflict.as_str() => {
             let existing = context.target.stat_without_attributes(spec).await?;
-            if existing.inode_kind() != InodeKind::Directory {
+            if existing.inode_kind() != EntryInodeKind::Directory {
                 return Err(error);
             }
             Ok(RemoteDirectoryOutcome::AlreadyExists {

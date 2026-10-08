@@ -11,7 +11,7 @@ use loonfs::publish::{
 use loonfs_client::{ClientError, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::{first_page, namespace_id};
 use loonfs_types::{
-    ChangeSeq, CommitId, DestinationBehavior, InodeKind, API_GROUP_FILESYSTEM_V0,
+    ChangeSeq, CommitId, DestinationBehavior, EntryInodeKind, API_GROUP_FILESYSTEM_V0,
     API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
     LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
@@ -295,7 +295,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         .stat(&directory)
         .await
         .expect("stat directory");
-    assert_eq!(directory_entry.inode_kind(), InodeKind::Directory);
+    assert_eq!(directory_entry.inode_kind(), EntryInodeKind::Directory);
 
     let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("parse namespace path");
     let written = harness

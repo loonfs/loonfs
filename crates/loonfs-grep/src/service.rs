@@ -27,9 +27,9 @@ use loonfs_types::format::sst_blocks::{
     string_prefix_upper_bound,
 };
 use loonfs_types::{
-    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EffectiveLimit, ErrorCode, GrepMatch,
-    GrepPageCursor, GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId, PathEntry,
-    RevisionNo, ROOT_INODE_ID,
+    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, EffectiveLimit, EntryInodeKind,
+    ErrorCode, GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, InodeId, NamespaceId,
+    PathEntry, RevisionNo, ROOT_INODE_ID,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -986,7 +986,7 @@ async fn scan_candidate_inodes(
 ) -> Result<BTreeSet<InodeId>> {
     let mut inodes = BTreeSet::new();
     let root = match scope {
-        Some(entry) if entry.inode_kind() == InodeKind::File => {
+        Some(entry) if entry.inode_kind() == EntryInodeKind::File => {
             // A file scope contains only that file.
             inodes.insert(entry.inode_id);
             return Ok(inodes);
@@ -1017,10 +1017,11 @@ async fn scan_candidate_inodes(
             };
             for entry in page.items {
                 match entry.inode_kind() {
-                    InodeKind::Directory => directories.push(entry.inode_id),
-                    InodeKind::File => {
+                    EntryInodeKind::Directory => directories.push(entry.inode_id),
+                    EntryInodeKind::File => {
                         inodes.insert(entry.inode_id);
                     }
+                    EntryInodeKind::Unknown => {}
                 }
             }
             if inodes.len() + directories.len() > MAX_GREP_SCAN_FILES

@@ -710,3 +710,125 @@ impl Client {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scripted_transport::{self, Outcome};
+    use loonfs_types::{ContentId, EntryInodeKind, PathEntryKind};
+
+    fn client_for(transport: &scripted_transport::ScriptedTransport) -> Client {
+        Client::with_transport(
+            ClientConfig {
+                server_url: "http://example.invalid".to_owned(),
+                auth_token: None,
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: None,
+            },
+            transport.clone(),
+        )
+        .expect("valid client config")
+    }
+
+    #[tokio::test]
+    async fn an_unknown_inode_kind_decodes_as_unknown_and_a_known_kind_is_unchanged() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let listing = serde_json::json!({
+            "namespace_id": "demo",
+            "path": "/docs",
+            "head_seq": 418,
+            "entries": [
+                {
+                    "namespace_id": "demo",
+                    "path": "/docs/report.txt",
+                    "inode_id": "ino_42",
+                    "created_by": "usr_8f3c",
+                    "created_at_ms": 1_752_623_000_000_u64,
+                    "inode_kind": "file",
+                    "revision_no": 7,
+                    "size_bytes": 5,
+                    "content_ref": ContentRef::blob_v1(
+                        namespace_id.clone(),
+                        ContentId::generate(),
+                        b"hello",
+                    ),
+                    "revision_committed_by": "render-worker",
+                    "revision_committed_at_ms": 1_752_624_000_000_u64,
+                    "head_seq": 418,
+                    "parent_inode_id": "ino_7",
+                    "display_name": "report.txt",
+                    "binding_version": "abc"
+                },
+                {
+                    "namespace_id": "demo",
+                    "path": "/docs/latest",
+                    "inode_id": "ino_43",
+                    "created_by": "usr_8f3c",
+                    "created_at_ms": 1_752_623_000_000_u64,
+                    "inode_kind": "link",
+                    "target_inode_id": "ino_42",
+                    "head_seq": 418,
+                    "parent_inode_id": "ino_7",
+                    "display_name": "latest",
+                    "binding_version": "def"
+                }
+            ]
+        });
+        let trash = serde_json::json!({
+            "namespace_id": "demo",
+            "head_seq": 418,
+            "entries": [{
+                "inode_id": "ino_44",
+                "inode_kind": "link",
+                "deletion_seq": 417,
+                "deleted_at_ms": 1_752_625_000_000_u64,
+                "deleted_by": "usr_8f3c",
+                "deleted_binding": {
+                    "parent_inode_id": "ino_7",
+                    "name_key": "old",
+                    "display_name": "old"
+                }
+            }]
+        });
+        let transport = scripted_transport::script([
+            Outcome::Success(listing.to_string().into_bytes()),
+            Outcome::Success(trash.to_string().into_bytes()),
+        ]);
+        let client = client_for(&transport);
+
+        let page = client
+            .list(&NamespacePath::parse("demo", "/docs").expect("namespace path"))
+            .next()
+            .await
+            .expect("one page")
+            .expect("decoded listing");
+        assert_eq!(
+            serde_json::to_value(&page.entries[0]).expect("serialize file entry"),
+            listing["entries"][0]
+        );
+        let link = &page.entries[1];
+        assert_eq!(link.kind, PathEntryKind::Unknown);
+        assert_eq!(link.inode_kind(), EntryInodeKind::Unknown);
+        assert_eq!(link.inode_id, InodeId(43));
+        assert_eq!(link.path.as_str(), "/docs/latest");
+        assert_eq!(
+            link.display_name.as_ref().map(|name| name.as_str()),
+            Some("latest")
+        );
+        assert_eq!(
+            link.binding_version
+                .as_ref()
+                .map(|version| version.as_str()),
+            Some("def")
+        );
+
+        let trash = client
+            .list_trash(&namespace_id)
+            .next()
+            .await
+            .expect("one page")
+            .expect("decoded trash");
+        assert_eq!(trash.entries[0].inode_kind, EntryInodeKind::Unknown);
+    }
+}

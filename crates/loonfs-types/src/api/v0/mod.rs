@@ -31,8 +31,8 @@ pub use operations::{
     StoreProbeResponse, WalFoldStepOutcome,
 };
 pub use reads::{
-    AttributesProjection, FileBytes, ListInodeChildrenResponse, ListPathEntriesResponse,
-    ListTrashResponse, PathEntry, PathEntryKind, TrashEntry,
+    AttributesProjection, EntryInodeKind, FileBytes, ListInodeChildrenResponse,
+    ListPathEntriesResponse, ListTrashResponse, PathEntry, PathEntryKind, TrashEntry,
 };
 pub use search::{GrepIndex, GrepIndexLifecycle, GrepMatch, GrepRequest, GrepResponse};
 pub use uploads::{

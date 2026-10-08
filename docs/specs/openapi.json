@@ -3545,7 +3545,7 @@
         "type": "object"
       },
       "PathEntry": {
-        "description": "Metadata for one path returned by stat and directory listings.\n\nAttribute fields are included only when requested.",
+        "description": "Metadata for one path returned by stat and directory listings.\n\nAttribute fields are included only when requested.\n\nNewer servers may report other inode kinds; clients read only the fields every entry carries.",
         "discriminator": {
           "mapping": {
             "dir": "#/components/schemas/PathEntryDirectory",
@@ -4408,7 +4408,7 @@
           },
           "inode_kind": {
             "$ref": "#/components/schemas/InodeKind",
-            "description": "Whether the deleted root is a file or a directory."
+            "description": "Whether the deleted root is a file or a directory; a newer server may report another kind."
           }
         },
         "required": [

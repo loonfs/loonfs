@@ -2,9 +2,9 @@
 
 use crate::common::{open_runtime_async, store, TestRuntime};
 use loonfs::{
-    CommitId, CommitOptions, DeleteByInodeOptions, DeleteDirectoryBehavior, DisplayName, ErrorCode,
-    InodeId, InodeKind, LoonFs, Namespace, PageRequest, PaginationPolicy, PutFileOptions,
-    RevisionNo, Writable,
+    CommitId, CommitOptions, DeleteByInodeOptions, DeleteDirectoryBehavior, DisplayName,
+    EntryInodeKind, ErrorCode, InodeId, LoonFs, Namespace, PageRequest, PaginationPolicy,
+    PutFileOptions, RevisionNo, Writable,
 };
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
@@ -316,7 +316,7 @@ async fn create_directory_by_inode_binds_a_new_name_under_the_parent() {
         .stat("/docs/archive")
         .await
         .expect("stat created directory");
-    assert_eq!(created.inode_kind(), InodeKind::Directory);
+    assert_eq!(created.inode_kind(), EntryInodeKind::Directory);
     assert_eq!(created.parent_inode_id, Some(docs));
 
     let error = namespace

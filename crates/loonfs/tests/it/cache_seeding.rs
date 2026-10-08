@@ -6,8 +6,8 @@
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    ChangeSeq, CompactionStepOutcome, ErrorCode, InodeId, InodeKind, MetadataCache, NamespaceId,
-    SharedObjectStore, StoredMetadataBlockKind,
+    ChangeSeq, CompactionStepOutcome, EntryInodeKind, ErrorCode, InodeId, MetadataCache,
+    NamespaceId, SharedObjectStore, StoredMetadataBlockKind,
 };
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::test_support::{
@@ -817,7 +817,7 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
         .expect("stat root after create");
     assert_eq!(root.path, "/");
     assert_eq!(root.inode_id, InodeId(1));
-    assert_eq!(root.inode_kind(), InodeKind::Directory);
+    assert_eq!(root.inode_kind(), EntryInodeKind::Directory);
     assert_eq!(root.head_seq, ChangeSeq(0));
 
     let entries = fs

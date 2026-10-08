@@ -15,7 +15,7 @@ use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::format::manifest::{
     ActiveDeletionRowAction, DeletedBinding, DeltaPosition, InodeRecord,
 };
-use loonfs_types::{AttributeInclusion, InodeKind};
+use loonfs_types::{AttributeInclusion, EntryInodeKind, InodeKind};
 use loonfs_types::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
 use std::sync::Arc;
 
@@ -364,7 +364,8 @@ fn trash_by_walking_every_tombstone(state: &MetadataState, head_seq: ChangeSeq) 
                 inode_kind: state
                     .inode_at_seq(root_inode_id, head_seq)
                     .expect("deletion root")
-                    .inode_kind,
+                    .inode_kind
+                    .into(),
                 deletion_seq: active.committed_seq,
                 deleted_at_ms: active.committed_at_ms,
                 deleted_by: active.committed_by,
@@ -571,10 +572,10 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
             .map(|entry| entry.inode_kind)
             .collect::<Vec<_>>(),
         vec![
-            InodeKind::File,
-            InodeKind::File,
-            InodeKind::File,
-            InodeKind::Directory
+            EntryInodeKind::File,
+            EntryInodeKind::File,
+            EntryInodeKind::File,
+            EntryInodeKind::Directory
         ]
     );
     create_checkpoint(&store, &namespace_id, &context)

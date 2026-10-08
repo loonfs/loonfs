@@ -6,10 +6,13 @@ use crate::{
     DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Metadata for one path returned by stat and directory listings.
 ///
 /// Attribute fields are included only when requested.
+///
+/// Newer servers may report other inode kinds; clients read only the fields every entry carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PathEntry {
@@ -25,7 +28,7 @@ pub struct PathEntry {
     pub created_by: ActorId,
     /// The inode creation time in Unix milliseconds.
     pub created_at_ms: u64,
-    /// File-or-directory classification and its kind-specific payload.
+    /// Inode kind and its kind-specific payload.
     #[serde(flatten)]
     pub kind: PathEntryKind,
     /// Namespace head sequence this answer was read from.
@@ -53,15 +56,15 @@ pub struct PathEntry {
 }
 
 impl PathEntry {
-    /// Returns whether this entry is a file or directory.
-    pub const fn inode_kind(&self) -> InodeKind {
+    /// Returns the entry's inode kind, which is `Unknown` for a kind added by a newer server.
+    pub const fn inode_kind(&self) -> EntryInodeKind {
         self.kind.inode_kind()
     }
 
     /// Returns the current revision number for a file entry.
     pub const fn revision_no(&self) -> Option<RevisionNo> {
         match &self.kind {
-            PathEntryKind::Directory {} => None,
+            PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
             PathEntryKind::File { revision_no, .. } => Some(*revision_no),
         }
     }
@@ -69,7 +72,7 @@ impl PathEntry {
     /// Returns the current byte length for a file entry.
     pub const fn size_bytes(&self) -> Option<u64> {
         match &self.kind {
-            PathEntryKind::Directory {} => None,
+            PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
             PathEntryKind::File { size_bytes, .. } => Some(*size_bytes),
         }
     }
@@ -77,7 +80,7 @@ impl PathEntry {
     /// Returns the current content reference for a file entry.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match &self.kind {
-            PathEntryKind::Directory {} => None,
+            PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
             PathEntryKind::File { content_ref, .. } => Some(content_ref),
         }
     }
@@ -85,7 +88,7 @@ impl PathEntry {
     /// Returns the current revision's commit stamp for a file entry.
     pub const fn revision_committed_at_ms(&self) -> Option<u64> {
         match &self.kind {
-            PathEntryKind::Directory {} => None,
+            PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
             PathEntryKind::File {
                 revision_committed_at_ms,
                 ..
@@ -117,27 +120,72 @@ pub enum PathEntryKind {
         /// The current revision time in Unix milliseconds.
         revision_committed_at_ms: u64,
     },
+    /// A kind added by a newer server, without its kind-specific fields.
+    ///
+    /// It serializes as `unknown` because the reported kind is not kept.
+    #[serde(other)]
+    Unknown,
 }
 
 impl PathEntryKind {
-    /// Returns the stable inode classification represented by this payload.
-    pub const fn inode_kind(&self) -> InodeKind {
+    /// Returns the inode kind this payload represents.
+    pub const fn inode_kind(&self) -> EntryInodeKind {
         match self {
-            Self::Directory {} => InodeKind::Directory,
-            Self::File { .. } => InodeKind::File,
+            Self::Directory {} => EntryInodeKind::Directory,
+            Self::File { .. } => EntryInodeKind::File,
+            Self::Unknown => EntryInodeKind::Unknown,
         }
     }
 
     /// Returns the actor responsible for the current file revision.
-    /// Directories return `None`.
+    /// Other kinds return `None`.
     pub const fn revision_committed_by(&self) -> Option<&ActorId> {
         match self {
-            Self::Directory {} => None,
+            Self::Directory {} | Self::Unknown => None,
             Self::File {
                 revision_committed_by,
                 ..
             } => Some(revision_committed_by),
         }
+    }
+}
+
+/// The inode kind a response reports.
+///
+/// The stored [`InodeKind`] is closed. A response can come from a newer
+/// server that stores more kinds, so this enum ends in `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryInodeKind {
+    /// File with revision history.
+    File,
+    /// Directory with child bindings.
+    ///
+    /// The wire value is pinned to `"dir"`; only the Rust name spells the
+    /// word out.
+    #[serde(rename = "dir")]
+    Directory,
+    /// A kind added by a newer server. It serializes as `unknown`.
+    #[serde(other)]
+    Unknown,
+}
+
+impl From<InodeKind> for EntryInodeKind {
+    fn from(kind: InodeKind) -> Self {
+        match kind {
+            InodeKind::File => Self::File,
+            InodeKind::Directory => Self::Directory,
+        }
+    }
+}
+
+impl fmt::Display for EntryInodeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::File => "file",
+            Self::Directory => "dir",
+            Self::Unknown => "unknown",
+        })
     }
 }
 
@@ -218,8 +266,9 @@ pub struct TrashEntry {
     /// Inode hidden by the deletion.
     #[serde(with = "crate::public_inode_id")]
     pub inode_id: InodeId,
-    /// Whether the deleted root is a file or a directory.
-    pub inode_kind: InodeKind,
+    /// Whether the deleted root is a file or a directory; a newer server may report another kind.
+    #[cfg_attr(feature = "openapi", schema(value_type = InodeKind))]
+    pub inode_kind: EntryInodeKind,
     /// Commit sequence that identifies this deletion.
     pub deletion_seq: ChangeSeq,
     /// Time of the deletion, in Unix milliseconds.
@@ -404,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn path_entry_kinds_share_inode_kind_wire_values() {
+    fn entry_kinds_share_inode_kind_wire_values() {
         let directory = PathEntryKind::Directory {};
         assert_eq!(
             serde_json::to_value(directory).expect("serialize directory entry kind")["inode_kind"],
@@ -427,6 +476,18 @@ mod tests {
             serde_json::to_value(file).expect("serialize file entry kind")["inode_kind"],
             serde_json::to_value(InodeKind::File).expect("serialize file inode kind")
         );
+
+        for kind in [InodeKind::Directory, InodeKind::File] {
+            let wire = serde_json::to_value(kind).expect("serialize inode kind");
+            assert_eq!(
+                serde_json::to_value(EntryInodeKind::from(kind)).expect("serialize entry kind"),
+                wire
+            );
+            assert_eq!(
+                serde_json::from_value::<EntryInodeKind>(wire).expect("decode entry kind"),
+                EntryInodeKind::from(kind)
+            );
+        }
     }
 
     #[test]
@@ -500,7 +561,7 @@ mod tests {
     fn a_trash_entry_nests_the_binding_the_deletion_removed() {
         let trash = TrashEntry {
             inode_id: InodeId(42),
-            inode_kind: InodeKind::File,
+            inode_kind: EntryInodeKind::File,
             deletion_seq: ChangeSeq(417),
             deleted_at_ms: 1,
             deleted_by: ActorId::loonfs(),
@@ -531,7 +592,7 @@ mod tests {
     fn trash_handle_copies_directly_into_an_undelete_operation() {
         let trash = TrashEntry {
             inode_id: InodeId(42),
-            inode_kind: InodeKind::File,
+            inode_kind: EntryInodeKind::File,
             deletion_seq: ChangeSeq(417),
             deleted_at_ms: 1_752_625_000_000,
             deleted_by: ActorId::loonfs(),

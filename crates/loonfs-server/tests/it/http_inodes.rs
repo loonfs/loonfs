@@ -13,7 +13,7 @@ use loonfs_test_support::ids::{
 };
 use loonfs_types::PageRequest;
 use loonfs_types::{
-    ApiError, DeleteDirectoryBehavior, DisplayName, ErrorCode, InodeId, InodeKind, RevisionNo,
+    ApiError, DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, InodeId, RevisionNo,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -756,7 +756,7 @@ async fn http_create_directory_by_inode_binds_a_new_name_under_the_parent() {
         .stat(&demo_path("/docs/archive"))
         .await
         .expect("stat created directory");
-    assert_eq!(created.inode_kind(), InodeKind::Directory);
+    assert_eq!(created.inode_kind(), EntryInodeKind::Directory);
     assert_eq!(created.parent_inode_id, Some(docs));
     assert_api_code(
         harness

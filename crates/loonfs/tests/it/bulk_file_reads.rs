@@ -54,6 +54,9 @@ async fn listed_files(
                 loonfs::PathEntryKind::Directory {} => {
                     directories.push(entry.path.as_str().to_owned());
                 }
+                loonfs::PathEntryKind::Unknown => {
+                    panic!("expected a file or directory at {}", entry.path)
+                }
                 loonfs::PathEntryKind::File {
                     revision_no,
                     size_bytes,

@@ -1,8 +1,9 @@
 //! Named schemas for the tagged HTTP payloads.
 //!
-//! Utoipa derives fields from the wire types. These declarations choose the tag
-//! and the few types whose fields belong to every variant. Assembly is local to
-//! each declared type; it never searches a document for unions or guesses tags.
+//! Utoipa derives fields from the wire types. These declarations choose the tag,
+//! the few types whose fields belong to every variant, and the catch-all variant
+//! a client decodes but the document leaves out. Assembly is local to each
+//! declared type; it never searches a document for unions or guesses tags.
 
 use super::*;
 use crate::NamespaceAccess;
@@ -31,9 +32,9 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<RunMaintenanceResponse>("kind");
     named.tagged::<CompleteUploadBody>("mode");
     named.tagged::<WalFoldStepOutcome>("outcome");
-    named.composite::<PathEntry, PathEntryKind>("inode_kind");
-    named.composite::<UploadSession, UploadSessionStatus>("status");
-    named.composite::<GrepIndex, GrepIndexLifecycle>("status");
+    named.composite::<PathEntry, PathEntryKind>("inode_kind", Some("unknown"));
+    named.composite::<UploadSession, UploadSessionStatus>("status", None);
+    named.composite::<GrepIndex, GrepIndexLifecycle>("status", None);
 
     // These are implementation fields flattened into the named payloads. The
     // document's reference-integrity test catches accidental independent reuse.
@@ -65,7 +66,7 @@ impl NamedSchemas {
         self.union(&T::name(), tag, source.schema.clone(), &source, None);
     }
 
-    fn composite<T: ToSchema, Kind: ToSchema>(&mut self, tag: &str) {
+    fn composite<T: ToSchema, Kind: ToSchema>(&mut self, tag: &str, catch_all: Option<&str>) {
         let source = Source::of::<T>();
         let mut envelope = source.schema.clone();
         let members = envelope["allOf"].as_array_mut().expect("composite fields");
@@ -77,7 +78,18 @@ impl NamedSchemas {
         members.remove(index);
         let fields = self.flatten(envelope, &source);
         let mut union = serde_json::to_value(Kind::schema()).expect("derived union");
-        for variant in union["oneOf"].as_array_mut().expect("kind variants") {
+        let variants = union["oneOf"].as_array_mut().expect("kind variants");
+        if let Some(catch_all) = catch_all {
+            let derived = variants.len();
+            variants.retain(|variant| variant["properties"][tag]["enum"][0] != catch_all);
+            assert_eq!(
+                variants.len() + 1,
+                derived,
+                "{}: declared catch-all `{catch_all}` must be one variant",
+                Kind::name()
+            );
+        }
+        for variant in variants {
             if variant.get("title").is_none() {
                 let value = variant["properties"][tag]["enum"][0]
                     .as_str()
@@ -287,7 +299,7 @@ mod tests {
     fn assembling_a_payload_does_not_change_its_kind_type() {
         let kind = serde_json::to_value(PathEntryKind::schema()).expect("derived schema");
         let mut named = NamedSchemas::default();
-        named.composite::<PathEntry, PathEntryKind>("inode_kind");
+        named.composite::<PathEntry, PathEntryKind>("inode_kind", Some("unknown"));
         assert!(named.schemas["PathEntryFile"]["properties"]
             .get("namespace_id")
             .is_some());
