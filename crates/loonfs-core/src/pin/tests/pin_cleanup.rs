@@ -86,6 +86,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
         // A missing basis is still an error while the record must be retained.
         let young = crate::gc::gc_namespace(
             &store,
+            None,
             &namespace_id,
             &crate::gc::GcOptions::default(),
             &setup,
@@ -96,6 +97,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
 
         let collected = crate::gc::gc_namespace(
             &store,
+            None,
             &namespace_id,
             &crate::gc::GcOptions::default(),
             &mutation_context(
@@ -113,6 +115,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
         assert!(store.head(&pins[0]).await.expect("pin").is_none());
         crate::gc::gc_namespace(
             &store,
+            None,
             &namespace_id,
             &crate::gc::GcOptions::default(),
             &mutation_context(
@@ -160,7 +163,7 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
     let options = crate::gc::GcOptions::default();
     store.block_next();
     let (collection, ()) = tokio::join!(
-        crate::gc::gc_namespace(&store, &namespace_id, &options, &aged),
+        crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged),
         async {
             store.wait_until_blocked().await;
             store
@@ -168,7 +171,7 @@ async fn pin_removed_after_listing_does_not_make_a_collected_basis_corruption() 
                 .delete(&keys::pin(&namespace_id, &pin.checkpoint_id))
                 .await
                 .expect("release pin");
-            crate::gc::gc_namespace(store.inner(), &namespace_id, &options, &aged)
+            crate::gc::gc_namespace(store.inner(), None, &namespace_id, &options, &aged)
                 .await
                 .expect("other collector");
             assert!(store
@@ -238,13 +241,13 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
     );
     let options = crate::gc::GcOptions::default();
-    let error = crate::gc::gc_namespace(&store, &namespace_id, &options, &aged)
+    let error = crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)
         .await
         .expect_err("second pin still requires the missing basis");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(error.message().contains(ids[1].as_str()));
     store.fail_all();
-    let error = crate::gc::gc_namespace(&store, &namespace_id, &options, &aged)
+    let error = crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)
         .await
         .expect_err("unreadable pin is not absent");
     assert_eq!(error.code(), ErrorCode::ServerError);
@@ -254,7 +257,7 @@ async fn missing_basis_checks_each_pin_and_propagates_pin_read_errors() {
         .put_overwrite(&key, Bytes::from_static(b"not json"))
         .await
         .expect("malformed pin");
-    let error = crate::gc::gc_namespace(&store, &namespace_id, &options, &aged)
+    let error = crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)
         .await
         .expect_err("malformed pin is not deletable");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);

@@ -300,7 +300,7 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                loonfs_core::gc_namespace(&store, &namespace_id, &options, &aged)
+                loonfs_core::gc_namespace(&store, None, &namespace_id, &options, &aged)
                     .await
                     .expect("collect aborted session");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -316,6 +316,7 @@ mod streamed_content {
         );
         loonfs_core::gc_namespace(
             &store,
+            None,
             &namespace_id,
             &loonfs_core::GcOptions::default(),
             &aged,
@@ -393,7 +394,7 @@ mod streamed_content {
                 now_ms: expires_at_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
-            loonfs_core::gc_namespace(&store, &namespace_id, &options, &expired)
+            loonfs_core::gc_namespace(&store, None, &namespace_id, &options, &expired)
                 .await
                 .expect("GC aborts expired implicit session");
             let encoded = store
@@ -417,7 +418,7 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                loonfs_core::gc_namespace(&store, &namespace_id, &options, &aged)
+                loonfs_core::gc_namespace(&store, None, &namespace_id, &options, &aged)
                     .await
                     .expect("forget expired implicit owner");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -433,6 +434,7 @@ mod streamed_content {
         );
         loonfs_core::gc_namespace(
             &store,
+            None,
             &namespace_id,
             &loonfs_core::GcOptions::default(),
             &aged,
@@ -1246,7 +1248,7 @@ mod direct_multipart {
             writer_id: context.writer_id.clone(),
             now_ms: expires_at_ms + options.grace_window_ms + 1,
         };
-        gc_namespace(&store, &session.namespace_id, &options, &expired)
+        gc_namespace(&store, None, &session.namespace_id, &options, &expired)
             .await
             .expect("garbage collection");
 

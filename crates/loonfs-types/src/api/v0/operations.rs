@@ -1293,10 +1293,12 @@ pub struct DeletedObjectCounts {
     pub manifests: u64,
     /// Upload-session control objects deleted after the reap window.
     pub upload_sessions: u64,
-    /// Content reclaimed through completed upload sessions.
+    /// Content objects no retained view names, deleted once older than the grace window.
     pub content_objects: u64,
     /// Listed content objects deleted from a retired namespace.
     pub retired_content_objects: u64,
+    /// Store scratch objects deleted once older than the grace window.
+    pub scratch_objects: u64,
 }
 
 impl DeletedObjectCounts {
@@ -1309,6 +1311,7 @@ impl DeletedObjectCounts {
             upload_sessions,
             content_objects,
             retired_content_objects,
+            scratch_objects,
         } = other;
         self.wal_objects += wal_objects;
         self.metadata_segments += metadata_segments;
@@ -1316,6 +1319,7 @@ impl DeletedObjectCounts {
         self.upload_sessions += upload_sessions;
         self.content_objects += content_objects;
         self.retired_content_objects += retired_content_objects;
+        self.scratch_objects += scratch_objects;
     }
 }
 

@@ -4,28 +4,30 @@ use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementState};
 use super::reclaim::reclaim_namespace;
 use super::sweep::Sweep;
-use super::uploads::PublicationView;
 use super::GcOptions;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
-use crate::namespace::read_anchor::load_read_anchor;
+use crate::manifest::MetadataSegmentCache;
 use futures::StreamExt;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{GcResponse, NamespaceId};
 
+/// Collects one namespace. The root scan reads through `segment_cache`
+/// and charges the content ids it holds to that cache's read working
+/// memory, so a pass never holds more than the configured budget.
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
     namespace_id: &NamespaceId,
     options: &GcOptions,
     context: &MutationContext,
 ) -> Result<GcResponse> {
     options.validate()?;
     let mut report = GcResponse::empty(namespace_id.clone());
-    let anchor = load_read_anchor(store, namespace_id).await?;
     let live = LiveSet::load(
         store,
+        segment_cache,
         namespace_id,
-        &anchor,
         options.grace_window_ms,
         context,
     )
@@ -38,18 +40,18 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         RetirementState::Retained { until_ms } => until_ms,
         _ => None,
     };
-    let basis = anchor.basis();
-    let view = PublicationView::new(store, namespace_id, &anchor, &basis);
     let mut sweep = Sweep {
         store,
         namespace_id,
         grace_window_ms: options.grace_window_ms,
         mutation: context,
         live: &live,
-        view: &view,
         report: &mut report,
     };
     for family in CandidateFamily::ALL {
+        if family == CandidateFamily::Content && live.namespace_deleted {
+            continue;
+        }
         let prefix = family.prefix(namespace_id);
         let mut listing = store.list_prefix_stream(&prefix);
         while let Some(key) = listing

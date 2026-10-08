@@ -11,7 +11,7 @@
 | **Semantic fingerprint** | A digest of the canonical logical request, used to detect conflicting reuse of a commit ID. |
 | **WAL** | The ordered log of immutable, consecutively numbered WAL objects. |
 | **Fence** | A zero-record WAL object used to establish a writer epoch in WAL order without creating a logical commit. |
-| **Content publication** | Permanent metadata evidence that a content ID was committed; collection uses it to decide completed-upload cleanup. |
+| **Content publication** | Permanent metadata evidence that a content ID was committed. A read by content reference checks it. |
 | **Fold** | Materializing committed WAL into metadata segments and publishing a manifest so later readers replay less history. |
 | **Inode** | The identity and creation metadata of a filesystem item. Its ID remains unchanged when the item is renamed or moved within a namespace. |
 | **Directory binding / direntry** | A parent inode, name, and child inode association that places an item in the tree. |
@@ -23,6 +23,8 @@
 | **Revision** | One committed content state of a file, ordered by a revision number scoped to that inode. |
 | **Content object** | The complete bytes of one piece of file content, stored immutably under `namespaces/{owner_namespace_id}/content/{content_id}`. |
 | **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, complete size, and checksum. It identifies content; it does not prove that the content object exists yet. |
+| **Content root** | A record that keeps an active namespace's content object: a revision row in a manifest the GC pass roots, a revision in the unfolded WAL tail, or an upload session record ([format section 11.9](format.md#119-content-roots)). |
+| **Scratch object** | A temporary object that an object extension writes and deletes under `namespaces/{namespace_id}/scratch/`. Nothing references it, and collection deletes one that is older than the reclamation grace. |
 | **Inline content** | File bytes carried in the WAL commit that references them. A fold writes them to a content object before the WAL object can be collected ([format section 1.5](format.md#15-file-contents-and-ownership)). |
 | **Upload session** | A durable record for one upload, with a fixed identity and mode and an open, completed, or aborted status. Completion alone does not commit a file. |
 | **Admission evidence** | The in-process proof or the signed content token that admits an externally supplied content reference to publication ([format section 5.5](format.md#55-admission-proofs)). It is bound to the namespace and the complete reference. It is valid while the clock reads before its expiry. |
@@ -51,7 +53,7 @@
 | **Compactor epoch** | A namespace-wide counter in the manifest that fences compaction publications from older runtime claims. |
 | **GC pass** | One complete collection call with freshly loaded roots, an in-memory live set, and a fixed call clock. |
 | **Publication budget** | The longest monotonic time from the observation a publisher planned against to the start of its numbered put. A put that returns after its budget has an unknown outcome ([format Appendix C.1](format.md#c1-publication-and-collection-timing)). |
-| **Reclamation grace** | The configured age `T` that a collectable manifest or WAL object must reach before collection deletes it. It is at least `GC_MIN_GRACE_WINDOW_MS`, the longest publication budget plus the provider request bound and the clock allowance ([format section 11.3](format.md#113-candidate-and-age-rules)). |
+| **Reclamation grace** | The configured age `T` that a collectable manifest, WAL object, content object, or scratch object must reach before collection deletes it. It is at least `GC_MIN_GRACE_WINDOW_MS`: the longer of the longest publication budget and the revalidation bound plus a direct transfer capability's lifetime, plus the provider request bound and the clock allowance ([format section 11.3](format.md#113-candidate-and-age-rules)). |
 | **Revalidation bound** | `READ_REVALIDATION_BOUND_MS`, the longest time a reader trusts an absent manifest successor after the probe it confirms ([format section 4.2](format.md#42-replaying-the-visible-wal)). |
 | **API group** | A conformance unit, such as `filesystem/v0`, advertised only when all its required operations are implemented. |
 | **Feature** | An optional capability within an API group, such as `filesystem.uploads.direct_put`. |

@@ -23,7 +23,7 @@ use loonfs_types::{
     CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName, InodeId, MetadataSegmentId,
     NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, WriterId,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 
 /// Heap a value owns outside its own inline size. Whatever holds the value
@@ -52,13 +52,23 @@ pub(crate) fn index_block_heap_bytes(entries: &Vec<SegmentIndexEntry>) -> usize 
 /// below fourteen), one control byte per bucket, and one trailing group of
 /// control bytes.
 pub(crate) fn hash_map_table_bytes<K, V>(map: &HashMap<K, V>) -> usize {
+    hash_table_bytes::<(K, V)>(map.capacity())
+}
+
+/// The table `std`'s hash set allocates for its capacity, laid out as the
+/// map's.
+pub(crate) fn hash_set_table_bytes<K>(set: &HashSet<K>) -> usize {
+    hash_table_bytes::<K>(set.capacity())
+}
+
+fn hash_table_bytes<Entry>(capacity: usize) -> usize {
     const TRAILING_CONTROL_BYTES: usize = 16;
-    let buckets = match map.capacity() {
+    let buckets = match capacity {
         0 => return 0,
         capacity if capacity < 8 => capacity + 1,
         capacity => capacity / 7 * 8,
     };
-    buckets * (size_of::<(K, V)>() + 1) + TRAILING_CONTROL_BYTES
+    buckets * (size_of::<Entry>() + 1) + TRAILING_CONTROL_BYTES
 }
 
 /// The nodes of a B-tree map filled by sorted inserts, which is how

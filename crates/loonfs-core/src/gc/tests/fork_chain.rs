@@ -2,54 +2,6 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::storage::inline_content::InlineContent;
-use crate::time::{Deadline, StdMonotonicTimer};
-use loonfs_types::{AbsolutePath, CommitId, ContentId, DestinationBehavior};
-use std::sync::Arc;
-
-async fn publish_inline(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    index: usize,
-    setup: &MutationContext,
-) -> String {
-    let value = InlineContent::new(
-        namespace_id.clone(),
-        ContentId::generate(),
-        Bytes::copy_from_slice(namespace_id.as_str().as_bytes()),
-    );
-    let key = loonfs_objectstore::keys::content_blob(namespace_id, &value.content_ref().content_id);
-    let request = CommitRequest::single(
-        CommitId::parse(format!("write-{index}")).expect("commit"),
-        loonfs_test_support::test_actor(),
-        None,
-        FilesystemOperation::PutFile {
-            path: AbsolutePath::parse(format!("/owned-{index}")).expect("path"),
-            content_ref: Some(value.content_ref().clone()),
-            inline_content: None,
-            behavior: DestinationBehavior::NoReplace,
-            expected_inode_id: None,
-            expected_revision_no: None,
-        },
-    );
-    NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            [CommitCandidate::with_inline_content(
-                request,
-                Vec::new(),
-                vec![value],
-            )],
-            setup,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("result")
-        .expect("publish inline");
-    key
-}
 
 async fn assert_leaf_reads_every_owner(store: &LocalFsStore, namespaces: &[NamespaceId; 3]) {
     let view = load_current_metadata_view(store, &namespaces[2])
@@ -119,7 +71,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     }
     let aged = context(aged_now);
     for index in [0, 1, 1, 0] {
-        let report = gc_namespace(&store, &namespaces[index], &options(), &aged)
+        let report = gc_namespace(&store, None, &namespaces[index], &options(), &aged)
             .await
             .expect("collect ancestor while grandchild lives");
         assert_eq!(report.deleted.retired_content_objects, 0);
@@ -134,13 +86,13 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         .expect("delete leaf");
     // Deletion alone must not release either link in the protection chain.
     for index in [0, 1] {
-        let report = gc_namespace(&store, &namespaces[index], &options(), &aged)
+        let report = gc_namespace(&store, None, &namespaces[index], &options(), &aged)
             .await
             .expect("ancestors still pinned by unretired descendants");
         assert_eq!(report.deleted.retired_content_objects, 0);
     }
     for index in [2, 1, 0] {
-        gc_namespace(&store, &namespaces[index], &options(), &aged)
+        gc_namespace(&store, None, &namespaces[index], &options(), &aged)
             .await
             .expect("retire from leaf to root");
         assert!(store

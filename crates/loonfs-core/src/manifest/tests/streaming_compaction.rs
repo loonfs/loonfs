@@ -3289,6 +3289,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     ] {
         crate::gc::gc_namespace(
             &store,
+            None,
             &namespace,
             &options,
             &mutation_context("collector", age_ms),

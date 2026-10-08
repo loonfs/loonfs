@@ -907,19 +907,19 @@ Segments not referenced by a collection root are protected for a minimum provide
 streaming publication budget + minimum GC grace <= 24 hours
 ```
 
-With the current constants, the job can initiate publication for at most 23 hours, 37 minutes, and 45 seconds after its timer begins before output. Beyond that point it abandons publication because its earliest unreferenced output may become collectable. A cancelled or crashed job leaves output subject to the same age rule.
+With the current constants, the job can initiate publication for at most 23 hours, 18 minutes, and 30 seconds after its timer begins before output. Beyond that point it abandons publication because its earliest unreferenced output may become collectable. A cancelled or crashed job leaves output subject to the same age rule.
 
 Streaming compaction applies the row-retention rules for its selected window, just as bounded compaction does. It must preserve every retained view. Restart begins a new plan from the current manifest; there is no durable compaction cursor or output-protection record.
 
 ## 11. Garbage collection
 
-Collection removes objects that no retained view needs, after the applicable age and publication checks. A logical delete alone is not permission to remove file bytes. Collection does not remove a live namespace's published content, even after a base compaction removes every revision that referenced it, and a deleted ancestor's content remains while fork descendants depend on it.
+Collection removes objects that no retained view needs, after the applicable age and publication checks. A logical delete alone is not permission to remove file bytes. A live namespace's content stays while a retained view names it (section 11.9), and a deleted ancestor's content remains while fork descendants depend on it.
 
 ### 11.1 One complete pass
 
-A call discovers the namespace's current manifest, lists all pin keys and manifest numbers, reads the age of each manifest's successor, and builds an in-memory set of protected manifests and segments. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
+A call discovers the namespace's current manifest, lists its upload sessions, reads its WAL tail, lists all pin keys and manifest numbers, reads the age of each manifest's successor, and builds an in-memory set of protected manifests, segments, and content. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
 
-The call then lists each candidate family from the beginning to completion. It stores no durable run, phase, reference table, or cursor. The complete pin listing used to establish roots is separate from the later pin sweep that decides which records can be deleted.
+The call then lists each candidate family from the beginning to completion. It stores no durable run, phase, reference table, or cursor. The complete pin and session listings used to establish roots are separate from the later sweeps that decide which records can be deleted.
 
 Every age decision uses the call's fixed `now_ms`. A later call reads fresh roots and uses its own clock. Concurrent collectors can independently delete eligible objects; an already absent object needs no further cleanup. A failed pass can have deleted earlier candidates, but the next pass safely starts again.
 
@@ -940,6 +940,8 @@ A manifest below the current one stays a root while its immediate successor is y
 
 The tombstone retains its runs so an import from a deleted owner can still be authorized against its final access state. Retirement does not read those segments. Retirement eligibility follows section 9.5.
 
+Content objects have their own roots, defined in section 11.9.
+
 A retention floor may pass a pinned manifest's head sequence. That does not remove its protection. Reads through the pin use the pinned file set directly.
 
 ### 11.3 Candidate and age rules
@@ -953,7 +955,9 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 | WAL object in a deleted namespace | Provider age at least `T`; no current WAL is protected. |
 | Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
 | Pin record | Owner-specific rules in section 11.7. |
-| Upload session and its content | Status-specific rules in section 11.6. |
+| Upload session | Status-specific rules in section 11.6. |
+| Content object in an active namespace | No content root names it (section 11.9), with provider age at least `T`. |
+| Scratch object | Provider age at least `T`. |
 | An eligible tombstone’s owned content | Sections 9.5 and 11.8. |
 
 The hint and current manifest are never swept. Unrecognized keys outside an eligible tombstone’s content prefix are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age.
@@ -966,7 +970,7 @@ Ordinary age is calculated as `now_ms.saturating_sub(last_modified_ms)`. Safety 
 
 The combined allowance is 180,000 milliseconds. This is one relative-clock, precision, and scheduling allowance, not three minutes for each participant. A provider ahead of the collector delays collection. Record-based ages use the corresponding bound between the collector and the host that recorded creation, expiry, or completion.
 
-Publication budgets use monotonic elapsed time, measured on a clock that continues through host sleep. The minimum ordinary grace includes the longest bounded publication, the provider publication request bound, and the combined allowance. Fork installation and streaming compaction reserve that grace within their respective lifetime bounds. Appendix C records the exact calculations.
+Publication budgets use monotonic elapsed time, measured on a clock that continues through host sleep. The minimum ordinary grace covers the longer of the longest bounded publication and the revalidation bound plus the lifetime of a direct transfer capability, because a view up to that bound old can still issue a capability. It then adds the provider publication request bound and the combined allowance. Fork installation and streaming compaction reserve that grace within their respective lifetime bounds. Appendix C records the exact calculations.
 
 If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout does not establish that a remote write had no effect; unknown outcomes still require reconciliation.
 
@@ -984,25 +988,25 @@ A collector protects every WAL number above its captured folded boundary. Writer
 
 New metadata segments remain protected by their minimum age while a publisher writes and verifies them. Streaming compaction must initiate publication before its budget expires, and every compaction checks its epoch and selected inputs. These rules apply to output that is not yet listed by a root captured earlier in the pass.
 
-A failed required-root read stops collection. An uncertain fork-target read retains that pin. A failed content-publication lookup deletes neither the completed upload's bytes nor its session. Each cleanup operation must retain the durable evidence needed to retry after a failure.
+A failed required-root read stops collection. An uncertain fork-target read retains that pin. Each cleanup operation must retain the durable evidence needed to retry after a failure.
 
 ### 11.6 Upload-session cleanup
 
-Uploads are collected through their session records. Retirement under section 9.5 takes precedence over the session status rules. Section 11.8 defines the subsequent content sweep.
+Uploads are collected through their session records. Retirement under section 9.5 takes precedence over the session status rules. Section 11.9 defines when an active namespace's content is collected, and section 11.8 defines the content sweep of a retired one.
 
 | Session and namespace | Action |
 | --- | --- |
 | Open session | Retain until expiry plus `T`; then CAS to `aborted` and clean content and provider transfer state. A lost CAS retains it. |
 | Aborted session | Retry content and provider cleanup; remove the record after abort time plus `T`. |
-| Completed session in an active namespace | Retain until content grace passes; then check publication evidence. Keep published content; delete unreferenced content. Remove the session after successful cleanup or a confirmed publication. |
+| Completed session in an active namespace | Retain until content grace passes; then remove the record. Its content follows section 11.9. |
 | Session in a deleted namespace ineligible under section 9.5 | Retain; report a future retirement deadline, if any. |
-| Completed session in an eligible deleted namespace | Delete the session's exact content key, then the record; no publication lookup or additional completion grace is required. |
+| Completed session in an eligible deleted namespace | Remove the record; no additional completion grace is required. The content sweep in section 11.8 removes its content. |
 
 Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. In active namespaces or eligible tombstones, cleanup first wins the terminal transition, then removes content and any provider transfer. Cleanup keeps the aborted record until abort time plus `T`, so a streamed write that passed its final ownership check before the abort still has a record when it finishes, and a later cleanup attempt can remove its object. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
 
 Cleanup derives every content key and provider cleanup target from the namespace and content ID recorded when the session opened.
 
-For eligible completed uploads on an active namespace, the collector loads a metadata view lazily and looks up `content_id` in the WAL projection and `content_publications` family. It does not scan every revision. These publication rows are retained permanently, independently of commit receipts and the retention floor. If publication is found, only the session record is removed. If no publication exists, content is deleted before the session. An error permits neither a speculative content deletion nor removal of retry evidence.
+A completed session's record is a content root (section 11.9). Once the record is removed, its content stays only while another root names it.
 
 The completed-content grace covers all possible admission evidence:
 
@@ -1023,7 +1027,7 @@ CONTENT_RECLAMATION_GRACE_MS
       + GC_MIN_GRACE_WINDOW_MS
 ```
 
-Every token mint checks the original completion time. A retained receipt cannot extend its issuance window. In-process proofs expire at the end of the admission window, and publication checks proof expiry immediately before the numbered WAL put. After the full grace, an unpublished upload cannot acquire a new valid first publication. Previously published content remains protected by its durable publication row.
+Every token mint checks the original completion time. A retained receipt cannot extend its issuance window. In-process proofs expire at the end of the admission window, and publication checks proof expiry immediately before the numbered WAL put. After the full grace, an unpublished upload cannot acquire a new valid first publication. Published content stays while a content root names it.
 
 ### 11.7 Pin cleanup
 
@@ -1051,6 +1055,24 @@ After session cleanup, reclaim a tombstone eligible under section 9.5:
 Content ownership follows section 1.5. A deleted namespace refuses upload capabilities and completion, and the retirement grace exceeds the lifetime of issued presigned URLs.
 
 Content and source-pin cleanup are idempotent. With no new objects, a later content sweep makes one empty LIST and no DELETE, and reports zero reclaimed objects. Retained roots follow section 11.2. Deleting listed content counts as maintenance progress. No progress record or journal is stored.
+
+### 11.9 Content roots
+
+In an active namespace `N`, a content object that `N` owns stays while one of these roots names its content ID:
+
+| Root | Content IDs it names |
+| --- | --- |
+| A manifest that section 11.2 roots: the current manifest, a manifest a listed pin holds, or a manifest whose immediate successor is younger than `T` | Every row of its `revisions` family. |
+| `N`'s unfolded WAL tail | Every `append_file_revision` delta. Each inline entry is named by one (Appendix A.5). |
+| An upload session record in `N`, whatever its status | The session's `content_id`. |
+
+Collection deletes every other content object under `namespaces/N/content/` whose provider age is at least `T`. It keeps an object younger than `T` and a key that does not parse as a content object key. A pass scans the `revisions` family once for each distinct rooted manifest. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (section 11.4).
+
+Every foreign-owned reference a fork holds is also a revision row in the source manifest that the fork's pin holds in the owner's namespace, so an owner's own roots cover its forks.
+
+The pass lists upload sessions before it reads the WAL tail. A session record is removed only after any admission evidence it could issue has expired (section 11.6). A session the pass does not list was either created after the listing or removed before it. Content of a session created later is younger than `T`. Every commit that names content of a removed session landed before the tail was read, so the tail or a rooted manifest names that content.
+
+A deleted namespace keeps its content until it retires. Section 11.8 then removes its whole content prefix.
 
 ## 12. Encodings, versions, and extensions
 
@@ -1589,19 +1611,20 @@ Publication and collection use the timing relationships below. Configurable sizi
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One control-operation attempt. |
 | `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | Retry budget, final backoff, and payload-sized final request. |
 | `GC_SAFETY_MARGIN_MS` | 180,000 | Combined relative-clock, timestamp-precision, and scheduling allowance. |
-| `GC_MIN_GRACE_WINDOW_MS` | 1,335,000 | Derived minimum ordinary collection grace. |
+| `GC_MIN_GRACE_WINDOW_MS` | 2,490,000 | Derived minimum ordinary collection grace. |
 | `READ_REVALIDATION_BOUND_MS` | 1,155,000 | Longest gap between a view's previous basis confirmation and the answer to its next successor check. |
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | Default configured ordinary grace. |
 | `UNREFERENCED_SEGMENT_MIN_AGE_MS` | 86,400,000 | Segments must be strictly older than this before unreferenced collection. |
-| `METADATA_COMPACTION_BUDGET_MS` | 85,065,000 | Maximum elapsed time before initiating streaming publication. |
+| `METADATA_COMPACTION_BUDGET_MS` | 83,910,000 | Maximum elapsed time before initiating streaming publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | Lifetime of a direct transfer capability. |
-| `NAMESPACE_RETIREMENT_GRACE_MS` | 2,490,000 | Minimum grace from the deletion call clock. |
+| `NAMESPACE_RETIREMENT_GRACE_MS` | 3,645,000 | Minimum grace from the deletion call clock. |
 
 A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (section 3.1). Conditional WAL and manifest writes can still exceed the payload threshold in their one request. The publication allowance therefore reserves 120 + 15 + 120 seconds, not the 30-second small-request timeout. This is a request-phase allowance, not a bound on response-body consumption. It retains the relative-clock and scheduling assumptions and does not prove that a timed-out remote mutation had no effect.
 
 ```text
 GC_MIN_GRACE_WINDOW_MS
-    = max(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
+    = max(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS,
+          READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS)
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
       + GC_SAFETY_MARGIN_MS
 
@@ -1615,9 +1638,7 @@ METADATA_COMPACTION_BUDGET_MS
 NAMESPACE_RETIREMENT_GRACE_MS
     = METADATA_PUBLICATION_BUDGET_MS
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-      + max(GC_MIN_GRACE_WINDOW_MS,
-            DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-            + GC_SAFETY_MARGIN_MS)
+      + GC_MIN_GRACE_WINDOW_MS
 ```
 
 Configured grace `T` cannot be below the minimum. Retirement uses the greater of `T` and the retirement minimum. Segment age and completed-content grace use their fixed constants. Changing a publication bound or its safety relationship changes the protocol, not just a scheduling preference.
@@ -1630,9 +1651,9 @@ Configured grace `T` cannot be below the minimum. Retirement uses the greater of
 | `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` | 604,800,000 | Seven-day window in which completed content can issue new receipts. |
 | `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | One-hour token lifetime. |
 | `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | Receipt issuance window plus the final token's lifetime. |
-| `CONTENT_RECLAMATION_GRACE_MS` | 609,735,000 | Admission window plus minimum GC grace. |
+| `CONTENT_RECLAMATION_GRACE_MS` | 610,890,000 | Admission window plus minimum GC grace. |
 
-The completed-content interval is seven days, one hour, and twenty-two minutes fifteen seconds. Eligibility is still conditional on the namespace state and reference evidence; reaching that age does not delete referenced content.
+The completed-content interval is seven days, one hour, forty-one minutes, and thirty seconds. Eligibility is still conditional on the namespace state and reference evidence; reaching that age does not delete referenced content.
 
 A direct multipart upload is also subject to provider transfer geometry. The current reference limits are 10,000 parts, 5 MiB minimum configured part size, 5 GiB maximum configured part size, and 1,000 part capabilities per signing request. These limits do not override a provider's lower maximum object size or other supported-provider constraints.
 

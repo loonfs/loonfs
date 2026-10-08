@@ -95,6 +95,12 @@ pub fn scratch_object(namespace_id: &NamespaceId) -> String {
     )
 }
 
+/// Builds the listing prefix for the temporary objects that an extension writes
+/// and deletes under one namespace.
+pub fn scratch_prefix(namespace_id: &NamespaceId) -> String {
+    format!("namespaces/{namespace_id}/scratch/")
+}
+
 #[cfg(test)]
 mod tests {
     // The key builder is tested where it is defined.

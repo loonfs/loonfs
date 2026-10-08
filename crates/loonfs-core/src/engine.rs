@@ -25,8 +25,8 @@ use crate::protocol::{
     ResolvedUploadCompletion, UploadSessionView,
 };
 use crate::storage::content::{
-    open_content_import_reader, validate_loaded_content_bytes, ContentLocation, FileContentStream,
-    StreamedPayloadKind,
+    open_content_import_reader, validate_loaded_content_bytes, ContentLocation,
+    DurableContentValidationError, FileContentStream, StreamedPayloadKind,
 };
 use crate::storage::content_admission::PreparedContent;
 use loonfs_objectstore::{ByteStream, ObjectStore};
@@ -805,7 +805,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ///
     /// `max_bytes` is checked against the declared size before the fetch and is
     /// independent of deployment-wide download limits. The method returns an
-    /// error if the fetched size or checksum does not match the reference.
+    /// error if the fetched size or checksum does not match the reference. A
+    /// published reference whose object collection reclaimed answers like an
+    /// unpublished one.
     pub async fn read_content_ref(
         &self,
         content_ref: &ContentRef,
@@ -825,7 +827,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
         let location = view.resolve_content_location(content_ref)?;
-        Ok(location.get_bytes(&self.store, content_ref).await?)
+        location
+            .get_bytes(&self.store, content_ref)
+            .await
+            .map_err(|error| match error {
+                DurableContentValidationError::MissingContentObject { .. } => {
+                    CoreError::PathNotFound(content_ref.content_id.to_string())
+                }
+                error => error.into(),
+            })
     }
 
     fn ensure_live_context(&self, context: &RuntimeReadContext) -> Result<()> {

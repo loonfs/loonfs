@@ -62,7 +62,7 @@ A direct download returns a presigned URL for the content object. Inline content
 
 A fold writes every inline value in its range as a content object before it writes segments or publishes the manifest. The writes run with bounded concurrency after the fold's publication budget starts, and the fold checks the budget when they return.
 
-In a live namespace, collection never deletes materialized content: each object belongs to a committed revision, and no operation reclaims a live namespace's content, even after a base compaction removes that revision at or below the retention floor. A fold that crashes, exceeds its budget, or loses the manifest race leaves objects that the next fold finds already present. There is no orphan to discover and no cleanup state to persist. An object already at the key must hold the same bytes, and the verified write checks this. A mismatch stops the fold without publishing.
+A fold's objects are not garbage while a fold can still need them: the unfolded WAL tail roots each object until a manifest covers its WAL object, and that manifest's revisions root it after that ([format section 11.9](../specs/format.md#119-content-roots)). A fold that crashes, exceeds its budget, or loses the manifest race leaves objects that the next fold finds already present. There is no orphan to discover and no cleanup state to persist. An object already at the key must hold the same bytes, and the verified write checks this. A mismatch stops the fold without publishing.
 
 A fold can pause between reading a tail and writing its content while the namespace is deleted and swept. A fold call reads a fresh manifest, but a writer's own fold starts from its retained view. Neither checks its publication budget until its content writes return. A content write can therefore land after a sweep. It is found the way a late upload is: the retired-owner sweep lists the content prefix again on every later pass ([format section 11.8](../specs/format.md#118-sweeping-a-retired-owners-content)).
 
@@ -70,7 +70,7 @@ A fold becomes due when the unfolded tail reaches 32 WAL objects, or when its in
 
 ## Collection
 
-Collection has no family for inline content. WAL objects are collected at or below `folded_wal_no`, and the fold writes inline bytes to content objects before it publishes that boundary. Content objects written by a fold are published content with permanent `content_publications` rows. Upload sessions are not involved in an inline write. Unpublished inline content cannot exist, so the ownership question that sessions answer does not arise.
+Collection has no family for inline content. WAL objects are collected at or below `folded_wal_no`, and the fold writes inline bytes to content objects before it publishes that boundary. A content object that a fold or an early direct download wrote is collected like any other: the unfolded WAL tail names it until a manifest covers it, and a rooted manifest's revisions name it after that. Upload sessions are not involved in an inline write. Unpublished inline content cannot exist, so the ownership question that sessions answer does not arise.
 
 ## Costs
 

@@ -301,7 +301,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 now_ms: grace + 1,
                 ..context()
             };
-            crate::gc::gc_namespace(store.inner(), &namespace_id, &options, &aged)
+            crate::gc::gc_namespace(store.inner(), None, &namespace_id, &options, &aged)
                 .await
                 .expect("collect during pending hint");
             store.release();
@@ -322,7 +322,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         now_ms: 2 * grace + 2,
         ..context()
     };
-    crate::gc::gc_namespace(&store, &namespace_id, &options, &aged)
+    crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)
         .await
         .expect("collect after grace");
     assert!(store

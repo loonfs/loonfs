@@ -64,6 +64,7 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
             let options = crate::gc::GcOptions::default();
             let report = crate::gc::gc_namespace(
                 blocked.inner(),
+                None,
                 &namespace_id,
                 &options,
                 &MutationContext {
@@ -178,6 +179,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             timer.advance_ms(options.grace_window_ms + 1);
             let report = crate::gc::gc_namespace(
                 &store,
+                None,
                 &namespace_id,
                 &options,
                 &MutationContext {

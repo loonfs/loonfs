@@ -398,10 +398,12 @@ Maintenance
     to the end.
     --grace-window-ms protects objects younger than the window.
     --json includes every retention reason.
-    Repeated GC runs reclaim a deleted namespace's own content once it retires,
-    with deleted.content_objects counting completed-session reclamation and
+    deleted.content_objects counts content objects that no retained view names,
+    deleted once older than the grace window. Repeated GC runs reclaim a
+    deleted namespace's own content once it retires, with
     deleted.retired_content_objects counting listed content objects that were
     deleted. A pass with nothing left under the content prefix reports zero.
+    deleted.scratch_objects counts store scratch objects older than the window.
 
   loonfs maintenance store probe
     Test the object-store operations LoonFS requires. The command creates

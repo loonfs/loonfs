@@ -176,6 +176,15 @@ pub enum CoreError {
          and stopped before its next write"
     )]
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
+    #[error(
+        "the content ids namespace `{namespace_id}` roots need {bytes} bytes of read working \
+         memory, above its {limit}-byte limit"
+    )]
+    ContentRootsExceedReadMemory {
+        namespace_id: NamespaceId,
+        bytes: usize,
+        limit: usize,
+    },
     #[error("invalid gc configuration: {0}")]
     InvalidGcOptions(String),
     #[error("upload session `{upload_id}` was not found")]
@@ -422,6 +431,9 @@ impl CoreError {
             | CoreError::MetadataPublicationBudgetExceeded { .. } => {
                 ErrorCode::CheckpointUnavailable
             }
+            // The deployment's read memory cannot hold this namespace's live
+            // content ids; an operator raises the limit.
+            CoreError::ContentRootsExceedReadMemory { .. } => ErrorCode::ServerError,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
@@ -526,6 +538,7 @@ impl CoreError {
             | CoreError::NamespaceDeleted { .. }
             | CoreError::Forbidden { .. }
             | CoreError::NamespaceUnrestricted { .. }
+            | CoreError::ContentRootsExceedReadMemory { .. }
             | CoreError::StaleHeadPrecondition { .. } => None,
         }
     }

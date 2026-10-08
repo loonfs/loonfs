@@ -180,7 +180,7 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
     }
 }
 
-fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
+fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
     let deleted = &report.deleted;
     let checkpoints = &report.deleted_checkpoints_by_owner;
     [
@@ -193,6 +193,7 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
         ("upload sessions", deleted.upload_sessions),
         ("content objects", deleted.content_objects),
         ("retired content objects", deleted.retired_content_objects),
+        ("scratch objects", deleted.scratch_objects),
     ]
 }
 

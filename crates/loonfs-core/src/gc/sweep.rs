@@ -2,7 +2,7 @@
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
 use super::reap::{grace_age, sweep_pin, GraceAge, PinSweep};
-use super::uploads::{sweep_upload_session, PublicationView, UploadSessionSweep};
+use super::uploads::{sweep_upload_session, UploadSessionSweep};
 use crate::context::MutationContext;
 use crate::control_update::load_upload_session_state;
 use crate::error::{CoreError, Result};
@@ -11,17 +11,16 @@ use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
 
-pub(super) struct Sweep<'a, 'store, S: ObjectStore + ?Sized> {
-    pub(super) store: &'store S,
+pub(super) struct Sweep<'a, S: ObjectStore + ?Sized> {
+    pub(super) store: &'a S,
     pub(super) namespace_id: &'a NamespaceId,
     pub(super) grace_window_ms: u64,
     pub(super) mutation: &'a MutationContext,
     pub(super) live: &'a LiveSet,
-    pub(super) view: &'a PublicationView<'a, 'store, S>,
     pub(super) report: &'a mut GcResponse,
 }
 
-impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
+impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
     pub(super) async fn candidate(&mut self, family: CandidateFamily, key: &str) -> Result<()> {
         if !family.recognizes(key) {
             self.report.retain(RetainedReason::UnrecognizedKey);
@@ -42,6 +41,14 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             }
             CandidateFamily::Pins => self.process_pin(key).await,
             CandidateFamily::UploadSessions => self.process_upload_session(key).await,
+            CandidateFamily::Content => {
+                self.process_aged_family(family, key, |counts| &mut counts.content_objects)
+                    .await
+            }
+            CandidateFamily::Scratch => {
+                self.process_aged_family(family, key, |counts| &mut counts.scratch_objects)
+                    .await
+            }
         }
     }
     async fn process_aged_family(
@@ -59,6 +66,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
         }
         if self.live.objects.contains(key)
             || (family == CandidateFamily::WalObjects && self.live.protects_wal(key))
+            || (family == CandidateFamily::Content && self.live.protects_content(key))
         {
             self.report.retain(RetainedReason::Referenced);
             return Ok(());
@@ -115,12 +123,9 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, '_, S> {
             Err(error) => return Err(error),
         };
         match sweep_upload_session(self, &state).await? {
-            UploadSessionSweep::Delete { reclaimed_content } => {
+            UploadSessionSweep::Delete => {
                 self.delete_key(key).await?;
                 self.report.deleted.upload_sessions += 1;
-                if reclaimed_content {
-                    self.report.deleted.content_objects += 1;
-                }
             }
             UploadSessionSweep::Retain { reclaimable_at_ms } => {
                 self.report.retain(match reclaimable_at_ms {

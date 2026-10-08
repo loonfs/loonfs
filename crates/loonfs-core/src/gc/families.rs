@@ -1,10 +1,12 @@
 //! Object families swept by namespace collection.
 
 use loonfs_objectstore::keys::{
-    metadata_manifest_prefix, metadata_segment_prefix, pin_prefix, upload_session_prefix,
-    wal_prefix,
+    content_prefix, metadata_manifest_prefix, metadata_segment_prefix, pin_prefix, scratch_prefix,
+    upload_session_prefix, wal_prefix,
 };
-use loonfs_objectstore::layout::{manifest_no_of, parse_object_key, DurableObjectFamily};
+use loonfs_objectstore::layout::{
+    content_id_of, manifest_no_of, parse_object_key, DurableObjectFamily,
+};
 use loonfs_types::NamespaceId;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -14,15 +16,19 @@ pub(super) enum CandidateFamily {
     MetadataSegments,
     Pins,
     UploadSessions,
+    Content,
+    Scratch,
 }
 
 impl CandidateFamily {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 7] = [
         Self::Manifests,
         Self::WalObjects,
         Self::MetadataSegments,
         Self::Pins,
         Self::UploadSessions,
+        Self::Content,
+        Self::Scratch,
     ];
 
     pub(super) fn recognizes(self, key: &str) -> bool {
@@ -35,6 +41,8 @@ impl CandidateFamily {
             Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
             Self::Pins => family == DurableObjectFamily::Pin,
             Self::UploadSessions => family == DurableObjectFamily::UploadSession,
+            Self::Content => content_id_of(key).is_some(),
+            Self::Scratch => family == DurableObjectFamily::ScratchObject,
         }
     }
 
@@ -45,6 +53,8 @@ impl CandidateFamily {
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
             Self::Pins => pin_prefix(namespace_id),
             Self::UploadSessions => upload_session_prefix(namespace_id),
+            Self::Content => content_prefix(namespace_id),
+            Self::Scratch => scratch_prefix(namespace_id),
         }
     }
 }

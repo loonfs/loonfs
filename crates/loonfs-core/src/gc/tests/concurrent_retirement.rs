@@ -79,7 +79,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             .await
             .expect("delete");
     }
-    let deadline = context(setup.now_ms + GRACE_MS);
+    let deadline = context(setup.now_ms + retirement_ms());
     let gc_options = options();
     let store = BlockingStore::new(
         FailStore::new(
@@ -94,11 +94,11 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
     );
     store.block_next();
     let (delayed, ()) = tokio::join!(
-        gc_namespace(&store, &target, &gc_options, &deadline),
+        gc_namespace(&store, None, &target, &gc_options, &deadline),
         async {
             store.wait_until_blocked().await;
             store.inner().fail_next(1);
-            gc_namespace(store.inner(), &target, &gc_options, &deadline)
+            gc_namespace(store.inner(), None, &target, &gc_options, &deadline)
                 .await
                 .expect_err("a delete landed but its acknowledgement was lost");
             assert!(store
@@ -112,7 +112,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
                 "failed sweep does not release its source pin"
             );
             store.inner().clear();
-            gc_namespace(store.inner(), &source, &gc_options, &deadline)
+            gc_namespace(store.inner(), None, &source, &gc_options, &deadline)
                 .await
                 .expect("source stays pinned");
             for key in &source_keys {
@@ -124,7 +124,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
                     .is_some());
             }
 
-            gc_namespace(store.inner(), &target, &gc_options, &deadline)
+            gc_namespace(store.inner(), None, &target, &gc_options, &deadline)
                 .await
                 .expect("second collector retries from the beginning");
             assert!(!pin_exists(store.inner(), &source, &target_pin).await);
@@ -174,10 +174,10 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .await
         .expect("inherited file stays visible");
     }
-    gc_namespace(&store, &target, &gc_options, &deadline)
+    gc_namespace(&store, None, &target, &gc_options, &deadline)
         .await
         .expect("repeated target retirement");
-    gc_namespace(&store, &source, &gc_options, &deadline)
+    gc_namespace(&store, None, &source, &gc_options, &deadline)
         .await
         .expect("sibling continues to retain source");
     for key in source_keys {
