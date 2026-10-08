@@ -19,8 +19,8 @@ pub(super) enum RetentionRule {
     WholeState,
     /// Retain active deletions and remove completed deletion pairs.
     ActiveDeletions,
-    /// Per slot and child, or per child in the child index, retains the
-    /// values above the floor and the bound value at the floor.
+    /// Per edge, retains the values above the floor and the bound value at
+    /// the floor.
     Bindings,
 }
 
@@ -233,10 +233,11 @@ impl ActiveDeletionRetention {
 #[derive(Debug, Default)]
 pub(super) struct BindingRetention {
     at_floor: Option<KeptRow>,
-    /// The parent, name, and child of the last bound floor value the slot
-    /// index kept. One slot's children are adjacent in that index, so a
-    /// second child bound in the same slot is always compared with this one.
-    bound_in_slot: Option<(InodeId, NameKey, InodeId)>,
+    /// The parent, name, and child of the last bound floor value this index
+    /// kept. The slot index keeps one slot's edges adjacent and the child
+    /// index keeps one child's edges adjacent, so a second edge bound in the
+    /// same slot, or for the same child, is always compared with this one.
+    last_bound_edge: Option<(InodeId, NameKey, InodeId)>,
 }
 
 impl BindingRetention {
@@ -268,23 +269,35 @@ impl BindingRetention {
         let Some(kept) = self.at_floor.take() else {
             return Ok(None);
         };
-        if let (MetadataRowFamily::DirentryBinds, MetadataRow::DirentryBinding(binding)) = &kept {
-            if let Some((parent_inode_id, name_key, child_inode_id)) = &self.bound_in_slot {
-                if *parent_inode_id == binding.parent_inode_id && *name_key == binding.name_key {
-                    return Err(CoreError::NamespaceCorrupt(format!(
-                        "parent `{parent_inode_id}` binds name `{name_key}` to children \
-                         `{child_inode_id}` and `{}` at or below the retention floor; refusing \
-                         to drop rows",
-                        binding.child_inode_id
-                    )));
-                }
+        let (family, MetadataRow::DirentryBinding(binding)) = &kept else {
+            return Ok(Some(kept));
+        };
+        if let Some((parent_inode_id, name_key, child_inode_id)) = &self.last_bound_edge {
+            let same_slot =
+                *parent_inode_id == binding.parent_inode_id && *name_key == binding.name_key;
+            let same_child = *child_inode_id == binding.child_inode_id;
+            if *family == MetadataRowFamily::DirentryBinds && same_slot {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "parent `{parent_inode_id}` binds name `{name_key}` to children \
+                     `{child_inode_id}` and `{}` at or below the retention floor; refusing to \
+                     drop rows",
+                    binding.child_inode_id
+                )));
             }
-            self.bound_in_slot = Some((
-                binding.parent_inode_id,
-                binding.name_key.clone(),
-                binding.child_inode_id,
-            ));
+            if *family == MetadataRowFamily::DirentryChildBinds && same_child {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "child `{child_inode_id}` is bound as `{name_key}` under parent \
+                     `{parent_inode_id}` and as `{}` under parent `{}` at or below the retention \
+                     floor; refusing to drop rows",
+                    binding.name_key, binding.parent_inode_id
+                )));
+            }
         }
+        self.last_bound_edge = Some((
+            binding.parent_inode_id,
+            binding.name_key.clone(),
+            binding.child_inode_id,
+        ));
         Ok(Some(kept))
     }
 }
@@ -551,6 +564,42 @@ mod tests {
         assert!(
             error.to_string().contains("children `2` and `3`"),
             "the error must name both children, got: {error}"
+        );
+    }
+
+    #[test]
+    fn two_edges_bound_for_one_child_at_the_floor_are_refused() {
+        let mut operator = RetentionRule::Bindings.operator();
+        for (parent, name, child) in [(9, "z.txt", 41), (7, "a.txt", 42)] {
+            operator
+                .push(
+                    MetadataRowFamily::DirentryChildBinds,
+                    bind_row(parent, name, child, 20),
+                    floor(),
+                )
+                .expect("push");
+            assert!(
+                operator.close_group(floor()).expect("close").is_some(),
+                "one bound edge per child is kept"
+            );
+        }
+        operator
+            .push(
+                MetadataRowFamily::DirentryChildBinds,
+                bind_row(8, "b.txt", 42, 10),
+                floor(),
+            )
+            .expect("push");
+
+        let error = operator
+            .close_group(floor())
+            .expect_err("a second edge bound for the child at the floor is refused");
+        assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("as `a.txt` under parent `7` and as `b.txt` under parent `8`"),
+            "the error must name both edges, got: {error}"
         );
     }
 }

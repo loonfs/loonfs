@@ -11,33 +11,32 @@ A `direntry_binding` row contains `parent_inode_id`, `name_key`, `child_inode_id
 | Family | Order | Filter key |
 | --- | --- | --- |
 | `direntry_binds` | Parent, name, child, committed sequence, delta index | Parent and name |
-| `direntry_child_binds` | Child, committed sequence, delta index, parent, name | Child |
+| `direntry_child_binds` | Child, parent, name, committed sequence, delta index | Child |
 
-The two indexes contain the same records. Within a slot and child, or within a child in the child index, positions sort oldest first. Each bind and each unbind writes one record to each index. The unbind delta in the WAL names the exact bind it removes. Commit validation checks that reference before materialization, so the unbound row needs to store only its own position.
+The two indexes contain the same records: the same edge events in two orders. An edge is a parent, a name, and a child. Within one edge, positions sort oldest first in both indexes. Each bind and each unbind writes one record to each index. The unbind delta in the WAL names the exact bind it removes. Commit validation checks that reference before materialization, so the unbound row needs to store only its own position.
 
 ## Reads
 
-At sequence `N`, a slot's value is the version with the greatest `(committed_seq, delta_index)` at or below `N`. A bound value names its child. If the value is unbound, or the slot has no value, the name is available. Parent lookup follows the same rule in the child index. Within one commit, the last delta wins.
+At sequence `N`, a slot's value is the version with the greatest `(committed_seq, delta_index)` at or below `N`. A bound value names its child. If the value is unbound, or the slot has no value, the name is available. Parent lookup follows the same rule in the child index. Within one commit, the last delta wins. Key order is not position order: a slot's rows sort by child first, and a child's rows by parent and name first. A read therefore compares positions and never takes the last row in key order.
 
-Commit validation allows at most one child per slot and at most one parent per child. A move unbinds the old slot before it binds the new slot. The two indexes therefore agree at every readable sequence.
+One child per slot and one parent per child are validated rules. Commit validation refuses a bind into a slot that holds another child, and a bind of a child that already has a binding, unless the same operation unbinds that binding first. A move unbinds the old slot before it binds the new slot, and an undelete binds a deletion root, which has no binding. The two indexes therefore agree at every readable sequence.
 
 A path lookup reads the slot index once per component. A listing scans the parent's binding prefix, selects one visible value for each name, and includes the bound entries. Inode visibility and covering subtree tombstones also apply. Neither operation joins bindings with a separate removal family. Snapshots and checkpoints read through their pinned manifests at their captured sequences.
 
 ## Retention
 
-An unbound value is a tombstone for older values of its slot or child. It must remain while an excluded run may still hold those older values. A compaction that excludes the group's oldest run keeps every row.
+An unbound value is a tombstone for older values of its edge. It must remain while an excluded run may still hold those older values. A compaction that excludes the group's oldest run keeps every row.
 
-A bottom-anchored compaction includes the oldest run. It groups the slot index by slot and child, and the child index by child. In each group it keeps every version above the floor and the newest version at or below the floor. If that floor value is unbound, the compaction removes it together with every older version of the group. A child that left a slot by the floor has an unbind as its newest floor value there, so the compaction removes all of that group's rows at or below the floor. Because the input is sorted, the compaction buffers at most one floor value per group. In the slot index it also carries one flag across the groups of a slot, and it refuses a second child bound in the slot at the floor as corruption.
+A bottom-anchored compaction includes the oldest run. It groups both indexes by edge. For each edge it keeps every version above the floor and the newest version at or below the floor. If that floor value is unbound, the compaction removes it together with every older version of the edge. A child that left a slot by the floor has an unbind as its newest floor value there, so the compaction removes all of that edge's rows at or below the floor. Because the input is sorted, the compaction buffers at most one floor value per edge. It also carries the last edge bound at the floor: across the edges of one slot in the slot index, and across the edges of one child in the child index. It refuses a second child bound in one slot at the floor, or a second parent bound for one child at the floor, as corruption.
 
 For example, suppose inode 7 moves from `/a` to `/b` at sequence 20 and the floor is at 20. A bottom-anchored compaction produces:
 
-| Index entry | Value at the floor | Retained rows |
+| Edge | Value at the floor | Retained rows in each index |
 | --- | --- | --- |
-| Slot `/a` | Unbound | None |
-| Slot `/b` | Bound to inode 7 | The bound value |
-| Child 7 | Bound at `/b` | The same bound value |
+| `/a` to inode 7 | Unbound | None |
+| `/b` to inode 7 | Bound | The bound value |
 
-Every event above the floor stays in both indexes. At the floor, a bind is the newest value of its slot and child exactly when it is the newest value of its child, because replacing a child or moving it requires an unbind. Both indexes therefore keep the same set of events. The row-count and digest checks verify that agreement.
+Every event above the floor stays in both indexes. Both indexes group by edge, so each edge's rows get the same decision in each index, and both indexes keep the same set of events. The row-count and digest checks verify that agreement.
 
 Attribute and access revisions keep a cleared floor value, because the next update needs its revision number. A binding position comes from the event that published it, so a later bind does not depend on a retained unbound value.
 

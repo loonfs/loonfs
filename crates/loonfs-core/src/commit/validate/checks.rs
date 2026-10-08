@@ -6,7 +6,7 @@ use super::view::PublishValidationView;
 use crate::error::CoreError;
 use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::DeletedBinding;
+use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition};
 use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
 use loonfs_types::{
     next_public_ordinal, AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo,
@@ -213,6 +213,7 @@ async fn validate_create_directory<S: ObjectStore + ?Sized>(
         CommitOperand::CreateParent,
     )
     .await?;
+    validate_child_unbound(view, child_inode_id, None).await?;
     validate_not_covered_by_tombstone(view, parent_inode_id, CommitOperand::CreateParent).await?;
     Ok(vec![
         WalDelta::CreateInode {
@@ -250,6 +251,7 @@ async fn validate_create_file<S: ObjectStore + ?Sized>(
         CommitOperand::CreateParent,
     )
     .await?;
+    validate_child_unbound(view, child_inode_id, None).await?;
     validate_not_covered_by_tombstone(view, parent_inode_id, CommitOperand::CreateParent).await?;
     Ok(vec![
         WalDelta::CreateInode {
@@ -376,6 +378,7 @@ async fn validate_rename<S: ObjectStore + ?Sized>(
         CommitOperand::RenameTargetParent,
     )
     .await?;
+    validate_child_unbound(view, inode_id, Some(source_binding.position)).await?;
     validate_rename_does_not_cycle(view, &inode, new_parent_inode_id).await?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::RenameSource).await?;
     validate_not_covered_by_tombstone(view, new_parent_inode_id, CommitOperand::RenameTargetParent)
@@ -436,6 +439,7 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
         CommitOperand::UndeleteTarget,
     )
     .await?;
+    validate_child_unbound(view, inode_id, None).await?;
     validate_not_covered_by_tombstone(view, parent_inode_id, CommitOperand::UndeleteTarget).await?;
     Ok(vec![
         WalDelta::RevokeSubtreeTombstone {
@@ -721,6 +725,29 @@ async fn validate_name_absent<S: ObjectStore + ?Sized>(
         }
     }
     Ok(name_key)
+}
+
+/// One parent per child: a bind names an inode with no current binding, or
+/// with the binding its own operation unbinds first.
+async fn validate_child_unbound<S: ObjectStore + ?Sized>(
+    view: &PublishValidationView<'_, S>,
+    child_inode_id: InodeId,
+    unbinding: Option<DeltaPosition>,
+) -> Result<(), CoreError> {
+    match view
+        .view()
+        .current_parent_binding_for_child(child_inode_id)
+        .await?
+    {
+        Some(current) if Some(current.position()) != unbinding => {
+            Err(CoreError::NamespaceCorrupt(format!(
+                "a commit binds inode `{child_inode_id}`, which is already bound as `{}` under \
+                 parent inode `{}`",
+                current.name_key, current.parent_inode_id
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 async fn validate_source_binding<S: ObjectStore + ?Sized>(

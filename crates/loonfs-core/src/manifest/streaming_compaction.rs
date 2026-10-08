@@ -582,17 +582,17 @@ pub(super) struct RetentionCluster {
     pub(super) rule: RetentionRule,
 }
 
+// Both indexes put an edge's parent, name, and child ahead of its position, so
+// positions run oldest first only within one edge.
 const BINDINGS_CLUSTERS: [RetentionCluster; 2] = [
     RetentionCluster {
         families: &[MetadataRowFamily::DirentryBinds],
-        // A slot's rows sort by child before position, so positions run
-        // oldest first only within one slot and child.
         locality: LocalityGrouping::LeadingKeyComponents(3),
         rule: RetentionRule::Bindings,
     },
     RetentionCluster {
         families: &[MetadataRowFamily::DirentryChildBinds],
-        locality: LocalityGrouping::LeadingKeyComponents(1),
+        locality: LocalityGrouping::LeadingKeyComponents(3),
         rule: RetentionRule::Bindings,
     },
 ];
