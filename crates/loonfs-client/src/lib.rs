@@ -17,6 +17,7 @@ mod downloads;
 mod error;
 mod maintenance;
 mod mutations;
+mod mutations_by_inode;
 mod namespace_path;
 mod payload;
 mod query;

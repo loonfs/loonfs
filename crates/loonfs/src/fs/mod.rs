@@ -9,6 +9,7 @@ mod snapshots;
 mod speculative_read;
 mod uploads;
 mod writes;
+mod writes_by_inode;
 
 pub use maintenance::CheckpointsPager;
 pub use reads::{
