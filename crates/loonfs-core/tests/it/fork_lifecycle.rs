@@ -347,7 +347,10 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     let root_entry = resolve_path(&store, &namespace_id, "/")
         .await
         .expect("a fresh namespace serves reads");
-    assert_eq!(root_entry.inode_kind(), loonfs_types::InodeKind::Directory);
+    assert_eq!(
+        root_entry.inode_kind(),
+        loonfs_types::EntryInodeKind::Directory
+    );
     let status = loonfs_core::cache::load_namespace_diagnostics(&store, &namespace_id)
         .await
         .expect("status");

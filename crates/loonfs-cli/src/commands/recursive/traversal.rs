@@ -5,6 +5,7 @@
 use super::{joined_remote, parse_remote, relative_remote, CommandContext, FileJob};
 use crate::commands::pagination::page_request;
 use crate::error::CliError;
+use crate::render::write_stderr_warning;
 use futures::Stream;
 use loonfs_types::PinId;
 use loonfs_types::{ChangeSeq, ListPathEntriesResponse, PathEntry, PathEntryKind};
@@ -213,6 +214,13 @@ impl RemoteTree<'_> {
                             relative_remote: relative,
                             size_bytes: Some(size_bytes),
                         }))
+                    }
+                    PathEntryKind::Unknown => {
+                        write_stderr_warning(format_args!(
+                            "skipping `{}`: this client does not know its inode kind",
+                            joined_remote(self.root, &relative)
+                        ));
+                        continue;
                     }
                 }
             }

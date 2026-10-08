@@ -19,8 +19,8 @@ use loonfs_types::{
     api::v0::FilesystemChange,
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    DirectoryPageCursor, InodeId, InodeKind, NameKey, NamespaceId, Page, PageRequest, PathEntry,
-    RevisionNo,
+    DirectoryPageCursor, EntryInodeKind, InodeId, NameKey, NamespaceId, Page, PageRequest,
+    PathEntry, RevisionNo,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -352,7 +352,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let stat = resolve_path(&store, &namespace_id, "/docs/file-1.txt")
         .await
         .expect("stat file");
-    assert_eq!(stat.inode_kind(), InodeKind::File);
+    assert_eq!(stat.inode_kind(), EntryInodeKind::File);
     assert_eq!(stat.size_bytes(), Some("file-1-bytes".len() as u64));
     assert!(stat.content_ref().is_some());
     assert_eq!(store.count(OperationClass::Read), 0);
@@ -363,7 +363,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
         .expect("list docs");
     assert_eq!(entries.len(), 3);
     for entry in entries {
-        assert_eq!(entry.inode_kind(), InodeKind::File);
+        assert_eq!(entry.inode_kind(), EntryInodeKind::File);
         assert_eq!(entry.size_bytes(), Some("file-0-bytes".len() as u64));
         assert!(entry.content_ref().is_some());
     }
@@ -858,7 +858,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
             .iter()
             .find(|entry| named_entry(entry) == directory_name)
             .expect("directory entry");
-        assert_eq!(entry.inode_kind(), InodeKind::Directory);
+        assert_eq!(entry.inode_kind(), EntryInodeKind::Directory);
         assert_eq!(entry.revision_no(), None);
         assert_eq!(entry.size_bytes(), None);
         assert!(entry.content_ref().is_none());
@@ -873,7 +873,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
             .iter()
             .find(|entry| named_entry(entry) == file_name)
             .expect("file entry");
-        assert_eq!(entry.inode_kind(), InodeKind::File);
+        assert_eq!(entry.inode_kind(), EntryInodeKind::File);
         assert_eq!(entry.revision_no(), Some(RevisionNo(1)));
         assert_eq!(entry.size_bytes(), Some(size));
         assert!(entry.content_ref().is_some());
@@ -1358,7 +1358,7 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
     let docs = resolve_path(&store, &namespace_id("demo"), "/docs")
         .await
         .expect("resolve docs");
-    assert_eq!(docs.inode_kind(), InodeKind::Directory);
+    assert_eq!(docs.inode_kind(), EntryInodeKind::Directory);
 
     let missing_parent = create_directory_path(
         &store,

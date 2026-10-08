@@ -613,7 +613,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .into_iter()
             .map(|deletion| TrashEntry {
                 inode_id: deletion.root_inode_id,
-                inode_kind: deletion.inode_kind,
+                inode_kind: deletion.inode_kind.into(),
                 deletion_seq: deletion.deletion_seq,
                 deleted_at_ms: deletion.deleted_at_ms,
                 deleted_by: deletion.deleted_by,
@@ -1106,7 +1106,8 @@ pub(crate) fn ensure_within_read_limit(
 fn file_content_ref(entry: &PathEntry) -> Result<ContentRef> {
     match &entry.kind {
         PathEntryKind::File { content_ref, .. } => Ok(content_ref.clone()),
-        PathEntryKind::Directory {} => Err(CoreError::ExpectedFile {
+        // Core builds entries from stored kinds, so an unknown kind never reaches here.
+        PathEntryKind::Directory {} | PathEntryKind::Unknown => Err(CoreError::ExpectedFile {
             target: entry.path.to_string(),
             kind: InodeKind::Directory,
         }),

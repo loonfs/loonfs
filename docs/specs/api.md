@@ -1853,6 +1853,12 @@ current revision row. These stamps are observational — sequences are the
 order, and no validity rule reads them. Directories have creation time but no
 modified time in v0; rename and move change neither attribution nor time.
 
+A newer server may report an `inode_kind` that this document does not define.
+A client must tolerate an `inode_kind` it does not know. It treats such an
+entry as opaque: it reads the fields every entry carries, such as
+`display_name`, `inode_id`, `path`, and `binding_version`, and ignores any
+field that belongs to the kind.
+
 `include_attributes` selects whether the response includes the inode's attributes. It accepts `true` or `false`; anything else is `invalid_request`. The entry route defaults to `true` because it returns one bounded attribute map of at most 64 KiB.
 
 The projection serializes as prefixed siblings. `attributes_revision_no` and
@@ -1977,7 +1983,7 @@ Lists the namespace's recoverable deletions, oldest deletion first — ascending
 by `(deletion_seq, inode_id)` — paged with the standard `limit`/`cursor`
 pattern (the cursor is an ordering resume like every other). The listing is a
 range scan over the derived active-deletions family ([format: file deletion](format.md#16-file-and-subtree-deletion)), so a page costs the page rather than the namespace's deletion history.
-Those rows represent current state and are not removed when the retention floor advances. Each entry includes the inode id and deletion sequence required by `undelete`, plus `inode_kind`, `deleted_by`, `deleted_at_ms`, and the removed `deleted_binding`. Nested deletions remain separate entries, and recovering an outer deletion does not remove an inner deletion from the list.
+Those rows represent current state and are not removed when the retention floor advances. Each entry includes the inode id and deletion sequence required by `undelete`, plus `inode_kind`, `deleted_by`, `deleted_at_ms`, and the removed `deleted_binding`. As with path entries, a client must tolerate an `inode_kind` it does not know. Nested deletions remain separate entries, and recovering an outer deletion does not remove an inner deletion from the list.
 
 ```json
 {
