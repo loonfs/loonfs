@@ -8,6 +8,7 @@ import {
     streamingFetch,
     uploadBody,
     inlineContentLimit,
+    appendContent,
 } from "./transfer-runtime.js";
 import { LoonFSClient as GeneratedLoonFSClient } from "./Client.js";
 import { FilesClient as GeneratedFilesClient } from "./api/resources/files/client/Client.js";
@@ -45,6 +46,16 @@ export interface PrepareStreamInput {
 
 export interface PreparedUploadInput extends Omit<UploadInput, "content"> {
     prepared: PreparedFile;
+}
+
+export interface AppendInput {
+    namespace_alias: string;
+    path: LoonFS.AbsolutePath;
+    content: Uint8Array;
+    commit_id?: LoonFS.CommitId;
+    message?: string;
+    expected_inode_id?: LoonFS.InodeId;
+    expected_revision_no?: LoonFS.RevisionNo;
 }
 
 export interface DownloadInput {
@@ -202,6 +213,31 @@ export class FilesClient extends GeneratedFilesClient {
         return this.root.commits.create(request, requestOptions);
     }
 
+    /** Adds 1 byte to 256 KiB to the end of a file in one commit. Pass `commit_id` explicitly if you may retry. */
+    public async append(
+        input: AppendInput,
+        requestOptions: FilesClient.RequestOptions = {},
+    ): Promise<LoonFS.Commit> {
+        const inline_content = appendContent(input.content);
+        const request: LoonFS.CommitRequest = {
+            namespace_alias: input.namespace_alias,
+            ...this.publicationIds(input),
+            operations: [
+                {
+                    kind: "append_file",
+                    path: input.path,
+                    inline_content,
+                    expected_inode_id: input.expected_inode_id,
+                    expected_revision_no: input.expected_revision_no,
+                },
+            ],
+        };
+        if (input.message !== undefined) {
+            request.message = input.message;
+        }
+        return this.root.commits.create(request, requestOptions);
+    }
+
     private publicationIds(input: Pick<UploadInput, "commit_id">): {
         commit_id: LoonFS.CommitId;
     } {
@@ -233,14 +269,19 @@ export class FilesClient extends GeneratedFilesClient {
             }
             const grant = await this.createDownload(input, options);
             requirePresignedMethod(grant.access, "GET", "download");
-            const response = await (this._options.fetch ?? fetch)(grant.access.url, {
-                redirect: "error",
-                method: grant.access.method,
-                headers: grant.access.headers,
-                signal: scope.signal,
-            });
-            body = response.body;
-            requireSuccessfulResponse(response, "download");
+            // A grant of zero bytes signs no range and needs no request; its object may not exist.
+            if (grant.content_ref.size_bytes === 0) {
+                body = new ReadableStream<Uint8Array>({ start: (controller) => controller.close() });
+            } else {
+                const response = await (this._options.fetch ?? fetch)(grant.access.url, {
+                    redirect: "error",
+                    method: grant.access.method,
+                    headers: grant.access.headers,
+                    signal: scope.signal,
+                });
+                body = response.body;
+                requireSuccessfulResponse(response, "download");
+            }
             return {
                 namespace_alias: input.namespace_alias,
                 path: grant.path,

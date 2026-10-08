@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -19,13 +20,14 @@ import (
 )
 
 type streamCase struct {
-	Name           string `json:"name"`
-	Content        string `json:"content"`
-	Algorithm      string `json:"algorithm"`
-	Checksum       string `json:"checksum"`
-	SizeBytes      int    `json:"size_bytes"`
-	Error          bool   `json:"error"`
-	TransportError bool   `json:"transport_error"`
+	Name           string  `json:"name"`
+	Content        string  `json:"content"`
+	Algorithm      string  `json:"algorithm"`
+	Checksum       string  `json:"checksum"`
+	SizeBytes      int     `json:"size_bytes"`
+	Range          *string `json:"range"`
+	Error          bool    `json:"error"`
+	TransportError bool    `json:"transport_error"`
 }
 
 func streamingCases(t *testing.T) []streamCase {
@@ -45,10 +47,20 @@ func streamTestServer(t *testing.T, fixture streamCase, direct bool, content fun
 	t.Helper()
 	var host *httptest.Server
 	claim := map[string]any{"kind": "blob", "owner_namespace_id": "demo", "content_id": "cnt_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
+	var signed []string
+	if fixture.Range != nil {
+		signed = []string{*fixture.Range}
+	}
 	host = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/object" {
 			if r.Header.Get("Authorization") != "" || r.Header.Get("X-Private") != "" {
 				t.Error("API credentials leaked to object store")
+			}
+			if fixture.SizeBytes == 0 {
+				t.Error("a grant of zero bytes needs no request")
+			}
+			if ranges := r.Header.Values("Range"); !reflect.DeepEqual(ranges, signed) {
+				t.Errorf("object request range = %q, want the grant's %q", ranges, signed)
 			}
 			content(w, r)
 			return
@@ -61,12 +73,19 @@ func streamTestServer(t *testing.T, fixture streamCase, direct bool, content fun
 		case strings.HasSuffix(r.URL.Path, "/capabilities"):
 			json.NewEncoder(w).Encode(map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.downloads.direct_get": direct}})
 		case strings.HasSuffix(r.URL.Path, "/downloads"):
-			json.NewEncoder(w).Encode(map[string]any{"namespace_id": "demo", "path": "/file", "revision_no": 1, "content_ref": claim, "access": map[string]any{"kind": "presigned_url", "url": host.URL + "/object", "method": "GET", "expires_at_ms": 2000000000000}})
+			access := map[string]any{"kind": "presigned_url", "url": host.URL + "/object", "method": "GET", "expires_at_ms": 2000000000000}
+			if fixture.Range != nil {
+				access["headers"] = map[string]string{"range": *fixture.Range}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"namespace_id": "demo", "path": "/file", "revision_no": 1, "content_ref": claim, "access": access})
 		case strings.HasSuffix(r.URL.Path, "/entry"):
 			json.NewEncoder(w).Encode(map[string]any{"inode_kind": "file", "namespace_id": "demo", "path": "/file", "revision_no": 1, "content_ref": claim})
 		case strings.HasSuffix(r.URL.Path, "/content"):
 			if r.URL.Query().Get("revision_no") != "1" {
 				t.Error("proxy read is not pinned to its revision")
+			}
+			if r.Header.Get("Range") != "" {
+				t.Error("proxy read sent a range")
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			content(w, r)

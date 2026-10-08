@@ -26,6 +26,7 @@ pub struct Case {
 }
 
 const EXPECTED_CASES: &[&str] = &[
+    "append",
     "changes",
     "children_by_inode",
     "commit_replay",

@@ -30,6 +30,7 @@ from .types import (
     ContentRef,
     ContentToken,
     DestinationBehavior,
+    FilesystemOperation_AppendFile,
     FilesystemOperation_PutFile,
     ObjectTransferAccess,
     RevisionNo,
@@ -45,6 +46,7 @@ from .types import (
 _INLINE_FEATURE = "filesystem.commits.inline_content"
 _INLINE_LIMIT = "commit.max_inline_content_bytes_per_operation"
 _MAX_INLINE_BYTES = 64 * 1024
+_MAX_APPEND_BYTES = 256 * 1024
 
 _MULTIPART_MIN_BYTES = 8 * 1024 * 1024
 _DIRECT_GET_FEATURE = "filesystem.downloads.direct_get"
@@ -427,6 +429,32 @@ class FilesClient(_GeneratedFilesClient):
             namespace_id, request_options=request_options, **commit_arguments
         )
 
+    def append(
+        self,
+        namespace_id: str,
+        *,
+        path: str,
+        content: bytes,
+        commit_id: CommitId | None = None,
+        message: str | None = None,
+        expected_inode_id: InodeId | None = None,
+        expected_revision_no: RevisionNo | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> Commit:
+        """Add 1 byte to 256 KiB to the end of a file in one commit.
+
+        Pass commit_id explicitly if you may retry.
+        """
+        commit_arguments = _append_commit(
+            path, content, message, expected_inode_id, expected_revision_no
+        )
+        return self._root.commits.create(
+            namespace_id,
+            commit_id=self._publication_ids(commit_id),
+            request_options=request_options,
+            **commit_arguments,
+        )
+
     def _publication_ids(self, commit_id: CommitId | None) -> CommitId:
         if commit_id is None:
             commit_id = "c_" + uuid.uuid4().hex
@@ -471,6 +499,18 @@ class FilesClient(_GeneratedFilesClient):
         )
         if grant.access.method.upper() != "GET":
             raise RuntimeError("download grant must use GET")
+        if grant.content_ref.size_bytes == 0:
+            # A grant of zero bytes signs no range and needs no request;
+            # its object may not exist.
+            chunks = _no_chunks()
+            return DownloadStream(
+                chunks,
+                chunks.close,
+                grant.namespace_id,
+                grant.path,
+                grant.revision_no,
+                grant.content_ref,
+            )
         client = http_client or self._root._client_wrapper.httpx_client.httpx_client
         timeout = (request_options or {}).get(
             "timeout", self._root._client_wrapper.get_timeout()
@@ -829,6 +869,32 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
             namespace_id, request_options=request_options, **commit_arguments
         )
 
+    async def append(
+        self,
+        namespace_id: str,
+        *,
+        path: str,
+        content: bytes,
+        commit_id: CommitId | None = None,
+        message: str | None = None,
+        expected_inode_id: InodeId | None = None,
+        expected_revision_no: RevisionNo | None = None,
+        request_options: RequestOptions | None = None,
+    ) -> Commit:
+        """Add 1 byte to 256 KiB to the end of a file in one commit.
+
+        Pass commit_id explicitly if you may retry.
+        """
+        commit_arguments = _append_commit(
+            path, content, message, expected_inode_id, expected_revision_no
+        )
+        return await self._root.commits.create(
+            namespace_id,
+            commit_id=self._publication_ids(commit_id),
+            request_options=request_options,
+            **commit_arguments,
+        )
+
     def _publication_ids(self, commit_id: CommitId | None) -> CommitId:
         if commit_id is None:
             commit_id = "c_" + uuid.uuid4().hex
@@ -875,6 +941,18 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         )
         if grant.access.method.upper() != "GET":
             raise RuntimeError("download grant must use GET")
+        if grant.content_ref.size_bytes == 0:
+            # A grant of zero bytes signs no range and needs no request;
+            # its object may not exist.
+            chunks = _no_async_chunks()
+            return AsyncDownloadStream(
+                chunks,
+                chunks.aclose,
+                grant.namespace_id,
+                grant.path,
+                grant.revision_no,
+                grant.content_ref,
+            )
         client = http_client or self._root._client_wrapper.httpx_client.httpx_client
         timeout = (request_options or {}).get(
             "timeout", self._root._client_wrapper.get_timeout()
@@ -959,6 +1037,15 @@ __all__ = [
 ]
 
 
+def _no_chunks():
+    yield from ()
+
+
+async def _no_async_chunks():
+    for chunk in ():
+        yield chunk
+
+
 def _proxied_claim(client, namespace_id, path, revision_no, request_options):
     if revision_no is None:
         entry = client.files.retrieve(
@@ -1032,6 +1119,29 @@ def _inline_limit(capabilities):
     ):
         return min(limit, _MAX_INLINE_BYTES)
     return None
+
+
+def _append_commit(path, content, message, expected_inode_id, expected_revision_no):
+    if not content:
+        raise ValueError("append content is empty")
+    if len(content) > _MAX_APPEND_BYTES:
+        raise ValueError(
+            f"{len(content)}-byte append is larger than the {_MAX_APPEND_BYTES}-byte limit"
+        )
+    operation_arguments = {
+        "path": path,
+        "inline_content": base64.b64encode(content).decode("ascii"),
+    }
+    if expected_inode_id is not None:
+        operation_arguments["expected_inode_id"] = expected_inode_id
+    if expected_revision_no is not None:
+        operation_arguments["expected_revision_no"] = expected_revision_no
+    commit_arguments = {
+        "operations": [FilesystemOperation_AppendFile(**operation_arguments)]
+    }
+    if message is not None:
+        commit_arguments["message"] = message
+    return commit_arguments
 
 
 def _prepared_commit_fields(prepared: PreparedFile):

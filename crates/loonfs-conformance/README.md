@@ -4,7 +4,7 @@ This private crate contains shared JSON test cases and a Rust test harness.
 
 ## Cases
 
-The thirteen cases cover:
+The fifteen cases cover:
 
 - standard API errors
 - repeated commit requests
@@ -12,9 +12,11 @@ The thirteen cases cover:
 - multipart uploads and repeated completion requests
 - repeated upload aborts
 - direct downloads
+- appends, and direct downloads of earlier and empty revisions (`append`)
 - cursor pagination and resumption
 - directory children by inode (`children_by_inode`)
 - mutations by inode (`inode_mutations`)
+- reads, copies, restores, and updates by inode (`inode_addressing`)
 - snapshot creation, reads, extension, and deletion (`snapshots`)
 - change feed identity fields
 - an end-to-end filesystem workflow

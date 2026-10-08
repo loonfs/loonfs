@@ -676,6 +676,7 @@ source = replace_once(
     generated_export,
     'export { LoonFSClient } from "./transfers.js";\n'
     'export type {\n'
+    '    AppendInput,\n'
     '    DownloadInput,\n'
     '    DownloadResult,\n'
     '    DownloadStream,\n'

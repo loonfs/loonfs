@@ -3609,7 +3609,9 @@ none is supplied. TypeScript uses `timeoutInSeconds` (client default, otherwise
 request/client HTTPX timeout for I/O waits on both transports; its synchronous
 iterator closes the response on early exit from a `with` block. The async iterator
 uses an `async with` block. API authorization, cookies and API headers are not
-copied into presigned object-store requests.
+copied into presigned object-store requests. A direct request sends the grant's
+`access.headers` unchanged and adds no `Range`, and a grant of zero bytes makes
+no request.
 
 ### SDK streaming uploads
 
@@ -3653,3 +3655,23 @@ completion failure leaves the session available for inspection. After successful
 preparation, retain the result and retry `UploadPrepared` / `upload_prepared` /
 `uploadPrepared` with identical publication inputs; do not reread a stream or
 start a new upload to retry publication.
+
+### SDK appends
+
+The handwritten helpers add bytes to the end of an existing file with one
+`create_commit` request that carries an `append_file` operation:
+
+| SDK | Append bytes |
+| --- | --- |
+| Go | `client.Files.Append(ctx, files.AppendInput{...})` |
+| Python (`LoonFS` and `AsyncLoonFS`) | `client.files.append(namespace_id, path=path, content=data, ...)`; await with `AsyncLoonFS` |
+| TypeScript server/browser | `client.files.append(input, requestOptions)` |
+
+The request carries the bytes as `inline_content`, so an append needs no
+upload. Each helper refuses empty content and content larger than 256 KiB
+before it sends anything, with the error its upload helpers raise for a size no
+transport can carry: an `error` in Go, a `ValueError` in Python, and an `Error`
+in TypeScript. The other inputs are optional: the commit ID, the commit message,
+`expected_inode_id`, and `expected_revision_no`. Pass the commit ID explicitly
+if you may retry; a retry with the same bytes and commit ID replays the original
+commit. No helper sends `append_file_by_inode`; send it with `commits.create`.

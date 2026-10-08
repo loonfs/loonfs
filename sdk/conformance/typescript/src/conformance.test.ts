@@ -22,6 +22,7 @@ const BROWSER_MULTIPART_MIN_BYTES = 8 * 1024 * 1024;
 const PROXY_UPLOAD_MAX_BYTES = "upload.service_proxied.max_content_bytes";
 const CASE_FIELDS = ["expected", "intent", "name", "request"];
 const EXPECTED_CASES = [
+    "append",
     "changes",
     "children_by_inode",
     "commit_replay",
@@ -260,6 +261,38 @@ interface DownloadExpected {
     size_bytes: number;
     checksum_algorithm: string;
     committed_seq: number;
+}
+
+interface AppendCommitIds {
+    put: string;
+    append: string;
+    empty_append: string;
+    empty_put: string;
+    append_to_empty: string;
+}
+
+interface AppendRequest {
+    namespace_id: string;
+    path: string;
+    empty_path: string;
+    actor_id: LoonFS.ActorId;
+    content_utf8: string;
+    appended_utf8: string;
+    commit_ids: AppendCommitIds;
+}
+
+interface AppendExpected {
+    put_committed_seq: number;
+    append_committed_seq: number;
+    previous_revision_no: number;
+    previous_size_bytes: number;
+    previous_range: string;
+    appended_revision_no: number;
+    appended_size_bytes: number;
+    resumed_range: string;
+    empty_append: ErrorStatusExpected;
+    empty_put_committed_seq: number;
+    append_to_empty_committed_seq: number;
 }
 
 interface EndToEndCommitIds {
@@ -547,6 +580,28 @@ const DOWNLOAD_REQUEST_FIELDS = [
     "content_utf8",
 ] as const;
 const DOWNLOAD_EXPECTED_FIELDS = ["size_bytes", "checksum_algorithm", "committed_seq"] as const;
+const APPEND_REQUEST_FIELDS = [
+    "namespace_id",
+    "path",
+    "empty_path",
+    "actor_id",
+    "content_utf8",
+    "appended_utf8",
+    "commit_ids",
+] as const;
+const APPEND_EXPECTED_FIELDS = [
+    "put_committed_seq",
+    "append_committed_seq",
+    "previous_revision_no",
+    "previous_size_bytes",
+    "previous_range",
+    "appended_revision_no",
+    "appended_size_bytes",
+    "resumed_range",
+    "empty_append",
+    "empty_put_committed_seq",
+    "append_to_empty_committed_seq",
+] as const;
 const END_TO_END_REQUEST_FIELDS = [
     "namespace_id",
     "directory",
@@ -708,6 +763,21 @@ function decodeDownload(testCase: ConformanceCase): [DownloadRequest, DownloadEx
     return [
         testCase.request as unknown as DownloadRequest,
         testCase.expected as unknown as DownloadExpected,
+    ];
+}
+
+function decodeAppend(testCase: ConformanceCase): [AppendRequest, AppendExpected] {
+    strictObject(testCase.request, APPEND_REQUEST_FIELDS, `${testCase.name} request`);
+    strictObject(
+        testCase.request.commit_ids,
+        ["put", "append", "empty_append", "empty_put", "append_to_empty"],
+        `${testCase.name} commit_ids`,
+    );
+    strictObject(testCase.expected, APPEND_EXPECTED_FIELDS, `${testCase.name} expected`);
+    strictObject(testCase.expected.empty_append, ["status", "code"], `${testCase.name} empty_append`);
+    return [
+        testCase.request as unknown as AppendRequest,
+        testCase.expected as unknown as AppendExpected,
     ];
 }
 
@@ -2974,6 +3044,162 @@ conformanceTest("download", async (activeHarness, testCase) => {
         download.content_ref.checksum,
     );
     assert.deepEqual(download.content, payload);
+});
+
+function signedRange(access: LoonFS.ObjectTransferAccess): string | undefined {
+    return Object.entries(access.headers ?? {}).find(([name]) => name.toLowerCase() === "range")?.[1];
+}
+
+conformanceTest("append", async (activeHarness, testCase) => {
+    const [request, expected] = decodeAppend(testCase);
+    const client = activeHarness.client;
+    const actor = { headers: { "Loonfs-Actor": request.actor_id } };
+    await client.namespaces.create({ namespace_id: request.namespace_id }, actor);
+    const content = new TextEncoder().encode(request.content_utf8);
+    const appended = new TextEncoder().encode(request.appended_utf8);
+    const whole = new Uint8Array(content.length + appended.length);
+    whole.set(content);
+    whole.set(appended, content.length);
+
+    const put = await client.files.upload(
+        {
+            namespace_id: request.namespace_id,
+            path: request.path,
+            content,
+            commit_id: request.commit_ids.put,
+        },
+        actor,
+    );
+    assert.equal(put.committed_seq, expected.put_committed_seq);
+    const append = await client.files.append(
+        {
+            namespace_id: request.namespace_id,
+            path: request.path,
+            content: appended,
+            commit_id: request.commit_ids.append,
+        },
+        actor,
+    );
+    assert.equal(append.committed_seq, expected.append_committed_seq);
+
+    const stat = fileEntry(
+        await client.files.retrieve({ namespace_id: request.namespace_id, path: request.path }),
+    );
+    assert.equal(stat.revision_no, expected.appended_revision_no);
+    const current = await client.files.download({
+        namespace_id: request.namespace_id,
+        path: request.path,
+    });
+    assert.deepEqual(current.content, whole);
+    assert.deepEqual(current.content_ref, stat.content_ref);
+    assert.equal(current.content_ref.size_bytes, expected.appended_size_bytes);
+
+    const previousRevision = expected.previous_revision_no;
+    assert.deepEqual(
+        await readProxied(client, request.namespace_id, request.path, undefined, previousRevision),
+        content,
+    );
+    const grant = await client.files.createDownload({
+        namespace_id: request.namespace_id,
+        path: request.path,
+        revision_no: previousRevision,
+    });
+    // The append extended this object, so only the signed range keeps the
+    // appended bytes out of this read.
+    assert.equal(grant.content_ref.content_id, current.content_ref.content_id);
+    assert.equal(grant.content_ref.size_bytes, expected.previous_size_bytes);
+    assert.equal(signedRange(grant.access), expected.previous_range);
+    const previous = await client.files.download({
+        namespace_id: request.namespace_id,
+        path: request.path,
+        revision_no: previousRevision,
+    });
+    assert.deepEqual(previous.content, content);
+
+    const resumed = await client.files.createDownload({
+        namespace_id: request.namespace_id,
+        path: request.path,
+        start_offset: expected.previous_size_bytes,
+    });
+    assert.equal(signedRange(resumed.access), expected.resumed_range);
+    const rest = await fetch(resumed.access.url, { headers: resumed.access.headers });
+    assert.ok(rest.ok, `resumed download failed with HTTP ${rest.status}`);
+    assert.deepEqual(new Uint8Array(await rest.arrayBuffer()), appended);
+
+    await assert.rejects(
+        client.files.append(
+            {
+                namespace_id: request.namespace_id,
+                path: request.path,
+                content: new Uint8Array(0),
+                commit_id: request.commit_ids.empty_append,
+            },
+            actor,
+        ),
+        /append content is empty/,
+    );
+    await assert.rejects(
+        client.commits.create(
+            {
+                namespace_id: request.namespace_id,
+                commit_id: request.commit_ids.empty_append,
+                operations: [{ kind: "append_file", path: request.path, inline_content: "" }],
+            },
+            actor,
+        ),
+        (error: unknown) => {
+            assert.ok(error instanceof LoonFS.BadRequestError);
+            assert.equal(error.statusCode, expected.empty_append.status);
+            assert.equal(error.body.code, expected.empty_append.code);
+            return true;
+        },
+    );
+
+    const emptyPut = await client.files.upload(
+        {
+            namespace_id: request.namespace_id,
+            path: request.empty_path,
+            content: new Uint8Array(0),
+            commit_id: request.commit_ids.empty_put,
+        },
+        actor,
+    );
+    assert.equal(emptyPut.committed_seq, expected.empty_put_committed_seq);
+    const emptyGrant = await client.files.createDownload({
+        namespace_id: request.namespace_id,
+        path: request.empty_path,
+    });
+    assert.equal(emptyGrant.content_ref.size_bytes, 0);
+    assert.equal(signedRange(emptyGrant.access), undefined);
+    const empty = await client.files.download({
+        namespace_id: request.namespace_id,
+        path: request.empty_path,
+    });
+    assert.equal(empty.content.byteLength, 0);
+
+    const appendToEmpty = await client.files.append(
+        {
+            namespace_id: request.namespace_id,
+            path: request.empty_path,
+            content: appended,
+            commit_id: request.commit_ids.append_to_empty,
+        },
+        actor,
+    );
+    assert.equal(appendToEmpty.committed_seq, expected.append_to_empty_committed_seq);
+    const filled = await client.files.download({
+        namespace_id: request.namespace_id,
+        path: request.empty_path,
+    });
+    assert.deepEqual(filled.content, appended);
+    assert.notEqual(filled.content_ref.content_id, emptyGrant.content_ref.content_id);
+    const stillEmpty = await client.files.download({
+        namespace_id: request.namespace_id,
+        path: request.empty_path,
+        revision_no: previousRevision,
+    });
+    assert.equal(stillEmpty.content.byteLength, 0);
+    assert.deepEqual(stillEmpty.content_ref, emptyGrant.content_ref);
 });
 
 conformanceTest("end_to_end", async (activeHarness, testCase) => {

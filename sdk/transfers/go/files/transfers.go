@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"hash/crc32"
@@ -21,6 +22,7 @@ import (
 
 const (
 	maxInlineBytes        = 64 * 1024
+	maxAppendBytes        = 256 * 1024
 	multipartMinimumBytes = 8 * 1024 * 1024
 
 	featureDirectGet           = "filesystem.downloads.direct_get"
@@ -86,6 +88,17 @@ type PreparedUploadInput struct {
 	CommitID           loonfs.CommitID
 	Message            *string
 	Behavior           loonfs.DestinationBehavior
+	ExpectedInodeID    *loonfs.InodeID
+	ExpectedRevisionNo *loonfs.RevisionNo
+}
+
+// AppendInput describes bytes to add to the end of an existing file.
+type AppendInput struct {
+	NamespaceID        loonfs.NamespaceID
+	Path               loonfs.AbsolutePath
+	Content            []byte
+	CommitID           loonfs.CommitID
+	Message            *string
 	ExpectedInodeID    *loonfs.InodeID
 	ExpectedRevisionNo *loonfs.RevisionNo
 }
@@ -176,6 +189,43 @@ func (c *Client) UploadPrepared(ctx context.Context, in PreparedUploadInput, opt
 	}, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("transfers: commit file: %w", err)
+	}
+	return committed, nil
+}
+
+// Append adds 1 byte to 256 KiB to the end of an existing file as its next
+// revision, in one commit that carries the bytes. Pass CommitID explicitly if
+// you may retry.
+func (c *Client) Append(ctx context.Context, in AppendInput, opts ...core.RequestOption) (*loonfs.Commit, error) {
+	if len(in.Content) == 0 {
+		return nil, fmt.Errorf("transfers: append content is empty")
+	}
+	if len(in.Content) > maxAppendBytes {
+		return nil, fmt.Errorf("transfers: %d-byte append is larger than the %d-byte limit", len(in.Content), maxAppendBytes)
+	}
+	commitID, err := c.publicationIDs(in.CommitID)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := transferContext(ctx)
+	defer cancel()
+	committed, err := commits.NewClient(c.options).Create(ctx, &loonfs.CommitRequest{
+		NamespaceID: string(in.NamespaceID),
+		CommitID:    commitID,
+		Message:     in.Message,
+		Operations: []*loonfs.FilesystemOperation{
+			{
+				AppendFile: &loonfs.FilesystemOperationAppendFile{
+					Path:               in.Path,
+					InlineContent:      base64.StdEncoding.EncodeToString(in.Content),
+					ExpectedInodeID:    in.ExpectedInodeID,
+					ExpectedRevisionNo: in.ExpectedRevisionNo,
+				},
+			},
+		},
+	}, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("transfers: commit append: %w", err)
 	}
 	return committed, nil
 }
