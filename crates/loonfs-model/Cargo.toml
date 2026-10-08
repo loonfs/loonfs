@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 loonfs-types.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

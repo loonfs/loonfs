@@ -2128,6 +2128,7 @@ name = "loonfs-model"
 version = "0.4.0"
 dependencies = [
  "loonfs-types",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
