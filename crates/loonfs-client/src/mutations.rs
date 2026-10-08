@@ -1288,11 +1288,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .create_namespace(
-                    &namespace_id,
-                    &loonfs_test_support::test_actor(),
-                    loonfs_types::NamespaceAccess::unrestricted(),
-                )
+                .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
                 .await,
             &transport,
         );

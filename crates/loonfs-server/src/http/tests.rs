@@ -301,11 +301,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     })
     .expect("valid client config");
     client
-        .create_namespace(
-            &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace over http");
 

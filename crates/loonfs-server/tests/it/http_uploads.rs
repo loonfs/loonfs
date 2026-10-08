@@ -32,11 +32,7 @@ async fn http_upload_content_rejects_invalid_upload_id() {
 
     harness
         .client
-        .create_namespace(
-            &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -73,11 +69,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
 
     harness
         .client
-        .create_namespace(
-            &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -123,11 +115,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let begin = harness
@@ -214,11 +202,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let begin = harness
@@ -304,11 +288,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     let target = NamespacePath::parse("demo", "/uploaded.txt").expect("target");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -436,11 +416,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 

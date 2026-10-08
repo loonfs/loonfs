@@ -154,11 +154,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
 
     harness
         .client
-        .create_namespace(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -667,11 +663,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
     let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
     harness
         .client
-        .create_namespace(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -997,11 +989,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
 
     harness
         .client
-        .create_namespace(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 

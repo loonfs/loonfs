@@ -62,11 +62,7 @@ async fn a_restarted_server_uses_the_local_cache_for_index_but_not_scan_data() {
     .await;
     writer
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     for index in 0..4 {

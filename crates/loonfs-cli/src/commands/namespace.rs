@@ -106,8 +106,7 @@ async fn run_namespace_create(
         .create_namespace_with_options(
             &namespace_id,
             &actor_id,
-            access,
-            &CreateNamespaceOptions { naming },
+            &CreateNamespaceOptions { access, naming },
         )
         .await
         .map_err(|error| context.fail(kind, error))?;

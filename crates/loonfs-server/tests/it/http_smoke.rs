@@ -38,11 +38,7 @@ async fn delete_namespace_blocks_operations() {
     let namespace = namespace_id("doomed");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("doomed", "/note.txt").expect("parse path");
@@ -271,11 +267,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     let creator = loonfs_types::ActorId::parse("namespace-creator").expect("actor");
     let created = harness
         .client
-        .create_namespace(
-            &namespace_id("demo"),
-            &creator,
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id("demo"), &creator)
         .await
         .expect("create namespace");
     assert_eq!(created.namespace_id.as_str(), "demo");
@@ -363,11 +355,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     harness
         .client
-        .create_namespace(
-            &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let source_path = NamespacePath::parse("demo", "/docs/shared.txt").expect("source path");
@@ -503,11 +491,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
     let target = namespace_id("target");
     harness
         .client
-        .create_namespace(
-            &source,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&source, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
     let path = NamespacePath::parse("source", "/file.txt").expect("path");

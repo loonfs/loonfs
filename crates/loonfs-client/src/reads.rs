@@ -13,10 +13,24 @@ pub struct ReadFileOptions {
 }
 
 /// Options for creating a namespace.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// `allow_existing` has no wire form, so only the runtime's
+/// `CreateNamespaceOptions` has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateNamespaceOptions {
+    /// The access mode, fixed for the namespace's life.
+    pub access: loonfs_types::NamespaceAccess,
     /// How sibling names compare, fixed for the namespace's life.
     pub naming: loonfs_types::NamespaceNaming,
+}
+
+impl Default for CreateNamespaceOptions {
+    fn default() -> Self {
+        Self {
+            access: loonfs_types::NamespaceAccess::Unrestricted {},
+            naming: loonfs_types::NamespaceNaming::CaseInsensitive,
+        }
+    }
 }
 
 /// Optional selectors for the change feed.
@@ -119,38 +133,31 @@ impl Client {
             .await
     }
 
-    /// Creates an empty case-insensitive namespace with the given ID and
-    /// access mode and returns its genesis state.
+    /// Creates an empty unrestricted, case-insensitive namespace with the
+    /// given ID and returns its genesis state.
     pub async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
-        actor_id: &loonfs_types::ActorId,
-        access: loonfs_types::NamespaceAccess,
+        actor: &loonfs_types::ActorId,
     ) -> Result<NamespaceMetadata> {
-        self.create_namespace_with_options(
-            namespace_id,
-            actor_id,
-            access,
-            &CreateNamespaceOptions::default(),
-        )
-        .await
+        self.create_namespace_with_options(namespace_id, actor, &CreateNamespaceOptions::default())
+            .await
     }
 
-    /// Creates an empty namespace with the given ID, access mode, and
-    /// options and returns its genesis state.
+    /// Creates an empty namespace with the given ID and options and returns
+    /// its genesis state.
     pub async fn create_namespace_with_options(
         &self,
         namespace_id: &NamespaceId,
-        actor_id: &loonfs_types::ActorId,
-        access: loonfs_types::NamespaceAccess,
+        actor: &loonfs_types::ActorId,
         options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
         self.request_json::<_, NamespaceMetadata>(
-            self.post(&url).header("Loonfs-Actor", actor_id.as_str()),
+            self.post(&url).header("Loonfs-Actor", actor.as_str()),
             Some(&CreateNamespaceRequest {
-                access,
+                access: options.access.clone(),
                 naming: options.naming,
                 namespace_id: namespace_id.clone(),
             }),

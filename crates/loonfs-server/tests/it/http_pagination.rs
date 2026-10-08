@@ -53,11 +53,7 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     for namespace_id in [&demo, &other] {
         harness
             .client
-            .create_namespace(
-                namespace_id,
-                &loonfs_test_support::test_actor(),
-                loonfs_types::NamespaceAccess::unrestricted(),
-            )
+            .create_namespace(namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
     }
@@ -254,11 +250,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 
     harness
         .client
-        .create_namespace(
-            &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
@@ -371,11 +363,7 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
 
     harness
         .client
-        .create_namespace(
-            &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
@@ -420,11 +408,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     let target = NamespacePath::parse("demo", "/restore.txt").expect("target");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
 
@@ -583,11 +567,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/rev.txt").expect("target");
@@ -689,11 +669,7 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::unrestricted(),
-        )
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/restore.txt").expect("target");

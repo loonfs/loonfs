@@ -681,11 +681,7 @@ mod tests {
         context
             .target
             .client
-            .create_namespace(
-                &namespace,
-                &loonfs_test_support::test_actor(),
-                loonfs_types::NamespaceAccess::unrestricted(),
-            )
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         (context, watched)
