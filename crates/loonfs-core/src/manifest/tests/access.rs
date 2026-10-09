@@ -76,6 +76,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         &store,
         &namespace_id,
         &state,
+        &HashMap::new(),
         MetadataLsmPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
             ..MetadataLsmPolicy::default()
@@ -152,6 +153,7 @@ async fn every_metadata_source_resolves_the_same_effective_rights() {
         &store,
         &namespace_id,
         &state,
+        &HashMap::new(),
         MetadataLsmPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
             ..MetadataLsmPolicy::default()

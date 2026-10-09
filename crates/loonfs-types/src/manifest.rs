@@ -424,7 +424,8 @@ pub struct ContentPublicationRecord {
     /// Length the reference names. The longest sorts first, so the first
     /// row under an id's prefix is its chain head.
     pub size_bytes: u64,
-    /// SHA-256 state after the reference's bytes, copied from the delta.
+    /// SHA-256 state after the reference's bytes, copied from the delta, or
+    /// computed by the fold that wrote the object when the delta has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash_state: Option<Sha256State>,
     /// CRC-64/NVME of the reference's bytes, copied from the delta.

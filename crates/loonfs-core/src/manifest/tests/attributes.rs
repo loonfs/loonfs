@@ -210,6 +210,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         &store,
         &namespace_id,
         &state,
+        &HashMap::new(),
         MetadataLsmPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
             ..MetadataLsmPolicy::default()
@@ -304,7 +305,7 @@ async fn wide_attribute_rows_roll_segments_by_bytes_and_preserve_every_row() {
             target_segment_bytes: NonZeroUsize::new(target_bytes).expect("target"),
             ..MetadataLsmPolicy::default()
         };
-        let families = build_manifest_segments(&store, &namespace, &state, policy)
+        let families = build_manifest_segments(&store, &namespace, &state, &HashMap::new(), policy)
             .await
             .expect("write byte-bounded segments");
         let family = families

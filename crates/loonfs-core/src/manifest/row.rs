@@ -3,7 +3,8 @@
 
 use crate::metadata::{active_deletion_from_tombstone, MetadataState};
 use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_types::ChangeSeq;
+use loonfs_types::{ChangeSeq, ContentId, Sha256State};
+use std::collections::HashMap;
 
 #[cfg(test)]
 use super::runs::MANIFEST_ROW_FAMILIES;
@@ -99,6 +100,25 @@ pub(super) fn manifest_rows_for_family_after_seq(
         .into_iter()
         .filter(|row| manifest_row_commit_seq(row) > after_seq)
         .collect()
+}
+
+/// Writes a fold's SHA-256 state for a content id into each publication row
+/// of that id whose size the state covers and whose delta recorded none.
+pub(super) fn with_hash_states(
+    mut rows: Vec<MetadataRow>,
+    hash_states: &HashMap<ContentId, Sha256State>,
+) -> Vec<MetadataRow> {
+    for row in &mut rows {
+        if let MetadataRow::ContentPublication(record) = row {
+            if record.hash_state.is_none() {
+                record.hash_state = hash_states
+                    .get(&record.content_id)
+                    .filter(|state| state.length() == record.size_bytes)
+                    .cloned();
+            }
+        }
+    }
+    rows
 }
 
 pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {

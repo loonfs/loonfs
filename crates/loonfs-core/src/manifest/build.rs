@@ -1,7 +1,7 @@
 //! Segments metadata rows into runs and writes the immutable metadata
 //! segments a manifest references.
 
-use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq};
+use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_hash_states};
 use super::runs::{MetadataFamilySegments, MetadataLsmPolicy, MANIFEST_ROW_FAMILIES};
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
@@ -16,7 +16,8 @@ use loonfs_types::format::manifest::{
 #[cfg(test)]
 pub(super) use loonfs_types::format::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_types::format::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
-use loonfs_types::{ChangeSeq, MetadataSegmentId, NamespaceId};
+use loonfs_types::{ChangeSeq, ContentId, MetadataSegmentId, NamespaceId, Sha256State};
+use std::collections::HashMap;
 use std::future::Future;
 
 /// Most encoded segment bytes one fold or compaction holds while their puts
@@ -29,12 +30,18 @@ pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     metadata_state: &MetadataState,
+    hash_states: &HashMap<ContentId, Sha256State>,
     policy: MetadataLsmPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
         namespace_id,
-        |family| manifest_rows_for_family(metadata_state, family),
+        |family| {
+            with_hash_states(
+                manifest_rows_for_family(metadata_state, family),
+                hash_states,
+            )
+        },
         policy,
     )
     .await
@@ -68,12 +75,18 @@ pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
+    hash_states: &HashMap<ContentId, Sha256State>,
     policy: MetadataLsmPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
         namespace_id,
-        |family| manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
+        |family| {
+            with_hash_states(
+                manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
+                hash_states,
+            )
+        },
         policy,
     )
     .await

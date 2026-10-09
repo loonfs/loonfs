@@ -6,8 +6,8 @@
 use super::*;
 use crate::error::ErrorCode;
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::PutMode;
-use loonfs_types::{Checksum, ContentRefKind};
+use loonfs_objectstore::{ByteRange, PutMode};
+use loonfs_types::{Checksum, ContentRefKind, Sha256State};
 
 fn append(path: &str, bytes: &[u8]) -> FilesystemOperation {
     FilesystemOperation::AppendFile {
@@ -520,4 +520,119 @@ async fn appends_continue_the_digest_their_base_recorded() {
             assert!(error.to_string().contains("`/file-0`"), "{error}");
         }
     }
+}
+
+/// The first fold of a chain from a direct upload reads the object to
+/// attest the extension. It records the SHA-256 state it computed, so the
+/// next append names a SHA-256 and the fold after it reads nothing.
+#[tokio::test]
+async fn a_fold_records_the_state_it_computed_for_a_crc_chain() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, _) = folded_file(&store, &mut engine, &context, b"seed").await;
+    let content_id = ContentId::generate();
+    let key = content_blob(&namespace_id, &content_id);
+    store
+        .put(&key, Bytes::from_static(b"direct"), PutMode::CreateIfAbsent)
+        .await
+        .expect("direct upload");
+    crate::test_support::ops::append_wal_commit(
+        &store,
+        &namespace_id,
+        vec![WalDelta::AppendFileRevision {
+            delta_index: 0,
+            inode_id,
+            revision_no: RevisionNo(2),
+            content_ref: ContentRef {
+                kind: ContentRefKind::BlobV1,
+                owner_namespace_id: namespace_id.clone(),
+                content_id: content_id.clone(),
+                size_bytes: 6,
+                checksum: Checksum::crc64nvme(b"direct"),
+            },
+            hash_state: None,
+            crc64nvme: Some(Checksum::crc64nvme(b"direct")),
+        }],
+        Vec::new(),
+    )
+    .await
+    .expect("commit the upload");
+    let operations_on_key = |store: &RecordingStore<LocalFsStore>| {
+        store
+            .snapshot()
+            .into_iter()
+            .filter(|operation| operation.key() == key)
+            .collect::<Vec<_>>()
+    };
+
+    engine.invalidate_projection();
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        request("crc", vec![append("/file-0", b"+one")]),
+    )
+    .await
+    .expect("append to a CRC-64/NVME");
+    store.reset();
+    fold_wal(&store, &namespace_id).await.expect("first fold");
+    assert_eq!(
+        operations_on_key(&store),
+        [
+            RecordedOperation::Head { key: key.clone() },
+            RecordedOperation::Get {
+                key: key.clone(),
+                range: Some(ByteRange {
+                    start_inclusive: 0,
+                    end_exclusive: 6,
+                }),
+                result_bytes: 6,
+            },
+            RecordedOperation::Extend {
+                key: key.clone(),
+                bytes: 4,
+            },
+        ]
+    );
+    let head = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("view")
+        .projected_metadata_view()
+        .content_head(&content_id)
+        .await
+        .expect("head")
+        .expect("publication row");
+    let mut state = Sha256State::new();
+    state.update(b"direct+one");
+    assert_eq!((head.size_bytes, head.hash_state), (10, Some(state)));
+
+    engine.invalidate_projection();
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        request("sha256", vec![append("/file-0", b"+two")]),
+    )
+    .await
+    .expect("append to the recorded state");
+    assert_eq!(
+        current_ref(&store, &namespace_id, "/file-0").await.checksum,
+        Checksum::sha256(b"direct+one+two")
+    );
+    store.reset();
+    fold_wal(&store, &namespace_id).await.expect("second fold");
+    assert_eq!(
+        operations_on_key(&store),
+        [
+            RecordedOperation::Head { key: key.clone() },
+            RecordedOperation::Extend {
+                key: key.clone(),
+                bytes: 4,
+            },
+        ]
+    );
+    assert_eq!(
+        read_file(&store, &namespace_id, RevisionNo(4)).await,
+        b"direct+one+two"
+    );
 }

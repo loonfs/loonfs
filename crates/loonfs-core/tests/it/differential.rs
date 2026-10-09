@@ -29,8 +29,8 @@ use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
-    Attributes, AttributesRevisionNo, ChangeSeq, CommitId, ContentId, ContentRef, DisplayName,
-    InodeId, InodeKind, NameKey, NamespaceNaming, RevisionNo, ROOT_INODE_ID,
+    Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId, ContentId, ContentRef,
+    DisplayName, InodeId, InodeKind, NameKey, NamespaceNaming, RevisionNo, ROOT_INODE_ID,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -1188,6 +1188,134 @@ async fn planned_appends_match_the_model() {
         .map(|row| &row.content_id)
         .collect();
     assert_eq!(chains.len(), 3);
+}
+
+/// Plans appends to a direct upload, which records only a CRC-64/NVME, and
+/// folds after every commit. The fold records the SHA-256 state it computes
+/// for a chain without one, so the append after it names a SHA-256. A
+/// restore and an append to it start a second chain from the upload, which
+/// the fold streams. The state the fold records is in segment rows only, so
+/// the replay of the published deltas compares what the deltas carry.
+#[tokio::test]
+async fn planned_appends_to_a_crc_base_match_the_model() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = loonfs_types::NamespaceId::parse("crc-base").expect("namespace");
+    let context = crate::common::mutation_context("differential", 1_000);
+    crate::common::commit_split_support::bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("namespace");
+    let upload = ContentRef {
+        kind: loonfs_types::ContentRefKind::BlobV1,
+        owner_namespace_id: namespace_id.clone(),
+        content_id: ContentId::generate(),
+        size_bytes: 6,
+        checksum: Checksum::crc64nvme(b"direct"),
+    };
+    store
+        .put(
+            &loonfs_objectstore::keys::content_blob(&namespace_id, &upload.content_id),
+            bytes::Bytes::from_static(b"direct"),
+            loonfs_objectstore::PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("direct upload");
+    let path = || AbsolutePath::parse("/log").expect("path");
+    let append = |bytes: &[u8]| FilesystemOperation::AppendFile {
+        path: path(),
+        inline_content: bytes.to_vec(),
+        expected_inode_id: None,
+        expected_revision_no: None,
+    };
+    let operations = [
+        FilesystemOperation::PutFile {
+            path: path(),
+            content_ref: Some(upload),
+            inline_content: None,
+            behavior: loonfs_types::DestinationBehavior::NoReplace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        },
+        append(b"+one"),
+        append(b"+two"),
+        FilesystemOperation::RestoreRevision {
+            path: path(),
+            source_revision_no: RevisionNo(1),
+        },
+        append(b"+three"),
+        append(b"+four"),
+    ];
+    let deadline = || Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    for operation in operations {
+        let request = CommitRequest {
+            commit_id: CommitId::generate(),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            preconditions: Vec::new(),
+            operations: vec![operation],
+        };
+        let candidate =
+            crate::common::commit_split_support::prepared_candidate(&store, &namespace_id, request)
+                .await;
+        engine
+            .publish_batch(&store, [candidate], &context, &deadline())
+            .await
+            .results
+            .pop()
+            .expect("one result")
+            .expect("commit");
+        loonfs_core::fold_wal_tail(&store, None, &namespace_id, None, &deadline())
+            .await
+            .expect("fold");
+        engine.invalidate_projection();
+    }
+
+    let mut commits = Vec::new();
+    for key in store
+        .list_prefix(&wal_prefix(&namespace_id))
+        .await
+        .expect("list WAL")
+    {
+        let bytes = store.get(&key, None).await.expect("get").expect("WAL");
+        let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
+        commits.extend(wal.payload().records.iter().map(|record| {
+            record
+                .deltas
+                .iter()
+                .map(|delta| delta.delta.clone())
+                .collect::<Vec<_>>()
+        }));
+    }
+    let published: Vec<_> = commits
+        .iter()
+        .flatten()
+        .filter_map(|delta| match delta {
+            WalDelta::AppendFileRevision {
+                content_ref,
+                hash_state,
+                ..
+            } => Some((
+                content_ref.size_bytes,
+                content_ref.checksum.clone(),
+                hash_state.is_some(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        published,
+        [
+            (6, Checksum::crc64nvme(b"direct"), false),
+            (10, Checksum::crc64nvme(b"direct+one"), false),
+            (14, Checksum::sha256(b"direct+one+two"), true),
+            (6, Checksum::crc64nvme(b"direct"), false),
+            (12, Checksum::crc64nvme(b"direct+three"), false),
+            (17, Checksum::sha256(b"direct+three+four"), true),
+        ]
+    );
+    assert_core_matches_model(CaseInsensitive, &["/log"], &commits);
 }
 
 fn core_bootstrap_state() -> CoreMetadataState {
