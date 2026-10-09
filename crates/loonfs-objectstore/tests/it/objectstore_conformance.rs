@@ -92,7 +92,12 @@ async fn local_fs_streamed_write_round_trips() {
 async fn local_fs_honours_attested_writes_and_extension() {
     let temp_dir = test_dir("attested-extension");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_attested_writes_and_extension(&store, &[16, 1024], ChecksumAlgorithm::Crc64nvme).await;
+    assert_attested_writes_and_extension(
+        &store,
+        &[(16, 30), (1024, 30)],
+        ChecksumAlgorithm::Crc64nvme,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -113,8 +118,14 @@ async fn aws_s3_attested_writes_and_extension() {
         force_path_style: false,
     })
     .expect("create AWS S3 object store");
-    assert_attested_writes_and_extension(&store, &[1024, 9 * MIB], ChecksumAlgorithm::Crc64nvme)
-        .await;
+    // 1 KiB is one PUT and a rewrite. 9 MiB is a create with two parts in
+    // flight at once, and an extension that copies the base.
+    assert_attested_writes_and_extension(
+        &store,
+        &[(1024, 30), (9 * MIB, 30)],
+        ChecksumAlgorithm::Crc64nvme,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -131,8 +142,18 @@ async fn cloudflare_r2_attested_writes_and_extension() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
-    assert_attested_writes_and_extension(&store, &[1024, 65 * MIB], ChecksumAlgorithm::Crc64nvme)
-        .await;
+    // 1 KiB is one PUT and a rewrite. 9 MiB is copied as one part, and the
+    // 10 MiB appended to it is a last part longer than the copied part. The
+    // provider reference marks that unconfirmed, so this run must show that
+    // R2 accepts it. 65 MiB is a create with more parts than the window
+    // holds, and an extension that copies one 64 MiB part and re-sends the
+    // rest of the base with the pieces.
+    assert_attested_writes_and_extension(
+        &store,
+        &[(1024, 30), (9 * MIB, 10 * MIB), (65 * MIB, 30)],
+        ChecksumAlgorithm::Crc64nvme,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -146,7 +167,12 @@ async fn gcp_gcs_attested_writes_and_extension() {
         key_prefix: Some(config.prefix),
     })
     .expect("create GCP GCS object store");
-    assert_attested_writes_and_extension(&store, &[1024, 9 * MIB], ChecksumAlgorithm::Crc32c).await;
+    assert_attested_writes_and_extension(
+        &store,
+        &[(1024, 30), (9 * MIB, 30)],
+        ChecksumAlgorithm::Crc32c,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -162,8 +188,12 @@ async fn azure_abs_attested_writes_and_extension() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Azure Blob Storage object store");
-    assert_attested_writes_and_extension(&store, &[1024, 9 * MIB], ChecksumAlgorithm::Crc64nvme)
-        .await;
+    assert_attested_writes_and_extension(
+        &store,
+        &[(1024, 30), (9 * MIB, 30)],
+        ChecksumAlgorithm::Crc64nvme,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -702,19 +732,22 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
     );
 }
 
-/// Pins attested immutable writes and extension on one store, for each base
-/// length: a write attests its bytes, an occupied key is decided by that
-/// attestation, and an extension appends only under the version it names.
+/// Pins attested immutable writes and extension on one store, for each case
+/// of a base length and an appended length: a write attests its bytes, an
+/// occupied key is decided by that attestation, and an extension appends
+/// only under the version it names.
 async fn assert_attested_writes_and_extension<S: ObjectStore>(
     store: &S,
-    base_lengths: &[usize],
+    cases: &[(usize, usize)],
     crc: ChecksumAlgorithm,
 ) {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let pieces = Bytes::from_static(b" and the pieces appended to it");
-    for &base_length in base_lengths {
+    for &(base_length, appended_length) in cases {
         let key = content_blob(&namespace_id, &ContentId::generate());
         let base: Vec<u8> = (0..base_length).map(|index| (index % 251) as u8).collect();
+        let pieces: Bytes = (0..appended_length)
+            .map(|index| (index % 241) as u8)
+            .collect();
         let written = store
             .put_immutable_verified(&key, Bytes::from(base.clone()))
             .await
