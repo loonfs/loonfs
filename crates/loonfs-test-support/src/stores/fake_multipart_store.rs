@@ -12,14 +12,18 @@
 //! - the whole-object checksum supplied at completion is not necessarily
 //!   enforced (Cloudflare R2 accepts a wrong one and stores the true value),
 //!   which is why LoonFS reads the object back;
-//! - aborting a completed or unknown upload succeeds and destroys nothing.
+//! - aborting a completed or unknown upload succeeds and destroys nothing;
+//! - a new object can start with a copy of another object's prefix, taken
+//!   only while that object is at the version named. The copy reports the
+//!   copied part's checksum, and a claim is held to the parts' checksums
+//!   before completion, which accepts any claim, as Cloudflare R2's does.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, Result, StoredObjectChecksum,
+    ByteRange, ByteStream, ExtendBase, ExtendedObject, MultipartPart, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, Result, StoredObjectChecksum,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::collections::BTreeMap;
@@ -270,6 +274,55 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
 
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         self.inner.put_streamed(key, body, mode).await
+    }
+
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>> {
+        let precondition_failed = || ObjectStoreError::PreconditionFailed {
+            object_key: key.to_owned(),
+        };
+        let held = self
+            .inner
+            .head(base_key)
+            .await?
+            .ok_or_else(precondition_failed)?;
+        if held.etag.as_deref() != Some(base.etag.as_str()) || held.size_bytes < base.length {
+            return Err(precondition_failed());
+        }
+        let prefix = ByteRange {
+            start_inclusive: 0,
+            end_exclusive: base.length,
+        };
+        let copied = self
+            .inner
+            .get(base_key, Some(prefix))
+            .await?
+            .ok_or_else(precondition_failed)?;
+        // The provider reports the copied part's checksum and the uploader
+        // computes the last part's; completion accepts any claim, so only
+        // this check keeps a wrong claim from landing.
+        let assembled = Checksum::crc64nvme(&copied)
+            .crc64nvme_combine(&Checksum::crc64nvme(&pieces), pieces.len() as u64);
+        if result
+            .crc
+            .as_ref()
+            .is_some_and(|claim| assembled.as_ref() != Some(claim))
+        {
+            return Err(ObjectStoreError::ChecksumMismatch {
+                object_key: key.to_owned(),
+            });
+        }
+        let bytes = Bytes::from([copied.as_ref(), pieces.as_ref()].concat());
+        self.inner
+            .put(key, bytes, PutMode::CreateIfAbsent)
+            .await
+            .map(Some)
     }
 
     async fn delete(&self, key: &str) -> Result<()> {

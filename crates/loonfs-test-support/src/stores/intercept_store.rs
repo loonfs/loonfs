@@ -323,6 +323,34 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         Self::finish(&self.interceptor, &context, intercept, extended, outcome)
     }
 
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        let context = OperationContext::new(
+            key,
+            OperationKind::PutImmutableExtended {
+                base_key,
+                base,
+                pieces: &pieces,
+            },
+        );
+        let intercept = match self.interceptor.before(&context).await {
+            Intercept::FailBefore(error) => return Err(error),
+            intercept => intercept,
+        };
+        let created = self
+            .inner
+            .put_immutable_extended(key, base_key, base, pieces.clone(), result)
+            .await;
+        let outcome = result_outcome(&created);
+        Self::finish(&self.interceptor, &context, intercept, created, outcome)
+    }
+
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let context = OperationContext::new(key, OperationKind::Delete);
         let intercept = match self.interceptor.before(&context).await {

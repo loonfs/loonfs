@@ -6,8 +6,10 @@ use crate::storage::content::{content_object_key_for_ref, CONTENT_READ_CHUNK_BYT
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
-use loonfs_objectstore::PutMode;
-use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError, OperationClass};
+use loonfs_objectstore::{PutMode, PROVIDER_MIN_COPIED_PART_BYTES};
+use loonfs_test_support::stores::{
+    BlockingStore, FailStore, FakeMultipartStore, InjectedError, OperationClass,
+};
 use loonfs_types::{Checksum, ContentRefKind, ErrorCode};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,7 +20,9 @@ fn family(operation: &RecordedOperation) -> Option<DurableObjectFamily> {
 fn creates_content(operation: &RecordedOperation) -> bool {
     matches!(
         operation,
-        RecordedOperation::Put { .. } | RecordedOperation::PutImmutableStream { .. }
+        RecordedOperation::Put { .. }
+            | RecordedOperation::PutImmutableStream { .. }
+            | RecordedOperation::PutImmutableExtended { .. }
     ) && family(operation) == Some(DurableObjectFamily::ContentBlob)
 }
 
@@ -882,7 +886,7 @@ async fn a_chain_from_a_base_materializes_under_its_own_id() {
 }
 
 #[tokio::test]
-async fn a_chain_from_a_base_longer_than_a_chunk_streams_the_prefix_in_chunks() {
+async fn a_base_the_store_cannot_copy_streams_its_prefix_in_chunks() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let (inode_id, _) = folded_file(&store, &mut engine, &context, b"hello").await;
@@ -922,11 +926,20 @@ async fn a_chain_from_a_base_longer_than_a_chunk_streams_the_prefix_in_chunks() 
             .into_iter()
             .filter(creates_content)
             .collect::<Vec<_>>(),
-        [RecordedOperation::PutImmutableStream {
-            key: chain_key.clone(),
-            sha256: Some(chained.checksum.clone()),
-            bytes: Some(whole.len() as u64),
-        }]
+        [
+            RecordedOperation::PutImmutableExtended {
+                key: chain_key.clone(),
+                base_key: base_key.clone(),
+                base_length: prefix_bytes,
+                bytes: 3,
+            },
+            RecordedOperation::PutImmutableStream {
+                key: chain_key.clone(),
+                sha256: Some(chained.checksum.clone()),
+                bytes: Some(whole.len() as u64),
+            }
+        ],
+        "the local store declines the copy, so the fold streams"
     );
     let base_gets: Vec<_> = store
         .take_gets()
@@ -949,6 +962,148 @@ async fn a_chain_from_a_base_longer_than_a_chunk_streams_the_prefix_in_chunks() 
             .expect("get")
             .expect("chain object"),
         whole
+    );
+}
+
+#[tokio::test]
+async fn a_store_that_copies_gets_a_sha256_chain_copied_and_a_crc_chain_streamed() {
+    let (directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, _) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let base_id = ContentId::generate();
+    let base_key = content_blob(&namespace_id, &base_id);
+    let prefix_bytes = PROVIDER_MIN_COPIED_PART_BYTES;
+    let base: Vec<u8> = (0..prefix_bytes).map(|index| (index % 251) as u8).collect();
+    store
+        .put(
+            &base_key,
+            Bytes::from(base.clone()),
+            PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("base object");
+    let from_base = || {
+        Some(ContentBase {
+            owner_namespace_id: namespace_id.clone(),
+            content_id: base_id.clone(),
+        })
+    };
+    let attested = [base.as_slice(), b"!!!"].concat();
+    let attested_ref = commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &ContentId::generate(),
+        &attested,
+        base.len(),
+        from_base(),
+    )
+    .await;
+    let unattested = [base.as_slice(), b"???"].concat();
+    let unattested_ref = ContentRef {
+        kind: ContentRefKind::BlobV1,
+        owner_namespace_id: namespace_id.clone(),
+        content_id: ContentId::generate(),
+        size_bytes: unattested.len() as u64,
+        checksum: Checksum::crc64nvme(&unattested),
+    };
+    crate::test_support::ops::append_wal_commit(
+        &*store,
+        &namespace_id,
+        vec![WalDelta::AppendFileRevision {
+            delta_index: 0,
+            inode_id,
+            revision_no: RevisionNo(3),
+            content_ref: unattested_ref.clone(),
+            hash_state: None,
+            crc64nvme: Some(Checksum::crc64nvme(&unattested)),
+        }],
+        vec![WalInlineContent {
+            content_id: unattested_ref.content_id.clone(),
+            offset: prefix_bytes,
+            bytes: b"???".to_vec(),
+            base: from_base(),
+        }],
+    )
+    .await
+    .expect("commit piece");
+
+    let copying = RecordingStore::new(
+        FakeMultipartStore::new(LocalFsStore::new(directory.path()).expect("store")),
+        KeyPredicate::content_blob(),
+    );
+    fold_wal(&copying, &namespace_id).await.expect("fold");
+    let attested_key = content_object_key_for_ref(&attested_ref).expect("key");
+    let unattested_key = content_object_key_for_ref(&unattested_ref).expect("key");
+    let mut creates: Vec<_> = copying
+        .snapshot()
+        .into_iter()
+        .filter(creates_content)
+        .collect();
+    creates.sort_by(|left, right| left.key().cmp(right.key()));
+    let mut expected = vec![
+        RecordedOperation::PutImmutableExtended {
+            key: attested_key.clone(),
+            base_key,
+            base_length: prefix_bytes,
+            bytes: 3,
+        },
+        RecordedOperation::PutImmutableStream {
+            key: unattested_key.clone(),
+            sha256: None,
+            bytes: Some(unattested.len() as u64),
+        },
+    ];
+    expected.sort_by(|left, right| left.key().cmp(right.key()));
+    assert_eq!(creates, expected);
+    for (key, whole) in [(attested_key, attested), (unattested_key, unattested)] {
+        assert_eq!(
+            store.inner().get(&key, None).await.expect("get").as_deref(),
+            Some(whole.as_slice())
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_copy_that_misses_its_reference_is_corruption_and_leaves_no_object() {
+    let (directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, _) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let base_id = ContentId::generate();
+    let base = vec![1; PROVIDER_MIN_COPIED_PART_BYTES as usize];
+    store
+        .put(
+            &content_blob(&namespace_id, &base_id),
+            Bytes::from(base.clone()),
+            PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("base object");
+    let claimed = [vec![2; base.len()].as_slice(), b"!!!"].concat();
+    let chained = commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &ContentId::generate(),
+        &claimed,
+        base.len(),
+        Some(ContentBase {
+            owner_namespace_id: namespace_id.clone(),
+            content_id: base_id,
+        }),
+    )
+    .await;
+
+    let copying = FakeMultipartStore::new(LocalFsStore::new(directory.path()).expect("store"));
+    let error = fold_wal(&copying, &namespace_id)
+        .await
+        .expect_err("the copied bytes are not the reference's");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error:?}");
+    let chain_key = content_object_key_for_ref(&chained).expect("chain key");
+    assert_eq!(
+        store.inner().head(&chain_key).await.expect("head"),
+        None,
+        "the claim is refused before a completion that would accept it"
     );
 }
 

@@ -161,33 +161,92 @@ impl GcsRequestSigner {
         succeeded(key, send(&self.http, key, request, body).await?)
     }
 
-    /// Composes `key` and the temporary object onto `key` while `key` is still
-    /// at `generation`, attesting `sha256` on the result.
-    async fn compose(
-        &self,
-        key: &str,
-        generation: u64,
-        temporary: &str,
-        sha256: &Checksum,
-    ) -> Result<(ObjectMetadata, Option<Checksum>)> {
-        let names = [
-            scope_object_key(self.key_prefix.as_deref(), key)?,
-            scope_object_key(self.key_prefix.as_deref(), temporary)?,
-        ];
+    /// The object resource of `key` at `generation`. A version the bucket
+    /// no longer holds answers `PreconditionFailed`.
+    async fn object_at(&self, key: &str, generation: u64) -> Result<ObjectMetadata> {
         let url = format!(
-            "{GCS_JSON_OBJECTS}/{}/o/{}/compose?ifGenerationMatch={generation}",
+            "{GCS_JSON_OBJECTS}/{}/o/{}?generation={generation}",
             percent_encode_segment(&self.bucket),
             self.object_name(key)?,
         );
-        let body = serde_json::json!({
-            "sourceObjects": names.map(|name| serde_json::json!({ "name": name })),
-            "destination": attested(Some(sha256)),
-        });
-        let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
-        let composed = self
-            .send_authorized(key, request, body.to_string().into())
+        self.send_authorized(key, http::Request::get(url), HttpRequestBody::empty())
+            .await
+            .and_then(|response| gcs_object(key, &response.body))
+            .map(|(metadata, _)| metadata)
+            .map_err(precondition_failed_when_missing)
+    }
+
+    /// A compose source naming `key`, taken only while it is at `generation`
+    /// when one is given.
+    fn compose_source(&self, key: &str, generation: Option<u64>) -> Result<serde_json::Value> {
+        let name = scope_object_key(self.key_prefix.as_deref(), key)?;
+        Ok(match generation {
+            Some(generation) => serde_json::json!({
+                "name": name,
+                "objectPreconditions": { "ifGenerationMatch": generation.to_string() },
+            }),
+            None => serde_json::json!({ "name": name }),
+        })
+    }
+
+    /// Writes `pieces` as a temporary object, composes `base` and the
+    /// temporary object onto `key` while `key` is at `generation`, where 0 is
+    /// absent, attesting `result.sha256` on the result, and deletes the
+    /// temporary object. A CRC-32C claim is compared with the CRC-32C the
+    /// compose returns; a claim in another algorithm cannot be checked here.
+    async fn compose_pieces(
+        &self,
+        key: &str,
+        generation: u64,
+        base: serde_json::Value,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<ObjectMetadata> {
+        let namespace_id = parse_object_key(key)
+            .and_then(|parsed| NamespaceId::parse(parsed.owner_namespace_id()).ok())
+            .ok_or_else(|| ObjectStoreError::InvalidKey {
+                object_key: key.to_owned(),
+                message: "an extended object must belong to a namespace".to_owned(),
+            })?;
+        let temporary = temporary_object(&namespace_id);
+        let url = format!(
+            "{GCS_JSON_UPLOADS}/{}/o?uploadType=media&ifGenerationMatch=0&name={}",
+            percent_encode_segment(&self.bucket),
+            self.object_name(&temporary)?,
+        );
+        let request = http::Request::post(url).header(CONTENT_TYPE, "application/octet-stream");
+        self.send_authorized(&temporary, request, pieces.into())
             .await?;
-        gcs_object(key, &composed.body)
+        let composed: Result<SignedResponse> = async {
+            let url = format!(
+                "{GCS_JSON_OBJECTS}/{}/o/{}/compose?ifGenerationMatch={generation}",
+                percent_encode_segment(&self.bucket),
+                self.object_name(key)?,
+            );
+            let body = serde_json::json!({
+                "sourceObjects": [base, self.compose_source(&temporary, None)?],
+                "destination": attested(Some(&result.sha256)),
+            });
+            let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
+            self.send_authorized(key, request, body.to_string().into())
+                .await
+        }
+        .await;
+        self.delete_temporary(&temporary).await;
+        let (metadata, crc32c) = composed
+            .and_then(|composed| gcs_object(key, &composed.body))
+            .map_err(precondition_failed_when_missing)?;
+        if result
+            .crc
+            .as_ref()
+            .filter(|expected| expected.algorithm == ChecksumAlgorithm::Crc32c)
+            .is_some_and(|expected| crc32c.as_ref() != Some(expected))
+        {
+            return Err(ObjectStoreError::ChecksumMismatch {
+                object_key: key.to_owned(),
+            });
+        }
+        Ok(metadata)
     }
 
     /// Deletes an extension's temporary object. Best effort: one left behind
@@ -307,65 +366,67 @@ impl MultipartController for GcsRequestSigner {
         pieces: Bytes,
         result: &ExtendedObject,
     ) -> Result<Option<ObjectMetadata>> {
-        let precondition_failed =
-            |object_key: String| ObjectStoreError::PreconditionFailed { object_key };
-        let generation: u64 = base
-            .etag
-            .parse()
-            .map_err(|_| precondition_failed(key.to_owned()))?;
-        let namespace_id = parse_object_key(key)
-            .and_then(|parsed| NamespaceId::parse(parsed.owner_namespace_id()).ok())
-            .ok_or_else(|| ObjectStoreError::InvalidKey {
-                object_key: key.to_owned(),
-                message: "an extended object must belong to a namespace".to_owned(),
-            })?;
+        let generation = base_generation(key, base)?;
         // The compose names the base's generation, not its length, so a
         // base longer than the caller believes would put the pieces after
         // bytes the caller never saw.
-        let url = format!(
-            "{GCS_JSON_OBJECTS}/{}/o/{}?generation={generation}",
-            percent_encode_segment(&self.bucket),
-            self.object_name(key)?,
-        );
-        let (current, _) = self
-            .send_authorized(key, http::Request::get(url), HttpRequestBody::empty())
-            .await
-            .and_then(|response| gcs_object(key, &response.body))
-            .map_err(|error| match error {
-                ObjectStoreError::NotFound { object_key } => precondition_failed(object_key),
-                error => error,
-            })?;
-        if current.size_bytes != base.length {
-            return Err(precondition_failed(key.to_owned()));
-        }
-        let temporary = temporary_object(&namespace_id);
-        let url = format!(
-            "{GCS_JSON_UPLOADS}/{}/o?uploadType=media&ifGenerationMatch=0&name={}",
-            percent_encode_segment(&self.bucket),
-            self.object_name(&temporary)?,
-        );
-        let request = http::Request::post(url).header(CONTENT_TYPE, "application/octet-stream");
-        self.send_authorized(&temporary, request, pieces.into())
-            .await?;
-        let composed = self
-            .compose(key, generation, &temporary, &result.sha256)
-            .await;
-        self.delete_temporary(&temporary).await;
-        let (metadata, crc32c) = composed.map_err(|error| match error {
-            ObjectStoreError::NotFound { object_key } => precondition_failed(object_key),
-            error => error,
-        })?;
-        if result
-            .crc
-            .as_ref()
-            .filter(|expected| expected.algorithm == ChecksumAlgorithm::Crc32c)
-            .is_some_and(|expected| crc32c.as_ref() != Some(expected))
-        {
-            return Err(ObjectStoreError::ChecksumMismatch {
+        if self.object_at(key, generation).await?.size_bytes != base.length {
+            return Err(ObjectStoreError::PreconditionFailed {
                 object_key: key.to_owned(),
             });
         }
-        Ok(Some(metadata))
+        let base = self.compose_source(key, None)?;
+        self.compose_pieces(key, generation, base, pieces, result)
+            .await
+            .map(Some)
+    }
+
+    /// Composes the base, held to its generation, and a temporary object
+    /// holding the pieces onto `key` while `key` is absent. A compose takes
+    /// whole objects, so a base longer than `base.length` answers `None`.
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>> {
+        let generation = base_generation(base_key, base)?;
+        let held = self.object_at(base_key, generation).await?.size_bytes;
+        if held < base.length {
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: base_key.to_owned(),
+            });
+        }
+        if held > base.length {
+            return Ok(None);
+        }
+        let base = self.compose_source(base_key, Some(generation))?;
+        self.compose_pieces(key, 0, base, pieces, result)
+            .await
+            .map(Some)
+    }
+}
+
+/// The generation an extension's base names. Any other compare token names
+/// no version this bucket holds.
+fn base_generation(key: &str, base: &ExtendBase) -> Result<u64> {
+    base.etag
+        .parse()
+        .map_err(|_| ObjectStoreError::PreconditionFailed {
+            object_key: key.to_owned(),
+        })
+}
+
+/// A write conditioned on a version reads that version's absence as its
+/// precondition failing.
+fn precondition_failed_when_missing(error: ObjectStoreError) -> ObjectStoreError {
+    match error {
+        ObjectStoreError::NotFound { object_key } => {
+            ObjectStoreError::PreconditionFailed { object_key }
+        }
+        error => error,
     }
 }
 

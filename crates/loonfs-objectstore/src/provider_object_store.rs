@@ -80,6 +80,11 @@ pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 /// Concurrent in-flight parts per multipart upload.
 pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
 
+/// The smallest part AWS S3 and Cloudflare R2 accept anywhere but last, and
+/// so the shortest base prefix a provider copies instead of receiving it
+/// again.
+pub const PROVIDER_MIN_COPIED_PART_BYTES: u64 = 5 * 1024 * 1024;
+
 /// Parts one provider multipart upload accepts. Every supported provider
 /// stops at 10,000, which with the part size sets the largest object a
 /// multipart write can produce.
@@ -240,6 +245,18 @@ pub(crate) trait MultipartController: Send + Sync {
     async fn extend_object(
         &self,
         key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>>;
+
+    /// Creates `key` from a prefix of the object at `base_key` without
+    /// moving it through this process, or answers `None` when the provider
+    /// cannot copy this base.
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
         base: &ExtendBase,
         pieces: Bytes,
         result: &ExtendedObject,
@@ -1155,6 +1172,24 @@ impl ObjectStore for ProviderObjectStore {
         };
         self.put_attested(key, bytes, mode, Some(result.sha256.clone()))
             .await
+    }
+
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>> {
+        match &self.multipart_controller {
+            Some(controller) => {
+                controller
+                    .put_immutable_extended(key, base_key, base, pieces, result)
+                    .await
+            }
+            None => Ok(None),
+        }
     }
 
     fn list_prefix_from_stream(
@@ -2842,6 +2877,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_store_without_a_provider_path_copies_no_base_into_a_new_key() {
+        let store = memory_store();
+        let written = store
+            .put_if_absent(MULTIPART_KEY, Bytes::from_static(b"base"))
+            .await
+            .expect("base");
+        let key = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
+        let copied = store
+            .put_immutable_extended(
+                key,
+                MULTIPART_KEY,
+                &ExtendBase {
+                    length: 4,
+                    etag: written.etag.expect("etag"),
+                },
+                Bytes::from_static(b" and pieces"),
+                &ExtendedObject {
+                    sha256: Checksum::sha256(b"base and pieces"),
+                    crc: None,
+                },
+            )
+            .await
+            .expect("a store without a provider path declines");
+        assert_eq!(copied, None);
+        assert_eq!(store.head(key).await.expect("head"), None);
+    }
+
+    #[tokio::test]
     async fn large_put_routes_through_multipart_and_preserves_bytes() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
@@ -2970,6 +3033,17 @@ mod tests {
         async fn extend_object(
             &self,
             _key: &str,
+            _base: &ExtendBase,
+            _pieces: Bytes,
+            _result: &ExtendedObject,
+        ) -> Result<Option<ObjectMetadata>> {
+            Ok(None)
+        }
+
+        async fn put_immutable_extended(
+            &self,
+            _key: &str,
+            _base_key: &str,
             _base: &ExtendBase,
             _pieces: Bytes,
             _result: &ExtendedObject,

@@ -13,7 +13,7 @@ use bytes::Bytes;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use loonfs_objectstore::{
     required_etag, ByteRange, ExtendBase, ExtendedObject, ImmutableWriteError, ObjectMetadata,
-    ObjectStore, ObjectStoreError,
+    ObjectStore, ObjectStoreError, PROVIDER_MIN_COPIED_PART_BYTES,
 };
 use loonfs_types::{ChecksumAlgorithm, ContentRef, Sha256State};
 use std::num::NonZeroU64;
@@ -64,10 +64,10 @@ enum Attempt {
 
 /// Writes `pieces`, the bytes from the first unfolded offset of `content`
 /// to the end of its newest reference. Bytes that start at 0 are the whole
-/// value. A chain that starts from a base streams the base's prefix and the
-/// pieces into the id's own key, so the base is never held whole. A key
-/// that already holds part of the chain is extended from the length it
-/// holds.
+/// value. A chain that starts from a base gets the base's prefix and the
+/// pieces at the id's own key, copied inside the provider where the store
+/// can and streamed otherwise, so the base is never held whole. A key that
+/// already holds part of the chain is extended from the length it holds.
 ///
 /// Returns the SHA-256 state of the newest reference's bytes when that
 /// reference is not a SHA-256 and this call computed the state: to attest
@@ -96,7 +96,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized>(
                     first.offset
                 )));
             }
-            if let Attempt::Written(state) = create_from_base(store, tail, newest).await? {
+            if let Attempt::Written(state) = create_from_base(store, tail, content).await? {
                 return Ok(state);
             }
             continue;
@@ -248,6 +248,72 @@ async fn create<S: ObjectStore + ?Sized>(
     )
 }
 
+/// Creates the chain's own object from its base: the base's prefix copied
+/// inside the provider where the store can, and streamed through this
+/// process where it cannot. Returns `Attempt::Changed` when the key already
+/// holds another fold's object, or the base moved before the copy.
+async fn create_from_base<S: ObjectStore + ?Sized>(
+    store: &S,
+    tail: &ProjectedWalTail,
+    content: &ProjectedContent,
+) -> Result<Attempt, CoreError> {
+    let newest = &content.content_ref;
+    let location = ContentLocation::resolve(Some(tail), newest)?;
+    if let Some(attempt) = copy_from_base(store, &location, content).await? {
+        return Ok(attempt);
+    }
+    stream_from_base(store, location, newest).await
+}
+
+/// Asks the store to copy the base's prefix into the chain's own key and
+/// add the pieces after it. The store records the newest reference's
+/// checksum as the attestation, so only a SHA-256 chain asks, and only for
+/// a prefix a provider copies. Returns `None` when the chain does not ask
+/// or the store cannot copy, and otherwise how the copy attempt ended.
+async fn copy_from_base<S: ObjectStore + ?Sized>(
+    store: &S,
+    location: &ContentLocation,
+    content: &ProjectedContent,
+) -> Result<Option<Attempt>, CoreError> {
+    let newest = &content.content_ref;
+    let Some((base_key, length)) = location.object_prefix().filter(|(_, length)| {
+        *length >= PROVIDER_MIN_COPIED_PART_BYTES
+            && newest.checksum.algorithm == ChecksumAlgorithm::Sha256
+    }) else {
+        return Ok(None);
+    };
+    let Some(held) = location.check_prefix(store).await? else {
+        return Ok(None);
+    };
+    let object_key = location.object_key();
+    let base = ExtendBase {
+        length,
+        etag: required_etag(base_key, held.etag)
+            .map_err(|error| CoreError::store(base_key, &error))?,
+    };
+    let result = ExtendedObject {
+        sha256: newest.checksum.clone(),
+        crc: content.crc64nvme.clone(),
+    };
+    match store
+        .put_immutable_extended(
+            object_key,
+            base_key,
+            &base,
+            location.joined_pieces(),
+            &result,
+        )
+        .await
+    {
+        Ok(created) => Ok(created.map(|_| Attempt::Written(None))),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(Some(Attempt::Changed)),
+        Err(ObjectStoreError::ChecksumMismatch { .. }) => Err(CoreError::NamespaceCorrupt(
+            format!("content object `{object_key}` does not match the checksum its pieces record"),
+        )),
+        Err(error) => Err(CoreError::store(object_key, &error)),
+    }
+}
+
 /// Streams the value a chain from a base names, the base's prefix and then
 /// the pieces, into the chain's own key, `CONTENT_READ_CHUNK_BYTES` at a
 /// time. The stream checks the whole value against the newest reference as
@@ -255,12 +321,11 @@ async fn create<S: ObjectStore + ?Sized>(
 /// nothing. When the newest reference is not a SHA-256, the same bytes give
 /// its SHA-256 state. `Attempt::Changed` is a key that already holds
 /// another fold's object.
-async fn create_from_base<S: ObjectStore + ?Sized>(
+async fn stream_from_base<S: ObjectStore + ?Sized>(
     store: &S,
-    tail: &ProjectedWalTail,
+    location: ContentLocation,
     newest: &ContentRef,
 ) -> Result<Attempt, CoreError> {
-    let location = ContentLocation::resolve(Some(tail), newest)?;
     let object_key = location.object_key().to_owned();
     let chunk_bytes = NonZeroU64::new(CONTENT_READ_CHUNK_BYTES)
         .expect("content read chunk size should be nonzero");

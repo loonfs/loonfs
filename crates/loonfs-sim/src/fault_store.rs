@@ -434,6 +434,36 @@ where
         extended
     }
 
+    /// Traces creates from a copied base without injecting scheduled write
+    /// faults, like streamed writes. A store that cannot copy the base
+    /// writes nothing, so the event is traced as skipped.
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOperationKind::PutIfAbsent, key);
+        let created = self
+            .inner
+            .put_immutable_extended(key, base_key, base, pieces, result)
+            .await;
+        let class = match &created {
+            Ok(Some(_)) => {
+                self.remember_successful_write(key);
+                SimEventResult::Ok
+            }
+            Ok(None) => SimEventResult::Skipped {
+                reason: "store_cannot_copy_base".to_owned(),
+            },
+            Err(error) => error_result_class(error),
+        };
+        self.push_trace(op, "put_immutable_extended", None, class);
+        created
+    }
+
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         let op = self.next_object_op(ObjectOperationKind::Delete, key);
         let scheduled = self.scheduled_fault(&op);

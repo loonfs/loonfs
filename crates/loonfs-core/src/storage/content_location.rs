@@ -5,7 +5,7 @@ use super::content::{content_object_key_for_ref, DurableContentValidationError};
 use crate::wal::ProjectedWalTail;
 use bytes::Bytes;
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::{ByteRange, ObjectStore};
+use loonfs_objectstore::{ByteRange, ObjectMetadata, ObjectStore};
 use loonfs_types::{ContentId, ContentRef, NamespaceId};
 
 /// Where a published reference's bytes are read from: the first bytes of an
@@ -116,14 +116,31 @@ impl ContentLocation {
         self.prefix.as_ref().map_or(0, |prefix| prefix.length)
     }
 
+    /// The key and length of the object prefix, when the bytes start with
+    /// one.
+    pub(crate) fn object_prefix(&self) -> Option<(&str, u64)> {
+        self.prefix
+            .as_ref()
+            .map(|prefix| (prefix.object_key.as_str(), prefix.length))
+    }
+
+    /// The bytes the WAL tail supplies after the object prefix, joined.
+    pub(crate) fn joined_pieces(&self) -> Bytes {
+        match self.pieces.as_slice() {
+            [piece] => piece.clone(),
+            pieces => pieces.concat().into(),
+        }
+    }
+
     /// Checks that the object prefix exists and is at least as long as the
-    /// bytes read from it.
+    /// bytes read from it, and returns what the head of it found. `None`
+    /// when no byte comes from an object.
     pub(crate) async fn check_prefix<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
-    ) -> Result<(), DurableContentValidationError> {
+    ) -> Result<Option<ObjectMetadata>, DurableContentValidationError> {
         let Some(prefix) = &self.prefix else {
-            return Ok(());
+            return Ok(None);
         };
         let metadata = match store.head(&prefix.object_key).await {
             Ok(Some(metadata)) => metadata,
@@ -146,7 +163,7 @@ impl ContentLocation {
                 actual: metadata.size_bytes,
             });
         }
-        Ok(())
+        Ok(Some(metadata))
     }
 
     /// Reads bytes `[start, end)` of the assembled content: the part below

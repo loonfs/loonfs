@@ -20,6 +20,7 @@ macro_rules! delegate_object_store {
             put_immutable_verified,
             put_immutable_verified_stream,
             extend_object,
+            put_immutable_extended,
             compare_and_swap,
             delete,
             list_prefix_stream,
@@ -60,6 +61,7 @@ macro_rules! delegate_object_store {
             put_immutable_verified,
             put_immutable_verified_stream,
             extend_object,
+            put_immutable_extended,
             compare_and_swap,
             delete,
             list_prefix_stream,
@@ -463,6 +465,38 @@ macro_rules! __delegate_object_store_method {
         {
             ::std::boxed::Box::pin(async move {
                 $inner.extend_object(key, base, pieces, result).await
+            })
+        }
+    };
+    (put_immutable_extended, $receiver:ident, $inner:expr) => {
+        fn put_immutable_extended<'store, 'key, 'base_key, 'base, 'result, 'future>(
+            &'store $receiver,
+            key: &'key str,
+            base_key: &'base_key str,
+            base: &'base ::loonfs_objectstore::ExtendBase,
+            pieces: ::bytes::Bytes,
+            result: &'result ::loonfs_objectstore::ExtendedObject,
+        ) -> ::core::pin::Pin<::std::boxed::Box<
+            dyn ::core::future::Future<
+                    Output = Result<
+                        Option<::loonfs_objectstore::ObjectMetadata>,
+                        ::loonfs_objectstore::ObjectStoreError,
+                    >,
+                > + Send
+                + 'future,
+        >>
+        where
+            'store: 'future,
+            'key: 'future,
+            'base_key: 'future,
+            'base: 'future,
+            'result: 'future,
+            Self: 'future,
+        {
+            ::std::boxed::Box::pin(async move {
+                $inner
+                    .put_immutable_extended(key, base_key, base, pieces, result)
+                    .await
             })
         }
     };
