@@ -28,10 +28,11 @@ use crate::wal::ProjectedWalTail;
 use futures::{stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
+use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
 use loonfs_types::{
     ChangeSeq, ContentId, FoldWalOutcome, FoldWalResponse, ManifestNo, NamespaceId, RunNo,
-    Sha256State, MAX_PUBLIC_INTEGER,
+    MAX_PUBLIC_INTEGER,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -59,6 +60,20 @@ pub(crate) enum TryFoldWal {
     /// A concurrent manifest publication does not cover this attempt's
     /// target. It carries the current manifest the attempt lost to.
     RaceLost(CurrentManifest),
+}
+
+#[async_trait::async_trait]
+impl<S: ObjectStore + ?Sized> crate::storage::content_location::LayoutLookup
+    for ManifestProjection<'_, S>
+{
+    async fn content_layout(
+        &self,
+        content_id: &ContentId,
+    ) -> Result<Option<loonfs_types::format::manifest::ContentLayoutRecord>> {
+        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state.rows)
+            .content_layout(content_id)
+            .await
+    }
 }
 
 /// Folds the visible WAL tail into segments and publishes the next manifest.
@@ -164,16 +179,9 @@ async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
     if let Some(current) = already_current(&projection) {
         return Ok(current);
     }
-    let hash_states = materialize_tail_content(store, &projection).await?;
-    let mut attempt = publish_fold(
-        store,
-        namespace_id,
-        &projection,
-        &hash_states,
-        deadline,
-        policy,
-    )
-    .await?;
+    let layouts = materialize_tail_content(store, &projection).await?;
+    let mut attempt =
+        publish_fold(store, namespace_id, &projection, &layouts, deadline, policy).await?;
     for _retry in 0..CONTENTION_RETRY_LIMIT {
         let TryFoldWal::RaceLost(winner) = &attempt else {
             break;
@@ -189,15 +197,8 @@ async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
             load_basis_metadata_segments(store, segment_cache, &projection.basis)
                 .await?
                 .segments;
-        attempt = publish_fold(
-            store,
-            namespace_id,
-            &projection,
-            &hash_states,
-            deadline,
-            policy,
-        )
-        .await?;
+        attempt =
+            publish_fold(store, namespace_id, &projection, &layouts, deadline, policy).await?;
     }
     Ok(attempt)
 }
@@ -217,9 +218,8 @@ fn keeps_held_tail(basis: &NamespaceManifestPayload, winner: &NamespaceManifestP
     // - Activity: a successor at the same `head_seq` keeps it, so the
     //   basis activity plus the tail's is still the total.
     // - Run numbers: the retry takes its runs and run number from the winner.
-    // - Inline content: the first attempt wrote it and computed its SHA-256
-    //   states, and nothing deletes the content of a live namespace. A
-    //   deleted winner differs in `status`.
+    // - Content: the first attempt's extents and layouts still describe this tail.
+    //   A deleted winner differs in `status`.
     winner.manifest_no > basis.manifest_no
         && winner.runs.is_empty() == basis.runs.is_empty()
         && *winner
@@ -243,16 +243,8 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
     if let Some(current) = already_current(projection) {
         return Ok(current);
     }
-    let hash_states = materialize_tail_content(store, projection).await?;
-    publish_fold(
-        store,
-        namespace_id,
-        projection,
-        &hash_states,
-        deadline,
-        policy,
-    )
-    .await
+    let layouts = materialize_tail_content(store, projection).await?;
+    publish_fold(store, namespace_id, projection, &layouts, deadline, policy).await
 }
 
 /// The settled attempt for a projection whose basis already folded its
@@ -284,7 +276,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     projection: &ManifestProjection<'_, S>,
-    hash_states: &HashMap<ContentId, Sha256State>,
+    layouts: &HashMap<ContentId, ContentLayoutRecord>,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
 ) -> Result<TryFoldWal> {
@@ -294,7 +286,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         projection,
-        hash_states,
+        layouts,
         manifest_no,
         policy,
     )
@@ -323,39 +315,38 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
     })))
 }
 
-/// Writes every piece the tail holds into its content object. Every chain
-/// is assembled, and every whole value that starts at offset 0 checked,
-/// before anything is written. Returns, by content id, the SHA-256 states
-/// the writes computed for newest references that are not a SHA-256.
+/// Checks whole tail values before writing any object, then writes each chain's
+/// extents with bounded concurrency and returns the layouts.
 async fn materialize_tail_content<S: ObjectStore + ?Sized>(
     store: &S,
     projection: &ManifestProjection<'_, S>,
-) -> Result<HashMap<ContentId, Sha256State>> {
+) -> Result<HashMap<ContentId, ContentLayoutRecord>> {
     let tail = projection.tail_state.as_ref();
     let assembled = tail
         .contents()
         .iter()
         .map(|content| Ok((content, assemble_tail_content(content)?)))
         .collect::<Result<Vec<_>>>()?;
-    let hash_states = Mutex::new(HashMap::new());
+    let layouts = Mutex::new(HashMap::new());
     // In a live namespace, failed folds leave committed content for the next fold.
     stream::iter(assembled.into_iter().map(Ok))
         .try_for_each_concurrent(STORE_WRITE_WAVE, |(content, pieces)| {
-            let hash_states = &hash_states;
+            let layouts = &layouts;
             async move {
-                if let Some(state) = write_tail_content(store, tail, content, pieces).await? {
-                    hash_states
+                let layout = write_tail_content(store, projection, tail, content, pieces).await?;
+                {
+                    layouts
                         .lock()
-                        .expect("hash state lock should not be poisoned")
-                        .insert(content.content_ref.content_id.clone(), state);
+                        .expect("layout lock should not be poisoned")
+                        .insert(content.content_ref.content_id.clone(), layout);
                 }
                 Result::Ok(())
             }
         })
         .await?;
-    Ok(hash_states
+    Ok(layouts
         .into_inner()
-        .expect("hash state lock should not be poisoned"))
+        .expect("layout lock should not be poisoned"))
 }
 
 pub struct FoldedWalTail {
@@ -509,7 +500,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     projection: &ManifestProjection<'_, S>,
-    hash_states: &HashMap<ContentId, Sha256State>,
+    layouts: &HashMap<ContentId, ContentLayoutRecord>,
     manifest_no: ManifestNo,
     policy: MetadataLsmPolicy,
 ) -> Result<NamespaceManifestPayload> {
@@ -543,7 +534,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                 run_seq: head_seq,
                 tier: RunTier::Base,
                 segments: flatten_manifest_segments(
-                    build_manifest_segments(store, namespace_id, &tail_state, hash_states, policy)
+                    build_manifest_segments(store, namespace_id, &tail_state, layouts, policy)
                         .await?,
                 ),
             }],
@@ -567,7 +558,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                         namespace_id,
                         previous_manifest.payload().head_seq,
                         &tail_state,
-                        hash_states,
+                        layouts,
                         policy,
                     )
                     .await?,

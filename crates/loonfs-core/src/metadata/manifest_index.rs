@@ -12,7 +12,7 @@ use crate::error::{CoreError, Result};
 use crate::manifest::{ManifestLoadError, Readahead, VerifiedMetadataSegments};
 use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentPublicationRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
+    ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
 use loonfs_objectstore::ObjectStore;
@@ -287,81 +287,40 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-/// The chain head of `content_id`: the first visible row under its prefix,
-/// since the key sorts the longest reference first and then by commit.
-pub(super) async fn content_head<S: ObjectStore + ?Sized>(
+pub(super) async fn content_layout<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     content_id: &loonfs_types::ContentId,
-    visible_seq: ChangeSeq,
-) -> Result<Option<ContentPublicationRecord>> {
-    first_content_publication(
+) -> Result<Option<ContentLayoutRecord>> {
+    first_content_layout(
         segments,
-        &lookup_keys::content_publication_prefix(content_id),
-        &lookup_keys::content_publication_probe(content_id),
-        visible_seq,
+        &lookup_keys::content_layout_prefix(content_id),
+        &lookup_keys::content_layout_probe(content_id),
     )
     .await
 }
 
-/// Rows a publication lookup reads at a time. A chain's rows sit in key
-/// order with the one wanted first, so one short page usually answers.
-const CONTENT_PUBLICATION_PAGE_ROWS: usize = 8;
+const CONTENT_LAYOUT_PAGE_ROWS: usize = 8;
 
-/// The first row under `prefix` that a view at `visible_seq` can see, read
-/// a short page at a time, so a lookup never holds a content id's whole
-/// publication history.
-async fn first_content_publication<S: ObjectStore + ?Sized>(
+async fn first_content_layout<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     prefix: &str,
     probe: &str,
-    visible_seq: ChangeSeq,
-) -> Result<Option<ContentPublicationRecord>> {
+) -> Result<Option<ContentLayoutRecord>> {
     let upper_bound = string_prefix_upper_bound(prefix);
-    let mut lower_bound = prefix.to_owned();
-    loop {
-        let rows = segments
-            .scan_range_page_with_keys_for_lookup(
-                MetadataRowFamily::ContentPublications,
-                &lower_bound,
-                upper_bound.as_deref(),
-                CONTENT_PUBLICATION_PAGE_ROWS,
-                probe,
-            )
-            .await
-            .map_err(manifest_error_to_core)?;
-        let exhausted = rows.len() < CONTENT_PUBLICATION_PAGE_ROWS;
-        let Some(last_key) = rows.last().map(|(row_key, _)| row_key.clone()) else {
-            return Ok(None);
-        };
-        for (_, row) in rows {
-            let record = super::row_decode::content_publication_from_manifest_row(row)?;
-            if record.committed_seq <= visible_seq {
-                return Ok(Some(record));
-            }
-        }
-        if exhausted {
-            return Ok(None);
-        }
-        lower_bound = lookup_keys::after_row_key(&last_key);
-    }
-}
-
-/// The first visible row of `content_id` at `size_bytes`: the commit that
-/// first published that reference, since the rows of one size sort by
-/// commit.
-pub(super) async fn content_publication<S: ObjectStore + ?Sized>(
-    segments: &VerifiedMetadataSegments<'_, S>,
-    content_id: &loonfs_types::ContentId,
-    size_bytes: u64,
-    visible_seq: ChangeSeq,
-) -> Result<Option<ContentPublicationRecord>> {
-    first_content_publication(
-        segments,
-        &lookup_keys::content_publication_size_prefix(content_id, size_bytes),
-        &lookup_keys::content_publication_probe(content_id),
-        visible_seq,
-    )
-    .await
+    let rows = segments
+        .scan_range_page_with_keys_for_lookup(
+            MetadataRowFamily::ContentLayouts,
+            prefix,
+            upper_bound.as_deref(),
+            CONTENT_LAYOUT_PAGE_ROWS,
+            probe,
+        )
+        .await
+        .map_err(manifest_error_to_core)?;
+    rows.into_iter()
+        .next()
+        .map(|(_, row)| super::row_decode::content_layout_from_manifest_row(row))
+        .transpose()
 }
 
 pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(

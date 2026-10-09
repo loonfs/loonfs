@@ -13,7 +13,7 @@ use thiserror::Error;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ContentRefKind {
-    /// A prefix of one content object, addressed by its random content id.
+    /// A prefix of one chain, addressed by its random content id.
     BlobV1,
 }
 
@@ -412,12 +412,7 @@ pub enum ContentRefValidationError {
     InvalidChecksum(ChecksumValidationError),
 }
 
-/// Identifies the bytes of one file revision: the first `size_bytes` bytes
-/// of a content object, which appends extend but never change.
-///
-/// The owner namespace and content id name the content object that holds the
-/// bytes. A reference is not proof that the object holds them: bytes
-/// committed inline reach their object when a fold writes them.
+/// Identifies a chain prefix by its owner, content id, size, and checksum.
 // Request bodies and durable records share this type, so it rejects unknown
 // fields in every context. After release, new content kinds, not new fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

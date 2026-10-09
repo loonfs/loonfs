@@ -2,7 +2,7 @@
 //!
 //! Each step selects one family group and either merges a bounded run window
 //! or requests a full background compaction. Base merges may apply retention;
-//! delta merges preserve every row. Both paths use the same merge engine.
+//! delta merges drop only superseded layouts. Both paths use the same merge engine.
 //!
 //! Every successful merge publishes a new manifest. Interrupted or losing
 //! publications leave unreferenced output for garbage collection.

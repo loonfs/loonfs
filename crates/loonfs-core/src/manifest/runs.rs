@@ -24,7 +24,7 @@ pub(super) const MANIFEST_ROW_FAMILIES: [MetadataRowFamily; 11] = [
     MetadataRowFamily::ActiveDeletions,
     MetadataRowFamily::CommitReceipts,
     MetadataRowFamily::Commits,
-    MetadataRowFamily::ContentPublications,
+    MetadataRowFamily::ContentLayouts,
     MetadataRowFamily::Attributes,
     MetadataRowFamily::Access,
 ];

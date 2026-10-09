@@ -12,6 +12,8 @@ pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
 pub(super) enum RetentionRule {
     /// Retain every row in the group.
     KeepEveryRow,
+    /// Keeps the first row in each group, whose keys sort newest first.
+    NewestPerGroup,
     /// A commit row or its receipt is decided by its own commit sequence against the floor.
     CommitHistory,
     /// Every revision above the floor, plus the newest at or below it, per
@@ -28,12 +30,13 @@ impl RetentionRule {
     pub(super) fn operator(self) -> RetentionOperator {
         match self {
             Self::KeepEveryRow => RetentionOperator::KeepEveryRow,
+            Self::NewestPerGroup => RetentionOperator::NewestPerGroup(false),
             Self::CommitHistory => RetentionOperator::CommitHistory,
             Self::WholeState => RetentionOperator::WholeState(WholeStateRetention::default()),
             Self::ActiveDeletions => {
                 RetentionOperator::ActiveDeletions(ActiveDeletionRetention::default())
             }
-            Self::Bindings => RetentionOperator::Bindings(BindingRetention::default()),
+            Self::Bindings => RetentionOperator::Bindings(Box::default()),
         }
     }
 }
@@ -42,10 +45,11 @@ impl RetentionRule {
 #[derive(Debug)]
 pub(super) enum RetentionOperator {
     KeepEveryRow,
+    NewestPerGroup(bool),
     CommitHistory,
     WholeState(WholeStateRetention),
     ActiveDeletions(ActiveDeletionRetention),
-    Bindings(BindingRetention),
+    Bindings(Box<BindingRetention>),
 }
 
 impl RetentionOperator {
@@ -59,6 +63,7 @@ impl RetentionOperator {
     ) -> Result<Option<KeptRow>> {
         let kept = match self {
             Self::KeepEveryRow => Some(row),
+            Self::NewestPerGroup(kept) => (!std::mem::replace(kept, true)).then_some(row),
             Self::CommitHistory => keep_commit_history_row(row, floor_seq),
             Self::WholeState(state) => state.push(family, row, floor_seq)?,
             Self::ActiveDeletions(state) => state.push(row),
@@ -86,6 +91,10 @@ impl RetentionOperator {
     pub(super) fn close_group(&mut self, _floor_seq: ChangeSeq) -> Result<Option<KeptRow>> {
         match self {
             Self::KeepEveryRow | Self::CommitHistory => Ok(None),
+            Self::NewestPerGroup(kept) => {
+                *kept = false;
+                Ok(None)
+            }
             Self::WholeState(state) => {
                 state.close_group();
                 Ok(None)
@@ -102,6 +111,7 @@ impl RetentionOperator {
     pub(super) fn held_rows(&self) -> usize {
         match self {
             Self::KeepEveryRow
+            | Self::NewestPerGroup(_)
             | Self::CommitHistory
             | Self::WholeState(_)
             | Self::ActiveDeletions(_) => 0,
@@ -312,6 +322,59 @@ mod tests {
         AccessRevisionNo, AttributesRevisionNo, DisplayName, InodeId, NameKey, RevisionNo,
     };
 
+    #[test]
+    fn layout_compaction_keeps_the_newest_row_per_content_id() {
+        use super::super::compaction_merge::locality_of;
+        use super::super::streaming_compaction::retention_clusters;
+        use loonfs_types::format::manifest::{ContentLayoutRecord, MetadataFamilyGroup};
+        use loonfs_types::{ContentExtent, ContentId, ContentLayout, ExtentObject, NamespaceId};
+        let owner = NamespaceId::parse("owner").expect("namespace");
+        let first = ContentId::generate();
+        let second = ContentId::generate();
+        let row = |content_id: ContentId, committed_seq| {
+            MetadataRow::ContentLayout(ContentLayoutRecord {
+                owner_namespace_id: owner.clone(),
+                content_id: content_id.clone(),
+                committed_seq: ChangeSeq(committed_seq),
+                size_bytes: 1,
+                layout: ContentLayout {
+                    extents: vec![ContentExtent {
+                        owner_namespace_id: owner.clone(),
+                        content_id,
+                        object: ExtentObject::Whole,
+                        offset: 0,
+                        length: 1,
+                    }],
+                },
+            })
+        };
+        let mut rows = vec![
+            row(first.clone(), 1),
+            row(second.clone(), 2),
+            row(first.clone(), 3),
+        ];
+        rows.sort_by_key(MetadataRow::row_key);
+        let cluster = &retention_clusters(MetadataFamilyGroup::ContentLayouts)[0];
+        let mut operator = cluster.rule.operator();
+        let family = MetadataRowFamily::ContentLayouts;
+        let mut previous = String::new();
+        let mut kept = Vec::new();
+        for row in rows {
+            let key = row.row_key();
+            let group = locality_of(family, &key, cluster.locality);
+            if previous != group {
+                operator.close_group(ChangeSeq(0)).expect("close");
+                previous = group.to_owned();
+            }
+            if let Some((_, row)) = operator.push(family, row, ChangeSeq(0)).expect("push") {
+                kept.push(row);
+            }
+        }
+        let mut expected = vec![row(first, 3), row(second, 2)];
+        expected.sort_by_key(MetadataRow::row_key);
+        assert_eq!(kept, expected);
+    }
+
     const WHOLE_STATE_FAMILIES: [MetadataRowFamily; 3] = [
         MetadataRowFamily::Revisions,
         MetadataRowFamily::Attributes,
@@ -359,6 +422,8 @@ mod tests {
                             .expect("content id"),
                         b"body",
                     ),
+                    hash_state: None,
+                    crc64nvme: None,
                 })
             }
             _ => MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {

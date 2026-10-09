@@ -13,7 +13,7 @@ use crate::manifest::cache::read_working_memory;
 use crate::manifest::{
     load_namespace_manifest_envelope_if_present, metadata_basis_from_manifest, MetadataSegmentCache,
 };
-use crate::metadata::row_decode::revision_from_manifest_row;
+use crate::metadata::row_decode::{content_layout_from_manifest_row, revision_from_manifest_row};
 use crate::namespace::control::{load_current_manifest_with_hint, CurrentManifest, LoadedManifest};
 use crate::namespace::read_anchor::{load_read_anchor_from_manifest, project_anchor_tail};
 use crate::pin::record::pin_key_ids;
@@ -32,7 +32,7 @@ use loonfs_types::{ContentId, ContentRef, ManifestNo, NamespaceId, WalNo};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
-const REVISION_PAGE_ROWS: usize = 1024;
+const CONTENT_ROOT_PAGE_ROWS: usize = 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum RetirementState {
@@ -149,12 +149,20 @@ impl LiveSet {
         live.protect_manifest(store, segment_cache, &anchor.manifest)
             .await?;
         if !live.namespace_deleted {
-            for revision in project_anchor_tail(store, segment_cache, &anchor)
-                .await?
-                .rows
-                .revisions()
-            {
+            let tail = project_anchor_tail(store, segment_cache, &anchor).await?;
+            for revision in tail.rows.revisions() {
                 live.protect_content(&revision.content_ref)?;
+            }
+            for content in tail.contents() {
+                for base in content
+                    .pieces
+                    .iter()
+                    .filter_map(|piece| piece.base.as_ref())
+                {
+                    if base.owner_namespace_id == live.content_roots.namespace_id {
+                        live.content_roots.insert(&base.content_id)?;
+                    }
+                }
             }
         }
         let mut manifests = BTreeSet::from([head.manifest_no]);
@@ -287,30 +295,47 @@ impl LiveSet {
             return Ok(());
         }
         let segments = metadata_basis_from_manifest(store, segment_cache, manifest).segments;
-        let upper_bound = string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX);
-        let mut lower_bound = lookup_keys::REVISION_ROW_PREFIX.to_owned();
-        loop {
-            let rows = segments
-                .scan_range_page_with_keys(
-                    MetadataRowFamily::Revisions,
-                    &lower_bound,
-                    upper_bound.as_deref(),
-                    REVISION_PAGE_ROWS,
-                )
-                .await
-                .map_err(MetadataProjectionLoadError::from)?;
-            let Some((last_key, _)) = rows.last() else {
-                return Ok(());
-            };
-            lower_bound = lookup_keys::after_row_key(last_key);
-            let exhausted = rows.len() < REVISION_PAGE_ROWS;
-            for (_, row) in rows {
-                self.protect_content(&revision_from_manifest_row(row)?.content_ref)?;
-            }
-            if exhausted {
-                return Ok(());
+        for family in [
+            MetadataRowFamily::Revisions,
+            MetadataRowFamily::ContentLayouts,
+        ] {
+            let upper_bound = string_prefix_upper_bound(family.row_key_prefix());
+            let mut lower_bound = family.row_key_prefix().to_owned();
+            loop {
+                let rows = segments
+                    .scan_range_page_with_keys(
+                        family,
+                        &lower_bound,
+                        upper_bound.as_deref(),
+                        CONTENT_ROOT_PAGE_ROWS,
+                    )
+                    .await
+                    .map_err(MetadataProjectionLoadError::from)?;
+                let Some((last_key, _)) = rows.last() else {
+                    break;
+                };
+                lower_bound = lookup_keys::after_row_key(last_key);
+                let exhausted = rows.len() < CONTENT_ROOT_PAGE_ROWS;
+                for (_, row) in rows {
+                    if family == MetadataRowFamily::Revisions {
+                        self.protect_content(&revision_from_manifest_row(row)?.content_ref)?;
+                    } else {
+                        let row = content_layout_from_manifest_row(row)?;
+                        if self.content_roots.ids.contains(&row.content_id) {
+                            for extent in row.layout.extents {
+                                if extent.owner_namespace_id == self.content_roots.namespace_id {
+                                    self.content_roots.insert(&extent.content_id)?;
+                                }
+                            }
+                        }
+                    }
+                }
+                if exhausted {
+                    break;
+                }
             }
         }
+        Ok(())
     }
 
     fn protect_content(&mut self, content_ref: &ContentRef) -> Result<()> {

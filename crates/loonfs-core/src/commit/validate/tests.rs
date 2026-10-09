@@ -136,6 +136,7 @@ fn wal_create_file(
             content_ref,
             hash_state: None,
             crc64nvme: None,
+            layout: None,
         },
     ]
 }
@@ -153,6 +154,7 @@ fn wal_append_revision(
         content_ref,
         hash_state: None,
         crc64nvme: None,
+        layout: None,
     }]
 }
 
@@ -258,7 +260,7 @@ async fn validate_planned_ops(
         &validated_commit_id(),
         &loonfs_test_support::test_actor(),
         committed_at_ms,
-        |_| (None, None),
+        |_| (None, None, None),
     )
     .await
 }
@@ -920,6 +922,7 @@ async fn restore_revision_overflow_is_rejected() {
         content_ref: content_ref("content-max"),
         hash_state: None,
         crc64nvme: None,
+        layout: None,
     };
     let metadata_state = MetadataState::default()
         .apply_committed_wal_deltas(

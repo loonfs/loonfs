@@ -79,6 +79,18 @@ pub enum EnvelopeCodecError {
         /// Format rule violated by the delta.
         reason: &'static str,
     },
+    /// Reports a layout that does not cover its revision's reference.
+    #[error(
+        "invalid wal revision layout in commit `{seq}` for `content_id` `{content_id}`: {reason}"
+    )]
+    InvalidWalRevisionLayout {
+        /// Commit containing the rejected delta.
+        seq: crate::ChangeSeq,
+        /// Chain the rejected layout names.
+        content_id: crate::ContentId,
+        /// Format rule violated by the layout.
+        reason: &'static str,
+    },
     /// Reports an unrecognized durable-family discriminator found during the envelope probe.
     #[error("unknown envelope kind `{found}`")]
     UnknownKind {

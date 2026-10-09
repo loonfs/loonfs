@@ -884,7 +884,7 @@
       },
       "ContentRef": {
         "additionalProperties": false,
-        "description": "Identifies the bytes of one file revision: the first `size_bytes` bytes\nof a content object, which appends extend but never change.\n\nThe owner namespace and content id name the content object that holds the\nbytes. A reference is not proof that the object holds them: bytes\ncommitted inline reach their object when a fold writes them.",
+        "description": "Identifies a chain prefix by its owner, content id, size, and checksum.",
         "properties": {
           "checksum": {
             "$ref": "#/components/schemas/Checksum",

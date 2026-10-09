@@ -559,7 +559,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         Ok(ResolvedFileContent {
             entry,
-            location: view.resolve_content_location(&content_ref)?,
+            location: view.resolve_content_location(&content_ref).await?,
             content_ref,
         })
     }
@@ -621,7 +621,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
         Ok(FileContentStream::open_inner(
             self.store.clone(),
-            view.resolve_content_location(&content_ref)?,
+            view.resolve_content_location(&content_ref).await?,
             Some(entry),
             content_ref,
             chunk_bytes,
@@ -662,7 +662,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
         Ok(FileContentStream::open_inner(
             self.store.clone(),
-            view.resolve_content_location(&content_ref)?,
+            view.resolve_content_location(&content_ref).await?,
             None,
             content_ref,
             chunk_bytes,
@@ -800,15 +800,27 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::resolve_current_files(&view, inode_ids, &access).await
     }
 
-    /// Resolves a reference in the owner's pinned view.
+    /// Resolves an import source, including an unpublished upload.
     pub async fn resolve_content_location(
         &self,
         content_ref: &ContentRef,
         context: &RuntimeReadContext,
     ) -> Result<ContentLocation> {
-        self.load_read_view(context)
+        let view = load_metadata_view_for_authorization(
+            &self.store,
+            &self.namespace_id,
+            runtime_read_load_context(context),
+        )
+        .await?;
+        if view
+            .metadata_view()
+            .content_published(&content_ref.content_id)
             .await?
-            .resolve_content_location(content_ref)
+        {
+            view.resolve_content_location(content_ref).await
+        } else {
+            Ok(ContentLocation::whole(content_ref)?)
+        }
     }
 
     /// Reads and verifies the bytes named by a published reference.
@@ -835,7 +847,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             return Err(CoreError::PathNotFound(content_ref.content_id.to_string()));
         }
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
-        let location = view.resolve_content_location(content_ref)?;
+        let location = view.resolve_content_location(content_ref).await?;
         location
             .get_bytes(&self.store, content_ref)
             .await
@@ -1162,7 +1174,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let context = self.mutation_context()?;
         let location = match owner_location {
             Some(location) => location,
-            None => ContentLocation::resolve(None, content_ref)?,
+            None => ContentLocation::whole(content_ref)?,
         };
         let body = open_content_import_reader(self.store.clone(), location, content_ref).await?;
         crate::protocol::stage_owned_stream(

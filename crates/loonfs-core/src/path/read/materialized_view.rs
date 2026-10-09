@@ -6,7 +6,7 @@ use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cu
 use crate::authorize::{Absence, ReadAccess};
 #[cfg(test)]
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::manifest::{
     load_basis_metadata_segments, HeadStateCache, MetadataSegmentCache, VerifiedMetadataSegments,
     WalTailProjectionCacheKey,
@@ -20,11 +20,10 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::mutation_path::parse_absolute_path_for_core;
-use crate::storage::content::ContentLocation;
-use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
+use crate::storage::content::{validate_loaded_content_bytes, ContentLocation};
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
 use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
@@ -341,7 +340,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<FileBytes> {
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         let bytes = self
-            .resolve_content_location(&content_ref)?
+            .resolve_content_location(&content_ref)
+            .await?
             .get_bytes(store, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
@@ -386,18 +386,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok((entry, content_ref))
     }
 
-    pub(crate) fn resolve_content_location(
+    pub(crate) async fn resolve_content_location(
         &self,
         content_ref: &ContentRef,
     ) -> Result<ContentLocation> {
-        Ok(ContentLocation::resolve(Some(&self.wal_tail), content_ref)?)
+        ContentLocation::resolve(&self.metadata_view(), Some(&self.wal_tail), content_ref).await
     }
 
-    /// The object key a direct download from `start_offset` signs. An
-    /// offset at or past the reference's end is refused before anything is
-    /// written, and a reference of zero bytes takes only offset 0. A
-    /// reference whose bytes the tail still holds is written to its object
-    /// first, as a fold would, unless the object already holds them.
+    /// Selects one object for a direct download, writing a chain's initial tail
+    /// value at its own key only when the reference names the chain head.
     async fn download_object_key(
         &self,
         store: &S,
@@ -410,36 +407,59 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 size_bytes: content_ref.size_bytes,
             });
         }
-        let location = self.resolve_content_location(content_ref)?;
-        let object_key = location.object_key();
-        // A value of zero bytes has no piece to assemble, but its object
-        // must exist for the grant to be served.
-        let Some(content) = self
-            .wal_tail
-            .content(content_ref)
-            .filter(|_| location.has_pieces() || content_ref.size_bytes == 0)
-        else {
-            return Ok(object_key.to_owned());
-        };
-        let pieces = assemble_tail_content(content)?;
-        let held = store
-            .head(object_key)
-            .await
-            .map_err(|error| CoreError::store(object_key, &error))?;
-        if held.is_none_or(|metadata| metadata.size_bytes < content_ref.size_bytes) {
-            write_tail_content(store, &self.wal_tail, content, pieces)
+        let location = self.resolve_content_location(content_ref).await?;
+        if content_ref.size_bytes == 0 {
+            let key = location.object_key();
+            if store
+                .head(key)
+                .await
+                .map_err(|error| CoreError::store(key, &error))?
+                .is_none()
+            {
+                store
+                    .put_immutable_verified(key, bytes::Bytes::new())
+                    .await?;
+            }
+            return Ok(key.to_owned());
+        }
+        if location.is_resident()
+            && location.has_pieces()
+            && self
+                .metadata_view()
+                .content_head(&content_ref.content_id)
+                .await?
+                == Some(content_ref.size_bytes)
+        {
+            let key = location.object_key();
+            let pieces = location.joined_pieces();
+            validate_loaded_content_bytes(key.to_owned(), content_ref, &pieces)?;
+            store
+                .put_immutable_verified(key, pieces)
                 .await
                 .map_err(|error| match error {
-                    CoreError::Store {
-                        class: crate::error::StoreFailureClass::PermissionDenied,
-                        ..
-                    } => CoreError::ContentNotMaterialized {
+                    ImmutableWriteError::DifferentObject { .. }
+                    | ImmutableWriteError::Unattested { .. } => CoreError::ContentNotMaterialized {
                         content_id: content_ref.content_id.clone(),
                     },
-                    error => error,
+                    ImmutableWriteError::Transport { ref source, .. }
+                        if StoreFailureClass::of(source) == StoreFailureClass::PermissionDenied =>
+                    {
+                        CoreError::ContentNotMaterialized {
+                            content_id: content_ref.content_id.clone(),
+                        }
+                    }
+                    error => CoreError::from(error),
                 })?;
+            return Ok(key.to_owned());
         }
-        Ok(object_key.to_owned())
+        if let [extent] = location.extents.as_slice() {
+            if !location.has_pieces() && extent.extent.offset == 0 {
+                return Ok(extent.object_key.clone());
+            }
+        }
+        Err(CoreError::ContentNotMaterialized {
+            content_id: content_ref.content_id.clone(),
+        })
     }
 
     pub(crate) async fn direct_download_target(
@@ -780,7 +800,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await?;
         ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
         let bytes = self
-            .resolve_content_location(&content_ref)?
+            .resolve_content_location(&content_ref)
+            .await?
             .get_bytes(store, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
@@ -799,7 +820,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await?;
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         Ok(self
-            .resolve_content_location(&revision.content_ref)?
+            .resolve_content_location(&revision.content_ref)
+            .await?
             .get_bytes(store, &revision.content_ref)
             .await?)
     }

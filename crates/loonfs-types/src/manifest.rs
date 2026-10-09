@@ -65,8 +65,8 @@ pub enum MetadataRowFamily {
     CommitReceipts,
     /// Stores each retained commit's record in sequence order.
     Commits,
-    /// Preserves evidence that content was published.
-    ContentPublications,
+    /// Names the objects that hold each chain.
+    ContentLayouts,
     /// Stores inode attribute revisions newest-first.
     ///
     /// Attributes are read only in this order, so the family has no secondary
@@ -95,8 +95,8 @@ pub enum MetadataFamilyGroup {
     ActiveDeletions,
     /// Commit records and their idempotency receipts, one row each per commit.
     Commits,
-    /// Preserves evidence that content was published.
-    ContentPublications,
+    /// Names the objects that hold each chain.
+    ContentLayouts,
     /// Attributes.
     Attributes,
     /// Access rows.
@@ -112,7 +112,7 @@ impl MetadataFamilyGroup {
         Self::Tombstones,
         Self::ActiveDeletions,
         Self::Commits,
-        Self::ContentPublications,
+        Self::ContentLayouts,
         Self::Attributes,
         Self::Access,
     ];
@@ -126,7 +126,7 @@ impl MetadataFamilyGroup {
             Self::Tombstones => "tombstones",
             Self::ActiveDeletions => "active_deletions",
             Self::Commits => "commits",
-            Self::ContentPublications => "content_publications",
+            Self::ContentLayouts => "content_layouts",
             Self::Attributes => "attributes",
             Self::Access => "access",
         }
@@ -147,7 +147,7 @@ impl MetadataFamilyGroup {
                 MetadataRowFamily::Commits,
                 MetadataRowFamily::CommitReceipts,
             ],
-            Self::ContentPublications => &[MetadataRowFamily::ContentPublications],
+            Self::ContentLayouts => &[MetadataRowFamily::ContentLayouts],
             Self::Attributes => &[MetadataRowFamily::Attributes],
             Self::Access => &[MetadataRowFamily::Access],
         }
@@ -240,8 +240,8 @@ pub enum MetadataRow {
     /// One committed logical commit as its WAL record carries it, without inline bytes.
     /// The change feed and commit replay read this row.
     Commit(WalCommitPayload),
-    /// Records a published content identity independently of its revisions.
-    ContentPublication(ContentPublicationRecord),
+    /// Names the objects that hold one chain as of a fold or commit.
+    ContentLayout(ContentLayoutRecord),
     /// Publishes one inode's complete attribute map at one revision.
     ///
     /// The row is whole state, not a change: a reader takes the newest row
@@ -355,6 +355,12 @@ pub struct RevisionRecord {
     pub delta_index: u32,
     /// Immutable bytes published by the revision.
     pub content_ref: ContentRef,
+    /// SHA-256 state after the reference's bytes, copied from the delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash_state: Option<Sha256State>,
+    /// CRC-64/NVME of the reference's bytes, copied from the delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crc64nvme: Option<Checksum>,
 }
 
 /// One event that changes whether a root inode has an active subtree tombstone.
@@ -410,27 +416,20 @@ impl ActiveDeletionRecord {
     }
 }
 
-/// Evidence retained at every retention floor that a commit published a
-/// reference to one content id, and the head of that id's chain.
+/// The objects that hold a chain as of one fold or commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ContentPublicationRecord {
-    /// Stored directly in the row key and Bloom filter key.
+pub struct ContentLayoutRecord {
+    /// Namespace that owns the chain.
+    pub owner_namespace_id: NamespaceId,
+    /// Chain whose bytes the layout holds.
     pub content_id: ContentId,
-    /// Distinguishes later publications of the same reference.
+    /// Newest commit whose bytes the layout covers.
     pub committed_seq: ChangeSeq,
-    /// First publishing delta when a commit uses this reference more than once.
-    pub delta_index: u32,
-    /// Length the reference names. The longest sorts first, so the first
-    /// row under an id's prefix is its chain head.
+    /// Total length covered by the extents.
     pub size_bytes: u64,
-    /// SHA-256 state after the reference's bytes, copied from the delta, or
-    /// computed by the fold that wrote the object when the delta has none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hash_state: Option<Sha256State>,
-    /// CRC-64/NVME of the reference's bytes, copied from the delta.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crc64nvme: Option<Checksum>,
+    /// Objects in chain order.
+    pub layout: crate::ContentLayout,
 }
 
 /// Indexes one retained commit by the caller's idempotency key.
@@ -585,7 +584,7 @@ impl MetadataRowFamily {
             Self::ActiveDeletions => "active_deletions",
             Self::CommitReceipts => "commit_receipts",
             Self::Commits => "commits",
-            Self::ContentPublications => "content_publications",
+            Self::ContentLayouts => "content_layouts",
             Self::Attributes => "attributes",
             Self::Access => "access",
         }
@@ -604,7 +603,7 @@ impl MetadataRowFamily {
             Self::ActiveDeletions => lookup_keys::ACTIVE_DELETION_ROW_PREFIX,
             Self::CommitReceipts => lookup_keys::COMMIT_RECEIPT_ROW_PREFIX,
             Self::Commits => lookup_keys::COMMIT_ROW_PREFIX,
-            Self::ContentPublications => lookup_keys::CONTENT_PUBLICATION_ROW_PREFIX,
+            Self::ContentLayouts => lookup_keys::CONTENT_LAYOUT_ROW_PREFIX,
             Self::Attributes => lookup_keys::ATTRIBUTE_ROW_PREFIX,
             Self::Access => lookup_keys::ACCESS_ROW_PREFIX,
         }
@@ -624,7 +623,7 @@ impl MetadataRow {
             Self::ActiveDeletion(_) => MetadataRowFamily::ActiveDeletions,
             Self::CommitReceipt(_) => MetadataRowFamily::CommitReceipts,
             Self::Commit(_) => MetadataRowFamily::Commits,
-            Self::ContentPublication(_) => MetadataRowFamily::ContentPublications,
+            Self::ContentLayout(_) => MetadataRowFamily::ContentLayouts,
             Self::AttributesRevision(_) => MetadataRowFamily::Attributes,
             Self::AccessRevision(_) => MetadataRowFamily::Access,
         })
@@ -659,7 +658,7 @@ impl MetadataRow {
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
                 | MetadataRowFamily::Commits
-                | MetadataRowFamily::ContentPublications
+                | MetadataRowFamily::ContentLayouts
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access => None,
             }
@@ -684,11 +683,9 @@ impl MetadataRow {
                 lookup_keys::commit_receipt_row_key(record.commit_id.as_str(), record.committed_seq)
             }
             Self::Commit(record) => lookup_keys::commit_row_key(record.committed_seq),
-            Self::ContentPublication(record) => lookup_keys::content_publication_row_key(
-                &record.content_id,
-                record.size_bytes,
-                record.committed_seq,
-            ),
+            Self::ContentLayout(record) => {
+                lookup_keys::content_layout_row_key(&record.content_id, record.committed_seq)
+            }
             Self::AttributesRevision(record) => lookup_keys::attributes_row_key(
                 record.inode_id,
                 record.attributes_revision_no,
@@ -722,7 +719,7 @@ impl MetadataRow {
                 | MetadataRowFamily::ActiveDeletions
                 | MetadataRowFamily::CommitReceipts
                 | MetadataRowFamily::Commits
-                | MetadataRowFamily::ContentPublications
+                | MetadataRowFamily::ContentLayouts
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access => None,
             }
@@ -736,9 +733,7 @@ impl MetadataRow {
                 lookup_keys::commit_receipt_probe(record.commit_id.as_str())
             }
             Self::Commit(_) => self.row_key_for_family(family),
-            Self::ContentPublication(record) => {
-                lookup_keys::content_publication_probe(&record.content_id)
-            }
+            Self::ContentLayout(record) => lookup_keys::content_layout_probe(&record.content_id),
             Self::AttributesRevision(record) => lookup_keys::attributes_probe(record.inode_id),
             Self::AccessRevision(record) => lookup_keys::access_probe(record.inode_id),
         }
@@ -773,7 +768,7 @@ pub mod lookup_keys {
     pub(super) const DIRENTRY_BIND_ROW_PREFIX: &str = "direntry-bind-";
     pub(super) const DIRENTRY_CHILD_BIND_ROW_PREFIX: &str = "direntry-child-bind-";
     pub(super) const TOMBSTONE_ROW_PREFIX: &str = "tombstone-";
-    pub(super) const CONTENT_PUBLICATION_ROW_PREFIX: &str = "content-publication-";
+    pub(super) const CONTENT_LAYOUT_ROW_PREFIX: &str = "content-layout-";
     pub(super) const COMMIT_RECEIPT_ROW_PREFIX: &str = "commit-receipt-";
     pub(super) const ATTRIBUTE_ROW_PREFIX: &str = "attribute-";
     pub(super) const ACCESS_ROW_PREFIX: &str = "access-";
@@ -921,37 +916,22 @@ pub mod lookup_keys {
         ))
     }
 
-    /// Selects all publications of one content identity in the Bloom filter.
-    pub fn content_publication_probe(content_id: &ContentId) -> String {
-        format!("{CONTENT_PUBLICATION_ROW_PREFIX}{content_id}")
+    /// Selects one chain in the Bloom filter.
+    pub fn content_layout_probe(content_id: &ContentId) -> String {
+        format!("{CONTENT_LAYOUT_ROW_PREFIX}{content_id}")
     }
 
     /// Selects the rows for one content identity.
-    pub fn content_publication_prefix(content_id: &ContentId) -> String {
-        format!("{}-", content_publication_probe(content_id))
+    pub fn content_layout_prefix(content_id: &ContentId) -> String {
+        format!("{}-", content_layout_probe(content_id))
     }
 
-    /// Selects the rows for one reference length of one content identity,
-    /// ordered by commit sequence.
-    pub fn content_publication_size_prefix(content_id: &ContentId, size_bytes: u64) -> String {
-        format!(
-            "{}{:020}-",
-            content_publication_prefix(content_id),
-            u64::MAX - size_bytes
-        )
-    }
-
-    /// Orders publications by content identity, longest reference first,
-    /// then by commit sequence.
-    pub(super) fn content_publication_row_key(
-        content_id: &ContentId,
-        size_bytes: u64,
-        committed_seq: ChangeSeq,
-    ) -> String {
+    /// Orders a chain's layouts with the newest commit first.
+    pub fn content_layout_row_key(content_id: &ContentId, committed_seq: ChangeSeq) -> String {
         format!(
             "{}{:020}",
-            content_publication_size_prefix(content_id, size_bytes),
-            committed_seq.0
+            content_layout_prefix(content_id),
+            u64::MAX - committed_seq.0
         )
     }
 
@@ -1764,6 +1744,8 @@ mod tests {
                     .expect("valid content id"),
                 b"row key sample",
             ),
+            hash_state: None,
+            crc64nvme: None,
         });
 
         assert_eq!(
@@ -1872,6 +1854,8 @@ mod tests {
                     .expect("valid content id"),
                 b"row key prefix sample",
             ),
+            hash_state: None,
+            crc64nvme: None,
         });
         let rows: [(MetadataRowFamily, super::MetadataRow); 9] = [
             (
@@ -1889,15 +1873,25 @@ mod tests {
             (MetadataRowFamily::DirentryChildBinds, bind),
             (MetadataRowFamily::Revisions, revision),
             (
-                MetadataRowFamily::ContentPublications,
-                super::MetadataRow::ContentPublication(super::ContentPublicationRecord {
+                MetadataRowFamily::ContentLayouts,
+                super::MetadataRow::ContentLayout(super::ContentLayoutRecord {
+                    owner_namespace_id: NamespaceId::parse("demo").expect("namespace"),
                     content_id: crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
-                        .expect("valid content id"),
+                        .expect("content id"),
                     committed_seq: ChangeSeq(12),
-                    delta_index: 3,
                     size_bytes: 5,
-                    hash_state: None,
-                    crc64nvme: None,
+                    layout: crate::ContentLayout {
+                        extents: vec![crate::ContentExtent {
+                            owner_namespace_id: NamespaceId::parse("demo").expect("namespace"),
+                            content_id: crate::ContentId::parse(
+                                "con_0123456789abcdef0123456789abcdef",
+                            )
+                            .expect("content id"),
+                            object: crate::ExtentObject::Whole,
+                            offset: 0,
+                            length: 5,
+                        }],
+                    },
                 }),
             ),
             (
@@ -1992,6 +1986,8 @@ mod tests {
                                 .expect("content id"),
                             b"attribution key test",
                         ),
+                        hash_state: None,
+                        crc64nvme: None,
                     }),
                 ),
                 (

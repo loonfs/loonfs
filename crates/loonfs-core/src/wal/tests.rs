@@ -1028,6 +1028,7 @@ async fn replay_keeps_pieces_by_offset_and_the_base_a_chain_starts_from() {
                 content_ref: content_ref.clone(),
                 hash_state: None,
                 crc64nvme: None,
+                layout: None,
             }],
             vec![WalInlineContent {
                 content_id: content_id.clone(),
@@ -1065,7 +1066,17 @@ async fn replay_keeps_pieces_by_offset_and_the_base_a_chain_starts_from() {
             .iter()
             .zip([&b"hello"[..], b"hello world", b"hello!!!"])
     {
-        let location = ContentLocation::resolve(Some(&tail), content_ref).expect("location");
+        let location = ContentLocation::resolve(
+            &crate::metadata::InMemoryMetadataView::in_memory(
+                &tail.rows,
+                None,
+                anchor.read_state.seq,
+            ),
+            Some(&tail),
+            content_ref,
+        )
+        .await
+        .expect("location");
         assert!(location.is_resident());
         assert_eq!(
             location

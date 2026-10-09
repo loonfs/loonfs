@@ -161,6 +161,9 @@ pub enum WalDelta {
         /// the bytes or the reference's own checksum is that CRC.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         crc64nvme: Option<Checksum>,
+        /// Whole object supplied by upload evidence in this commit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<crate::ContentLayout>,
     },
     /// Hides a rooted subtree from snapshots at this delta's sequence or later.
     TombstoneSubtree {
@@ -377,6 +380,7 @@ pub(crate) fn encode_wal_payload_cbor(
 ) -> Result<Vec<u8>, EnvelopeCodecError> {
     validate_wal_inline_content(payload)?;
     validate_wal_revision_digests(payload)?;
+    validate_wal_revision_layouts(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
@@ -448,6 +452,7 @@ fn decode_wal_object_envelope_zstd_with_limit(
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
     validate_wal_inline_content(&payload)?;
     validate_wal_revision_digests(&payload)?;
+    validate_wal_revision_layouts(&payload)?;
 
     Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
@@ -599,6 +604,38 @@ fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), Envelop
     Ok(())
 }
 
+fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), EnvelopeCodecError> {
+    for record in &payload.records {
+        for delta in &record.deltas {
+            let WalDelta::AppendFileRevision {
+                content_ref,
+                layout: Some(layout),
+                ..
+            } = &delta.delta
+            else {
+                continue;
+            };
+            let invalid = |reason| EnvelopeCodecError::InvalidWalRevisionLayout {
+                seq: record.committed_seq,
+                content_id: content_ref.content_id.clone(),
+                reason,
+            };
+            layout
+                .validate(content_ref.size_bytes)
+                .map_err(|error| invalid(error.reason))?;
+            if layout.extents.iter().any(|extent| {
+                extent.owner_namespace_id != content_ref.owner_namespace_id
+                    || extent.content_id != content_ref.content_id
+            }) {
+                return Err(invalid(
+                    "extent owner and content id must match the reference",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic)]
@@ -685,6 +722,7 @@ mod tests {
                             ),
                             hash_state: None,
                             crc64nvme: None,
+                            layout: None,
                         },
                     }],
                     inline_content: vec![WalInlineContent {
@@ -935,6 +973,52 @@ mod tests {
             decode_wal_object_envelope_zstd_with_limit(&invalid, 64),
             Err(EnvelopeCodecError::EnvelopeDecode(_))
         ));
+    }
+
+    #[test]
+    fn revision_layouts_must_cover_and_name_the_reference() {
+        for invalid in 0..4 {
+            let mut payload = inline_wal_object(&[3]);
+            let WalDelta::AppendFileRevision {
+                content_ref,
+                layout,
+                ..
+            } = &mut payload.records[0].deltas[0].delta
+            else {
+                panic!("revision");
+            };
+            let mut extent = crate::ContentExtent {
+                owner_namespace_id: content_ref.owner_namespace_id.clone(),
+                content_id: content_ref.content_id.clone(),
+                object: crate::ExtentObject::Whole,
+                offset: 0,
+                length: 3,
+            };
+            match invalid {
+                1 => extent.length = 2,
+                2 => extent.owner_namespace_id = NamespaceId::parse("other").expect("namespace"),
+                3 => extent.content_id = ContentId::generate(),
+                _ => {}
+            }
+            *layout = Some(crate::ContentLayout {
+                extents: vec![extent],
+            });
+            let decoded = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload));
+            let encoded = encode_wal_object_envelope_zstd(payload);
+            if invalid == 0 {
+                assert!(decoded.is_ok());
+                assert!(encoded.is_ok());
+            } else {
+                assert!(matches!(
+                    decoded,
+                    Err(EnvelopeCodecError::InvalidWalRevisionLayout { .. })
+                ));
+                assert!(matches!(
+                    encoded,
+                    Err(EnvelopeCodecError::InvalidWalRevisionLayout { .. })
+                ));
+            }
+        }
     }
 
     fn assert_revision_digests_rejected(payload: WalObjectPayload, expected_reason: &str) {
