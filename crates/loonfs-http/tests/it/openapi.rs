@@ -446,7 +446,13 @@ fn openapi_documents_current_server_paths() {
         paths,
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
         "post",
-        &["snapshot_id"],
+        &["snapshot_id", "start_offset"],
+    );
+    assert_query_params(
+        paths,
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+        "post",
+        &["start_offset"],
     );
     assert_query_params(
         paths,

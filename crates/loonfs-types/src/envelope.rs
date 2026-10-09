@@ -67,6 +67,18 @@ pub enum EnvelopeCodecError {
         /// Format rule violated by the entry.
         reason: &'static str,
     },
+    /// Reports a revision delta whose recorded digests do not describe its reference.
+    #[error(
+        "invalid wal revision digest in commit `{seq}` for `content_id` `{content_id}`: {reason}"
+    )]
+    InvalidWalRevisionDigest {
+        /// Commit containing the rejected delta.
+        seq: crate::ChangeSeq,
+        /// Content the delta's reference names.
+        content_id: crate::ContentId,
+        /// Format rule violated by the delta.
+        reason: &'static str,
+    },
     /// Reports an unrecognized durable-family discriminator found during the envelope probe.
     #[error("unknown envelope kind `{found}`")]
     UnknownKind {

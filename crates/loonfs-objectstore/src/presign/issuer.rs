@@ -1,6 +1,7 @@
 //! Interfaces for issuing presigned reads and writes.
 
 use crate::object_store::Result;
+use crate::ByteRange;
 use async_trait::async_trait;
 use loonfs_types::{Checksum, ChecksumAlgorithm};
 use std::collections::BTreeMap;
@@ -17,14 +18,40 @@ pub struct PresignedPutRequest<'a> {
     pub expires_in: Duration,
 }
 
-/// Describes one read of an existing content object.
+/// Describes one read of exactly `range` of an existing content object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresignedGetRequest<'a> {
     /// Logical unscoped object key that the issuer resolves beneath its configured prefix.
     pub object_key: &'a str,
+    /// The bytes the capability reads. The issuer signs them as the `Range`
+    /// header, so the provider refuses a request for any other bytes. An
+    /// empty range signs no `Range`, because HTTP cannot name zero bytes; a
+    /// caller asks for one only for an object that holds none.
+    pub range: ByteRange,
     /// Requested lifetime measured from the supplied signing time. Temporary
     /// credentials can impose an earlier expiry, reported by the issued URL.
     pub expires_in: Duration,
+}
+
+impl PresignedGetRequest<'_> {
+    /// The `Range` header value the capability signs, `bytes={first}-{last}`,
+    /// or `None` for an empty range.
+    pub fn range_header(&self) -> Option<String> {
+        (self.range.start_inclusive < self.range.end_exclusive).then(|| {
+            format!(
+                "bytes={}-{}",
+                self.range.start_inclusive,
+                self.range.end_exclusive - 1
+            )
+        })
+    }
+
+    pub(crate) fn signed_headers(&self) -> BTreeMap<String, String> {
+        self.range_header()
+            .map(|range| ("range".to_owned(), range))
+            .into_iter()
+            .collect()
+    }
 }
 
 /// Describes one part of an open multipart upload to authorize for a client.
@@ -95,11 +122,13 @@ pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
 /// from the provider.
 #[async_trait]
 pub trait DirectGetIssuer: Send + Sync + std::fmt::Debug {
-    /// Issues a read capability for one content object.
+    /// Issues a read capability for exactly `request.range` of one content
+    /// object.
     ///
-    /// One capability may be used for ranged, resumed, or parallel reads.
-    /// Implementations must not sign the `Range` header, because doing so
-    /// would restrict the capability to one byte range.
+    /// Implementations sign the `Range` header and return it in the
+    /// capability's headers. An object can be longer than a reference that
+    /// names it, so a capability without the range would read bytes
+    /// appended after the reference.
     ///
     /// Issuance fails for invalid keys, invalid expiry policy, unusable
     /// signing time, or malformed provider configuration.

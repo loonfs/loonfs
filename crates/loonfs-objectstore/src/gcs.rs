@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::FutureExt;
 use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
-use loonfs_types::{Checksum, NamespaceId};
+use loonfs_types::{Checksum, ChecksumAlgorithm, NamespaceId};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use std::collections::BTreeMap;
@@ -239,7 +239,7 @@ impl MultipartController for GcsRequestSigner {
         &self,
         key: &str,
         head: Bytes,
-        mut rest: PartReader,
+        mut rest: PartReader<'_>,
         sha256: Option<&Checksum>,
     ) -> Result<ObjectMetadata> {
         let url = format!(
@@ -356,6 +356,7 @@ impl MultipartController for GcsRequestSigner {
         if result
             .crc
             .as_ref()
+            .filter(|expected| expected.algorithm == ChecksumAlgorithm::Crc32c)
             .is_some_and(|expected| crc32c.as_ref() != Some(expected))
         {
             return Err(ObjectStoreError::ChecksumMismatch {

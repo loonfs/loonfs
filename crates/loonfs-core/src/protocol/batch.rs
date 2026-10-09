@@ -14,7 +14,6 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
-use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, Observation};
 use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
@@ -44,7 +43,6 @@ pub(crate) enum PublishViewEffect {
     Invalidated,
     Advanced {
         records: Vec<WalCommitPayload>,
-        inline_content: Vec<InlineContent>,
         head: NamespaceReadState,
     },
 }
@@ -267,10 +265,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Advanced {
             records: wal_records,
-            inline_content: accepted_commits
-                .into_iter()
-                .flat_map(|commit| commit.inline_content)
-                .collect(),
             head: resulting_head,
         },
     }
@@ -402,6 +396,8 @@ mod tests {
                 ),
                 vec![PreparedContent::for_completed_upload(
                     content_ref,
+                    None,
+                    None,
                     expires_at_ms,
                     None,
                 )],

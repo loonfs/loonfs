@@ -7,9 +7,14 @@ use crate::error::{CoreError, Result};
 use crate::path::mutation_path::parse_mutation_path;
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use crate::storage::content_admission::PreparedContent;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ObjectStore, PutMode};
+use loonfs_types::format::wal::{
+    encode_wal_object_envelope_zstd, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
+    WalObjectPayload,
+};
 use loonfs_types::{
-    Commit, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
+    ChangeSeq, Commit, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId,
+    RevisionNo,
 };
 
 pub(crate) async fn create<S: ObjectStore + ?Sized>(
@@ -250,6 +255,61 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
         context,
     )
     .await
+}
+
+/// Publishes `deltas` and `inline_content` as one commit in the next WAL
+/// object, without planning, for WAL shapes no operation writes yet.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test writes the next numbered WAL object directly"
+)]
+pub(crate) async fn append_wal_commit<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    deltas: Vec<WalDelta>,
+    inline_content: Vec<WalInlineContent>,
+) -> Result<ChangeSeq> {
+    let head = crate::namespace::control::load_namespace_read_state(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    let committed_seq = ChangeSeq(head.seq.0 + 1);
+    let wal_no = loonfs_types::WalNo(head.wal_no.0 + 1);
+    let payload = WalObjectPayload {
+        namespace_id: namespace_id.clone(),
+        wal_no,
+        writer_epoch: head.writer_epoch,
+        head_seq: committed_seq,
+        next_inode_id: head.next_inode_id,
+        records: vec![WalCommitPayload {
+            committed_seq,
+            commit_id: CommitId::generate(),
+            committed_by: loonfs_test_support::test_actor(),
+            semantic_commit_fingerprint: serde_json::from_str(&format!(
+                r#""v1:sha256:{:064x}""#,
+                committed_seq.0
+            ))
+            .expect("fingerprint"),
+            committed_at_ms: 0,
+            message: None,
+            deltas: deltas
+                .into_iter()
+                .enumerate()
+                .map(|(index, delta)| WalCommitDelta {
+                    semantic_operation_index: index as u32,
+                    delta,
+                })
+                .collect(),
+            inline_content,
+        }],
+    };
+    let object = encode_wal_object_envelope_zstd(payload)
+        .map_err(|error| CoreError::Internal(error.to_string()))?;
+    let key = loonfs_objectstore::keys::wal_object(namespace_id, &wal_no);
+    store
+        .put(&key, object.into_bytes().into(), PutMode::CreateIfAbsent)
+        .await
+        .map_err(|error| CoreError::store(&key, &error))?;
+    Ok(committed_seq)
 }
 
 pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(

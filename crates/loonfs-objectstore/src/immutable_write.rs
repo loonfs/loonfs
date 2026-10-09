@@ -21,8 +21,9 @@ pub enum ImmutableWriteError {
         /// Durable key whose existing bytes violated immutability.
         object_key: String,
     },
-    /// The key holds an object whose writer attested no SHA-256, so whether
-    /// it holds the supplied bytes is undecided.
+    /// Whether the key holds the supplied bytes is undecided: the object
+    /// there carries no SHA-256 attestation, or the write had none to
+    /// compare with it.
     #[error("immutable object `{object_key}` already exists without a sha256 attestation")]
     Unattested {
         /// Durable key whose existing object carries no attestation.
@@ -90,20 +91,49 @@ where
     match written {
         Ok(metadata) => Ok(metadata),
         Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => {
-            match store.head(key).await {
-                Ok(Some(existing)) => match &existing.sha256 {
-                    Some(attested) if *attested == Checksum::sha256(bytes) => Ok(existing),
-                    Some(_) => Err(ImmutableWriteError::DifferentObject {
-                        object_key: key.to_owned(),
-                    }),
-                    None => Err(ImmutableWriteError::Unattested {
-                        object_key: key.to_owned(),
-                    }),
-                },
-                Ok(None) => Err(transport(key, conflict)),
-                Err(error) => Err(transport(key, error)),
-            }
+            decide_occupied(store, key, &Checksum::sha256(bytes), conflict).await
         }
+        Err(error) => Err(transport(key, error)),
+    }
+}
+
+/// Decides a create that attested `sha256` when given: a key found
+/// occupied holds this object only when its attestation equals `sha256`.
+pub(crate) async fn decide_created<S: ObjectStore + ?Sized>(
+    store: &S,
+    key: &str,
+    sha256: Option<&Checksum>,
+    created: crate::object_store::Result<ObjectMetadata>,
+) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
+    match created {
+        Ok(metadata) => Ok(metadata),
+        Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => match sha256 {
+            Some(sha256) => decide_occupied(store, key, sha256, conflict).await,
+            None => Err(ImmutableWriteError::Unattested {
+                object_key: key.to_owned(),
+            }),
+        },
+        Err(error) => Err(transport(key, error)),
+    }
+}
+
+async fn decide_occupied<S: ObjectStore + ?Sized>(
+    store: &S,
+    key: &str,
+    sha256: &Checksum,
+    conflict: ObjectStoreError,
+) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
+    match store.head(key).await {
+        Ok(Some(existing)) => match &existing.sha256 {
+            Some(attested) if attested == sha256 => Ok(existing),
+            Some(_) => Err(ImmutableWriteError::DifferentObject {
+                object_key: key.to_owned(),
+            }),
+            None => Err(ImmutableWriteError::Unattested {
+                object_key: key.to_owned(),
+            }),
+        },
+        Ok(None) => Err(transport(key, conflict)),
         Err(error) => Err(transport(key, error)),
     }
 }

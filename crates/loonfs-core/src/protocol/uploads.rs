@@ -46,9 +46,36 @@ use loonfs_types::format::control::{
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, NamespaceAccess,
-    NamespaceId, Subject, SubjectId, UploadId,
+    NamespaceId, Sha256State, Subject, SubjectId, UploadId,
 };
 use std::num::NonZeroU64;
+
+/// A reference a completion records, with the SHA-256 state and CRC-64/NVME
+/// of its bytes when this process wrote them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedContent {
+    content_ref: ContentRef,
+    hash_state: Option<Sha256State>,
+    crc64nvme: Option<Checksum>,
+}
+
+impl VerifiedContent {
+    fn written(content_ref: ContentRef, hash_state: Sha256State, crc64nvme: Checksum) -> Self {
+        Self {
+            content_ref,
+            hash_state: Some(hash_state),
+            crc64nvme: Some(crc64nvme),
+        }
+    }
+
+    fn uploaded(content_ref: ContentRef) -> Self {
+        Self {
+            content_ref,
+            hash_state: None,
+            crc64nvme: None,
+        }
+    }
+}
 
 /// Internal target for a new direct_put session, used by the server before
 /// signing its URL.
@@ -516,9 +543,9 @@ enum StagingSlot {
     /// The request holds the claim and is the only one that may write.
     Claimed,
     /// The session already staged content, so nothing is written. The
-    /// caller decides from this reference whether its bytes are the same
+    /// caller decides from this staged state whether its bytes are the same
     /// upload arriving twice or a conflicting one.
-    AlreadyStaged(ContentRef),
+    AlreadyStaged(ProxiedStaging),
 }
 
 /// Takes the exclusive right to write this session's content object.
@@ -557,8 +584,8 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
                     })
                 }
                 ProxiedStaging::Claimed => Err(CoreError::UploadContentConflict { upload_id }),
-                ProxiedStaging::Staged(content_ref) => Ok(UploadSessionUpdate::Noop(
-                    StagingSlot::AlreadyStaged(content_ref.clone()),
+                staged @ ProxiedStaging::Staged { .. } => Ok(UploadSessionUpdate::Noop(
+                    StagingSlot::AlreadyStaged(staged.clone()),
                 )),
             }
         }
@@ -710,7 +737,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
     // The claim is what makes the write exclusive, so it is taken before any
     // byte is written and released by the same swap that records the result.
     match claim_staging_slot(store, namespace_id, upload_id, now_ms).await? {
-        StagingSlot::AlreadyStaged(staged) => {
+        StagingSlot::AlreadyStaged(staging) => {
             let content_ref = match payload {
                 ProxiedPayload::Bytes(bytes) => ContentRef::blob_v1(
                     loaded.namespace_id.clone(),
@@ -726,14 +753,13 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
                     .await?
                 }
             };
-            if staged != content_ref {
+            if !matches!(&staging, ProxiedStaging::Staged { content_ref: staged, .. } if *staged == content_ref)
+            {
                 return Err(CoreError::UploadContentConflict {
                     upload_id: upload_id.clone(),
                 });
             }
-            loaded.mode = UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged(content_ref),
-            };
+            loaded.mode = UploadSessionMode::ServiceProxied { staging };
             return Ok(session_response(&loaded));
         }
         StagingSlot::Claimed => {}
@@ -748,7 +774,14 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
             bytes,
         )
         .await
-        .map(|stored| (stored.into_content_ref(), false)),
+        .map(|stored| {
+            let staging = ProxiedStaging::Staged {
+                content_ref: stored.content_ref,
+                hash_state: stored.hash_state,
+                crc64nvme: stored.crc64nvme,
+            };
+            (staging, false)
+        }),
         ProxiedPayload::Stream(body) => stage_streamed_under_content_id(
             store,
             loaded.namespace_id.clone(),
@@ -769,9 +802,16 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
             },
         )
         .await
-        .map(|staged| (staged.content_ref, staged.already_present)),
+        .map(|staged| {
+            let staging = ProxiedStaging::Staged {
+                content_ref: staged.content_ref,
+                hash_state: staged.hash_state,
+                crc64nvme: staged.crc64nvme,
+            };
+            (staging, staged.already_present)
+        }),
     };
-    let (content_ref, already_present) = match staged {
+    let (staging, already_present) = match staged {
         Ok(staged) => staged,
         Err(error) => {
             if !final_request_may_be_sent {
@@ -785,7 +825,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         upload_id,
-        content_ref,
+        staging,
         already_present,
         now_ms,
     )
@@ -806,13 +846,13 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    content_ref: ContentRef,
+    staged: ProxiedStaging,
     already_present: bool,
     now_ms: u64,
 ) -> Result<UploadSession> {
     update_upload_session(store, namespace_id, upload_id, |mut state| {
         let upload_id = upload_id.to_owned();
-        let content_ref = content_ref.clone();
+        let staged = staged.clone();
         async move {
             ensure_session_open(&state, now_ms)?;
             let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
@@ -824,15 +864,15 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                 return Err(CoreError::UploadContentConflict { upload_id });
             }
             match staging {
-                ProxiedStaging::Staged(existing) if *existing == content_ref => {
+                ProxiedStaging::Staged { .. } if *staging == staged => {
                     return Ok(UploadSessionUpdate::Noop(session_response(&state)));
                 }
-                ProxiedStaging::Staged(_) => {
+                ProxiedStaging::Staged { .. } => {
                     return Err(CoreError::UploadContentConflict { upload_id });
                 }
                 ProxiedStaging::Idle | ProxiedStaging::Claimed => {}
             }
-            *staging = ProxiedStaging::Staged(content_ref);
+            *staging = staged;
             let response = session_response(&state);
             Ok(UploadSessionUpdate::Replace {
                 next: Box::new(state),
@@ -916,7 +956,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     upload_id: &UploadId,
-    verified: &ContentRef,
+    verified: &VerifiedContent,
     now_ms: u64,
 ) -> Result<CompletedUpload> {
     freeze_completed_session_from_initial(store, catalog, upload_id, verified, now_ms, None).await
@@ -926,7 +966,7 @@ async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     upload_id: &UploadId,
-    verified: &ContentRef,
+    verified: &VerifiedContent,
     now_ms: u64,
     initial: Option<LoadedControl<UploadSessionPayload>>,
 ) -> Result<CompletedUpload> {
@@ -944,7 +984,7 @@ async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
                     &state.status,
                     &namespace_id,
                     &upload_id,
-                    Some(&verified),
+                    Some(&verified.content_ref),
                     upload_mode(&state.mode),
                     now_ms,
                 )? {
@@ -953,7 +993,9 @@ async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
 
                 state.status = UploadSessionRecordStatus::Completed {
                     completed_at_ms: now_ms,
-                    content_ref: verified.clone(),
+                    content_ref: verified.content_ref.clone(),
+                    hash_state: verified.hash_state.clone(),
+                    crc64nvme: verified.crc64nvme.clone(),
                 };
                 let outcome = completed_upload(
                     &namespace_id,
@@ -1006,7 +1048,7 @@ pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
         store,
         catalog,
         &session.upload_id,
-        stored.into_content_ref(),
+        VerifiedContent::written(stored.content_ref, stored.hash_state, stored.crc64nvme),
         context,
         session.initial,
     )
@@ -1059,7 +1101,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         store,
         catalog,
         &session.upload_id,
-        staged.content_ref,
+        VerifiedContent::written(staged.content_ref, staged.hash_state, staged.crc64nvme),
         context,
         session.initial,
     )
@@ -1111,7 +1153,7 @@ async fn complete_owned_staging<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     upload_id: &UploadId,
-    content_ref: ContentRef,
+    written: VerifiedContent,
     context: &MutationContext,
     initial: Option<LoadedControl<UploadSessionPayload>>,
 ) -> Result<PreparedContent> {
@@ -1119,7 +1161,7 @@ async fn complete_owned_staging<S: ObjectStore + ?Sized>(
         store,
         catalog,
         upload_id,
-        &content_ref,
+        &written,
         context.now_ms,
         initial,
     )
@@ -1272,7 +1314,17 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
         UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
-        } => evidence_within_window(content_ref, *completed_at_ms, now_ms),
+            hash_state,
+            crc64nvme,
+        } => evidence_within_window(
+            &VerifiedContent {
+                content_ref: content_ref.clone(),
+                hash_state: hash_state.clone(),
+                crc64nvme: crc64nvme.clone(),
+            },
+            *completed_at_ms,
+            now_ms,
+        ),
         UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. } => None,
     };
     let direct_put_object_key = if matches!(loaded.status, UploadSessionRecordStatus::Open { .. })
@@ -1303,7 +1355,7 @@ fn session_response(state: &UploadSessionPayload) -> UploadSession {
             access: None,
             content_ref: match &state.mode {
                 UploadSessionMode::ServiceProxied {
-                    staging: ProxiedStaging::Staged(content_ref),
+                    staging: ProxiedStaging::Staged { content_ref, .. },
                 } => Some(content_ref.clone()),
                 _ => None,
             },
@@ -1311,6 +1363,7 @@ fn session_response(state: &UploadSessionPayload) -> UploadSession {
         UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
+            ..
         } => completed_status(content_ref, *completed_at_ms),
         UploadSessionRecordStatus::Aborted { aborted_at_ms } => UploadSessionStatus::Aborted {
             aborted_at_ms: *aborted_at_ms,
@@ -1342,7 +1395,7 @@ pub struct CompletedUpload {
 fn completed_upload(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    content_ref: &ContentRef,
+    content: &VerifiedContent,
     mode: UploadMode,
     completed_at_ms: u64,
     now_ms: u64,
@@ -1352,14 +1405,16 @@ fn completed_upload(
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             mode,
-            status: completed_status(content_ref, completed_at_ms),
+            status: completed_status(&content.content_ref, completed_at_ms),
         },
         prepared: PreparedContent::for_completed_upload(
-            content_ref.clone(),
+            content.content_ref.clone(),
+            content.hash_state.clone(),
+            content.crc64nvme.clone(),
             completed_at_ms.saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS),
             Some(upload_id.clone()),
         ),
-        evidence: evidence_within_window(content_ref, completed_at_ms, now_ms),
+        evidence: evidence_within_window(content, completed_at_ms, now_ms),
     }
 }
 
@@ -1378,12 +1433,17 @@ fn completed_status(content_ref: &ContentRef, completed_at_ms: u64) -> UploadSes
 /// evidence exists, so no new metadata reference to this content can appear
 /// (`limits::CONTENT_RECLAMATION_GRACE_MS`).
 fn evidence_within_window(
-    content_ref: &ContentRef,
+    content: &VerifiedContent,
     completed_at_ms: u64,
     now_ms: u64,
 ) -> Option<CompletedUploadEvidence> {
     (now_ms.saturating_sub(completed_at_ms) < COMPLETED_UPLOAD_RECEIPT_WINDOW_MS).then(|| {
-        CompletedUploadEvidence::for_completed_session(content_ref.clone(), completed_at_ms)
+        CompletedUploadEvidence::for_completed_session(
+            content.content_ref.clone(),
+            content.hash_state.clone(),
+            content.crc64nvme.clone(),
+            completed_at_ms,
+        )
     })
 }
 
@@ -1406,6 +1466,8 @@ fn replay_terminal_completion(
         UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
+            hash_state,
+            crc64nvme,
         } => {
             if expected.is_some_and(|expected| expected != content_ref) {
                 return Err(CoreError::UploadAlreadyCompleted {
@@ -1415,7 +1477,11 @@ fn replay_terminal_completion(
             Ok(Some(completed_upload(
                 namespace_id,
                 upload_id,
-                content_ref,
+                &VerifiedContent {
+                    content_ref: content_ref.clone(),
+                    hash_state: hash_state.clone(),
+                    crc64nvme: crc64nvme.clone(),
+                },
                 mode,
                 *completed_at_ms,
                 now_ms,
@@ -1427,7 +1493,7 @@ fn replay_terminal_completion(
 /// Information needed to verify an upload before completion.
 enum CompletionPlan<'a> {
     /// Content previously staged through the server.
-    Proxied { staged: Option<&'a ContentRef> },
+    Proxied { staging: &'a ProxiedStaging },
     /// Directly uploaded content that must be checked at the provider.
     DirectPut { requested: ContentRef },
     /// Parts the provider must assemble and verify.
@@ -1476,12 +1542,7 @@ fn completion_plan<'a>(
 
     match (&session.mode, completion) {
         (UploadSessionMode::ServiceProxied { staging }, ResolvedUploadCompletion::KnownContent) => {
-            Ok(CompletionPlan::Proxied {
-                staged: match staging {
-                    ProxiedStaging::Staged(content_ref) => Some(content_ref),
-                    ProxiedStaging::Idle | ProxiedStaging::Claimed => None,
-                },
-            })
+            Ok(CompletionPlan::Proxied { staging })
         }
         (
             UploadSessionMode::DirectPut { checksum_algorithm },
@@ -1528,16 +1589,28 @@ fn completion_plan<'a>(
 async fn verify_completion<S: ObjectStore + ?Sized>(
     store: &S,
     plan: CompletionPlan<'_>,
-) -> Result<ContentRef> {
+) -> Result<VerifiedContent> {
     match plan {
-        CompletionPlan::Proxied { staged } => staged.cloned().ok_or_else(|| {
-            CoreError::InvalidUploadContent("upload content has not been staged".to_owned())
-        }),
+        CompletionPlan::Proxied {
+            staging:
+                ProxiedStaging::Staged {
+                    content_ref,
+                    hash_state,
+                    crc64nvme,
+                },
+        } => Ok(VerifiedContent::written(
+            content_ref.clone(),
+            hash_state.clone(),
+            crc64nvme.clone(),
+        )),
+        CompletionPlan::Proxied { .. } => Err(CoreError::InvalidUploadContent(
+            "upload content has not been staged".to_owned(),
+        )),
         CompletionPlan::DirectPut { requested } => {
             verify_durable_content_checksum(store, &requested)
                 .await
                 .map_err(content_failure)?;
-            Ok(requested)
+            Ok(VerifiedContent::uploaded(requested))
         }
         CompletionPlan::DirectMultipart {
             requested,
@@ -1553,7 +1626,7 @@ async fn verify_completion<S: ObjectStore + ?Sized>(
                 &requested,
             )
             .await?;
-            Ok(requested)
+            Ok(VerifiedContent::uploaded(requested))
         }
     }
 }
@@ -1778,7 +1851,7 @@ mod tests {
         assert!(!matches!(
             loaded.mode,
             UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged(_)
+                staging: ProxiedStaging::Staged { .. }
             }
         ));
     }
@@ -1903,7 +1976,7 @@ mod tests {
         assert!(matches!(
             state.mode,
             UploadSessionMode::ServiceProxied {
-                staging: ProxiedStaging::Staged(_)
+                staging: ProxiedStaging::Staged { .. }
             }
         ));
     }
@@ -1944,11 +2017,15 @@ mod tests {
                 staging: ProxiedStaging::Idle,
             }
         );
+        let mut hash_state = Sha256State::new();
+        hash_state.update(BYTES);
         assert_eq!(
             state.status,
             UploadSessionRecordStatus::Completed {
                 completed_at_ms: 2_000,
                 content_ref: content_ref.clone(),
+                hash_state: Some(hash_state),
+                crc64nvme: Some(Checksum::crc64nvme(BYTES)),
             }
         );
 
@@ -2014,7 +2091,7 @@ mod tests {
                 &store,
                 &catalog,
                 &upload_id,
-                &content_ref,
+                &VerifiedContent::uploaded(content_ref.clone()),
                 3_000,
                 Some(initial),
             )

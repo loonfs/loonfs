@@ -80,6 +80,21 @@ const REVISION_BYTES: usize = delta_bytes(
         ("inode_id", INTEGER_BYTES),
         ("revision_no", INTEGER_BYTES),
         ("content_ref", CONTENT_REF_BYTES),
+        (
+            "hash_state",
+            map_bytes(&[
+                ("words", 9 + 8 * INDEX_BYTES),
+                ("tail", string_bytes(63)),
+                ("length", INTEGER_BYTES),
+            ]),
+        ),
+        (
+            "crc64nvme",
+            map_bytes(&[
+                ("algorithm", string_bytes("crc64nvme".len())),
+                ("value", string_bytes(16)),
+            ]),
+        ),
     ],
 );
 const ATTRIBUTES_BYTES: usize = delta_bytes(
@@ -190,6 +205,7 @@ pub(crate) fn estimated_wal_record_bytes(
                         "content_id",
                         string_bytes(value.content_ref().content_id.as_str().len()),
                     ),
+                    ("offset", INTEGER_BYTES),
                     ("bytes", string_bytes(value.bytes().len())),
                 ]))
             })

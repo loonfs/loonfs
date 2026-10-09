@@ -189,9 +189,10 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     assert_eq!(
         current
             .projected_metadata_view()
-            .find_content_publication(&old_reference.content_id)
+            .content_head(&old_reference.content_id)
             .await
-            .expect("permanent publication"),
+            .expect("permanent publication")
+            .map(|head| head.committed_seq),
         Some(original.committed_seq)
     );
     drop(current);

@@ -130,12 +130,21 @@ impl MetadataState {
                 inode_id,
                 revision_no,
                 content_ref,
+                hash_state,
+                crc64nvme,
             } => {
-                if self.find_content_publication(&content_ref.content_id) != Some(committed_seq) {
+                if !self.publishes_in_commit(
+                    committed_seq,
+                    &content_ref.content_id,
+                    content_ref.size_bytes,
+                ) {
                     self.push_content_publication_record(ContentPublicationRecord {
                         content_id: content_ref.content_id.clone(),
                         committed_seq,
                         delta_index: *delta_index,
+                        size_bytes: content_ref.size_bytes,
+                        hash_state: hash_state.clone(),
+                        crc64nvme: crc64nvme.clone(),
                     });
                 }
                 self.push_revision_record(RevisionRecord {

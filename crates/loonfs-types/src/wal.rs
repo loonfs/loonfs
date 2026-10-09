@@ -5,13 +5,13 @@ use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::manifest::{DeletedBinding, DeltaPosition};
 use crate::{
-    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitFingerprint,
-    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
-    RevisionNo, WalNo, WriterEpoch,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, Checksum,
+    ChecksumAlgorithm, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName, InodeId,
+    InodeKind, NameKey, NamespaceId, RevisionNo, Sha256State, WalNo, WriterEpoch,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Read;
 
 /// Version 1: a zstd-compressed CBOR envelope document carrying the payload
@@ -153,6 +153,14 @@ pub enum WalDelta {
         /// publication; inline bytes travel in this commit's `inline_content`
         /// ([format section 1.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#15-file-contents-and-ownership)).
         content_ref: ContentRef,
+        /// SHA-256 state after the reference's bytes, recorded when the
+        /// reference is a SHA-256 and the writer had the bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hash_state: Option<Sha256State>,
+        /// CRC-64/NVME of the reference's bytes, recorded when the writer had
+        /// the bytes or the reference's own checksum is that CRC.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crc64nvme: Option<Checksum>,
     },
     /// Hides a rooted subtree from snapshots at this delta's sequence or later.
     TombstoneSubtree {
@@ -251,15 +259,32 @@ pub fn committed_activity(deltas: &[WalCommitDelta]) -> Option<crate::manifest::
     Some(activity)
 }
 
-/// Carries bytes named by a revision delta in the same commit.
+/// Carries bytes of a content object named by a revision delta in the same
+/// commit, starting at `offset`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalInlineContent {
     /// Identity shared with the accompanying `blob_v1` reference.
     pub content_id: ContentId,
-    /// Complete content encoded as a CBOR byte string.
+    /// Position of the first byte in the content object.
+    pub offset: u64,
+    /// The bytes, encoded as a CBOR byte string.
     #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
+    /// Content whose first `offset` bytes precede `bytes`, when this entry
+    /// starts a chain under a new content id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<ContentBase>,
+}
+
+/// Names the content object a chain copies its first bytes from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentBase {
+    /// Namespace that owns the base content.
+    pub owner_namespace_id: NamespaceId,
+    /// Identity of the base content.
+    pub content_id: ContentId,
 }
 
 /// Carries one accepted logical commit inside a WAL object.
@@ -333,6 +358,7 @@ pub(crate) fn encode_wal_payload_cbor(
     payload: &WalObjectPayload,
 ) -> Result<Vec<u8>, EnvelopeCodecError> {
     validate_wal_inline_content(payload)?;
+    validate_wal_revision_digests(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
@@ -403,11 +429,65 @@ fn decode_wal_object_envelope_zstd_with_limit(
     let payload: WalObjectPayload = from_reader(document.payload.as_slice())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
     validate_wal_inline_content(&payload)?;
+    validate_wal_revision_digests(&payload)?;
 
     Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
         payload,
     })
+}
+
+/// Checks what a revision delta records about its reference's bytes against
+/// the reference (A.4). A `hash_state` is the SHA-256 state after exactly
+/// the bytes a SHA-256 reference names, so its length and digest are the
+/// reference's. A `crc64nvme` is a CRC-64/NVME, and the reference's own
+/// checksum when that is one.
+fn validate_wal_revision_digests(payload: &WalObjectPayload) -> Result<(), EnvelopeCodecError> {
+    for record in &payload.records {
+        for delta in &record.deltas {
+            let WalDelta::AppendFileRevision {
+                content_ref,
+                hash_state,
+                crc64nvme,
+                ..
+            } = &delta.delta
+            else {
+                continue;
+            };
+            let invalid = |reason| EnvelopeCodecError::InvalidWalRevisionDigest {
+                seq: record.committed_seq,
+                content_id: content_ref.content_id.clone(),
+                reason,
+            };
+            let checksum = &content_ref.checksum;
+            if let Some(state) = hash_state {
+                if checksum.algorithm != ChecksumAlgorithm::Sha256 {
+                    return Err(invalid(
+                        "`hash_state` on a reference whose checksum is not a SHA-256",
+                    ));
+                }
+                if state.length() != content_ref.size_bytes {
+                    return Err(invalid(
+                        "`hash_state` length differs from the reference `size_bytes`",
+                    ));
+                }
+                if state.finish() != *checksum {
+                    return Err(invalid(
+                        "`hash_state` digest differs from the reference checksum",
+                    ));
+                }
+            }
+            if let Some(crc) = crc64nvme {
+                if crc.algorithm != ChecksumAlgorithm::Crc64nvme || crc.validate().is_err() {
+                    return Err(invalid("`crc64nvme` is not a CRC-64/NVME"));
+                }
+                if checksum.algorithm == ChecksumAlgorithm::Crc64nvme && crc != checksum {
+                    return Err(invalid("`crc64nvme` differs from the reference checksum"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), EnvelopeCodecError> {
@@ -416,40 +496,84 @@ fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), Envelop
         if record.inline_content.is_empty() {
             continue;
         }
-        let mut reference_sizes: BTreeMap<&ContentId, Vec<u64>> = BTreeMap::new();
+        let invalid =
+            |content_id: &ContentId, reason| EnvelopeCodecError::InvalidWalInlineContent {
+                seq: record.committed_seq,
+                content_id: content_id.clone(),
+                reason,
+            };
+        let mut reference_ends: BTreeMap<&ContentId, u64> = BTreeMap::new();
         for delta in &record.deltas {
             if let WalDelta::AppendFileRevision { content_ref, .. } = &delta.delta {
                 if content_ref.owner_namespace_id == payload.namespace_id {
-                    reference_sizes
-                        .entry(&content_ref.content_id)
-                        .or_default()
-                        .push(content_ref.size_bytes);
+                    let end = reference_ends.entry(&content_ref.content_id).or_default();
+                    *end = (*end).max(content_ref.size_bytes);
                 }
             }
         }
-        let mut content_ids = BTreeSet::new();
+        let mut entries: BTreeMap<&ContentId, BTreeMap<u64, &WalInlineContent>> = BTreeMap::new();
         for entry in &record.inline_content {
-            let invalid = |reason| EnvelopeCodecError::InvalidWalInlineContent {
-                seq: record.committed_seq,
-                content_id: entry.content_id.clone(),
-                reason,
-            };
-            if !content_ids.insert(&entry.content_id) {
-                return Err(invalid("duplicate `content_id` in commit"));
-            }
             if entry.bytes.len() > MAX_WAL_INLINE_CONTENT_BYTES {
-                return Err(invalid("value exceeds `MAX_WAL_INLINE_CONTENT_BYTES`"));
-            }
-            let sizes = reference_sizes.get(&entry.content_id).ok_or_else(|| {
-                invalid("no `append_file_revision` reference in the same commit owned by the WAL object's `namespace_id`")
-            })?;
-            if !sizes.iter().all(|&size| size == entry.bytes.len() as u64) {
-                return Err(invalid("length does not match reference `size_bytes`"));
+                return Err(invalid(
+                    &entry.content_id,
+                    "value exceeds `MAX_WAL_INLINE_CONTENT_BYTES`",
+                ));
             }
             total_bytes += entry.bytes.len();
             if total_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES {
                 return Err(invalid(
+                    &entry.content_id,
                     "WAL object inline total exceeds `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`",
+                ));
+            }
+            if !reference_ends.contains_key(&entry.content_id) {
+                return Err(invalid(&entry.content_id, "no `append_file_revision` reference in the same commit owned by the WAL object's `namespace_id`"));
+            }
+            if entries
+                .entry(&entry.content_id)
+                .or_default()
+                .insert(entry.offset, entry)
+                .is_some()
+            {
+                return Err(invalid(
+                    &entry.content_id,
+                    "duplicate `content_id` and `offset` in commit",
+                ));
+            }
+        }
+        for (content_id, by_offset) in entries {
+            let mut end = None;
+            for (offset, entry) in by_offset {
+                match &entry.base {
+                    Some(_) if offset == 0 => {
+                        return Err(invalid(content_id, "an entry at offset 0 names a `base`"))
+                    }
+                    Some(_) if end.is_some() => {
+                        return Err(invalid(
+                            content_id,
+                            "an entry after the first names a `base`",
+                        ))
+                    }
+                    Some(base) if &base.content_id == content_id => {
+                        return Err(invalid(
+                            content_id,
+                            "an entry names its own content as its `base`",
+                        ))
+                    }
+                    _ => {}
+                }
+                if end.is_some_and(|end| end != offset) {
+                    return Err(invalid(content_id, "entries are not contiguous"));
+                }
+                end = offset.checked_add(entry.bytes.len() as u64);
+                if end.is_none() {
+                    break;
+                }
+            }
+            if end != reference_ends.get(content_id).copied() {
+                return Err(invalid(
+                    content_id,
+                    "entries do not end at the reference `size_bytes`",
                 ));
             }
         }
@@ -517,9 +641,16 @@ mod tests {
                                 content_id.clone(),
                                 &bytes,
                             ),
+                            hash_state: None,
+                            crc64nvme: None,
                         },
                     }],
-                    inline_content: vec![WalInlineContent { content_id, bytes }],
+                    inline_content: vec![WalInlineContent {
+                        content_id,
+                        offset: 0,
+                        bytes,
+                        base: None,
+                    }],
                 }
             })
             .collect();
@@ -608,10 +739,11 @@ mod tests {
     }
 
     #[test]
-    fn inline_content_length_must_match_the_reference() {
+    fn inline_content_must_end_at_the_longest_reference() {
+        let expected_reason = "entries do not end at the reference `size_bytes`";
         let mut payload = inline_wal_object(&[3]);
         payload.records[0].inline_content[0].bytes.push(42);
-        assert_inline_content_rejected(payload, 0, "length does not match reference `size_bytes`");
+        assert_inline_content_rejected(payload, 0, expected_reason);
 
         let mut payload = inline_wal_object(&[3]);
         let mut other_reference = payload.records[0].deltas[0].clone();
@@ -630,15 +762,69 @@ mod tests {
             other => panic!("expected file revision, got {other:?}"),
         }
         payload.records[0].deltas.push(other_reference);
-        assert_inline_content_rejected(payload, 0, "length does not match reference `size_bytes`");
+        assert_inline_content_rejected(payload, 0, expected_reason);
     }
 
     #[test]
-    fn inline_content_ids_must_be_unique_within_each_commit() {
+    fn inline_content_offsets_must_be_unique_within_each_commit() {
         let mut payload = inline_wal_object(&[0]);
         let entry = payload.records[0].inline_content[0].clone();
         payload.records[0].inline_content.push(entry);
-        assert_inline_content_rejected(payload, 0, "duplicate `content_id` in commit");
+        assert_inline_content_rejected(payload, 0, "duplicate `content_id` and `offset` in commit");
+    }
+
+    /// One commit appending `[3, 8)` to a content id, as two entries.
+    fn appended_wal_object() -> WalObjectPayload {
+        let mut payload = inline_wal_object(&[8]);
+        let record = &mut payload.records[0];
+        let bytes = std::mem::take(&mut record.inline_content[0].bytes);
+        let entry = record.inline_content[0].clone();
+        record.inline_content = vec![
+            WalInlineContent {
+                offset: 3,
+                bytes: bytes[3..5].to_vec(),
+                ..entry.clone()
+            },
+            WalInlineContent {
+                offset: 5,
+                bytes: bytes[5..].to_vec(),
+                ..entry
+            },
+        ];
+        payload
+    }
+
+    #[test]
+    fn inline_entries_extend_contiguously_and_only_the_first_names_a_base() {
+        assert_inline_content_accepted(appended_wal_object());
+        let base = ContentBase {
+            owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
+            content_id: ContentId::parse("con_fedcba9876543210fedcba9876543210")
+                .expect("content id"),
+        };
+        let mut chain = appended_wal_object();
+        chain.records[0].inline_content[0].base = Some(base.clone());
+        assert_inline_content_accepted(chain);
+
+        let mut gap = appended_wal_object();
+        gap.records[0].inline_content[1].offset = 6;
+        gap.records[0].inline_content[1].bytes.pop();
+        assert_inline_content_rejected(gap, 0, "entries are not contiguous");
+
+        let mut later_base = appended_wal_object();
+        later_base.records[0].inline_content[1].base = Some(base.clone());
+        assert_inline_content_rejected(later_base, 0, "an entry after the first names a `base`");
+
+        let mut own_base = appended_wal_object();
+        own_base.records[0].inline_content[0].base = Some(ContentBase {
+            content_id: own_base.records[0].inline_content[0].content_id.clone(),
+            ..base.clone()
+        });
+        assert_inline_content_rejected(own_base, 0, "an entry names its own content as its `base`");
+
+        let mut first = inline_wal_object(&[3]);
+        first.records[0].inline_content[0].base = Some(base);
+        assert_inline_content_rejected(first, 0, "an entry at offset 0 names a `base`");
     }
 
     #[test]
@@ -707,5 +893,85 @@ mod tests {
             decode_wal_object_envelope_zstd_with_limit(&invalid, 64),
             Err(EnvelopeCodecError::EnvelopeDecode(_))
         ));
+    }
+
+    fn assert_revision_digests_rejected(payload: WalObjectPayload, expected_reason: &str) {
+        let expected_seq = payload.records[0].committed_seq;
+        let expected_content_id = payload.records[0].inline_content[0].content_id.clone();
+        let decoded_error = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload))
+            .expect_err("invalid revision digests should not decode");
+        let encoded_error = encode_wal_object_envelope_zstd(payload)
+            .expect_err("invalid revision digests should not encode");
+        for error in [decoded_error, encoded_error] {
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid wal revision digest in commit `{expected_seq}` for `content_id` `{expected_content_id}`: {expected_reason}"
+                ),
+            );
+            assert!(matches!(
+                error,
+                EnvelopeCodecError::InvalidWalRevisionDigest { seq, content_id, reason }
+                    if seq == expected_seq && content_id == expected_content_id && reason == expected_reason
+            ));
+        }
+    }
+
+    #[test]
+    fn revision_digests_must_describe_the_reference() {
+        let digests = |bytes: &[u8]| {
+            let mut state = Sha256State::new();
+            state.update(bytes);
+            (Some(state), Some(Checksum::crc64nvme(bytes)))
+        };
+        let with_digests =
+            |checksum: Option<Checksum>,
+             (hash_state, crc64nvme): (Option<Sha256State>, Option<Checksum>)| {
+                let mut payload = inline_wal_object(&[3]);
+                let WalDelta::AppendFileRevision {
+                    content_ref,
+                    hash_state: state,
+                    crc64nvme: crc,
+                    ..
+                } = &mut payload.records[0].deltas[0].delta
+                else {
+                    panic!("the fixture commits one revision");
+                };
+                if let Some(checksum) = checksum {
+                    content_ref.checksum = checksum;
+                }
+                *state = hash_state;
+                *crc = crc64nvme;
+                payload
+            };
+        let crc_reference = Some(Checksum::crc64nvme(&[42; 3]));
+
+        assert_inline_content_accepted(with_digests(None, digests(&[42; 3])));
+        assert_inline_content_accepted(with_digests(
+            crc_reference.clone(),
+            (None, Some(Checksum::crc64nvme(&[42; 3]))),
+        ));
+
+        let (state, _) = digests(&[42; 3]);
+        assert_revision_digests_rejected(
+            with_digests(crc_reference.clone(), (state, None)),
+            "`hash_state` on a reference whose checksum is not a SHA-256",
+        );
+        assert_revision_digests_rejected(
+            with_digests(None, digests(&[42; 4])),
+            "`hash_state` length differs from the reference `size_bytes`",
+        );
+        assert_revision_digests_rejected(
+            with_digests(None, digests(&[43; 3])),
+            "`hash_state` digest differs from the reference checksum",
+        );
+        assert_revision_digests_rejected(
+            with_digests(None, (None, Some(Checksum::sha256(&[42; 3])))),
+            "`crc64nvme` is not a CRC-64/NVME",
+        );
+        assert_revision_digests_rejected(
+            with_digests(crc_reference, (None, Some(Checksum::crc64nvme(&[43; 3])))),
+            "`crc64nvme` differs from the reference checksum",
+        );
     }
 }

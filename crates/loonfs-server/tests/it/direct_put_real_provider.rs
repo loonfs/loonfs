@@ -5,7 +5,7 @@
 use crate::common::{start_server, test_config};
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_client::{Client, ClientError, NamespacePath, PayloadSource};
+use loonfs_client::{Client, ClientError, DownloadOptions, NamespacePath, PayloadSource};
 use loonfs_objectstore::{
     AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
 };
@@ -222,7 +222,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
     assert_eq!(loaded, bytes);
 
     assert_direct_get_returns_the_written_bytes(&harness.client, &target, bytes).await;
-    assert_direct_get_capability_serves_ranges(&harness.client, &target, bytes).await;
+    assert_direct_get_capability_serves_only_its_range(&harness.client, &target, bytes).await;
 
     harness.server.abort();
 }
@@ -257,14 +257,14 @@ async fn assert_direct_get_returns_the_written_bytes(
     assert_eq!(received, bytes);
 }
 
-/// `Range` is not among the headers a presigned GET signs, so one issued
-/// capability serves ranged, resumed, and parallel reads without another
-/// round trip to the server.
+/// A grant signs the `Range` it names, so the provider serves those bytes
+/// and refuses any other range on the same URL, and a resume takes a new
+/// grant from its offset.
 ///
 /// That is a property of the provider's SigV4 verification, not of this
 /// codebase, which is why it is asserted here rather than only against the
 /// presigner's own unit tests: this is the run that can be wrong.
-async fn assert_direct_get_capability_serves_ranges(
+async fn assert_direct_get_capability_serves_only_its_range(
     client: &Client,
     target: &NamespacePath,
     bytes: &[u8],
@@ -272,25 +272,37 @@ async fn assert_direct_get_capability_serves_ranges(
     let grant = client
         .create_download(target)
         .await
-        .expect("begin download for ranged reads");
+        .expect("begin download");
     let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
+    let whole = format!("bytes=0-{}", bytes.len() - 1);
+    assert_eq!(headers.get("range"), Some(&whole));
+    assert_eq!(fetch_range(url, 0, bytes.len() - 1), bytes);
     assert!(
-        headers.is_empty(),
-        "a read capability requires the client to send nothing, which is what leaves \
-         `Range` free"
+        raw_agent()
+            .get(url)
+            .set("range", &format!("bytes=1-{}", bytes.len() - 1))
+            .call()
+            .is_err(),
+        "a range the grant does not sign was served"
     );
 
-    // Two windows, on the one URL, neither of which the signature knew
-    // about. Concatenating them must reproduce the object exactly.
     let split = bytes.len() / 2;
-    let head = fetch_range(url, 0, split - 1);
-    let tail = fetch_range(url, split, bytes.len() - 1);
-    assert_eq!(head, &bytes[..split]);
-    assert_eq!(tail, &bytes[split..]);
+    let rest = client
+        .create_download_with_options(
+            target,
+            &DownloadOptions {
+                start_offset: split as u64,
+                ..DownloadOptions::default()
+            },
+        )
+        .await
+        .expect("a grant from the resume offset");
+    let ObjectTransferAccess::PresignedUrl { url, .. } = &rest.access;
+    assert_eq!(fetch_range(url, split, bytes.len() - 1), &bytes[split..]);
 }
 
-/// Reads one inclusive byte range from a presigned URL with a `Range`
-/// header the signature never covered.
+/// Reads one inclusive byte range from a presigned URL with the `Range`
+/// header its signature covers.
 fn fetch_range(url: &str, first: usize, last: usize) -> Vec<u8> {
     let response = raw_agent()
         .get(url)
@@ -681,7 +693,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
 
     assert_gcs_completion_judges_the_object_that_is_there(&harness.client, &namespace_id).await;
     assert_gcs_signed_writes_land_under_the_configured_prefix(&harness, &store_config).await;
-    assert_gcs_read_capability_serves_ranges_and_resumes(&harness, namespace).await;
+    assert_gcs_read_capability_serves_only_its_range(&harness, namespace).await;
     assert_gcs_expired_capability_is_refused(&harness.client, &namespace_id).await;
     assert_gcs_cap_bound_object_moves_only_directly(&harness, namespace).await;
 
@@ -780,9 +792,9 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
     );
 }
 
-/// One read capability serves the whole object, arbitrary windows of it, and
-/// a resumption that stitches a prefix already in hand to the rest.
-async fn assert_gcs_read_capability_serves_ranges_and_resumes(
+/// A read capability serves exactly the range it signs: the whole object
+/// from offset 0, or the rest from a resume offset, and no other window.
+async fn assert_gcs_read_capability_serves_only_its_range(
     harness: &crate::common::TestServer,
     namespace: &str,
 ) {
@@ -805,14 +817,9 @@ async fn assert_gcs_read_capability_serves_ranges_and_resumes(
         .await
         .expect("begin download");
     let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
-    assert!(
-        headers.is_empty(),
-        "a read capability requires the client to send nothing, which is what leaves \
-         `Range` free"
-    );
+    let whole = format!("bytes=0-{}", payload.len() - 1);
+    assert_eq!(headers.get("range"), Some(&whole));
 
-    // The whole object, then three disjoint windows off the one URL that
-    // reassemble into it exactly.
     let mut received = Vec::new();
     harness
         .client
@@ -820,20 +827,29 @@ async fn assert_gcs_read_capability_serves_ranges_and_resumes(
         .await
         .expect("read the whole object");
     assert_eq!(received, payload);
-
-    let cuts = [0, 12_345, 60_000, payload.len()];
-    let mut reassembled = Vec::new();
-    for window in cuts.windows(2) {
-        reassembled.extend_from_slice(&fetch_range(url, window[0], window[1] - 1));
-    }
-    assert_eq!(
-        reassembled, payload,
-        "three windows off one capability did not reassemble the object"
+    assert!(
+        raw_agent()
+            .get(url)
+            .set("range", "bytes=12345-59999")
+            .call()
+            .is_err(),
+        "a window the grant does not sign was served"
     );
 
-    // A resumption: a prefix already in hand, and the remainder fetched with
-    // a `Range` the signature never covered.
+    // A resumption: a prefix already in hand, and a new grant for the rest.
     let already_have = 40_000;
+    let rest = harness
+        .client
+        .create_download_with_options(
+            &target,
+            &DownloadOptions {
+                start_offset: already_have as u64,
+                ..DownloadOptions::default()
+            },
+        )
+        .await
+        .expect("a grant from the resume offset");
+    let ObjectTransferAccess::PresignedUrl { url, .. } = &rest.access;
     let mut resumed = payload[..already_have].to_vec();
     resumed.extend_from_slice(&fetch_range(url, already_have, payload.len() - 1));
     assert_eq!(
@@ -1163,7 +1179,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .expect("read the assembled object straight from the provider");
     assert_eq!(written, payload.len() as u64);
     assert_eq!(received, payload);
-    assert_direct_get_capability_serves_ranges(&harness.client, &target, &payload).await;
+    assert_direct_get_capability_serves_only_its_range(&harness.client, &target, &payload).await;
 
     // Retaining provider-checksummed content supports exact publication replay.
     let prepared = harness

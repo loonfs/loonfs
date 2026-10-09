@@ -207,11 +207,28 @@ impl MetadataState {
         &self.content_publications
     }
 
-    pub fn find_content_publication(
+    /// The first publication row of `content_id` in row-key order: the
+    /// longest reference, from its earliest commit.
+    pub fn content_head(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> Option<ChangeSeq> {
-        self.indexes.content_publication(content_id)
+    ) -> Option<&ContentPublicationRecord> {
+        self.indexes.content_head(content_id)
+    }
+
+    /// Whether this commit already published the reference `content_id`
+    /// and `size_bytes` name. A commit's rows are the last ones pushed.
+    pub(crate) fn publishes_in_commit(
+        &self,
+        committed_seq: ChangeSeq,
+        content_id: &loonfs_types::ContentId,
+        size_bytes: u64,
+    ) -> bool {
+        self.content_publications
+            .iter()
+            .rev()
+            .take_while(|row| row.committed_seq == committed_seq)
+            .any(|row| &row.content_id == content_id && row.size_bytes == size_bytes)
     }
 
     pub(crate) fn push_content_publication_record(&mut self, record: ContentPublicationRecord) {

@@ -11,9 +11,9 @@ use crate::error::CoreError;
 use crate::manifest::VerifiedMetadataSegments;
 use crate::metadata::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, AccessRevisionRecord,
-    ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, DirentryBindingRecord,
-    InodeRecord, MetadataState, RecoverableDeletion, ResolvedVisiblePath, RevisionRecord,
-    SubtreeTombstoneRecord,
+    ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
+    DirentryBindingRecord, InodeRecord, MetadataState, RecoverableDeletion, ResolvedVisiblePath,
+    RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::namespace::state::NamespaceReadState;
 #[cfg(test)]
@@ -536,24 +536,33 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             }))
     }
 
+    /// Whether any commit visible here published a reference to `content_id`.
     pub(crate) async fn find_content_publication(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> Result<Option<ChangeSeq>, CoreError> {
-        if let Some(seq) = self
-            .row_states()
-            .filter_map(|state| state.find_content_publication(content_id))
-            .filter(|seq| *seq <= self.visible_seq())
-            .max()
-        {
-            return Ok(Some(seq));
-        }
-        match self.manifest_segments() {
+    ) -> Result<bool, CoreError> {
+        Ok(self.content_head(content_id).await?.is_some())
+    }
+
+    /// The first publication row of `content_id` in row-key order among the
+    /// rows visible here: the chain head, which names the longest reference.
+    pub(crate) async fn content_head(
+        &self,
+        content_id: &loonfs_types::ContentId,
+    ) -> Result<Option<ContentPublicationRecord>, CoreError> {
+        let manifest_head = match self.manifest_segments() {
             Some(segments) => {
-                manifest_index::content_publication(segments, content_id, self.visible_seq()).await
+                manifest_index::content_head(segments, content_id, self.visible_seq()).await?
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        Ok(self
+            .row_states()
+            .filter_map(|state| state.content_head(content_id))
+            .filter(|head| head.committed_seq <= self.visible_seq())
+            .cloned()
+            .chain(manifest_head)
+            .min_by_key(|head| (std::cmp::Reverse(head.size_bytes), head.committed_seq)))
     }
 
     pub(crate) async fn find_commit_receipt(

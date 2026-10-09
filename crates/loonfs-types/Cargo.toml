@@ -20,6 +20,7 @@ crc32c.workspace = true
 # multipart object, so a direct multipart upload has to produce exactly this
 # spelling of it. This is the implementation the AWS SDK uses.
 crc64fast-nvme.workspace = true
+crc-fast.workspace = true
 # Content ids are 128 fully random bits, drawn straight from the system
 # generator (see `ids::ContentId`).
 getrandom.workspace = true
@@ -29,7 +30,9 @@ libc.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+# `compress` exposes the block function, which continues a digest from a
+# recorded state.
+sha2 = { workspace = true, features = ["compress"] }
 thiserror.workspace = true
 utoipa = { workspace = true, optional = true }
 xxhash-rust.workspace = true

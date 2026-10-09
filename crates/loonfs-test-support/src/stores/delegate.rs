@@ -18,6 +18,8 @@ macro_rules! delegate_object_store {
             put_overwrite,
             put_if_absent,
             put_immutable_verified,
+            put_immutable_verified_stream,
+            extend_object,
             compare_and_swap,
             delete,
             list_prefix_stream,
@@ -35,6 +37,7 @@ macro_rules! delegate_object_store {
             abort_multipart_upload,
             get_with_metadata,
             get,
+            extend_object,
             delete,
             list_prefix_stream,
             list_prefix_from_stream,
@@ -55,6 +58,8 @@ macro_rules! delegate_object_store {
             put_overwrite,
             put_if_absent,
             put_immutable_verified,
+            put_immutable_verified_stream,
+            extend_object,
             compare_and_swap,
             delete,
             list_prefix_stream,
@@ -398,6 +403,67 @@ macro_rules! __delegate_object_store_method {
             Self: 'future,
         {
             ::std::boxed::Box::pin(async move { $inner.put_immutable_verified(key, bytes).await })
+        }
+    };
+    (put_immutable_verified_stream, $receiver:ident, $inner:expr) => {
+        fn put_immutable_verified_stream<'store, 'key, 'sha, 'body, 'future>(
+            &'store $receiver,
+            key: &'key str,
+            size_bytes: u64,
+            sha256: Option<&'sha ::loonfs_types::Checksum>,
+            body: ::futures::stream::BoxStream<
+                'body,
+                Result<::bytes::Bytes, ::loonfs_objectstore::ObjectStoreError>,
+            >,
+        ) -> ::core::pin::Pin<::std::boxed::Box<
+            dyn ::core::future::Future<
+                    Output = Result<
+                        ::loonfs_objectstore::ObjectMetadata,
+                        ::loonfs_objectstore::ImmutableWriteError,
+                    >,
+                > + Send
+                + 'future,
+        >>
+        where
+            'store: 'future,
+            'key: 'future,
+            'sha: 'future,
+            'body: 'future,
+            Self: 'future,
+        {
+            ::std::boxed::Box::pin(async move {
+                $inner
+                    .put_immutable_verified_stream(key, size_bytes, sha256, body)
+                    .await
+            })
+        }
+    };
+    (extend_object, $receiver:ident, $inner:expr) => {
+        fn extend_object<'store, 'key, 'base, 'result, 'future>(
+            &'store $receiver,
+            key: &'key str,
+            base: &'base ::loonfs_objectstore::ExtendBase,
+            pieces: ::bytes::Bytes,
+            result: &'result ::loonfs_objectstore::ExtendedObject,
+        ) -> ::core::pin::Pin<::std::boxed::Box<
+            dyn ::core::future::Future<
+                    Output = Result<
+                        ::loonfs_objectstore::ObjectMetadata,
+                        ::loonfs_objectstore::ObjectStoreError,
+                    >,
+                > + Send
+                + 'future,
+        >>
+        where
+            'store: 'future,
+            'key: 'future,
+            'base: 'future,
+            'result: 'future,
+            Self: 'future,
+        {
+            ::std::boxed::Box::pin(async move {
+                $inner.extend_object(key, base, pieces, result).await
+            })
         }
     };
     (list_prefix_stream, $receiver:ident, $inner:expr) => {

@@ -132,6 +132,17 @@ pub struct CreateCheckpointOptions {
     pub ttl_ms: Option<u64>,
 }
 
+/// Options for a direct download.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DownloadOptions {
+    /// The first byte the download reads, for a caller that already holds
+    /// the bytes below it. The target names `[start_offset, size_bytes)` and
+    /// nothing else, so a resume asks for a new target. An offset at or past
+    /// the end answers `invalid_request`; a revision of zero bytes takes only
+    /// 0.
+    pub start_offset: u64,
+}
+
 /// Options for a streaming file read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadFileStreamOptions {

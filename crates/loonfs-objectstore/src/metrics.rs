@@ -525,6 +525,39 @@ where
         result
     }
 
+    /// Recorded as the streamed create-if-absent it is.
+    async fn put_immutable_verified_stream(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        sha256: Option<&Checksum>,
+        body: BoxStream<'_, Result<Bytes>>,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        let start = sample_clock();
+        let (result, attempts) = counting_attempts(
+            self.inner
+                .put_immutable_verified_stream(key, size_bytes, sha256, body),
+        )
+        .await;
+        let class = match &result {
+            Ok(_) => ObjectStoreResultClass::Ok,
+            Err(crate::ImmutableWriteError::Transport { source, .. }) => source.class().into(),
+            Err(_) => ObjectStoreResultClass::PreconditionFailed,
+        };
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::PutStreamed,
+            key,
+            start.elapsed(),
+            attempts,
+            class,
+            self.store_kind.clone(),
+        );
+        sample.bytes_in = Some(size_bytes);
+        sample.put_mode = Some(PutModeClass::CreateIfAbsent);
+        self.record(sample);
+        result
+    }
+
     async fn extend_object(
         &self,
         key: &str,

@@ -1012,6 +1012,12 @@
           "snapshot_id": {
             "$ref": "#/components/schemas/PinId",
             "description": "Read the file revision captured by this snapshot.\nCannot be combined with `revision_no`."
+          },
+          "start_offset": {
+            "description": "The first byte the grant reads. It names `[start_offset, size_bytes)`\nof the revision; a client that resumes asks for a new grant from the\nbytes it holds. Must be below the revision's size, except 0 for a\nrevision of zero bytes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -6460,7 +6466,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/downloads": {
       "post": {
-        "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
+        "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. The capability reads exactly `[start_offset, size_bytes)` of the object: it signs that `Range`, and `access.headers` carries it for the client to send unchanged. A client that resumes asks for a new grant from its offset. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
         "operationId": "create_download",
         "parameters": [
           {
@@ -6502,7 +6508,7 @@
                 }
               }
             },
-            "description": "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id"
+            "description": "Invalid path, revision, snapshot id, non-snapshot checkpoint, revision_no combined with snapshot_id, or start_offset at or past the file's size"
           },
           "401": {
             "content": {
@@ -7736,7 +7742,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads": {
       "post": {
-        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound, or of the revision a live snapshot captured. The request has no body and the response does not include a path.",
+        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound, or of the revision a live snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The request has no body and the response does not include a path.",
         "operationId": "create_download_by_inode",
         "parameters": [
           {
@@ -7767,6 +7773,17 @@
             "schema": {
               "$ref": "#/components/schemas/PinId"
             }
+          },
+          {
+            "description": "First byte the capability reads. Defaults to 0 and must be below the file's size, except 0 for a file of zero bytes",
+            "in": "query",
+            "name": "start_offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -7788,7 +7805,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, snapshot id, or non-snapshot checkpoint"
+            "description": "Invalid inode ID, snapshot id, start_offset, or non-snapshot checkpoint, or start_offset at or past the file's size"
           },
           "401": {
             "content": {
@@ -8115,7 +8132,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads": {
       "post": {
-        "description": "Authorizes a direct read of one retained inode revision. The request has no body and the response does not include a path.",
+        "description": "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The request has no body and the response does not include a path.",
         "operationId": "create_revision_download_by_inode",
         "parameters": [
           {
@@ -8146,6 +8163,17 @@
             "schema": {
               "$ref": "#/components/schemas/RevisionNo"
             }
+          },
+          {
+            "description": "First byte the capability reads. Defaults to 0 and must be below the revision's size, except 0 for a revision of zero bytes",
+            "in": "query",
+            "name": "start_offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -8167,7 +8195,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision"
+            "description": "Invalid inode ID, revision number, or start_offset, start_offset at or past the revision's size, or a snapshot_id, which cannot be combined with a revision"
           },
           "401": {
             "content": {

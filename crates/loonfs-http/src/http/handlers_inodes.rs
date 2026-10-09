@@ -39,8 +39,8 @@ pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
         .map_err(|error| invalid_path_id_error("inode_id", value, error.reason()))
 }
 
-/// The query of the inode content and download routes. A revision route
-/// takes it only to refuse a snapshot with the error the path routes give.
+/// The query of the inode content routes. A revision route takes it only
+/// to refuse a snapshot with the error the path routes give.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InodeContentQuery {

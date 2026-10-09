@@ -221,9 +221,9 @@ pub use metadata_cache::{
 pub use options::{
     AccessState, AdvanceRetentionOptions, AttributeChanges, CommitOptions, CopyOptions,
     CreateCheckpointOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MetadataMaintenanceOptions,
-    MoveOptions, PutFileOptions, ReadFileStreamOptions, StatOptions, UndeleteDestination,
-    UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListOptions,
+    MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions, StatOptions,
+    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
     UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
@@ -307,6 +307,7 @@ impl Error {
         match self {
             Self::InvalidRequest { param, .. } => Some((*param).to_owned()),
             Self::Core(CoreError::InvalidCursor(_)) => Some("cursor".to_owned()),
+            Self::Core(CoreError::ResumeOffsetOutOfRange { .. }) => Some("start_offset".to_owned()),
             Self::Core(CoreError::InvalidCheckpointRequest(_)) => Some("/name".to_owned()),
             Self::Core(CoreError::SubjectRequired { .. }) => Some("Loonfs-Principals".to_owned()),
             Self::Core(CoreError::FailedOperation {

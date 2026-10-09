@@ -1,7 +1,7 @@
 //! Starts a local LoonFS server for SDK conformance tests.
 
 use async_trait::async_trait;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, RawQuery, State};
 use axum::http::header::{ETAG, RANGE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -13,7 +13,7 @@ use loonfs_objectstore::presign::{
     DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, DirectTransferIssuers,
     PresignedGetRequest, PresignedPartRequest, PresignedPutRequest, PresignedUrl,
 };
-use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore};
+use loonfs_objectstore::{ByteRange, ObjectStore, ObjectStoreError, SharedObjectStore};
 use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
 use loonfs_types::ChecksumAlgorithm;
 use std::collections::BTreeMap;
@@ -187,6 +187,8 @@ fn presigned_expiry_ms(now: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
+/// Carries the `Range` a provider signs in the URL, so the object route
+/// refuses a request for any other range, as a provider does.
 #[async_trait]
 impl DirectGetIssuer for LoopbackIssuer {
     async fn presign_get(
@@ -194,10 +196,18 @@ impl DirectGetIssuer for LoopbackIssuer {
         request: PresignedGetRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl, ObjectStoreError> {
+        let url = format!("{}/objects/{}", self.base_url, request.object_key);
+        let signed = request.range_header();
         Ok(PresignedUrl {
             method: "GET".to_owned(),
-            url: format!("{}/objects/{}", self.base_url, request.object_key),
-            headers: BTreeMap::new(),
+            url: match &signed {
+                Some(range) => format!("{url}?signed={range}"),
+                None => url,
+            },
+            headers: signed
+                .map(|range| ("range".to_owned(), range))
+                .into_iter()
+                .collect(),
             expires_at_ms: presigned_expiry_ms(now),
         })
     }
@@ -259,33 +269,34 @@ fn transfer_router(store: Arc<ConformanceStore>) -> Router {
 async fn get_object(
     State(store): State<Arc<ConformanceStore>>,
     AxumPath(key): AxumPath<String>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    match store.get(&key, None).await {
-        Ok(Some(bytes)) => {
-            if let Some(start) = range_start(&headers) {
-                let Ok(start) = usize::try_from(start) else {
-                    return StatusCode::RANGE_NOT_SATISFIABLE.into_response();
-                };
-                if start > bytes.len() {
-                    return StatusCode::RANGE_NOT_SATISFIABLE.into_response();
-                }
-                return (StatusCode::PARTIAL_CONTENT, bytes.slice(start..)).into_response();
-            }
-            (StatusCode::OK, bytes).into_response()
-        }
+    let signed = query
+        .as_deref()
+        .and_then(|query| query.strip_prefix("signed="));
+    if headers.get(RANGE).and_then(|value| value.to_str().ok()) != signed {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let range = signed.and_then(signed_range);
+    let status = match range {
+        Some(_) => StatusCode::PARTIAL_CONTENT,
+        None => StatusCode::OK,
+    };
+    match store.get(&key, range).await {
+        Ok(Some(bytes)) => (status, bytes).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
 }
 
-fn range_start(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get(RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("bytes="))
-        .and_then(|value| value.strip_suffix('-'))
-        .and_then(|value| value.parse().ok())
+/// Reads `bytes={first}-{last}` as the half-open range it names.
+fn signed_range(value: &str) -> Option<ByteRange> {
+    let (first, last) = value.strip_prefix("bytes=")?.split_once('-')?;
+    Some(ByteRange {
+        start_inclusive: first.parse().ok()?,
+        end_exclusive: last.parse::<u64>().ok()?.checked_add(1)?,
+    })
 }
 
 async fn put_object(

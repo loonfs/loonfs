@@ -37,6 +37,9 @@ clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
 crc32c = "0.6"
 crc64fast-nvme = "1.2"
+# Combines CRC-64/NVME values, so the CRC of an appended object follows from
+# the CRCs of its parts. Already in the tree beneath object_store.
+crc-fast = "1.8"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"

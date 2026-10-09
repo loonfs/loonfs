@@ -104,9 +104,11 @@ Each mode's mapping is frozen once a namespace holds rows, because its stored sl
 
 ### 1.5 File contents and ownership
 
-Each file revision contains one `ContentRef`. The current kind, `blob_v1`, identifies a complete file whose bytes are stored as one immutable content object. The object's bytes are the file bytes; LoonFS does not add an envelope around the content object. `blob_v1` is the only content reference kind. Content derived from other content, such as a future differential update, is a source of the bytes behind an ordinary `blob_v1` reference, never a second kind.
+Each file revision contains one `ContentRef`. The current kind, `blob_v1`, names the first `size_bytes` bytes of a content object, verified by the reference's checksum. Those bytes are the file bytes; LoonFS does not add an envelope around the content object. `blob_v1` is the only content reference kind. Content derived from other content, such as an append, is a source of the bytes behind an ordinary `blob_v1` reference, never a second kind.
 
-A reference contains the original owner namespace, a random content ID that is never reused, the complete size, and a full-object checksum. It does not contain a bucket address or object-store path.
+A content object is append-only, not write-once. An append adds bytes after the end of the object and never changes the bytes before it. An object can therefore be longer than a reference that names it, and two references with one content ID and different sizes name two prefixes of one object.
+
+A reference contains the original owner namespace, a random content ID, the size of the prefix it names, and a checksum of that prefix. A content ID names one object and is never used for another. A reference does not contain a bucket address or object-store path.
 
 The owner namespace and content ID in the reference determine the key:
 
@@ -119,9 +121,9 @@ File content is durable no later than the commit that references it. The bytes t
 | Path | How the bytes become durable |
 | --- | --- |
 | Uploaded | An upload session writes and verifies the content object before the commit (section 5). |
-| Inline | The WAL object that commits the revision carries the bytes (Appendix A.5), so they become durable in the same publication that makes the revision visible. Before a fold publishes a manifest whose `folded_wal_no` covers that WAL object, it writes the bytes to the content object (section 7.2). |
+| Inline | The WAL object that commits the revision carries the bytes as pieces (Appendix A.5), so they become durable in the same publication that makes the revision visible. A piece holds a whole value, or the bytes an append adds after bytes that are already durable. Before a fold publishes a manifest whose `folded_wal_no` covers that WAL object, it writes the pieces into the content object (section 7.2). |
 
-WAL collection requires that coverage, so a WAL object is never deleted while its inline bytes exist only in the WAL. A reference is therefore the content's identity, not proof that the content object exists. Section 4.5 defines where a reader finds the bytes.
+WAL collection requires that coverage, so a WAL object is never deleted while its pieces exist only in the WAL. A reference is therefore the content's identity, not proof that the content object holds its bytes. Section 4.5 defines where a reader finds the bytes.
 
 The original owner's manifest is not required to read inherited content. This matters for forks: a descendant can continue reading the exact objects in its pinned basis after the source namespace is deleted.
 
@@ -214,7 +216,7 @@ The key layout is part of the format. Other objects must not collide with these 
 | Metadata segment | Sorted metadata rows referenced by a manifest | Write a new immutable object. |
 | Pin record | Retain one manifest for a user, snapshot, or fork | Create and delete; snapshot expiry can be extended by CAS. |
 | Upload session | Own a transfer and its completed content until publication or cleanup | Conditional lifecycle transitions. |
-| Content object | Complete bytes of one file revision | Write once. |
+| Content object | Bytes of file revisions; each revision names a prefix | Create, then extend. Existing bytes never change. |
 | Scratch object | Pieces an extension composes onto its object | Create, then delete. |
 
 A manifest publication can change physical layout or control state without creating a logical commit. A WAL publication can advance logical history without creating a manifest. The hint selects neither history nor visibility: its number may lag successful publications.
@@ -273,7 +275,7 @@ A commit creates WAL `tip + 1` with put-if-absent. An acquired writer session pl
 
 A writer takeover publishes the next manifest with `writer_epoch + 1`, then creates a zero-record fence at the next WAL number with that epoch. Between the manifest and the fence, the previous writer can still commit at `tip + 1`. Those commits are valid: their epoch is below the manifest's, and the fence lands above them. Once the fence lands, a stale session cannot commit. Its next put collides, and the discovery that follows finds the higher epoch and fences the session for good. Any earlier discovery that finds the higher epoch fences it the same way (section 6.1).
 
-A fold needs no writer epoch, and any process may run one. It folds the WAL above the current manifest's `folded_wal_no` into new metadata segments and publishes the next manifest with `folded_wal_no` set to the tip it read. That manifest carries the predecessor's writer and compactor epochs. Before it publishes, the fold writes the inline content it covers as content objects (section 7.2).
+A fold needs no writer epoch, and any process may run one. It folds the WAL above the current manifest's `folded_wal_no` into new metadata segments and publishes the next manifest with `folded_wal_no` set to the tip it read. That manifest carries the predecessor's writer and compactor epochs. Before it publishes, the fold writes the pieces it covers into their content objects (section 7.2).
 
 Discovery loads the hint and the manifest it names, then probes successive manifest numbers until one is absent, rereading the hint in case it rose meanwhile. It reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first absent number. It then checks that the manifest still has no successor. If a successor appeared, or the check came `READ_REVALIDATION_BOUND_MS` or more after the manifest probe, discovery reloads the manifest and starts again. A missing or invalid WAL object also reloads the manifest; if the manifest number is unchanged, the store is corrupt (sections 4.1 and 4.2).
 
@@ -288,7 +290,7 @@ What the protocol guarantees:
 3. Writer epochs never decrease along the chain and never exceed the current manifest's epoch; once a newer writer's fence has landed, no older writer commits (the claim and the fence, sections 6.1 and 4.2).
 4. A fresh discovery observes every commit acknowledged before it began (the successor check within the revalidation bound, section 4.2).
 5. A cached view never regresses, and a read served from it reflects a successor check no older than the revalidation bound (the successor probe and the revalidation bound, section 4.2).
-6. Inline bytes stay readable: in the WAL until a fold has written their content objects, then in those objects (content written before the manifest, sections 7.2 and 1.5).
+6. Pieces stay readable: in the WAL until a fold has written them into their content objects, then in those objects (content written before the manifest, sections 7.2 and 1.5).
 7. A retry with the same commit ID and request does not commit twice while its receipt is retained (the commit receipt, section 6.5).
 8. A view that revalidates within its bound never lists a collected segment: its manifest was current at its last successor check, so the manifest and its segments stay for at least one grace after that check (the superseded-manifest root and the revalidation bound, sections 11.2 and 4.2).
 
@@ -314,7 +316,9 @@ An immutable object must not be replaced with different bytes. A collision at a 
 
 An immutable object carries its writer's SHA-256 attestation: the digest of the bytes the writer sent, recorded when the object is created. A provider keeps it as object user metadata named `sha256`, holding 64 lowercase hexadecimal digits. The local store reports the SHA-256 of the bytes it holds.
 
-An immutable write creates its key with put-if-absent at every size; a large one may send its bytes in parts and completes conditionally, so it can take longer than the one request a publication is allowed (C.1), and no publication is an immutable write. A key found occupied is decided by the attestation, read with one metadata request. An equal attestation is the same object, and the write succeeds. A different attestation is a collision. An object without an attestation fails the write, because nothing proves it equal or different. No bytes are read back. A retry whose earlier attempt landed meets its own object and succeeds the same way. A streamed write that needs more than one part carries no attestation, because its digest is unknown when the upload starts; nothing writes its key twice.
+An immutable write creates its key with put-if-absent at every size; a large one may send its bytes in parts and completes conditionally, so it can take longer than the one request a publication is allowed (C.1), and no publication is an immutable write. A key found occupied is decided by the attestation, read with one metadata request. An equal attestation is the same object, and the write succeeds. A different attestation is a collision. An object without an attestation fails the write, because nothing proves it equal or different. No bytes are read back. A retry whose earlier attempt landed meets its own object and succeeds the same way.
+
+A streamed immutable write of a known length creates its key the same way. Below one part it is buffered and takes the single-request create; a longer one sends its parts as they arrive and completes conditionally, so it never holds the whole body. It carries an attestation only when the writer knows the digest before the upload starts, as a fold does for a chain whose newest reference is a SHA-256 (section 7.2). A write without one, such as an upload's streamed write, decides an occupied key as an object without an attestation; nothing writes an upload's key twice. An error in the stream ends the write before the object is created, so a writer that checks the bytes as they pass creates nothing when the check fails. A stream cannot be sent twice, so a transport failure is not retried.
 
 Small control objects use conditional single-object writes. Multipart upload is an optimization for larger payloads, not a substitute for atomic control-object CAS.
 
@@ -398,16 +402,16 @@ A path-based revision read first resolves the current inode at that path, then l
 
 ### 4.5 Content verification
 
-File bytes can be stored in a content object or included directly in a WAL commit. In either case, the file revision contains a content reference with the owner namespace, content ID, size, and checksum. Use the read view to determine where to read the bytes:
+File bytes can be stored in a content object or included directly in a WAL commit as pieces. In either case, the file revision contains a content reference with the owner namespace, content ID, size, and checksum. The projected WAL tail indexes its pieces by content ID and offset and keeps each piece's base. Use the read view to determine where to read the bytes of a reference to content `C` of size `S`:
 
 | Condition | Where to read |
 | --- | --- |
-| The reference belongs to the namespace being read, and the complete reference equals the stored reference in the projected WAL tail | Use the inline bytes already in that projection. |
-| Otherwise | Read the content object using the reference's owner namespace and content ID. |
+| The reference belongs to the namespace being read, and the projected tail holds a piece of `C` at an offset at or below `S` | Read the content object's prefix up to the lowest such offset, then the pieces up to `S`. When that lowest piece names a base, the prefix is the base's first bytes up to that offset, found the same way. A piece at offset 0 needs no prefix. |
+| Otherwise | Read the first `S` bytes of the content object, using the reference's owner namespace and content ID. |
 
-Content inherited through a fork is always read from a content object. WAL replay loads inline bytes along with the metadata, so reading them from the resulting projection needs no separate content request.
+Content inherited through a fork is always read from a content object. WAL replay loads pieces along with the metadata, so reading them from the resulting projection needs no separate content request.
 
-Every content read must validate the reference's kind and checksum algorithm, then verify the complete byte length and checksum. These checks apply to both sources. WAL replay verifies the record envelope but does not recompute each file's checksum. A HEAD request can check an object's existence and size, but the content read must still verify the bytes. A missing required object or a failed validation must fail the read.
+Every content read must validate the reference's kind and checksum algorithm, then verify the byte length and checksum of all the bytes it assembled. These checks apply to every source. A read of a content object reads the range `[0, S)` of its prefix; the object can be longer, and the bytes after the range are not read. WAL replay verifies the record envelope but does not recompute each file's checksum. A HEAD request can check that an object exists and holds at least the bytes a read takes from it, but the content read must still verify the bytes. A missing required object or a failed validation must fail the read.
 
 Reclaiming a WAL object does not remove bytes already held in a read view’s projection. If that projection must be rebuilt and the required WAL objects are gone, the read must fail. Finding a content object is insufficient because the missing WAL is also required to reconstruct the view’s metadata.
 
@@ -423,7 +427,7 @@ Use the speculative bytes only if the current path has the same complete content
 
 For example, if `/report.txt` now refers to different content, discard the old file bytes and read the replacement. If the path was deleted, return the current metadata error even if the old bytes were read successfully.
 
-For content objects, request a byte range covering the declared size plus one extra byte. The extra byte detects an object larger than its reference claims; the read must still verify the exact length and checksum. A size error reports the length observed in that range, which may be less than the full object size. Inline content uses the bytes in the projected tail and requires no content request.
+The speculative read reads like any other read (section 4.5): the range of the object prefix, then the tail's pieces, verified over the reference. Content that the projected tail holds from offset 0 requires no content request.
 
 Reading speculative bytes does not by itself establish freshness or change retention. The ordinary metadata checks remain required.
 
@@ -469,7 +473,7 @@ A retry against already staged content compares the incoming content with the st
 
 Completion clears service-proxied staging to `idle` in the same CAS that records the terminal completed reference. Abort also clears staging to `idle`. A terminal record must not retain a second staged content description, even if the two references would agree.
 
-Service-proxied staging calculates SHA-256 while streaming the bytes. When the body ends, the request reads the session record again and lets the object store finish the write only if the session is still open and this request still owns staging. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
+Service-proxied staging calculates SHA-256 and CRC-64/NVME while streaming the bytes, and records both with the SHA-256 state after the last byte (A.4). When the body ends, the request reads the session record again and lets the object store finish the write only if the session is still open and this request still owns staging. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
 
 ### 5.4 Direct uploads
 
@@ -647,7 +651,20 @@ A fold starts from a verified manifest and a discovered WAL tip. A fold call dis
 
 A fold needs no writer epoch and may run in any process. It carries the predecessor's writer and compactor epochs forward. It loads the current manifest before its put, and again when its put loses, and decides coverage. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's. A covered fold is finished. Otherwise it rebuilds against the new predecessor and carries that predecessor's epochs. The rebuild may keep the WAL tail the fold already read when the new predecessor differs from the fold's own only in its number, compactor epoch, retention floor, runs, and next run number, and has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, and a retention advance publish such a manifest. After any other manifest, the rebuild reads the tail again above the new `folded_wal_no`. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
-Before writing segments or publishing the manifest, a fold writes every inline value it covers as a content object, verified against its reference. A manifest whose `folded_wal_no` is `n` implies a content object exists for every inline value in WAL objects up to `n`. WAL collection's rule is unchanged because it already requires each WAL object to be at or below `folded_wal_no`.
+Before writing segments or publishing the manifest, a fold writes every piece it covers into its content object. For each content ID with pieces, it joins the pieces from the first offset to the end of the newest reference to that ID; pieces that do not reach that end are corruption. Every chain is joined, and every whole value that starts at offset 0 checked, before anything is written.
+
+- Pieces that start at offset 0 are the whole value. The fold checks it against the newest reference and writes it with an immutable write (section 3.2).
+- A chain whose first piece names a base starts a new object. The fold streams the value into a streamed immutable write at the ID's own key (section 3.2): the base's first bytes up to that offset, read the way a read finds them (section 4.5) in ranges of at most 8 MiB, then the pieces. The stream checks the whole value against the newest reference as it passes and ends in an error when they differ, so nothing is created. The write's attestation is the newest reference's checksum when that is a SHA-256, and there is none otherwise.
+- Otherwise the fold reads the length `L` of the object at the ID's own key with one metadata request and acts on it:
+
+| Object length `L` | Action |
+| --- | --- |
+| Equal to the first piece's offset | Extend the object with all the pieces. |
+| Between the first offset and the newest reference's end | Extend the object with the pieces after `L`. |
+| At or past the newest reference's end | Another fold wrote the pieces. At exactly that end, an object with an attestation must carry the newest reference's checksum when the checksum is a SHA-256. Otherwise, and for an object without an attestation, the fold reads the bytes at the pieces' offsets back and compares them; other bytes there are `namespace_corrupt`. |
+| Below the first offset | `namespace_corrupt`. |
+
+A whole-value write that finds its key occupied, and a chain from a base whose key exists, apply the same table to the object they find, whether its attestation differs or is missing, because it holds a prefix of the same chain. An extension names the version it extends by its length and compare token (section 3.2). Its attestation is the newest reference's checksum when that is a SHA-256. A chain without a SHA-256 started from a direct upload, which recorded no hash state, so the fold reads the bytes the object holds to compute the attestation. The extension's CRC-64/NVME is the one the newest reference's delta records. A manifest whose `folded_wal_no` is `n` implies that every content object holds the bytes its pieces in WAL objects up to `n` carry. WAL collection's rule is unchanged because it already requires each WAL object to be at or below `folded_wal_no`.
 
 Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A fold already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Compaction additionally requires its selected inputs to remain valid.
 
@@ -829,7 +846,7 @@ An inode-preserving rename is namespace-local. Across namespaces, a move is a de
 
 A fork can retain references through its source pin; other imports write verified bytes under a fresh destination-owned identity. Reusing another owner's identity would require an additional durable source-side retention protocol.
 
-An import checks the owner’s current view for authorization, including imports within that namespace. Resident inline bytes are used only when the stored reference equals the requested reference and its owner is the reading namespace. Otherwise the import reads the object key derived from the reference. Reclaimed content returns the same error as any missing content object. The import verifies the bytes and stages them under a fresh identity owned by the destination. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner.
+An import checks the owner’s current view for authorization, including imports within that namespace. The import reads the requested reference where the owner's current view finds its bytes (section 4.5): pieces in that view's projected tail are used only when the reference's owner is the namespace the view reads, and every other byte comes from a content object. Reclaimed content returns the same error as any missing content object. The import verifies the bytes and stages them under a fresh identity owned by the destination. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner.
 
 A subject importing a bare reference must be an administrator of its owner namespace. An unrestricted owner and a request with no subject need no administrator grant. Authorization always uses the owner's current head. A deleted owner uses the access state in its surviving head.
 
@@ -1156,7 +1173,7 @@ The three control-object kinds are `hint`, `pin`, and `upload_session`.
 | Metadata segment | No envelope | Block sections described in A.7, holding the rows described in A.6 | 1, named by the segment descriptor's `encoding` |
 | Pin record | `pin` | Uncompressed JSON | 1 |
 | Upload session | `upload_session` | Uncompressed JSON | 1 |
-| Content object | No envelope | Complete file bytes | Referenced as `blob_v1` |
+| Content object | No envelope | File bytes, extended by appends | Referenced as `blob_v1`, which names a prefix |
 | Grep hint | `grep_hint` | Uncompressed JSON | 1 |
 | Grep manifest | `grep_manifest` | Uncompressed JSON | 1 |
 | Grep segment | No envelope | Block sections with grep rows | Governed by grep manifest version 1 |
@@ -1187,8 +1204,8 @@ A `blob_v1` reference contains all of the following fields:
 | `kind` | `blob_v1`. |
 | `owner_namespace_id` | Namespace that originally wrote the object. |
 | `content_id` | `con_` followed by 32 random lowercase hexadecimal characters. |
-| `size_bytes` | Length of the complete file. |
-| `checksum` | Algorithm and digest of the complete file. |
+| `size_bytes` | Length of the file: the prefix of the content object the reference names. |
+| `checksum` | Algorithm and digest of those bytes. |
 
 For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single LF at the end, have this reference shape. The ID is illustrative, while the size and SHA-256 are calculated from those bytes:
 
@@ -1215,7 +1232,9 @@ A checksum is `{ "algorithm": <name>, "value": <lowercase hex> }`:
 | `crc64nvme` | 16 hexadecimal characters |
 | `crc32c` | 8 hexadecimal characters |
 
-Coverage is defined by the containing field. A content reference or upload-content claim covers the complete object. A multipart part checksum covers one part. An algorithm selector without a value is not itself a checksum. Provider encodings are converted to this representation before constructing the stored value.
+Coverage is defined by the containing field. A content reference covers the prefix it names. An upload-content claim covers the complete object. A multipart part checksum covers one part. An algorithm selector without a value is not itself a checksum. Provider encodings are converted to this representation before constructing the stored value.
+
+A SHA-256 state, stored under `hash_state`, is the state of the digest after some bytes: `{words, tail, length}`, where `words` are the eight 32-bit state words, `tail` is the byte string of the bytes after the last whole 64-byte block, and `length` is the number of bytes. The tail holds exactly `length` modulo 64 bytes. Continuing the digest from a state over later bytes gives the digest of all the bytes, so a writer that records the state never reads the earlier bytes again. A CRC-64/NVME, stored under `crc64nvme`, is a `crc64nvme` checksum; CRCs combine, so the CRC of bytes followed by more bytes follows from the two CRCs and the second length.
 
 ### A.4 Control and manifest payloads
 
@@ -1232,7 +1251,9 @@ The following tables list the durable payload fields. Their transition rules are
 
 Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
-Pin owners have the fields in section 8.1. There is no status field on a pin. Upload status is `open` with `expires_at_ms`, `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`. The mode remains present in every status. A service-proxied mode contains `staging`; direct PUT contains `checksum_algorithm`; direct multipart contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`. Staging is `idle`, `claimed`, or `staged` with `content_ref`. All these variants use `kind` tags.
+Pin owners have the fields in section 8.1. There is no status field on a pin. Upload status is `open` with `expires_at_ms`, `completed` with `completed_at_ms`, `content_ref`, `hash_state?`, and `crc64nvme?`, or `aborted` with `aborted_at_ms`. The mode remains present in every status. A service-proxied mode contains `staging`; direct PUT contains `checksum_algorithm`; direct multipart contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`. Staging is `idle`, `claimed`, or `staged` with `content_ref`, `hash_state`, and `crc64nvme`. All these variants use `kind` tags.
+
+`hash_state` and `crc64nvme` (A.3) describe the bytes of `content_ref`. LoonFS computes them while it writes the bytes, so a service-proxied session and a session the runtime stages for its own writes record both, and a direct upload records neither. A completion copies them from the staged state, and a publication carries them into the revision delta.
 
 A namespace manifest contains:
 
@@ -1289,7 +1310,7 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 | `create_inode` | `delta_index`, `inode_id`, `inode_kind` |
 | `bind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms` |
 | `unbind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `target` |
-| `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref` |
+| `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref`, `hash_state?`, `crc64nvme?` |
 | `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_binding` |
 | `revoke_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
@@ -1297,17 +1318,19 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 
 A delta's own commit sequence is implicit in its containing commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event the delta retires or revokes. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
 
-`inline_content` is a list of `{content_id, bytes}`, where `bytes` is a CBOR byte string; the field is omitted when empty and defaults to an empty list when absent. This field is part of the version 1 format, and the reference it accompanies is an ordinary `blob_v1` reference.
+An `append_file_revision` delta's `hash_state` is the SHA-256 state after the reference's bytes (A.3). It is present exactly when the reference's checksum is a SHA-256 and the writer had the bytes. Its `crc64nvme` is the CRC-64/NVME of the reference's bytes, present when the writer had the bytes or when the reference's own checksum is that CRC. The writer derives both; replay copies them and never recomputes them. A decoder refuses a `hash_state` on a reference whose checksum is not a SHA-256, or whose length or digest differs from the reference, and a `crc64nvme` that is not a CRC-64/NVME or that differs from a reference checksum of that algorithm.
+
+`inline_content` is a list of pieces `{content_id, offset, bytes, base?}`, where `bytes` is a CBOR byte string that the content object holds from `offset`, and `base` is `{owner_namespace_id, content_id}`. The field is omitted when empty and defaults to an empty list when absent. The reference a piece accompanies is an ordinary `blob_v1` reference. A whole value is the piece at offset 0 with no base. A piece past offset 0 with no base adds bytes after bytes that an earlier commit made durable under the same content ID. An append to a reference of zero bytes would be a piece at offset 0, which is a whole value, so it starts a new content ID: a content object of zero bytes is never extended, which is what lets its download grant sign no range (see the [API specification][api-spec]). A first piece past offset 0 that names a base starts a new content object, whose first `offset` bytes are the first bytes of the base.
 
 Encoding and decoding enforce these rules using only the WAL object:
 
-1. Every entry's `content_id` is named by at least one `append_file_revision` delta in the same commit whose `content_ref.owner_namespace_id` equals the WAL object's `namespace_id`.
-2. The entry's length equals the `size_bytes` of every such reference. A zero-length entry is valid.
-3. A content ID appears at most once in a commit's `inline_content`.
-4. Each entry contains at most `MAX_WAL_INLINE_CONTENT_BYTES`: 256 KiB (262,144 bytes).
-5. The sum of all entry lengths in one WAL object is at most `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`: 4 MiB (4,194,304 bytes).
+1. Every entry's `content_id` is named by an `append_file_revision` delta in the same commit whose `content_ref.owner_namespace_id` equals the WAL object's `namespace_id`.
+2. The entries for one content ID in one commit, ordered by offset, are contiguous, and the last one ends at the largest `size_bytes` of those references. A zero-length entry is valid.
+3. The first entry for a content ID is at offset 0 with no base, or past offset 0. Only that first entry may name a base, and a base never names the entry's own content ID.
+4. A commit holds at most one entry per content ID and offset.
+5. Each entry contains at most `MAX_WAL_INLINE_CONTENT_BYTES`: 256 KiB (262,144 bytes), and the sum of all entry lengths in one WAL object is at most `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`: 4 MiB (4,194,304 bytes).
 
-These are reader limits; writer thresholds are policy at or below them. `MAX_WAL_OBJECT_BYTES` still limits the complete decompressed document. A delta may name content with no inline entry. Replay does not hash inline bytes against the reference's checksum; the envelope's `payload_checksum` covers the stored payload bytes.
+These are reader limits; writer thresholds are policy at or below them. `MAX_WAL_OBJECT_BYTES` still limits the complete decompressed document. A delta may name content with no inline entry. Replay does not hash pieces against the reference's checksum; the envelope's `payload_checksum` covers the stored payload bytes. Whether an earlier commit made the bytes before a piece durable, and whether a base holds the bytes a chain copies, are not decided from one WAL object; a read or a fold that finds them missing reports corruption.
 
 WAL replay applies these normalized records in sequence and delta order. It does not re-run the original request's preconditions or reinterpret the request under a newer planner.
 
@@ -1324,7 +1347,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_seq` |
 | `commit` | `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `deltas` |
-| `content_publication` | `content_id`, `committed_seq`, `delta_index` |
+| `content_publication` | `content_id`, `committed_seq`, `delta_index`, `size_bytes`, `hash_state?`, `crc64nvme?` |
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
 
@@ -1350,7 +1373,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
 | `commits` | `commit-{committed_seq:020}` |
-| `content_publications` | `content-publication-{content_id}-{committed_seq:020}` |
+| `content_publications` | `content-publication-{content_id}-{u64::MAX - size_bytes:020}-{committed_seq:020}` |
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
@@ -1374,7 +1397,7 @@ Bloom filters use the following keys, which are not always full row keys:
 | `attributes` | `attribute-{inode_id:020}` |
 | `access` | `access-{inode_id:020}` |
 
-Every delta that appends a file revision also produces a content-publication row for its content ID. Repeated references to the same content within one commit share one row with the first publishing delta index. These rows survive every base compaction, regardless of retention floor.
+Every delta that appends a file revision also produces a content-publication row for its reference, so two appends to one content ID in one commit produce two rows. A delta that repeats a reference within one commit shares the row of the first, which keeps that delta's index. The row copies the reference's `size_bytes` and the delta's `hash_state` and `crc64nvme`. Its key sorts the longest reference of a content ID first, then by commit, so the first row under an ID's prefix is the ID's chain head: the newest bytes and what their writer recorded about them. These rows survive every base compaction, regardless of retention floor.
 
 The family groups are fixed:
 

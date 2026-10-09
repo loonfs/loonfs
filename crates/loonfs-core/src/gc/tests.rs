@@ -1213,7 +1213,12 @@ async fn the_wal_tail_roots_inline_content_a_direct_download_wrote_early() {
         .expect("bootstrap");
     let key = publish_inline(&store, &namespace_id, 0, &setup).await;
     let target = crate::NamespaceEngine::reader(&store, namespace_id.clone())
-        .direct_download_target("/owned-0", None, &read_context(&store, &namespace_id).await)
+        .direct_download_target(
+            "/owned-0",
+            None,
+            0,
+            &read_context(&store, &namespace_id).await,
+        )
         .await
         .expect("download target");
     assert_eq!(target.object_key, key);

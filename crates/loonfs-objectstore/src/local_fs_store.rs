@@ -219,7 +219,7 @@ impl LocalFsStore {
     async fn put_streamed_object(
         &self,
         key: &str,
-        mut body: ByteStream,
+        mut body: BoxStream<'_, Result<Bytes>>,
         mode: PutMode,
     ) -> Result<u64> {
         let path = self.resolve_key(key)?;
@@ -570,6 +570,29 @@ impl ObjectStore for LocalFsStore {
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         self.put_streamed_object(&self.scoped(key)?, body, mode)
             .await
+    }
+
+    /// Streams the body through a staging file, as [`Self::put_streamed`]
+    /// does. This store attests every object by reading it, so `sha256`
+    /// only decides an occupied key.
+    async fn put_immutable_verified_stream(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        sha256: Option<&Checksum>,
+        body: BoxStream<'_, Result<Bytes>>,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        let _ = size_bytes;
+        let created = async {
+            let scoped = self.scoped(key)?;
+            self.put_streamed_object(&scoped, body, PutMode::CreateIfAbsent)
+                .await?;
+            self.head_object(&scoped)
+                .await?
+                .ok_or_else(|| ObjectStoreError::transport(key, "object disappeared after write"))
+        }
+        .await;
+        crate::immutable_write::decide_created(self, key, sha256, created).await
     }
 
     async fn extend_object(

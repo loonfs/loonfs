@@ -20,8 +20,9 @@ use loonfs_types::format::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,
-    CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName, InodeId, MetadataSegmentId,
-    NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, WriterId,
+    Checksum, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName, InodeId,
+    MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, Sha256State,
+    WriterId,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
@@ -165,11 +166,25 @@ impl HeapBytes for ChangeSeq {
     }
 }
 
+impl HeapBytes for Checksum {
+    fn heap_bytes(&self) -> usize {
+        self.value.heap_bytes()
+    }
+}
+
+// The state keeps exactly its pending bytes, the length past the last
+// whole 64-byte block.
+impl HeapBytes for Sha256State {
+    fn heap_bytes(&self) -> usize {
+        (self.length() % 64) as usize
+    }
+}
+
 impl HeapBytes for ContentRef {
     fn heap_bytes(&self) -> usize {
         self.owner_namespace_id.heap_bytes()
             + self.content_id.heap_bytes()
-            + self.checksum.value.heap_bytes()
+            + self.checksum.heap_bytes()
     }
 }
 
@@ -299,7 +314,7 @@ impl HeapBytes for ActiveDeletionRecord {
 
 impl HeapBytes for ContentPublicationRecord {
     fn heap_bytes(&self) -> usize {
-        self.content_id.heap_bytes()
+        self.content_id.heap_bytes() + self.hash_state.heap_bytes() + self.crc64nvme.heap_bytes()
     }
 }
 
@@ -348,7 +363,12 @@ impl HeapBytes for WalCommitDelta {
                 child_created_by,
                 ..
             } => name_key.heap_bytes() + display_name.heap_bytes() + child_created_by.heap_bytes(),
-            WalDelta::AppendFileRevision { content_ref, .. } => content_ref.heap_bytes(),
+            WalDelta::AppendFileRevision {
+                content_ref,
+                hash_state,
+                crc64nvme,
+                ..
+            } => content_ref.heap_bytes() + hash_state.heap_bytes() + crc64nvme.heap_bytes(),
             WalDelta::TombstoneSubtree {
                 deleted_binding, ..
             } => deleted_binding.heap_bytes(),
@@ -360,7 +380,11 @@ impl HeapBytes for WalCommitDelta {
 
 impl HeapBytes for WalInlineContent {
     fn heap_bytes(&self) -> usize {
-        self.content_id.heap_bytes() + self.bytes.capacity()
+        self.content_id.heap_bytes()
+            + self.bytes.capacity()
+            + self.base.as_ref().map_or(0, |base| {
+                base.owner_namespace_id.heap_bytes() + base.content_id.heap_bytes()
+            })
     }
 }
 

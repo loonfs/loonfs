@@ -2234,6 +2234,7 @@ version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "ciborium",
+ "crc-fast",
  "crc32c",
  "crc64fast-nvme",
  "getrandom 0.3.4",

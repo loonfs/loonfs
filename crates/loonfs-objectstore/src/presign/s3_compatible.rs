@@ -538,18 +538,12 @@ impl DirectGetIssuer for S3CompatiblePresigner {
         request: PresignedGetRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        // No required headers, so `host` is the only name in
-        // `X-Amz-SignedHeaders` and the only line in the canonical headers.
-        // A `Range` the client adds is therefore outside the signature
-        // entirely, and one issued URL serves ranged, resumed, and parallel
-        // reads of the object without another round trip to the server.
-        // Adding a required header here would silently cost that.
         let credentials = self.signing_credentials(request.expires_in, now).await?;
         self.presign(
             &credentials,
             "GET",
             request.object_key,
-            BTreeMap::new(),
+            request.signed_headers(),
             request.expires_in,
             now,
         )
@@ -602,6 +596,12 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     const CONTENT_KEY: &str = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
+    /// The bytes a read grant names: a resume from byte 10 of a 39-byte
+    /// reference.
+    const GRANT: ByteRange = ByteRange {
+        start_inclusive: 10,
+        end_exclusive: 39,
+    };
 
     const FIXTURE_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
     const FIXTURE_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -672,6 +672,7 @@ mod tests {
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: Duration::from_secs(900),
                 },
                 now,
@@ -694,6 +695,7 @@ mod tests {
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: Duration::from_secs(300),
                 },
                 now,
@@ -706,6 +708,7 @@ mod tests {
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: Duration::from_secs(900),
                 },
                 now,
@@ -738,6 +741,7 @@ mod tests {
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: Duration::ZERO,
                 },
                 now
@@ -748,6 +752,7 @@ mod tests {
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: Duration::MAX,
                 },
                 now
@@ -831,6 +836,7 @@ mod tests {
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -973,11 +979,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn presigned_get_signs_only_the_host_so_range_stays_unsigned() {
+    async fn presigned_get_signs_the_range_it_grants_and_returns_it_as_a_header() {
         let signed = presigner(Some("tenant-a"), None)
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -986,16 +993,32 @@ mod tests {
             .expect("presign get");
 
         assert_eq!(signed.method, "GET");
-        assert!(
-            signed.headers.is_empty(),
-            "a read capability requires the client to send nothing"
+        assert_eq!(
+            signed.headers,
+            std::collections::BTreeMap::from([("range".to_owned(), "bytes=10-38".to_owned())])
         );
-        assert!(signed.url.contains("X-Amz-SignedHeaders=host"));
-        assert!(!signed.url.to_ascii_lowercase().contains("range"));
+        assert!(signed.url.contains("X-Amz-SignedHeaders=host%3Brange&"));
         assert!(signed
             .url
             .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/namespaces/"));
         assert!(!signed.url.contains("secret"));
+
+        let empty = presigner(Some("tenant-a"), None)
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    range: ByteRange {
+                        start_inclusive: 0,
+                        end_exclusive: 0,
+                    },
+                    expires_in: Duration::from_secs(900),
+                },
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .await
+            .expect("presign get of zero bytes");
+        assert!(empty.headers.is_empty(), "HTTP cannot name zero bytes");
+        assert!(empty.url.contains("X-Amz-SignedHeaders=host&"));
     }
 
     #[tokio::test]
@@ -1019,6 +1042,7 @@ mod tests {
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
+                    range: GRANT,
                     expires_in: Duration::from_secs(900),
                 },
                 now,
@@ -1037,6 +1061,7 @@ mod tests {
                 .presign_get(
                     PresignedGetRequest {
                         object_key: CONTENT_KEY,
+                        range: GRANT,
                         expires_in: Duration::from_secs(900),
                     },
                     UNIX_EPOCH + Duration::from_secs(1_700_000_000),

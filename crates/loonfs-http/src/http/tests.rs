@@ -2930,16 +2930,20 @@ fn assert_api_error<T: std::fmt::Debug>(
 
 /// A deployment that authorizes direct uploads has to be able to hand back
 /// what they wrote. These exercise that with a store double standing in for
-/// the provider: a loopback issuer that signs nothing, and a loopback
-/// object server reading the same store the deployment writes to — so the
-/// whole grant path (route, issuer adapter, presigned fetch, client
-/// verification) runs end to end without a real bucket.
+/// the provider: a loopback issuer that carries the range it would sign in
+/// its URL, and a loopback object server reading the same store the
+/// deployment writes to that refuses any other range — so the whole grant
+/// path (route, issuer adapter, presigned fetch, client verification) runs
+/// end to end without a real bucket.
 mod direct_download {
     use super::*;
+    use loonfs_client::DownloadOptions;
     use loonfs_objectstore::presign::{
         DirectGetIssuer, DirectPutIssuer, DirectTransferIssuers, PresignedGetRequest,
         PresignedPutRequest, PresignedUrl,
     };
+    use loonfs_objectstore::ByteRange;
+    use loonfs_types::api::v0::ObjectTransferAccess;
     use loonfs_types::{
         api::v0::UploadContentClaim, Checksum, ChecksumAlgorithm, RevisionNo,
         FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
@@ -3073,21 +3077,28 @@ mod direct_download {
                 let access: loonfs_types::api::v0::ObjectTransferAccess =
                     serde_json::from_value(grant["access"].clone()).expect("access");
                 let loonfs_types::api::v0::ObjectTransferAccess::PresignedUrl {
-                    method, url, ..
+                    method,
+                    url,
+                    headers,
+                    ..
                 } = access;
                 assert_eq!(method, "GET");
+                let mut request = axum::http::Request::builder()
+                    .method(method.as_str())
+                    .uri(url.strip_prefix("http://objects").expect("object URL"));
+                for (name, value) in &headers {
+                    request = request.header(name, value);
+                }
                 let response = objects
                     .clone()
                     .oneshot(
-                        axum::http::Request::builder()
-                            .method(method.as_str())
-                            .uri(url.strip_prefix("http://objects").expect("object URL"))
+                        request
                             .body(axum::body::Body::empty())
                             .expect("object request"),
                     )
                     .await
                     .expect("object response");
-                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
                 let received = axum::body::to_bytes(response.into_body(), usize::MAX)
                     .await
                     .expect("object bytes");
@@ -3166,11 +3177,12 @@ mod direct_download {
 
     /// An issuer that hands out unsigned loopback URLs.
     ///
-    /// It stands in for the signing half only. What a real presigner adds —
-    /// that the capability expires, that `Range` stays outside the
-    /// signature, and that the provider enforces the digest — is pinned
-    /// where it is decided: in the S3-compatible presigner's own tests, and
-    /// against a live provider in the ignored suite.
+    /// It stands in for the signing half only, and carries the `Range` a
+    /// real presigner signs in the URL so the object double can refuse any
+    /// other one. What a real presigner adds — that the capability expires,
+    /// that `Range` is inside the signature, and that the provider enforces
+    /// the digest — is pinned where it is decided: in the presigners' own
+    /// tests, and against a live provider in the ignored suite.
     ///
     /// It implements the read and whole-object-write traits and not the
     /// multipart one, which is exactly the provider shape this suite exists
@@ -3218,10 +3230,18 @@ mod direct_download {
             request: PresignedGetRequest<'_>,
             _now: SystemTime,
         ) -> Result<PresignedUrl, ObjectStoreError> {
+            let url = format!("{}/{}", self.object_base_url, request.object_key);
+            let signed = request.range_header();
             Ok(PresignedUrl {
                 method: "GET".to_owned(),
-                url: format!("{}/{}", self.object_base_url, request.object_key),
-                headers: BTreeMap::new(),
+                url: match &signed {
+                    Some(range) => format!("{url}?signed={range}"),
+                    None => url,
+                },
+                headers: signed
+                    .map(|range| ("range".to_owned(), range))
+                    .into_iter()
+                    .collect(),
                 expires_at_ms: u64::MAX,
             })
         }
@@ -3255,10 +3275,34 @@ mod direct_download {
         async fn read_object(
             axum::extract::State(store): axum::extract::State<SharedObjectStore>,
             axum::extract::Path(key): axum::extract::Path<String>,
+            axum::extract::RawQuery(query): axum::extract::RawQuery,
+            headers: axum::http::HeaderMap,
         ) -> axum::response::Response {
             use axum::response::IntoResponse as _;
-            match store.get(&key, None).await {
-                Ok(Some(bytes)) => (axum::http::StatusCode::OK, bytes).into_response(),
+            let signed = query
+                .as_deref()
+                .and_then(|query| query.strip_prefix("signed="));
+            let sent = headers
+                .get(axum::http::header::RANGE)
+                .and_then(|value| value.to_str().ok());
+            if sent != signed {
+                return axum::http::StatusCode::FORBIDDEN.into_response();
+            }
+            let range = signed
+                .and_then(|range| range.strip_prefix("bytes="))
+                .and_then(|range| range.split_once('-'))
+                .and_then(|(first, last)| {
+                    Some(ByteRange {
+                        start_inclusive: first.parse().ok()?,
+                        end_exclusive: last.parse::<u64>().ok()? + 1,
+                    })
+                });
+            let status = match range {
+                Some(_) => axum::http::StatusCode::PARTIAL_CONTENT,
+                None => axum::http::StatusCode::OK,
+            };
+            match store.get(&key, range).await {
+                Ok(Some(bytes)) => (status, bytes).into_response(),
                 Ok(None) => axum::http::StatusCode::NOT_FOUND.into_response(),
                 Err(error) => (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -3564,6 +3608,154 @@ mod direct_download {
             .expect("grant for a prior revision");
         assert_eq!(pinned.revision_no, RevisionNo(1));
         assert_eq!(pinned.content_ref, grant.content_ref);
+    }
+
+    fn signed_headers(access: &ObjectTransferAccess) -> &BTreeMap<String, String> {
+        let ObjectTransferAccess::PresignedUrl { headers, .. } = access;
+        headers
+    }
+
+    fn assert_offset_refused<T: std::fmt::Debug>(result: Result<T, ClientError>) {
+        match result {
+            Err(ClientError::Api {
+                status: 400,
+                code,
+                param,
+                ..
+            }) => {
+                assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+                assert_eq!(param.as_deref(), Some("start_offset"));
+            }
+            other => panic!("expected invalid_request for start_offset, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_grant_signs_its_range_from_the_offset_and_refuses_an_offset_at_the_end() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at(object_base_url),
+            put: None,
+            multipart: None,
+        };
+        let client = start(temp_dir.path(), "grant-ranges", Some(transfers)).await;
+        let namespace = namespace_id("grant-ranges");
+        client
+            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/ranged.bin").expect("target");
+        let payload: Vec<u8> = (0..PROXY_CAP_BYTES as usize * 2)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        client
+            .put_file_with_options(
+                &target,
+                &payload,
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
+            .await
+            .expect("seed the file");
+        let inode_id = client.stat(&target).await.expect("stat").inode_id;
+
+        let held = 100;
+        let from = DownloadOptions {
+            start_offset: held,
+            ..DownloadOptions::default()
+        };
+        let signed = BTreeMap::from([(
+            "range".to_owned(),
+            format!("bytes={held}-{}", payload.len() - 1),
+        )]);
+        let grant = client
+            .create_download_with_options(&target, &from)
+            .await
+            .expect("a grant from the offset");
+        assert_eq!(signed_headers(&grant.access), &signed);
+        for inode_grant in [
+            client
+                .create_download_by_inode_with_options(&namespace, inode_id, &from)
+                .await
+                .expect("an inode grant from the offset"),
+            client
+                .create_revision_download_by_inode_with_options(
+                    &namespace,
+                    inode_id,
+                    RevisionNo(1),
+                    &from,
+                )
+                .await
+                .expect("a revision grant from the offset"),
+        ] {
+            assert_eq!(signed_headers(&inode_grant.access), &signed);
+        }
+        let mut download = client
+            .open_direct_download(&grant)
+            .await
+            .expect("open the grant");
+        download.fold_resumed_prefix(&payload[..held as usize]);
+        let mut received = Vec::new();
+        while let Some(chunk) = download.next_chunk().await.expect("read the grant") {
+            received.extend_from_slice(&chunk);
+        }
+        assert_eq!(received, payload[held as usize..]);
+
+        for start_offset in [payload.len() as u64, payload.len() as u64 + 1] {
+            let past = DownloadOptions {
+                start_offset,
+                ..DownloadOptions::default()
+            };
+            assert_offset_refused(client.create_download_with_options(&target, &past).await);
+            assert_offset_refused(
+                client
+                    .create_revision_download_by_inode_with_options(
+                        &namespace,
+                        inode_id,
+                        RevisionNo(1),
+                        &past,
+                    )
+                    .await,
+            );
+        }
+
+        // A revision of zero bytes has one grant, from offset 0, which
+        // signs no range because there is no byte to name.
+        let empty = NamespacePath::parse(namespace.as_str(), "/empty.bin").expect("target");
+        client
+            .put_file_with_options(
+                &empty,
+                b"",
+                &loonfs_test_support::test_actor(),
+                &replace_file_options(),
+            )
+            .await
+            .expect("seed an empty file");
+        let grant = client
+            .create_download(&empty)
+            .await
+            .expect("a grant of zero bytes");
+        assert!(signed_headers(&grant.access).is_empty());
+        let mut sink = Vec::new();
+        assert_eq!(
+            client
+                .download_via_presigned_url(&grant, &mut sink)
+                .await
+                .expect("read zero bytes"),
+            0
+        );
+        assert_offset_refused(
+            client
+                .create_download_with_options(
+                    &empty,
+                    &DownloadOptions {
+                        start_offset: 1,
+                        ..DownloadOptions::default()
+                    },
+                )
+                .await,
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

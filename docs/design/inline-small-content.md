@@ -19,7 +19,7 @@ The inline sequence was faster in all 24 rounds. These timings cover store reque
 
 ## A reference names content, not a location
 
-An inline commit records the same `append_file_revision` delta as an uploaded commit, with an ordinary `blob_v1` reference. The reference names the content object that the fold will write. Until then the WAL record holds the only copy.
+An inline commit records the same `append_file_revision` delta as an uploaded commit, with an ordinary `blob_v1` reference. The reference names a prefix of the content object that the fold writes. The WAL entry is a piece: the whole value at offset 0, or, for an append, the bytes after a prefix that is already durable. Until the fold, the WAL record holds the only copy of those bytes.
 
 This keeps one identity for one piece of content over its whole life. Revision rows, the change feed, retained receipts, and equality checks such as the speculative read's same-content test never see two different references for the same bytes. Readers resolve a reference through the read view and never build a content key directly, so no reader depends on the object existing as soon as the commit is visible.
 
@@ -27,7 +27,7 @@ The writer draws the content ID at random before publication, as it does for sta
 
 Two rules follow from this:
 
-- One content ID has one lifecycle. A content ID belongs to exactly one staged upload or one committed inline value. A later attempt never reuses the ID of an earlier one, even for the same bytes. The store's verified immutable write is safe to retry only because every writer that can name a key supplies identical bytes. An expired open upload session also deletes its content without checking for publication, so an ID shared between a staged attempt and an inline attempt could be deleted after it was committed.
+- One content ID has one lifecycle. A content ID belongs to exactly one staged upload or one committed inline value. A later attempt never reuses the ID of an earlier one, even for the same bytes. The store's verified immutable write is safe to retry only because every writer that can name a key supplies the same bytes for the same prefix. An expired open upload session also deletes its content without checking for publication, so an ID shared between a staged attempt and an inline attempt could be deleted after it was committed.
 - An inline value's content ID is not its retry identity. The server draws the ID for a hosted write, and a write that falls back to staging draws another. The fingerprint identifies inline content by its bytes instead.
 
 ## Retry identity
@@ -56,17 +56,17 @@ A long-lived view can outlast its tail: a later fold publishes, and collection d
 
 ## Direct downloads
 
-A direct download returns a presigned URL for the content object. Inline content is small, so the proxied read serves it in one request instead of two. A client can still ask for a direct download of a small file that has not been folded. A handle with write authority then writes the content object at the key the reference names, with a verified immutable write, before it signs the URL. This is one step of the fold done early: a later fold finds the object present, and a concurrent fold writes identical bytes. A deployment that cannot write content objects answers `content_not_materialized` until the next fold.
+A direct download returns a presigned URL for the content object. Inline content is small, so the proxied read serves it in one request instead of two. A client can still ask for a direct download of a small file that has not been folded. A handle with write authority then writes the content ID's pieces into the object at the key the reference names, through the fold's own materialization, before it signs the URL. This is one step of the fold done early: a later fold finds the object at its target, and a concurrent fold writes the same bytes or finds them written. An object that already holds the reference's bytes is signed as it is. A deployment that cannot write content objects answers `content_not_materialized` until the next fold.
 
 ## Folding
 
-A fold writes every inline value in its range as a content object before it writes segments or publishes the manifest. The writes run with bounded concurrency after the fold's publication budget starts, and the fold checks the budget when they return.
+A fold writes every piece in its range into its content object before it writes segments or publishes the manifest. Pieces that start at offset 0 are the whole value and take one verified immutable write; a later piece extends the object that holds the bytes before it. A chain that starts from a base streams the base's first bytes and then its pieces into a new object, checked against the newest reference as they pass, so a small append to a large base never holds the base. The writes run with bounded concurrency after the fold's publication budget starts, and the fold checks the budget when they return.
 
-A fold's objects are not garbage while a fold can still need them: the unfolded WAL tail roots each object until a manifest covers its WAL object, and that manifest's revisions root it after that ([format section 11.9](../specs/format.md#119-content-roots)). A fold that crashes, exceeds its budget, or loses the manifest race leaves objects that the next fold finds already present. There is no orphan to discover and no cleanup state to persist. An object already at the key must hold the same bytes, and the verified write checks this. A mismatch stops the fold without publishing.
+A fold's objects are not garbage while a fold can still need them: the unfolded WAL tail roots each object until a manifest covers its WAL object, and that manifest's revisions root it after that ([format section 11.9](../specs/format.md#119-content-roots)). A fold that crashes, exceeds its budget, or loses the manifest race leaves objects that the next fold finds already present. There is no orphan to discover and no cleanup state to persist. An object already at the key holds a prefix of the same content: the fold extends it from the length it holds, or finds it at or past its target and checks it, by attestation at the target, and by reading the pieces' bytes back past it or when the object carries no attestation. A mismatch stops the fold without publishing.
 
 A fold can pause between reading a tail and writing its content while the namespace is deleted and swept. A fold call reads a fresh manifest, but a writer's own fold starts from its retained view. Neither checks its publication budget until its content writes return. A content write can therefore land after a sweep. It is found the way a late upload is: the retired-owner sweep lists the content prefix again on every later pass ([format section 11.8](../specs/format.md#118-sweeping-a-retired-owners-content)).
 
-A fold becomes due when the unfolded tail reaches 32 WAL objects, or when its inline bytes reach the fold threshold. The second trigger bounds what a cold reader downloads to replay a tail.
+A fold becomes due when the unfolded tail reaches 32 WAL objects, or when the bytes of its pieces reach the fold threshold. The second trigger bounds what a cold reader downloads to replay a tail.
 
 ## Collection
 

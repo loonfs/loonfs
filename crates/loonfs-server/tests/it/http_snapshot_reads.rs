@@ -653,6 +653,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
                 inode_id,
                 &DownloadOptions {
                     snapshot_id: Some(deleted.snapshot_id.clone()),
+                    ..DownloadOptions::default()
                 },
             )
             .await

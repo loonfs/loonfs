@@ -18,7 +18,7 @@ pub(super) struct MetadataIndexes {
     latest_binding_by_child: HashMap<InodeId, DirentryBindingRecord>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
     commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
-    content_publication_by_id: HashMap<loonfs_types::ContentId, ChangeSeq>,
+    content_head_by_id: HashMap<loonfs_types::ContentId, ContentPublicationRecord>,
     /// What the indexed keys and records own, since each index holds its
     /// own copy of a row.
     owned_heap_bytes: usize,
@@ -33,7 +33,7 @@ impl Default for MetadataIndexes {
             latest_binding_by_child: HashMap::new(),
             tombstone_by_root: HashMap::new(),
             commit_receipt_by_id: HashMap::new(),
-            content_publication_by_id: HashMap::new(),
+            content_head_by_id: HashMap::new(),
             owned_heap_bytes: 0,
         }
     }
@@ -88,7 +88,7 @@ impl MetadataIndexes {
             + hash_map_table_bytes(&self.latest_binding_by_child)
             + hash_map_table_bytes(&self.tombstone_by_root)
             + hash_map_table_bytes(&self.commit_receipt_by_id)
-            + hash_map_table_bytes(&self.content_publication_by_id)
+            + hash_map_table_bytes(&self.content_head_by_id)
             + self.owned_heap_bytes
     }
 
@@ -185,23 +185,22 @@ impl MetadataIndexes {
         );
     }
 
-    pub(super) fn content_publication(
+    pub(super) fn content_head(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> Option<ChangeSeq> {
-        self.content_publication_by_id.get(content_id).copied()
+    ) -> Option<&ContentPublicationRecord> {
+        self.content_head_by_id.get(content_id)
     }
 
     pub(super) fn record_content_publication(&mut self, record: &ContentPublicationRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
-        match self.content_publication_by_id.get_mut(&record.content_id) {
-            Some(seq) => *seq = (*seq).max(record.committed_seq),
-            None => {
-                self.owned_heap_bytes += record.content_id.heap_bytes();
-                self.content_publication_by_id
-                    .insert(record.content_id.clone(), record.committed_seq);
-            }
-        }
+        replace_if_newer(
+            &mut self.content_head_by_id,
+            &mut self.owned_heap_bytes,
+            record.content_id.clone(),
+            record.clone(),
+            |head| (head.size_bytes, std::cmp::Reverse(head.committed_seq)),
+        );
     }
 
     pub(super) fn record_commit_receipt(&mut self, record: &CommitReceiptRecord) {
