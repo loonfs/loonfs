@@ -223,13 +223,16 @@ pub(crate) trait MultipartController: Send + Sync {
     }
 
     /// Writes `head` and then every part of `rest` to `key` only while `key`
-    /// is absent, attesting `sha256` when given.
+    /// is absent, attesting `sha256` when given, with at most `part_window`
+    /// parts in flight. A provider whose upload takes its parts in order
+    /// sends them one at a time.
     async fn put_if_absent(
         &self,
         key: &str,
         head: Bytes,
         rest: PartReader<'_>,
         sha256: Option<&Checksum>,
+        part_window: usize,
     ) -> Result<ObjectMetadata>;
 
     /// Extends `key` without moving its base through this process, or
@@ -991,7 +994,13 @@ impl ObjectStore for ProviderObjectStore {
                 );
                 let head = parts.next_part().await?.unwrap_or_default();
                 controller
-                    .put_if_absent(key, head, parts, Some(sha256))
+                    .put_if_absent(
+                        key,
+                        head,
+                        parts,
+                        Some(sha256),
+                        PROVIDER_MULTIPART_PART_WINDOW,
+                    )
                     .await
             }
         })
@@ -1000,7 +1009,7 @@ impl ObjectStore for ProviderObjectStore {
 
     /// Cuts the payload into parts as it arrives and uploads them one at a
     /// time, so a large object costs one part of memory instead of its own
-    /// size.
+    /// size. The server budgets a client's upload at that one part.
     ///
     /// The first part is cut before anything is decided. A payload that
     /// ends inside it is an ordinary [`ObjectStore::put`] with the caller's
@@ -1022,7 +1031,7 @@ impl ObjectStore for ProviderObjectStore {
             self.put(key, head, mode).await?;
             return Ok(size_bytes);
         }
-        self.put_parts(key, head, reader, mode, None)
+        self.put_parts(key, head, reader, mode, None, 1)
             .await
             .map(|metadata| metadata.size_bytes)
     }
@@ -1046,8 +1055,15 @@ impl ObjectStore for ProviderObjectStore {
             }
             let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
             let head = reader.next_part().await?.unwrap_or_default();
-            self.put_parts(key, head, reader, PutMode::CreateIfAbsent, sha256)
-                .await
+            self.put_parts(
+                key,
+                head,
+                reader,
+                PutMode::CreateIfAbsent,
+                sha256,
+                PROVIDER_MULTIPART_PART_WINDOW,
+            )
+            .await
         }
         .await;
         crate::immutable_write::decide_created(self, key, sha256, created).await
@@ -1317,9 +1333,10 @@ impl ProviderObjectStore {
 
     /// Uploads `head` and then every part of `rest`. A create-if-absent goes
     /// through the provider's own conditional create where it has one, which
-    /// records `sha256` when the upload starts. Elsewhere the upstream
-    /// multipart upload checks `mode` against a `head` before completion and
-    /// records no attestation.
+    /// records `sha256` when the upload starts and keeps at most
+    /// `part_window` parts in flight. Elsewhere the upstream multipart upload
+    /// sends one part at a time, checks `mode` against a `head` before
+    /// completion, and records no attestation.
     async fn put_parts(
         &self,
         key: &str,
@@ -1327,9 +1344,12 @@ impl ProviderObjectStore {
         rest: PartReader<'_>,
         mode: PutMode,
         sha256: Option<&Checksum>,
+        part_window: usize,
     ) -> Result<ObjectMetadata> {
         if let (PutMode::CreateIfAbsent, Some(controller)) = (&mode, &self.multipart_controller) {
-            return controller.put_if_absent(key, head, rest, sha256).await;
+            return controller
+                .put_if_absent(key, head, rest, sha256, part_window)
+                .await;
         }
         let path = self.to_path(key)?;
         let upload = MultipartWrite {
@@ -2907,11 +2927,17 @@ mod tests {
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 
-    /// A controller that counts the conditional creates handed to it and
-    /// answers with the attestation it was given.
+    /// A controller that records the part window of each conditional create
+    /// handed to it and answers with the attestation it was given.
     #[derive(Default)]
     struct CountingController {
-        creates: AtomicUsize,
+        part_windows: Mutex<Vec<usize>>,
+    }
+
+    impl CountingController {
+        fn part_windows(&self) -> Vec<usize> {
+            self.part_windows.lock().expect("part windows").clone()
+        }
     }
 
     #[async_trait]
@@ -2922,8 +2948,12 @@ mod tests {
             head: Bytes,
             mut rest: PartReader<'_>,
             sha256: Option<&Checksum>,
+            part_window: usize,
         ) -> Result<ObjectMetadata> {
-            self.creates.fetch_add(1, Ordering::SeqCst);
+            self.part_windows
+                .lock()
+                .expect("part windows")
+                .push(part_window);
             let mut size_bytes = head.len() as u64;
             while let Some(part) = rest.next_part().await? {
                 size_bytes += part.len() as u64;
@@ -2949,7 +2979,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_large_verified_write_creates_through_the_controller() {
+    async fn large_creates_go_through_the_controller_and_only_verified_ones_get_the_window() {
         let flaky = Arc::new(FlakyStore::default());
         let controller = Arc::new(CountingController::default());
         let store = multipart_test_store(Arc::clone(&flaky))
@@ -2963,7 +2993,7 @@ mod tests {
             )
             .await
             .expect("a publication is one conditional request at every size");
-        assert_eq!(controller.creates.load(Ordering::SeqCst), 0);
+        assert!(controller.part_windows().is_empty());
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
         assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
 
@@ -2971,7 +3001,7 @@ mod tests {
             .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload.clone()))
             .await
             .expect("a large verified write creates through the controller");
-        assert_eq!(controller.creates.load(Ordering::SeqCst), 1);
+        assert_eq!(controller.part_windows(), [PROVIDER_MULTIPART_PART_WINDOW]);
         assert_eq!(written.size_bytes, payload.len() as u64);
         assert_eq!(written.sha256, Some(Checksum::sha256(&payload)));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
@@ -2985,7 +3015,10 @@ mod tests {
             )
             .await
             .expect("a large streamed verified write creates through the controller");
-        assert_eq!(controller.creates.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            controller.part_windows(),
+            [PROVIDER_MULTIPART_PART_WINDOW; 2]
+        );
         assert_eq!(written.size_bytes, payload.len() as u64);
         assert_eq!(written.sha256, Some(Checksum::sha256(&payload)));
 
@@ -2994,10 +3027,32 @@ mod tests {
             .put_immutable_verified_stream(small, 10, None, streamed(&payload[..10], 4))
             .await
             .expect("a small streamed verified write is one request");
-        assert_eq!(controller.creates.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            controller.part_windows(),
+            [PROVIDER_MULTIPART_PART_WINDOW; 2]
+        );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         let held = store.head(small).await.expect("head").expect("object");
         assert_eq!(held.sha256, None, "no attestation was asked for");
+
+        let uploaded = store
+            .put_streamed(
+                MULTIPART_KEY,
+                streamed(&payload, 100),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("a large streamed upload creates through the controller");
+        assert_eq!(uploaded, payload.len() as u64);
+        assert_eq!(
+            controller.part_windows(),
+            [
+                PROVIDER_MULTIPART_PART_WINDOW,
+                PROVIDER_MULTIPART_PART_WINDOW,
+                1
+            ],
+            "a client's upload keeps one part in flight"
+        );
     }
 
     #[tokio::test]

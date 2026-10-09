@@ -234,13 +234,15 @@ impl StoredChecksumReader for GcsRequestSigner {
 impl MultipartController for GcsRequestSigner {
     /// Sends the parts through one JSON API resumable upload whose start
     /// carries `ifGenerationMatch=0`, because XML API multipart uploads
-    /// refuse preconditions.
+    /// refuse preconditions. A resumable upload takes its bytes in order, so
+    /// the parts go one at a time whatever the window.
     async fn put_if_absent(
         &self,
         key: &str,
         head: Bytes,
         mut rest: PartReader<'_>,
         sha256: Option<&Checksum>,
+        _part_window: usize,
     ) -> Result<ObjectMetadata> {
         let url = format!(
             "{GCS_JSON_UPLOADS}/{}/o?uploadType=resumable&ifGenerationMatch=0&name={}",

@@ -37,7 +37,7 @@ use crate::{
 use async_trait::async_trait;
 use base64::Engine as _;
 use bytes::Bytes;
-use futures::FutureExt;
+use futures::{stream, FutureExt, StreamExt, TryStreamExt};
 use loonfs_types::{format::hex::hex_encode_bytes, SecretString};
 use loonfs_types::{Checksum, ChecksumAlgorithm, OperationDeadline, StreamingChecksum};
 use object_store::aws::{AmazonS3Builder, Checksum as ProviderChecksum};
@@ -50,13 +50,14 @@ use std::time::{Duration, SystemTime};
 /// checksum head, each is issued immediately and never handed out.
 const MULTIPART_CONTROL_TTL: Duration = Duration::from_secs(60);
 
-/// Size of every copied part of a Cloudflare R2 extension. R2 requires every
-/// part but the last to share one size, so the base's remainder below it
-/// travels with the pieces as the last part.
+/// Size of every copied part of a Cloudflare R2 extension of a base at least
+/// this long. R2 requires every part but the last to share one size, so the
+/// base's remainder below it travels with the pieces as the last part. A
+/// shorter base is copied whole as one part, which that rule allows.
 const R2_EXTEND_PART_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The smallest part AWS S3 accepts anywhere but last, and so the smallest
-/// base an extension copies instead of rewriting.
+/// The smallest part AWS S3 and Cloudflare R2 accept anywhere but last, and
+/// so the smallest base an extension copies instead of rewriting.
 const S3_MIN_PART_BYTES: u64 = 5 * 1024 * 1024;
 
 /// The largest part AWS S3 accepts, copied or uploaded.
@@ -382,40 +383,49 @@ impl MultipartController for S3RequestSigner {
         }
     }
 
-    /// Uploads the parts in order and completes with `If-None-Match: *`,
-    /// claiming the CRC-64/NVME of every byte sent.
+    /// Uploads the parts with up to `part_window` in flight and completes
+    /// with `If-None-Match: *`, claiming the CRC-64/NVME of every byte sent.
     async fn put_if_absent(
         &self,
         key: &str,
         head: Bytes,
-        mut rest: PartReader<'_>,
+        rest: PartReader<'_>,
         sha256: Option<&Checksum>,
+        part_window: usize,
     ) -> Result<ObjectMetadata> {
         let upload_id = self.create_upload(key, sha256).await?;
         let mut abort_on_drop = self.abort_on_drop(key, &upload_id);
         let mut crc = StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc64nvme);
         let mut size_bytes = 0;
-        let mut parts = Vec::new();
-        let mut next = Some(head);
-        while let Some(payload) = next {
-            if parts.len() >= MAX_PROVIDER_MULTIPART_PARTS {
-                return Err(ObjectStoreError::transport(
-                    key,
-                    format!(
-                        "payload needs more than the provider's \
-                         {MAX_PROVIDER_MULTIPART_PARTS}-part limit at this part size"
-                    ),
-                ));
-            }
-            crc.update(&payload);
-            size_bytes += payload.len() as u64;
-            let part_number = parts.len() as u32 + 1;
-            parts.push(
-                self.upload_part(key, &upload_id, part_number, payload)
-                    .await?,
-            );
-            next = rest.next_part().await?;
-        }
+        let payloads = stream::once(async { Ok(head) })
+            .chain(stream::try_unfold(rest, |mut rest| async move {
+                Ok::<_, ObjectStoreError>(rest.next_part().await?.map(|payload| (payload, rest)))
+            }))
+            .boxed();
+        // Parts are cut, counted, and checksummed in order, and the next one
+        // is cut only while the window has room, so the window bounds the
+        // parts held in memory.
+        let mut parts: Vec<MultipartPart> = payloads
+            .enumerate()
+            .map(|(index, payload)| {
+                let payload = payload?;
+                if index >= MAX_PROVIDER_MULTIPART_PARTS {
+                    return Err(ObjectStoreError::transport(
+                        key,
+                        format!(
+                            "payload needs more than the provider's \
+                             {MAX_PROVIDER_MULTIPART_PARTS}-part limit at this part size"
+                        ),
+                    ));
+                }
+                crc.update(&payload);
+                size_bytes += payload.len() as u64;
+                Ok(self.upload_part(key, &upload_id, index as u32 + 1, payload))
+            })
+            .try_buffer_unordered(part_window)
+            .try_collect()
+            .await?;
+        parts.sort_unstable_by_key(|part| part.part_number);
         let etag = self
             .finish_upload(
                 key,
@@ -775,13 +785,17 @@ where
 /// base's remainder past them travels with the pieces as the last part.
 ///
 /// AWS S3 copies a base of at least one part in equal parts of at most
-/// 5 GiB. Cloudflare R2 copies whole parts of [`R2_EXTEND_PART_BYTES`].
+/// 5 GiB. Cloudflare R2 copies a base under [`R2_EXTEND_PART_BYTES`] the
+/// same way, which is one part, and a base of at least that length in whole
+/// parts of [`R2_EXTEND_PART_BYTES`].
 fn copied_parts(kind: ConfiguredObjectStoreKind, length: u64) -> Vec<ByteRange> {
+    if length < S3_MIN_PART_BYTES {
+        return Vec::new();
+    }
     let (part_bytes, copied_bytes) = match kind {
-        ConfiguredObjectStoreKind::CloudflareR2 => {
+        ConfiguredObjectStoreKind::CloudflareR2 if length >= R2_EXTEND_PART_BYTES => {
             (R2_EXTEND_PART_BYTES, length - length % R2_EXTEND_PART_BYTES)
         }
-        _ if length < S3_MIN_PART_BYTES => return Vec::new(),
         _ => (length.div_ceil(length.div_ceil(S3_MAX_PART_BYTES)), length),
     };
     (0..copied_bytes)
@@ -921,7 +935,10 @@ mod tests {
             copied(s3, 12 * GIB),
             [(0, 4 * GIB), (4 * GIB, 8 * GIB), (8 * GIB, 12 * GIB)]
         );
-        assert_eq!(copied(r2, 64 * MIB - 1), []);
+        assert_eq!(copied(r2, 5 * MIB - 1), []);
+        assert_eq!(copied(r2, 5 * MIB), [(0, 5 * MIB)]);
+        assert_eq!(copied(r2, 64 * MIB - 1), [(0, 64 * MIB - 1)]);
+        assert_eq!(copied(r2, 64 * MIB + 1), [(0, 64 * MIB)]);
         assert_eq!(
             copied(r2, 200 * MIB),
             [(0, 64 * MIB), (64 * MIB, 128 * MIB), (128 * MIB, 192 * MIB)]
