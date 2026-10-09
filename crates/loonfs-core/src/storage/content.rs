@@ -296,13 +296,33 @@ impl<S: ObjectStore> FileContentStream<S> {
         chunk_bytes: NonZeroU64,
         start_offset: u64,
     ) -> Result<Self, DurableContentValidationError> {
+        location.check_prefix(&store).await?;
+        Self::open_with_checked_prefix(
+            store,
+            location,
+            entry,
+            content_ref,
+            chunk_bytes,
+            start_offset,
+        )
+        .await
+    }
+
+    /// Opens the stream for a caller that has already run
+    /// [`ContentLocation::check_prefix`] on `location`.
+    pub(super) async fn open_with_checked_prefix(
+        store: S,
+        location: ContentLocation,
+        entry: Option<PathEntry>,
+        content_ref: ContentRef,
+        chunk_bytes: NonZeroU64,
+        start_offset: u64,
+    ) -> Result<Self, DurableContentValidationError> {
         if location.is_resident() {
             let bytes = location
                 .read_range(&store, 0, content_ref.size_bytes)
                 .await?;
             validate_loaded_content_bytes(location.object_key().to_owned(), &content_ref, &bytes)?;
-        } else {
-            location.check_prefix(&store).await?;
         }
         let expected = content_ref.checksum.clone();
         let digest = StreamingChecksum::for_algorithm(expected.algorithm);
@@ -424,7 +444,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// exactly `size_bytes` — the resumed head start, which the first
     /// [`Self::next_chunk`] refuses to start without, plus everything
     /// fetched from it to the end. An object prefix's length was checked
-    /// by the head request [`Self::open_inner`] made.
+    /// by a head request before the stream opened.
     fn completion(&mut self) -> Result<(), DurableContentValidationError> {
         let verdict = match self.completion.take() {
             Some(verdict) => verdict,

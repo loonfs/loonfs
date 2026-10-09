@@ -827,11 +827,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self.require_administrator(context).await?;
         self.ensure_live_context(context)?;
         let view = self.load_read_view(context).await?;
-        if view
+        if !view
             .metadata_view()
-            .content_head(&content_ref.content_id)
+            .content_published(&content_ref.content_id)
             .await?
-            .is_none()
         {
             return Err(CoreError::PathNotFound(content_ref.content_id.to_string()));
         }

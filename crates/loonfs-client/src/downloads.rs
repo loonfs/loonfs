@@ -372,6 +372,11 @@ impl Client {
     /// Streams a granted object's bytes into `sink`, checking them against
     /// the reference the grant carried, and reports how many arrived.
     ///
+    /// The grant must read from byte 0, since the check covers the whole
+    /// object. A grant from a later offset, which resumes a download, is
+    /// refused before any request. Resume with [`Self::open_direct_download`]
+    /// and [`DirectDownloadStream::fold_resumed_prefix`] instead.
+    ///
     /// The payload is never held: each chunk is hashed and written as it
     /// arrives, so this costs one chunk of memory whatever the object's
     /// length. That is the entire reason the grant exists — a file past the
@@ -395,6 +400,15 @@ impl Client {
     {
         use tokio::io::AsyncWriteExt as _;
         let path = &download.path;
+        let ObjectTransferAccess::PresignedUrl { headers, .. } = &download.access;
+        let start_offset = granted_start(headers, &download.content_ref, path.as_str())?;
+        if start_offset != 0 {
+            return Err(ClientError::Protocol(format!(
+                "the grant for `{path}` starts at offset {start_offset}; \
+                 `download_via_presigned_url` takes a grant from offset 0, so resume with \
+                 `open_direct_download`"
+            )));
+        }
         let mut download = self.open_direct_download(download).await?;
         let mut size_bytes = 0u64;
         while let Some(chunk) = download.next_chunk().await? {

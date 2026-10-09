@@ -941,6 +941,21 @@ async fn a_base_the_store_cannot_copy_streams_its_prefix_in_chunks() {
         ],
         "the local store declines the copy, so the fold streams"
     );
+    let operations = store.snapshot();
+    let streamed = operations
+        .iter()
+        .position(|operation| matches!(operation, RecordedOperation::PutImmutableStream { .. }))
+        .expect("the streamed create");
+    assert_eq!(
+        operations[..streamed]
+            .iter()
+            .filter(
+                |operation| matches!(operation, RecordedOperation::Head { key } if *key == base_key)
+            )
+            .count(),
+        1,
+        "the declined copy and the stream share one head of the base"
+    );
     let base_gets: Vec<_> = store
         .take_gets()
         .into_iter()

@@ -12,8 +12,8 @@ use loonfs_objectstore::metrics::{
     VecObjectStoreMetricsRecorder,
 };
 use loonfs_objectstore::{
-    ByteRange, ExtendBase, ExtendedObject, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, ObjectStoreErrorClass, PutMode,
+    ByteRange, ExtendBase, ExtendedObject, ImmutableWriteError, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode,
 };
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::{Checksum, EffectiveLimit, ManifestNo, Page};
@@ -179,6 +179,31 @@ async fn convenience_writes_funnel_through_put_with_distinct_modes() {
     assert_eq!(samples[0].put_mode, Some(PutModeClass::Overwrite));
     assert_eq!(samples[1].put_mode, Some(PutModeClass::CreateIfAbsent));
     assert_eq!(samples[2].put_mode, Some(PutModeClass::CompareAndSwap));
+}
+
+#[tokio::test]
+async fn a_verified_write_reaches_the_inner_store_and_records_one_put() {
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
+    let store = InstrumentedObjectStore::new(DelegatingWriteStore::default(), recorder.clone());
+
+    store
+        .put_immutable_verified(
+            "namespaces/ns-1/content/con_00000000000000000000000000000001",
+            bytes(b"content"),
+        )
+        .await
+        .expect("verified write");
+
+    assert_eq!(store.into_inner().calls(), vec!["put_immutable_verified"]);
+    let samples = recorder.samples();
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(sample.operation, ObjectStoreOperation::Put);
+    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.bytes_in, Some(7));
+    assert_eq!(sample.put_mode, Some(PutModeClass::CreateIfAbsent));
+    assert_eq!(sample.key_class, KeyClass::Content);
+    assert_eq!(sample.attempts, 1);
 }
 
 #[tokio::test]
@@ -498,6 +523,14 @@ impl ObjectStore for DelegatingWriteStore {
         _bytes: Bytes,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         Ok(self.record_call("put_if_absent"))
+    }
+
+    async fn put_immutable_verified(
+        &self,
+        _key: &str,
+        _bytes: Bytes,
+    ) -> Result<ObjectMetadata, ImmutableWriteError> {
+        Ok(self.record_call("put_immutable_verified"))
     }
 
     async fn compare_and_swap(

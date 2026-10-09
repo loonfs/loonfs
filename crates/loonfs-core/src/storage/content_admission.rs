@@ -17,6 +17,10 @@ use thiserror::Error;
 
 const TOKEN_VERSION: &str = "vct3";
 
+/// The most bytes a SHA-256 state keeps past its last whole 64-byte block.
+/// Its words and length sit inside the proof, which callers count by size.
+const SHA256_STATE_MAX_TAIL_BYTES: usize = 63;
+
 /// Evidence read from a durable upload session in its completed state.
 ///
 /// The type has no public constructor. Only the upload protocol can create
@@ -92,24 +96,40 @@ impl PreparedContent {
     pub(crate) fn estimated_payload_bytes(&self) -> usize {
         match &self.kind {
             PreparedContentKind::Inline(value) => value.bytes().len(),
-            PreparedContentKind::Staged { content_ref, .. } => content_ref
+            PreparedContentKind::Staged {
+                content_ref,
+                hash_state,
+                crc64nvme,
+                ..
+            } => content_ref
                 .owner_namespace_id
                 .as_str()
                 .len()
                 .saturating_add(content_ref.content_id.as_str().len())
-                .saturating_add(content_ref.checksum.value.len()),
+                .saturating_add(content_ref.checksum.value.len())
+                .saturating_add(digest_payload_bytes(
+                    hash_state.as_ref(),
+                    crc64nvme.as_ref(),
+                )),
         }
     }
 
+    /// The payload of the staged proof `value` becomes, which carries the
+    /// value's digests.
     pub(crate) fn estimated_owned_staging_payload_bytes(
         namespace_id: &NamespaceId,
-        content_ref: &ContentRef,
+        value: &InlineContent,
     ) -> usize {
+        let content_ref = value.content_ref();
         namespace_id
             .as_str()
             .len()
             .saturating_add(content_ref.content_id.as_str().len())
             .saturating_add(content_ref.checksum.value.len())
+            .saturating_add(digest_payload_bytes(
+                Some(value.hash_state()),
+                Some(value.crc64nvme()),
+            ))
     }
 
     pub(crate) fn content_id(&self) -> &ContentId {
@@ -190,6 +210,12 @@ impl PreparedContent {
             PreparedContentKind::Staged { content_ref, .. } => content_ref,
         }
     }
+}
+
+fn digest_payload_bytes(hash_state: Option<&Sha256State>, crc64nvme: Option<&Checksum>) -> usize {
+    hash_state
+        .map_or(0, |_| SHA256_STATE_MAX_TAIL_BYTES)
+        .saturating_add(crc64nvme.map_or(0, |crc64nvme| crc64nvme.value.len()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +411,39 @@ mod tests {
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
 
         assert!(!admission.admits(&other_namespace, &content, 1_000,));
+    }
+
+    #[test]
+    fn a_staged_proof_counts_the_digests_it_carries() {
+        let namespace = NamespaceId::parse("demo").expect("namespace");
+        let value = InlineContent::new(
+            namespace.clone(),
+            ContentId::generate(),
+            bytes::Bytes::from_static(b"hello"),
+        );
+        let staged = |hash_state, crc64nvme| {
+            PreparedContent::for_completed_upload(
+                value.content_ref().clone(),
+                hash_state,
+                crc64nvme,
+                u64::MAX,
+                None,
+            )
+            .estimated_payload_bytes()
+        };
+        let with_digests = staged(
+            Some(value.hash_state().clone()),
+            Some(value.crc64nvme().clone()),
+        );
+
+        assert!(
+            with_digests
+                >= staged(None, None) + SHA256_STATE_MAX_TAIL_BYTES + value.crc64nvme().value.len()
+        );
+        assert_eq!(
+            PreparedContent::estimated_owned_staging_payload_bytes(&namespace, &value),
+            with_digests
+        );
     }
 
     #[test]
