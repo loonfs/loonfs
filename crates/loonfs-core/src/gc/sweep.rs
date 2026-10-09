@@ -45,8 +45,8 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
                 self.process_aged_family(family, key, |counts| &mut counts.content_objects)
                     .await
             }
-            CandidateFamily::Scratch => {
-                self.process_aged_family(family, key, |counts| &mut counts.scratch_objects)
+            CandidateFamily::Temporary => {
+                self.process_aged_family(family, key, |counts| &mut counts.temporary_objects)
                     .await
             }
         }

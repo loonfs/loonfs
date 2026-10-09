@@ -1232,7 +1232,7 @@ async fn the_wal_tail_roots_inline_content_a_direct_download_wrote_early() {
 }
 
 #[tokio::test]
-async fn content_and_scratch_keys_the_layout_does_not_recognize_are_kept() {
+async fn content_and_temporary_keys_the_layout_does_not_recognize_are_kept() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1240,15 +1240,15 @@ async fn content_and_scratch_keys_the_layout_does_not_recognize_are_kept() {
         .await
         .expect("bootstrap");
     let content = loonfs_objectstore::keys::content_prefix(&namespace_id);
-    let scratch = loonfs_objectstore::keys::scratch_prefix(&namespace_id);
+    let temporary = loonfs_objectstore::keys::temporary_prefix(&namespace_id);
     let collected = [
         loonfs_objectstore::keys::content_blob(&namespace_id, &loonfs_types::ContentId::generate()),
-        format!("{scratch}piece"),
+        format!("{temporary}piece"),
     ];
     let kept = [
         format!("{content}not-a-content-id"),
         format!("{content}nested/object"),
-        format!("{scratch}nested/piece"),
+        format!("{temporary}nested/piece"),
     ];
     for key in collected.iter().chain(&kept) {
         store
@@ -1264,7 +1264,7 @@ async fn content_and_scratch_keys_the_layout_does_not_recognize_are_kept() {
     assert_eq!(
         (
             report.deleted.content_objects,
-            report.deleted.scratch_objects
+            report.deleted.temporary_objects
         ),
         (1, 1)
     );

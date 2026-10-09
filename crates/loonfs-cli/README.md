@@ -410,7 +410,7 @@ Maintenance
     deleted namespace's own content once it retires, with
     deleted.retired_content_objects counting listed content objects that were
     deleted. A pass with nothing left under the content prefix reports zero.
-    deleted.scratch_objects counts store scratch objects older than the window.
+    deleted.temporary_objects counts store temporary objects older than the window.
 
   loonfs maintenance store probe
     Test the object-store operations LoonFS requires. The command creates
