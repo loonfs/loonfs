@@ -5,8 +5,8 @@ use crate::attempts::counting_attempts;
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::{
-    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, ExtendBase, ExtendedObject, MultipartPart, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -42,7 +42,8 @@ pub struct ObjectStoreMetricSample {
     pub attempts: u32,
     /// Cardinality-bounded success or failure classification.
     pub result: ObjectStoreResultClass,
-    /// Request payload bytes for a put, including failed attempts; otherwise `None`.
+    /// Request payload bytes for a put or an extension, including failed
+    /// attempts; otherwise `None`.
     pub bytes_in: Option<u64>,
     /// Response payload bytes for a successful get, including zero; otherwise `None`.
     pub bytes_out: Option<u64>,
@@ -98,6 +99,8 @@ pub enum ObjectStoreOperation {
     Put,
     /// Measures a write whose payload arrived as a stream.
     PutStreamed,
+    /// Measures appending pieces to an object under its base version.
+    ExtendObject,
     /// Measures an idempotent object delete.
     Delete,
     /// Measures opening a client-driven multipart upload.
@@ -123,6 +126,7 @@ impl ObjectStoreOperation {
             Self::Get => "get",
             Self::Put => "put",
             Self::PutStreamed => "put_streamed",
+            Self::ExtendObject => "extend_object",
             Self::Delete => "delete",
             Self::CreateMultipartUpload => "create_multipart_upload",
             Self::CompleteMultipartUpload => "complete_multipart_upload",
@@ -521,6 +525,30 @@ where
         result
     }
 
+    async fn extend_object(
+        &self,
+        key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<ObjectMetadata> {
+        let start = sample_clock();
+        let bytes_in = pieces.len() as u64;
+        let (extended, attempts) =
+            counting_attempts(self.inner.extend_object(key, base, pieces, result)).await;
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::ExtendObject,
+            key,
+            start.elapsed(),
+            attempts,
+            classify_result(&extended),
+            self.store_kind.clone(),
+        );
+        sample.bytes_in = Some(bytes_in);
+        self.record(sample);
+        extended
+    }
+
     async fn delete(&self, key: &str) -> Result<()> {
         let start = sample_clock();
         let (result, attempts) = counting_attempts(self.inner.delete(key)).await;
@@ -783,7 +811,7 @@ fn classify_key(key: &str) -> KeyClass {
     };
 
     match parsed.family() {
-        DurableObjectFamily::ContentBlob => KeyClass::Content,
+        DurableObjectFamily::ContentBlob | DurableObjectFamily::ScratchObject => KeyClass::Content,
         DurableObjectFamily::WalObject => KeyClass::WalObject,
         DurableObjectFamily::MetadataManifest | DurableObjectFamily::Hint => {
             KeyClass::NamespaceManifest

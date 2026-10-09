@@ -31,6 +31,8 @@ pub enum DurableObjectFamily {
     UploadSession,
     /// Classifies immutable whole-file content bytes.
     ContentBlob,
+    /// Classifies a temporary object that an extension writes and deletes.
+    ScratchObject,
 }
 
 /// Reports the durable family and identifiers recoverable from a recognized key.
@@ -107,6 +109,11 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 )
             })
         }
+        ["namespaces", namespace, "scratch", scratch] => Some(parsed(
+            DurableObjectFamily::ScratchObject,
+            namespace,
+            Some(scratch),
+        )),
         _ => None,
     }
 }
@@ -230,7 +237,7 @@ mod tests {
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
         content_blob, hint, metadata_manifest_object, metadata_segment, metadata_segment_prefix,
-        pin, upload_session, wal_object, wal_prefix,
+        pin, scratch_object, upload_session, wal_object, wal_prefix,
     };
     use loonfs_types::{
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
@@ -247,6 +254,8 @@ mod tests {
         let upload_id = UploadId::parse("upl_00000000000000000000000000000001").expect("upload id");
         let content_id =
             ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("content id");
+        let scratch = scratch_object(&namespace_id);
+        let scratch_id = scratch.rsplit('/').next();
         let cases = [
             (
                 wal_object(&namespace_id, &wal_no),
@@ -278,6 +287,11 @@ mod tests {
                 content_blob(&namespace_id, &content_id),
                 DurableObjectFamily::ContentBlob,
                 Some(content_id.as_str()),
+            ),
+            (
+                scratch.clone(),
+                DurableObjectFamily::ScratchObject,
+                scratch_id,
             ),
         ];
 

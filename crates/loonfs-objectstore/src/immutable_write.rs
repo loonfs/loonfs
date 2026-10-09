@@ -1,13 +1,11 @@
 //! Verified writes for objects whose keys name immutable bytes.
 
-use crate::retry::{next_retry_backoff, transport_retry_pause, DEFAULT};
+use crate::retry::{with_transport_retry, DEFAULT};
 use crate::timing::StdMonotonicTimer;
-use crate::{
-    ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-    PROVIDER_MULTIPART_THRESHOLD_BYTES,
-};
+use crate::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use bytes::Bytes;
-use loonfs_types::{ChecksumAlgorithm, OperationDeadline};
+use loonfs_types::{Checksum, OperationDeadline};
+use std::future::Future;
 use thiserror::Error;
 
 /// Failure to verify that an immutable key contains the requested bytes.
@@ -23,12 +21,19 @@ pub enum ImmutableWriteError {
         /// Durable key whose existing bytes violated immutability.
         object_key: String,
     },
+    /// The key holds an object whose writer attested no SHA-256, so whether
+    /// it holds the supplied bytes is undecided.
+    #[error("immutable object `{object_key}` already exists without a sha256 attestation")]
+    Unattested {
+        /// Durable key whose existing object carries no attestation.
+        object_key: String,
+    },
     /// The storage boundary failed before byte identity could be established.
     #[error("immutable write transport failed for `{object_key}`: {source}")]
     Transport {
         /// Durable key whose byte identity could not be established.
         object_key: String,
-        /// Final storage failure after retry and read-back reconciliation.
+        /// Final storage failure after retries.
         #[source]
         source: ObjectStoreError,
     },
@@ -38,7 +43,9 @@ impl ImmutableWriteError {
     /// Returns the immutable object key whose byte identity was not established.
     pub fn object_key(&self) -> &str {
         match self {
-            Self::DifferentObject { object_key } | Self::Transport { object_key, .. } => object_key,
+            Self::DifferentObject { object_key }
+            | Self::Unattested { object_key }
+            | Self::Transport { object_key, .. } => object_key,
         }
     }
 }
@@ -48,150 +55,56 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
     key: &str,
     bytes: Bytes,
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
-    let timer = StdMonotonicTimer::default();
-    let retry_policy = DEFAULT;
-    let overwrite = bytes.len() as u64 >= PROVIDER_MULTIPART_THRESHOLD_BYTES;
-    let deadline = OperationDeadline::start(&timer, retry_policy.operation_deadline);
-    let mut retries = 0;
-    let mut ambiguous_transport = None;
-
-    loop {
-        let attempt = if overwrite {
-            // An overwrite cannot refuse an occupied key, so every attempt,
-            // retries included, compares the key before writing.
-            match compare_existing(store, key, &bytes).await {
-                Ok(ImmutableReadback::Missing) => {
-                    store.put(key, bytes.clone(), PutMode::Overwrite).await
-                }
-                Ok(ImmutableReadback::Identical(metadata)) => return Ok(metadata),
-                Ok(ImmutableReadback::Different) => return Err(different_object(key)),
-                Err(error) => Err(error),
-            }
-        } else {
-            store.put(key, bytes.clone(), PutMode::CreateIfAbsent).await
-        };
-        match attempt {
-            Ok(metadata) => return Ok(metadata),
-            Err(error @ ObjectStoreError::PreconditionFailed { .. }) => {
-                return resolve_readback(store, key, &bytes, ambiguous_transport.unwrap_or(error))
-                    .await;
-            }
-            Err(error @ ObjectStoreError::Transport { .. }) => {
-                let Some(backoff) = next_retry_backoff(
-                    &retry_policy,
-                    key,
-                    "put_immutable_verified",
-                    bytes.len() as u64,
-                    &mut retries,
-                    Some(&deadline),
-                ) else {
-                    return resolve_readback(store, key, &bytes, error).await;
-                };
-                ambiguous_transport = Some(error);
-                transport_retry_pause(backoff).await;
-            }
-            Err(error) if ambiguous_transport.is_some() => {
-                return resolve_readback(store, key, &bytes, error).await;
-            }
-            Err(error) => return Err(transport(key, error)),
-        }
-    }
-}
-
-async fn resolve_readback<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    expected: &Bytes,
-    original: ObjectStoreError,
-) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
-    match readback(store, key, expected).await {
-        Ok(ImmutableReadback::Identical(metadata)) => Ok(metadata),
-        Ok(ImmutableReadback::Different) => Err(different_object(key)),
-        Ok(ImmutableReadback::Missing) => Err(transport(key, original)),
-        Err(verify_error @ ObjectStoreError::Transport { .. }) => {
-            let source = ObjectStoreError::transport(
-                key,
-                format!(
-                    "{}; failed to verify immutable write outcome: {verify_error}",
-                    original.message()
-                ),
-            );
-            Err(transport(key, source))
-        }
-        Err(verify_error) => Err(transport(key, verify_error)),
-    }
-}
-
-pub(crate) enum ImmutableReadback {
-    Identical(ObjectMetadata),
-    Different,
-    Missing,
-}
-
-pub(crate) async fn readback<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    expected: &Bytes,
-) -> crate::Result<ImmutableReadback> {
-    match store.get_with_metadata(key).await? {
-        Some(body) if body.bytes.as_slice() == expected.as_ref() => {
-            Ok(ImmutableReadback::Identical(body.metadata))
-        }
-        Some(_) => Ok(ImmutableReadback::Different),
-        None => Ok(ImmutableReadback::Missing),
-    }
-}
-
-/// Compares what `key` holds with `expected` without writing.
-///
-/// A stored size or checksum that differs decides without a download, and so
-/// does a matching stored SHA-256. A CRC never confirms identity on its own,
-/// because different bytes can share a CRC. After a matching CRC, or when the
-/// store keeps no checksum, the object is read, but never more than one byte
-/// past the length of `expected`. An identical object reports only its size.
-async fn compare_existing<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    expected: &Bytes,
-) -> crate::Result<ImmutableReadback> {
-    let size_bytes = expected.len() as u64;
-    let identical = match store.head_stored_checksum(key).await {
-        Ok(None) => return Ok(ImmutableReadback::Missing),
-        Ok(Some(stored))
-            if stored.size_bytes != size_bytes || !stored.checksum.matches(expected) =>
-        {
-            false
-        }
-        Ok(Some(stored)) if stored.checksum.algorithm == ChecksumAlgorithm::Sha256 => true,
-        Ok(Some(_))
-        | Err(ObjectStoreError::StoredChecksumMissing { .. } | ObjectStoreError::Unsupported(_)) => {
-            // The extra byte tells a longer object apart from this payload.
-            let range = ByteRange {
-                start_inclusive: 0,
-                end_exclusive: size_bytes + 1,
-            };
-            match store.get(key, Some(range)).await? {
-                Some(existing) => existing == *expected,
-                None => return Ok(ImmutableReadback::Missing),
-            }
-        }
-        Err(error) => return Err(error),
-    };
-    Ok(if identical {
-        ImmutableReadback::Identical(ObjectMetadata {
-            etag: None,
-            version: None,
-            size_bytes,
-            last_modified_ms: None,
-        })
-    } else {
-        ImmutableReadback::Different
+    put_with(store, key, &bytes, || {
+        store.put(key, bytes.clone(), PutMode::CreateIfAbsent)
     })
+    .await
 }
 
-fn different_object(key: &str) -> ImmutableWriteError {
-    ImmutableWriteError::DifferentObject {
-        object_key: key.to_owned(),
+/// Runs `create`, a create-if-absent of `bytes` under `key` that attests
+/// their SHA-256, under one retry deadline, and decides an occupied key by
+/// one `head` of its attestation.
+pub(crate) async fn put_with<S, F, Fut>(
+    store: &S,
+    key: &str,
+    bytes: &Bytes,
+    create: F,
+) -> std::result::Result<ObjectMetadata, ImmutableWriteError>
+where
+    S: ObjectStore + ?Sized,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = crate::object_store::Result<ObjectMetadata>>,
+{
+    let timer = StdMonotonicTimer::default();
+    let deadline = OperationDeadline::start(&timer, DEFAULT.operation_deadline);
+    let written = with_transport_retry(
+        &DEFAULT,
+        key,
+        "put_immutable_verified",
+        bytes.len() as u64,
+        Some(&deadline),
+        |error: &ObjectStoreError| matches!(error, ObjectStoreError::Transport { .. }),
+        create,
+    )
+    .await;
+    match written {
+        Ok(metadata) => Ok(metadata),
+        Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => {
+            match store.head(key).await {
+                Ok(Some(existing)) => match &existing.sha256 {
+                    Some(attested) if *attested == Checksum::sha256(bytes) => Ok(existing),
+                    Some(_) => Err(ImmutableWriteError::DifferentObject {
+                        object_key: key.to_owned(),
+                    }),
+                    None => Err(ImmutableWriteError::Unattested {
+                        object_key: key.to_owned(),
+                    }),
+                },
+                Ok(None) => Err(transport(key, conflict)),
+                Err(error) => Err(transport(key, error)),
+            }
+        }
+        Err(error) => Err(transport(key, error)),
     }
 }
 

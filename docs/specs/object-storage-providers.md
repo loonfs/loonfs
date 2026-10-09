@@ -20,6 +20,11 @@ This document is a non-normative reference: provider limits and performance data
 | **Availability SLA / target** | S3 Standard family service credits begin when monthly uptime is below 99.9%; some IA classes use 99.0% thresholds.[^8] | Standard: 99.95% for multi-region / dual-region and 99.9% for regional; other storage classes and locations vary.[^18] | R2 docs state an availability SLA of 99.9% and 99.999999999% designed annual durability.[^31] | Availability depends on redundancy/access tier. Redundancy table: read/write at least 99.9% for common hot tiers; RA-GRS/RA-GZRS read availability at least 99.99%; cool/cold/archive can be lower.[^43] | Vendor/contract-specific. |
 | **Request scale, partitions, throughput** | At least 3,500 write-class requests/s and 5,500 GET/HEAD requests/s per partitioned prefix; unlimited prefixes; scaling is gradual and may return 503 Slow Down. AWS also cites up to 100 Gb/s from a single EC2 instance and aggregate multi-Tb/s workloads.[^9] | Initial bucket scale is about 1,000 writes/s and 5,000 reads/s, then auto-scales. Ramp no faster than roughly doubling every 20 minutes. Sequential names can hotspot; random prefixes improve initial fanout. Internet egress default quota is commonly 200 Gbps per region, subject to account history and quotas.[^19][^20] | Public r2.dev buckets are test-only and may throttle at hundreds of req/s; production should use custom domains or direct APIs. Cloudflare REST management API is not for high-throughput object I/O; use S3-compatible or Workers APIs.[^32] | Standard GPv2/blob accounts: default max request rate 40,000 req/s in many listed regions, 20,000 elsewhere; ingress commonly 60/25 Gbps and egress 200/50 Gbps by region, increaseable by request. Partition hot spots can cause 503/500; use distribution and backoff.[^44][^45] | Vendor-specific. Run compatibility and load tests before relying on any numbers. |
 | **Published GET/HEAD latency** | AWS publishes rough general S3 small-object / first-byte latencies of about 100-200 ms.[^10] | No provider-published average GET/HEAD latency found. Need to benchmark. | No provider-published average GET/HEAD latency found. Need to benchmark. | No provider-published average GET/HEAD latency found. Need to benchmark. | Need to benchmark to verify. |
+| **Attested writes** | `x-amz-meta-sha256`, sent with a single PUT or at CreateMultipartUpload. | `x-goog-meta-sha256` on a single PUT; `metadata.sha256` when a JSON API resumable upload starts and on a compose destination. | As AWS S3. *Live:* R2's S3 compatibility table does not list `x-amz-meta-*`. | `x-ms-meta-sha256` on Put Blob. | Unknown until tested. |
+| **Conditional create completion** | A publication (WAL object, manifest, control object) is one PUT with `If-None-Match: *` at every size. An immutable write of less than 8 MiB is the same PUT; from 8 MiB it is LoonFS's own signed multipart upload, completed with `If-None-Match: *` and the full-object CRC-64/NVME.[^48] | Below 8 MiB, one XML API PUT with `x-goog-if-generation-match: 0`. From 8 MiB, one JSON API resumable upload started with `ifGenerationMatch=0`, because XML API multipart uploads refuse preconditions.[^14][^49] *Live:* that the upload checks the precondition when it finishes. | As AWS S3. *Live:* R2 documents conditional completion, but which header it honors on CompleteMultipartUpload is unconfirmed. | Put Blob with `If-None-Match: *` at every size. A streamed write longer than one part uses Put Block and Put Block List through the upstream client, which cannot send the precondition, so the adapter checks for an existing object before completion. | Unknown until tested. |
+| **Extension** | A base under 5 MiB: one ranged GET, then one PUT of base and pieces with `If-Match`, after LoonFS checks the claimed checksum against those bytes. Otherwise CreateMultipartUpload with the CRC-64/NVME full-object checksum and the attestation, UploadPartCopy of the base in equal parts of at most 5 GiB with `x-amz-copy-source-if-match`, one UploadPart of the pieces, and CompleteMultipartUpload with `If-Match` and `x-amz-checksum-crc64nvme`. A wrong claim answers `BadDigest` and changes nothing.[^48][^50] | One media upload of the pieces to `namespaces/{namespace_id}/scratch/{scratch_id}` with `ifGenerationMatch=0`, a JSON API compose of the object and the scratch object onto the object with `ifGenerationMatch` set to the base generation and the attestation on the destination, a comparison of the CRC-32C the compose returns with the claim, and a delete of the scratch object. A crash can leave a scratch object behind. A mismatch is found after the compose.[^51] | A base under 64 MiB: ranged GET and PUT with `If-Match`, as on AWS S3. Otherwise UploadPartCopy in 64 MiB parts, one ranged GET of the base's remainder, sent with the pieces as the last part, CompleteMultipartUpload with `If-Match`, and a HEAD that compares the stored CRC-64/NVME with the claim, because R2 stores the true checksum instead of refusing a wrong claim. A mismatch is found after completion. *Live:* R2's table lists `x-amz-copy-source-if-match` as not implemented, so the adapter does not send it; whether R2 honors `If-Match` on completion; whether R2 accepts a last part longer than the others; whether UploadPartCopy reports `ChecksumCRC64NVME`, which completion needs. | One ranged GET of the base, then Put Blob of base and pieces with `If-Match`, after LoonFS checks any claimed checksum against those bytes. The base passes through LoonFS. | Unknown until tested. |
+
+Items marked *live* are documented behavior that only a run against the provider confirms. The ignored tests in `crates/loonfs-objectstore/tests/it/objectstore_conformance.rs` exercise them.
 
 AWS S3 credentials with `kind = "ambient"` use the standard AWS SDK credential chain. It checks environment variables, shared config and credentials files, credential processes, SSO, web identity, ECS task credentials, and EC2 instance metadata. `AWS_PROFILE` selects a named profile.
 
@@ -79,7 +84,8 @@ without passing through the server.
 
 The GCS adapter uses native V4 signed URLs. It does not use the GCS
 S3-interoperability API or implement multipart uploads, even though GCS
-documents an XML multipart API.[^46]
+documents an XML multipart API.[^46] Its own large creates and extensions
+use the JSON API with the service account's OAuth token.
 
 Browser clients send direct transfers to the provider. Bucket CORS must allow
 the application origin. Allowed methods must include `PUT` and `GET`. Allowed
@@ -100,7 +106,7 @@ here rather than advertised as a capability.
 | AWS S3 | Yes, provider multipart | One part (8 MiB by default), whatever the object's size |
 | Cloudflare R2 | Yes, provider multipart | One part, whatever the object's size |
 | Other S3-compatible endpoints | Yes, provider multipart | One part, whatever the object's size |
-| Google Cloud Storage | Yes, provider multipart | One part, whatever the object's size |
+| Google Cloud Storage | Yes, a resumable upload for a create, provider multipart otherwise | One part, whatever the object's size |
 | Azure Blob Storage | Yes, provider multipart | One part, whatever the object's size |
 | Local filesystem | Yes, staging file | One chunk as it arrives |
 
@@ -112,6 +118,8 @@ part or chunk for a proxied upload, independent of the object's total size.
 ## 5. Local Filesystem Provider
 
 The local provider is a development and test provider supported on Unix-family platforms. It stages each replacement in the destination directory, makes the staged bytes durable, and atomically renames the staged file over the destination. A concurrent reader therefore observes either the complete prior object or the complete replacement, never a missing or partial object. Construction fails on other platforms rather than claiming a weaker replacement contract.
+
+The local provider reports the SHA-256 of each file as the object's attestation, as its ETag already does. An extension checks the file's length and ETag and the claimed SHA-256 and CRC-64/NVME, then appends the pieces in place and makes them durable. A concurrent reader of the whole object can observe a partial append. The ETag of the new version is the SHA-256 of the whole file.
 
 ## 6. LoonFS Design Implications
 
@@ -202,3 +210,11 @@ The local provider is a development and test provider supported on Unix-family p
 [^46]: Google Cloud Storage, "XML API multipart uploads": [https://cloud.google.com/storage/docs/multipart-uploads](https://cloud.google.com/storage/docs/multipart-uploads)
 
 [^47]: Proven by a credentialed conformance run against a live bucket: the provider conformance assertions and both signed direct-transfer tests (the round trip, and the scoped, bounded, single-use capability checks) passed. `GCS_DIRECT_TRANSFERS_PROVEN` in `crates/loonfs-objectstore/src/configured.rs` records the run.
+
+[^48]: AWS S3 User Guide, "Checking object integrity for data uploads in Amazon S3": [https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html](https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html)
+
+[^49]: Google Cloud Storage, "Resumable uploads": [https://cloud.google.com/storage/docs/resumable-uploads](https://cloud.google.com/storage/docs/resumable-uploads)
+
+[^50]: AWS S3 API Reference, `UploadPartCopy`: [https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPartCopy.html](https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPartCopy.html)
+
+[^51]: Google Cloud Storage JSON API, `objects.compose`: [https://cloud.google.com/storage/docs/json_api/v1/objects/compose](https://cloud.google.com/storage/docs/json_api/v1/objects/compose)

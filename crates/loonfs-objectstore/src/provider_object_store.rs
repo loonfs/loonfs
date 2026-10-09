@@ -1,8 +1,7 @@
 //! The shared provider transport: timeouts, bounded retries for replay-safe
-//! delete and multipart stages, and multipart upload for large immutable
-//! payloads.
+//! delete and multipart stages, multipart upload for large payloads, and the
+//! write attestation kept in provider user metadata.
 
-use crate::immutable_write::{readback, ImmutableReadback};
 use crate::keyspace::{
     normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
     unscope_listed_key,
@@ -12,21 +11,22 @@ use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::{
-    ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, ConfiguredObjectStoreKind, ExtendBase, ExtendedObject, MultipartPart,
+    ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::future::{BoxFuture, FutureExt};
 use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt};
-use loonfs_types::Checksum;
+use loonfs_types::{Checksum, ChecksumAlgorithm};
 use loonfs_types::{EffectiveLimit, OperationDeadline, Page, TransportRetryPolicy};
 use object_store as provider_store;
 use provider_store::list::{PaginatedListOptions, PaginatedListStore};
 use provider_store::multipart::{MultipartStore, PartId};
 use provider_store::path::Path;
 use provider_store::{
-    GetOptions, GetRange, ObjectMeta, ObjectStoreExt, PutOptions, PutPayload, PutResult,
-    UpdateVersion,
+    Attribute, Attributes, GetOptions, GetRange, ObjectMeta, ObjectStoreExt, PutOptions,
+    PutPayload, PutResult, UpdateVersion,
 };
 use std::borrow::Cow;
 use std::fmt;
@@ -63,10 +63,11 @@ pub const PROVIDER_OPERATION_DEADLINE: Duration = Duration::from_secs(120);
 /// Maximum retry delay after the provider client admits a final retry.
 pub const PROVIDER_MAX_RETRY_BACKOFF: Duration = Duration::from_secs(15);
 
-/// Minimum payload size for native multipart overwrite uploads.
+/// Minimum payload size for native multipart uploads.
 ///
-/// Create-if-absent and compare-and-swap writes always use a single request
-/// because multipart completion cannot enforce those provider preconditions.
+/// An overwrite at or above it uploads parts. A create-if-absent at or above
+/// it uses the provider's own conditional path where the provider has one,
+/// and one request elsewhere. A compare-and-swap is always one request.
 pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Fixed size of every multipart part except the last. Cloudflare R2
@@ -176,9 +177,30 @@ pub(crate) trait StoredChecksumReader: Send + Sync {
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>>;
 }
 
+/// User-metadata name under which providers keep a write's attestation.
+pub(crate) const SHA256_METADATA_KEY: &str = "sha256";
+
+/// Reads an attestation kept in user metadata; a value that is not a SHA-256
+/// is no attestation.
+pub(crate) fn attested_sha256(value: &str) -> Option<Checksum> {
+    let sha256 = Checksum {
+        algorithm: ChecksumAlgorithm::Sha256,
+        value: value.to_owned(),
+    };
+    sha256.validate().is_ok().then_some(sha256)
+}
+
+/// The provider's own multi-request writes, sent as requests this crate
+/// signs: client-driven multipart uploads, large conditional creates, and
+/// extensions.
 #[async_trait]
 pub(crate) trait MultipartController: Send + Sync {
-    async fn create_multipart_upload(&self, key: &str) -> Result<String>;
+    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        let _ = key;
+        Err(ObjectStoreError::Unsupported(
+            "client-driven multipart upload",
+        ))
+    }
 
     async fn complete_multipart_upload(
         &self,
@@ -186,9 +208,39 @@ pub(crate) trait MultipartController: Send + Sync {
         provider_upload_id: &str,
         parts: &[MultipartPart],
         checksum: &Checksum,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        let _ = (key, provider_upload_id, parts, checksum);
+        Err(ObjectStoreError::Unsupported(
+            "client-driven multipart upload",
+        ))
+    }
 
-    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()>;
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        let _ = (key, provider_upload_id);
+        Err(ObjectStoreError::Unsupported(
+            "client-driven multipart upload",
+        ))
+    }
+
+    /// Writes `head` and then every part of `rest` to `key` only while `key`
+    /// is absent, attesting `sha256` when given.
+    async fn put_if_absent(
+        &self,
+        key: &str,
+        head: Bytes,
+        rest: PartReader,
+        sha256: Option<&Checksum>,
+    ) -> Result<ObjectMetadata>;
+
+    /// Extends `key` without moving its base through this process, or
+    /// answers `None` when the provider must rewrite this base instead.
+    async fn extend_object(
+        &self,
+        key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>>;
 }
 
 /// Adapts the upstream `object_store` provider surface to the narrower LoonFS contract.
@@ -323,12 +375,15 @@ impl ProviderObjectStore {
         }
     }
 
-    fn metadata_from_meta(&self, meta: ObjectMeta) -> ObjectMetadata {
+    fn metadata_from_meta(&self, meta: ObjectMeta, attributes: &Attributes) -> ObjectMetadata {
         self.with_compare_token(ObjectMetadata {
             etag: meta.e_tag,
             version: meta.version,
             size_bytes: meta.size,
             last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
+            sha256: attributes
+                .get(&Attribute::Metadata(SHA256_METADATA_KEY.into()))
+                .and_then(|value| attested_sha256(value)),
         })
     }
 
@@ -338,6 +393,7 @@ impl ProviderObjectStore {
             version: result.version,
             size_bytes,
             last_modified_ms: None,
+            sha256: None,
         })
     }
 
@@ -382,9 +438,8 @@ impl ProviderObjectStore {
     /// Uploads a large overwrite through the provider's multipart API.
     ///
     /// Parts use stable indices, bounded concurrency, and bounded retries. A
-    /// failed upload is aborted on a best-effort basis. If completion returns an
-    /// ambiguous transport error, immutable writes verify the stored bytes before
-    /// deciding whether the write succeeded.
+    /// failed upload is aborted on a best-effort basis, and an ambiguous
+    /// completion is returned as the transport failure it is.
     ///
     /// Each control call and each part is bounded by the operation deadline.
     /// Conditional write modes do not use this path.
@@ -403,10 +458,8 @@ impl ProviderObjectStore {
             path,
         };
 
-        let mut abort_on_drop = upload.create(size_bytes).await?;
-        let result = upload
-            .upload_parts_and_complete(abort_on_drop.upload_id(), &bytes)
-            .await;
+        let (upload_id, mut abort_on_drop) = upload.create(size_bytes).await?;
+        let result = upload.upload_parts_and_complete(&upload_id, &bytes).await;
         match result {
             Ok(metadata) => {
                 abort_on_drop.disarm();
@@ -416,7 +469,7 @@ impl ProviderObjectStore {
                 // Best effort, and harmless when the failure raced a landed
                 // completion: the upload id no longer exists then, and the
                 // abort cannot touch the completed object.
-                upload.abort(abort_on_drop.upload_id()).await;
+                upload.abort(&upload_id).await;
                 abort_on_drop.disarm();
                 Err(err)
             }
@@ -429,7 +482,7 @@ impl ProviderObjectStore {
 /// Chunk boundaries in the source stream carry no meaning, so a chunk that
 /// straddles a part boundary is split and its tail carried into the next
 /// part. A stream that ends exactly on a boundary produces no final part.
-struct PartReader {
+pub(crate) struct PartReader {
     body: ByteStream,
     /// The tail of a chunk that overran the part being cut.
     carry: Option<Bytes>,
@@ -438,7 +491,7 @@ struct PartReader {
 }
 
 impl PartReader {
-    fn new(body: ByteStream, part_bytes: usize) -> Self {
+    pub(crate) fn new(body: ByteStream, part_bytes: usize) -> Self {
         Self {
             body,
             carry: None,
@@ -453,7 +506,7 @@ impl PartReader {
     /// A full part is returned without polling the stream again, so a
     /// caller cannot conclude from a full part that more is coming — only
     /// a short part proves the stream ended.
-    async fn next_part(&mut self) -> Result<Option<Bytes>> {
+    pub(crate) async fn next_part(&mut self) -> Result<Option<Bytes>> {
         let mut buffer = bytes::BytesMut::with_capacity(self.part_bytes);
         while buffer.len() < self.part_bytes {
             let mut chunk = match self.carry.take() {
@@ -477,67 +530,56 @@ impl PartReader {
     }
 
     /// Whether the stream has already reported its end.
-    fn exhausted(&self) -> bool {
+    pub(crate) fn exhausted(&self) -> bool {
         self.exhausted && self.carry.is_none()
     }
 }
 
-/// Aborts a provider multipart upload when its write is cancelled.
+/// Aborts a provider upload when its write is abandoned.
 ///
-/// Normal return paths abort explicitly and disable this guard. Cancellation
-/// has no cleanup `await` point, so `Drop` starts the abort on the current
-/// Tokio runtime. Without a runtime, the bucket's incomplete-upload lifecycle
-/// policy must remove the parts.
-struct AbortUploadOnDrop {
-    multipart: Option<Arc<dyn MultipartStore>>,
-    path: Path,
-    upload_id: provider_store::MultipartId,
+/// A write that finishes, or that aborts explicitly, disarms this guard. A
+/// failed or cancelled write that does neither has no cleanup `await` point,
+/// so `Drop` starts `abort` on the current Tokio runtime. Without a runtime,
+/// the provider's cleanup of incomplete uploads must remove what was sent.
+pub(crate) struct AbortUploadOnDrop {
+    object_key: String,
+    abort: Option<BoxFuture<'static, Result<()>>>,
 }
 
 impl AbortUploadOnDrop {
-    fn new(
-        multipart: Arc<dyn MultipartStore>,
-        path: Path,
-        upload_id: provider_store::MultipartId,
-    ) -> Self {
+    pub(crate) fn new(object_key: &str, abort: BoxFuture<'static, Result<()>>) -> Self {
         Self {
-            multipart: Some(multipart),
-            path,
-            upload_id,
+            object_key: object_key.to_owned(),
+            abort: Some(abort),
         }
     }
 
-    fn upload_id(&self) -> &provider_store::MultipartId {
-        &self.upload_id
-    }
-
-    fn disarm(&mut self) {
-        self.multipart = None;
+    pub(crate) fn disarm(&mut self) {
+        self.abort = None;
     }
 }
 
 impl Drop for AbortUploadOnDrop {
     fn drop(&mut self) {
-        let Some(multipart) = self.multipart.take() else {
+        let Some(abort) = self.abort.take() else {
             return;
         };
+        let object_key = std::mem::take(&mut self.object_key);
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             tracing::warn!(
-                object_key = %self.path,
+                object_key,
                 operation = "abort_multipart",
-                "abandoned write has no runtime to abort its multipart upload on; \
-                 parts remain until the bucket lifecycle rule collects them",
+                "abandoned write has no runtime to abort its upload on; \
+                 what it sent remains until the provider's cleanup collects it",
             );
             return;
         };
-        let path = self.path.clone();
-        let upload_id = std::mem::take(&mut self.upload_id);
         handle.spawn(async move {
-            if let Err(_err) = multipart.abort_multipart(&path, &upload_id).await {
+            if abort.await.is_err() {
                 tracing::warn!(
-                    object_key = %path,
+                    object_key,
                     operation = "abort_multipart",
-                    "failed to abort the multipart upload of an abandoned write",
+                    "failed to abort the upload of an abandoned write",
                 );
             }
         });
@@ -554,7 +596,10 @@ struct MultipartWrite<'op> {
 }
 
 impl MultipartWrite<'_> {
-    async fn create(&self, payload_bytes: u64) -> Result<AbortUploadOnDrop> {
+    async fn create(
+        &self,
+        payload_bytes: u64,
+    ) -> Result<(provider_store::MultipartId, AbortUploadOnDrop)> {
         let deadline = OperationDeadline::start(
             self.store.timer.as_ref(),
             self.store.transport_retry.operation_deadline,
@@ -565,26 +610,30 @@ impl MultipartWrite<'_> {
             "create_multipart",
             payload_bytes,
             Some(&deadline),
+            provider_transport_retryable,
             || self.multipart.create_multipart(self.path),
         )
         .await
         .map_err(|error| map_provider_error(self.key, error))?;
-        Ok(AbortUploadOnDrop::new(
-            Arc::clone(&self.multipart),
-            self.path.clone(),
-            upload_id,
-        ))
+        let multipart = Arc::clone(&self.multipart);
+        let path = self.path.clone();
+        let key = self.key.to_owned();
+        let aborted_id = upload_id.clone();
+        let abort = async move {
+            multipart
+                .abort_multipart(&path, &aborted_id)
+                .await
+                .map_err(|error| map_provider_error(&key, error))
+        };
+        Ok((upload_id, AbortUploadOnDrop::new(self.key, abort.boxed())))
     }
 
     /// Uploads a stream as fixed-size parts while retaining at most one part.
     ///
     /// `head` is the first part. Later parts are buffered only after the previous
     /// part has been uploaded and released. The final part may be shorter.
-    ///
-    /// Because the original payload is no longer available, an ambiguous
-    /// completion cannot be verified by reading the object back. The caller
-    /// treats it as a failure. Conditional modes are checked after the stream is
-    /// consumed and immediately before completion.
+    /// Conditional modes are checked after the stream is consumed and
+    /// immediately before completion.
     async fn upload_stream_and_complete(
         &self,
         upload_id: &provider_store::MultipartId,
@@ -684,7 +733,14 @@ impl MultipartWrite<'_> {
             .into_iter()
             .map(|part_id| part_id.expect("every part completed before the window drained"))
             .collect();
-        self.complete(upload_id, parts, bytes).await
+        self.multipart
+            .complete_multipart(self.path, upload_id, parts)
+            .await
+            .map(|result| {
+                self.store
+                    .metadata_from_put_result(result, bytes.len() as u64)
+            })
+            .map_err(|err| map_provider_error(self.key, err))
     }
 
     async fn upload_part(
@@ -704,6 +760,7 @@ impl MultipartWrite<'_> {
             "put_part",
             payload_bytes,
             Some(&deadline),
+            provider_transport_retryable,
             || {
                 self.multipart.put_part(
                     self.path,
@@ -715,78 +772,6 @@ impl MultipartWrite<'_> {
         )
         .await
         .map_err(|error| map_provider_error(self.key, error))
-    }
-
-    async fn complete(
-        &self,
-        upload_id: &provider_store::MultipartId,
-        parts: Vec<PartId>,
-        bytes: &Bytes,
-    ) -> Result<ObjectMetadata> {
-        let size_bytes = bytes.len() as u64;
-        match self
-            .multipart
-            .complete_multipart(self.path, upload_id, parts)
-            .await
-        {
-            Ok(result) => Ok(self.store.metadata_from_put_result(result, size_bytes)),
-            Err(err) if provider_transport_retryable(&err) => {
-                self.resolve_ambiguous_completion(upload_id, bytes, err)
-                    .await
-            }
-            Err(err) => Err(map_provider_error(self.key, err)),
-        }
-    }
-
-    /// Resolves an ambiguous multipart completion by comparing the stored bytes
-    /// with the original in-memory payload.
-    ///
-    /// Size and etag equality are insufficient because an older object may share
-    /// them. Exact byte equality proves the write's postcondition. After a
-    /// successful comparison, the upload id is aborted on a best-effort basis to
-    /// remove any remaining parts.
-    async fn resolve_ambiguous_completion(
-        &self,
-        upload_id: &provider_store::MultipartId,
-        bytes: &Bytes,
-        final_err: provider_store::Error,
-    ) -> Result<ObjectMetadata> {
-        match readback(self.store, self.key, bytes).await {
-            Ok(ImmutableReadback::Identical(metadata)) => {
-                self.abort(upload_id).await;
-                Ok(metadata)
-            }
-            Ok(ImmutableReadback::Different) => self.unproven_completion(
-                final_err,
-                "the object at the key does not hold the payload bytes",
-            ),
-            Ok(ImmutableReadback::Missing) => {
-                self.unproven_completion(final_err, "no object exists at the key")
-            }
-            Err(verify_err) => {
-                let original = map_provider_error(self.key, final_err).message();
-                Err(ObjectStoreError::transport(
-                    self.key,
-                    format!(
-                        "{original}; failed to verify multipart completion outcome: {verify_err}"
-                    ),
-                ))
-            }
-        }
-    }
-
-    fn unproven_completion(
-        &self,
-        final_err: provider_store::Error,
-        outcome: &'static str,
-    ) -> Result<ObjectMetadata> {
-        tracing::warn!(
-            object_key = self.key,
-            operation = "complete_multipart",
-            outcome,
-            "ambiguous multipart completion did not land",
-        );
-        Err(map_provider_error(self.key, final_err))
     }
 
     async fn abort(&self, upload_id: &provider_store::MultipartId) {
@@ -813,8 +798,14 @@ impl MultipartWrite<'_> {
 impl ObjectStore for ProviderObjectStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let path = self.to_path(key)?;
-        match self.inner.head(&path).await {
-            Ok(meta) => Ok(Some(self.metadata_from_meta(meta))),
+        let options = GetOptions {
+            head: true,
+            ..Default::default()
+        };
+        match self.inner.get_opts(&path, options).await {
+            Ok(result) => Ok(Some(
+                self.metadata_from_meta(result.meta, &result.attributes),
+            )),
             Err(err) if provider_not_found(&err) => Ok(None),
             Err(err) => Err(map_provider_error(key, err)),
         }
@@ -874,7 +865,7 @@ impl ObjectStore for ProviderObjectStore {
         let path = self.to_path(key)?;
         match self.inner.get(&path).await {
             Ok(result) => {
-                let metadata = self.metadata_from_meta(result.meta.clone());
+                let metadata = self.metadata_from_meta(result.meta.clone(), &result.attributes);
                 let bytes = result
                     .bytes()
                     .await
@@ -966,39 +957,45 @@ impl ObjectStore for ProviderObjectStore {
     }
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        let path = self.to_path(key)?;
-        self.validate_compare_token(key, &mode)?;
-        let size_bytes = bytes.len() as u64;
-        if matches!(mode, PutMode::Overwrite)
-            && size_bytes >= self.multipart_geometry.threshold_bytes
-        {
-            return self
-                .put_large_multipart(Arc::clone(&self.multipart), key, &path, bytes)
-                .await;
-        }
-        // A conditional write is one request, so its precondition failure is
-        // never its own landing.
-        let client = match mode {
-            PutMode::Overwrite => &self.inner,
-            PutMode::CreateIfAbsent | PutMode::CompareAndSwap { .. } => &self.one_attempt,
+        let sha256 = matches!(mode, PutMode::CreateIfAbsent).then(|| Checksum::sha256(&bytes));
+        self.put_attested(key, bytes, mode, sha256).await
+    }
+
+    /// A verified write of one part or less is the single-request create
+    /// that [`Self::put`] sends. A longer one goes through the provider's
+    /// own multipart requests where it has them, so the create stays
+    /// conditional at every size. Its parts are replay-safe and each is
+    /// bounded by the operation deadline, so the whole takes longer than
+    /// one request's allowance: content and segments come through here,
+    /// never a publication.
+    async fn put_immutable_verified(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        let Some(controller) = self
+            .multipart_controller
+            .as_ref()
+            .filter(|_| bytes.len() as u64 >= self.multipart_geometry.threshold_bytes)
+        else {
+            return crate::immutable_write::put(self, key, bytes).await;
         };
-        let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
-        let options = PutOptions {
-            mode: self.map_put_mode(mode),
-            ..Default::default()
-        };
-        match client
-            .put_opts(&path, PutPayload::from(bytes), options)
-            .await
-        {
-            Ok(result) => Ok(self.metadata_from_put_result(result, size_bytes)),
-            Err(err) if compare_and_swap && provider_not_found(&err) => {
-                Err(ObjectStoreError::PreconditionFailed {
-                    object_key: key.to_owned(),
-                })
+        let sha256 = Checksum::sha256(&bytes);
+        crate::immutable_write::put_with(self, key, &bytes, || {
+            let bytes = bytes.clone();
+            let sha256 = &sha256;
+            async move {
+                let mut parts = PartReader::new(
+                    stream::once(async { Ok(bytes) }).boxed(),
+                    self.multipart_geometry.part_bytes as usize,
+                );
+                let head = parts.next_part().await?.unwrap_or_default();
+                controller
+                    .put_if_absent(key, head, parts, Some(sha256))
+                    .await
             }
-            Err(err) => Err(map_provider_error(key, err)),
-        }
+        })
+        .await
     }
 
     /// Cuts the payload into parts as it arrives and uploads them one at a
@@ -1010,9 +1007,11 @@ impl ObjectStore for ProviderObjectStore {
     /// mode enforced by the provider — which is the same size line `put`
     /// itself draws, so a small streamed write behaves exactly like a small
     /// buffered one. Anything longer goes through the provider's multipart
-    /// upload. A provider assembles one unconditionally, so a conditional
-    /// mode is checked against a separate read of the key after the payload is
-    /// consumed and immediately before completion.
+    /// upload. A create-if-absent completes conditionally through the
+    /// provider's own requests where it has them. Elsewhere a provider
+    /// assembles the upload unconditionally, so a conditional mode is checked
+    /// against a separate read of the key after the payload is consumed and
+    /// immediately before completion.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         let path = self.to_path(key)?;
         self.validate_compare_token(key, &mode)?;
@@ -1023,6 +1022,12 @@ impl ObjectStore for ProviderObjectStore {
             self.put(key, head, mode).await?;
             return Ok(size_bytes);
         }
+        if let (PutMode::CreateIfAbsent, Some(controller)) = (&mode, &self.multipart_controller) {
+            return controller
+                .put_if_absent(key, head, reader, None)
+                .await
+                .map(|metadata| metadata.size_bytes);
+        }
 
         let upload = MultipartWrite {
             store: self,
@@ -1030,9 +1035,9 @@ impl ObjectStore for ProviderObjectStore {
             key,
             path: &path,
         };
-        let mut abort_on_drop = upload.create(0).await?;
+        let (upload_id, mut abort_on_drop) = upload.create(0).await?;
         let result = upload
-            .upload_stream_and_complete(abort_on_drop.upload_id(), head, reader, &mode)
+            .upload_stream_and_complete(&upload_id, head, reader, &mode)
             .await;
         match result {
             Ok(size_bytes) => {
@@ -1042,7 +1047,7 @@ impl ObjectStore for ProviderObjectStore {
             Err(err) => {
                 // Best effort, and harmless when the failure raced a landed
                 // completion: the upload id no longer exists then.
-                upload.abort(abort_on_drop.upload_id()).await;
+                upload.abort(&upload_id).await;
                 abort_on_drop.disarm();
                 Err(err)
             }
@@ -1059,6 +1064,7 @@ impl ObjectStore for ProviderObjectStore {
             "delete",
             0,
             Some(&deadline),
+            provider_transport_retryable,
             || async {
                 match self.inner.delete(&path).await {
                     Err(error) if provider_not_found(&error) => Ok(()),
@@ -1068,6 +1074,72 @@ impl ObjectStore for ProviderObjectStore {
         )
         .await
         .map_err(|error| map_provider_error(key, error))
+    }
+
+    /// A provider without a path that leaves the base in place rewrites it:
+    /// one ranged read of the base, then one compare-and-swap of base and
+    /// pieces.
+    async fn extend_object(
+        &self,
+        key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<ObjectMetadata> {
+        if let Some(controller) = &self.multipart_controller {
+            if let Some(extended) = controller
+                .extend_object(key, base, pieces.clone(), result)
+                .await?
+            {
+                return Ok(extended);
+            }
+        }
+        let precondition_failed = || ObjectStoreError::PreconditionFailed {
+            object_key: key.to_owned(),
+        };
+        // The read names the version by its ETag and reports the object's
+        // whole length, so a base that moved on, or one longer than the
+        // caller believes, fails here instead of being rewritten short.
+        let existing = if base.length == 0 {
+            let metadata = self.head(key).await?.ok_or_else(precondition_failed)?;
+            if metadata.size_bytes != 0 || metadata.etag.as_deref() != Some(&base.etag) {
+                return Err(precondition_failed());
+            }
+            Bytes::new()
+        } else {
+            let path = self.to_path(key)?;
+            let options = GetOptions {
+                if_match: Some(base.etag.clone()),
+                range: Some(GetRange::Bounded(Range {
+                    start: 0,
+                    end: base.length,
+                })),
+                ..Default::default()
+            };
+            let result = match self.inner.get_opts(&path, options).await {
+                Ok(result) => result,
+                Err(err) if provider_not_found(&err) => return Err(precondition_failed()),
+                Err(err) => return Err(map_provider_error(key, err)),
+            };
+            if result.meta.size != base.length {
+                return Err(precondition_failed());
+            }
+            result
+                .bytes()
+                .await
+                .map_err(|err| map_provider_error(key, err))?
+        };
+        let bytes = Bytes::from([existing.as_ref(), pieces.as_ref()].concat());
+        if result.crc.as_ref().is_some_and(|crc| !crc.matches(&bytes)) {
+            return Err(ObjectStoreError::ChecksumMismatch {
+                object_key: key.to_owned(),
+            });
+        }
+        let mode = PutMode::CompareAndSwap {
+            expected_etag: base.etag.clone(),
+        };
+        self.put_attested(key, bytes, mode, Some(result.sha256.clone()))
+            .await
     }
 
     fn list_prefix_from_stream(
@@ -1186,6 +1258,64 @@ impl ObjectStore for ProviderObjectStore {
 }
 
 impl ProviderObjectStore {
+    /// Writes one object and records `sha256` as its attestation when given.
+    ///
+    /// A large create-if-absent uses the provider's own conditional requests
+    /// where it has them; every other conditional write is one request.
+    async fn put_attested(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+        sha256: Option<Checksum>,
+    ) -> Result<ObjectMetadata> {
+        let path = self.to_path(key)?;
+        self.validate_compare_token(key, &mode)?;
+        let size_bytes = bytes.len() as u64;
+        if size_bytes >= self.multipart_geometry.threshold_bytes
+            && matches!(mode, PutMode::Overwrite)
+        {
+            return self
+                .put_large_multipart(Arc::clone(&self.multipart), key, &path, bytes)
+                .await;
+        }
+        // A conditional write is one request at every size, so its
+        // precondition failure is never its own landing, and a publication
+        // ends within one request's allowance.
+        let client = match mode {
+            PutMode::Overwrite => &self.inner,
+            PutMode::CreateIfAbsent | PutMode::CompareAndSwap { .. } => &self.one_attempt,
+        };
+        let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
+        let mut attributes = Attributes::new();
+        if let Some(sha256) = &sha256 {
+            attributes.insert(
+                Attribute::Metadata(SHA256_METADATA_KEY.into()),
+                sha256.value.clone().into(),
+            );
+        }
+        let options = PutOptions {
+            mode: self.map_put_mode(mode),
+            attributes,
+            ..Default::default()
+        };
+        match client
+            .put_opts(&path, PutPayload::from(bytes), options)
+            .await
+        {
+            Ok(result) => Ok(ObjectMetadata {
+                sha256,
+                ..self.metadata_from_put_result(result, size_bytes)
+            }),
+            Err(err) if compare_and_swap && provider_not_found(&err) => {
+                Err(ObjectStoreError::PreconditionFailed {
+                    object_key: key.to_owned(),
+                })
+            }
+            Err(err) => Err(map_provider_error(key, err)),
+        }
+    }
+
     fn map_put_mode(&self, mode: PutMode) -> provider_store::PutMode {
         match mode {
             PutMode::Overwrite => provider_store::PutMode::Overwrite,
@@ -1230,7 +1360,7 @@ fn provider_not_found(err: &provider_store::Error) -> bool {
     matches!(err, provider_store::Error::NotFound { .. })
 }
 
-fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectStoreError {
+pub(crate) fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectStoreError {
     match err {
         provider_store::Error::NotFound { .. } => ObjectStoreError::NotFound {
             object_key: object_key.to_owned(),
@@ -1365,7 +1495,7 @@ mod tests {
     };
     use crate::test_support::{aws_environment_lock, isolated_aws_environment, SteppingTimer};
     use futures::{StreamExt, TryStreamExt};
-    use loonfs_types::{transport_retry_backoff, ChecksumAlgorithm};
+    use loonfs_types::transport_retry_backoff;
     use object_store::client::CredentialProvider;
     use object_store::memory::InMemory;
     use provider_store::list::PaginatedListResult;
@@ -1792,15 +1922,6 @@ mod tests {
         FailWithoutLanding,
         LandThenFail,
         FailAuth,
-        /// The upload vanishes (as a lifecycle rule reaping it would make
-        /// it) and the attempt reports a transport failure. Only meaningful
-        /// as a completion script.
-        VanishThenFail,
-    }
-
-    #[derive(Debug)]
-    enum ReadScript {
-        Transport,
     }
 
     /// Provider double that fails scripted attempts before delegating to an
@@ -1814,12 +1935,12 @@ mod tests {
     struct FlakyStore {
         inner: InMemory,
         put_script: Mutex<VecDeque<WriteScript>>,
-        get_script: Mutex<VecDeque<ReadScript>>,
         delete_script: Arc<Mutex<VecDeque<WriteScript>>>,
         part_script: Mutex<HashMap<usize, VecDeque<WriteScript>>>,
         complete_script: Mutex<VecDeque<WriteScript>>,
         puts: AtomicUsize,
         gets: AtomicUsize,
+        heads: AtomicUsize,
         deletes: Arc<AtomicUsize>,
         multipart_creates: AtomicUsize,
         part_attempts: Mutex<HashMap<usize, usize>>,
@@ -1875,9 +1996,6 @@ mod tests {
                     Err(transport_glitch())
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(location)),
-                Some(WriteScript::VanishThenFail) => {
-                    panic!("VanishThenFail is a completion script")
-                }
                 None => self.inner.put_opts(location, payload, opts).await,
             }
         }
@@ -1895,12 +2013,13 @@ mod tests {
             location: &Path,
             options: GetOptions,
         ) -> provider_store::Result<GetResult> {
-            self.gets.fetch_add(1, Ordering::SeqCst);
-            let script = self.get_script.lock().expect("get script").pop_front();
-            match script {
-                Some(ReadScript::Transport) => Err(transport_glitch()),
-                None => self.inner.get_opts(location, options).await,
-            }
+            let reads = if options.head {
+                &self.heads
+            } else {
+                &self.gets
+            };
+            reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.get_opts(location, options).await
         }
 
         fn delete_stream(
@@ -1926,9 +2045,6 @@ mod tests {
                                 Err(transport_glitch())
                             }
                             Some(WriteScript::FailAuth) => Err(auth_rejection(&location)),
-                            Some(WriteScript::VanishThenFail) => {
-                                panic!("VanishThenFail is a completion script")
-                            }
                             None => inner.delete(&location).await.map(|()| location),
                         }
                     }
@@ -2072,9 +2188,6 @@ mod tests {
                     Err(transport_glitch())
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(path)),
-                Some(WriteScript::VanishThenFail) => {
-                    panic!("VanishThenFail is a completion script")
-                }
                 None => {
                     self.store_part(id, part_idx, data)?;
                     Ok(PartId {
@@ -2103,13 +2216,6 @@ mod tests {
                     Err(transport_glitch())
                 }
                 Some(WriteScript::FailAuth) => Err(auth_rejection(path)),
-                Some(WriteScript::VanishThenFail) => {
-                    self.multipart_uploads
-                        .lock()
-                        .expect("uploads")
-                        .remove(id.as_str());
-                    Err(transport_glitch())
-                }
                 None => self.land_completion(path, id, &parts).await,
             }
         }
@@ -2193,63 +2299,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn immutable_small_write_uses_create_if_absent() {
+    async fn only_a_create_carries_an_attestation_that_head_and_get_report() {
+        let store = memory_store();
+        let created = "namespaces/demo/content/con_00000000000000000000000000000001";
+        let replaced = "namespaces/demo/hint.json";
+        store
+            .put_if_absent(created, Bytes::from_static(b"created"))
+            .await
+            .expect("create");
+        store
+            .put_overwrite(replaced, Bytes::from_static(b"replaced"))
+            .await
+            .expect("overwrite");
+
+        let attested = Some(Checksum::sha256(b"created"));
+        let head = store.head(created).await.expect("head").expect("created");
+        let body = store
+            .get_with_metadata(created)
+            .await
+            .expect("get")
+            .expect("created");
+        assert_eq!(head.sha256, attested);
+        assert_eq!(body.metadata.sha256, attested);
+        let replaced = store.head(replaced).await.expect("head").expect("replaced");
+        assert_eq!(replaced.sha256, None);
+    }
+
+    #[tokio::test]
+    async fn an_immutable_write_creates_at_every_size_and_attests_its_bytes() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        for (key, payload) in [
+            ("namespaces/demo/uploads/upl_2.json", multipart_payload(15)),
+            (
+                MULTIPART_KEY,
+                multipart_payload(MULTIPART_TEST_THRESHOLD as usize + 1),
+            ),
+        ] {
+            let written = store
+                .put_immutable_verified(key, Bytes::from(payload.clone()))
+                .await
+                .expect("immutable write");
+            let head = store.head(key).await.expect("head").expect("written");
+            assert_eq!(written.sha256, Some(Checksum::sha256(&payload)));
+            assert_eq!(head.sha256, written.sha256);
+        }
+
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_occupied_key_is_decided_by_one_head_of_its_attestation() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
-        let key = "namespaces/demo/uploads/upl_2.json";
-
+        let ours = Bytes::from_static(b"ours");
+        let identical = "namespaces/demo/segments/seg_1.sst.zst";
+        let different = "namespaces/demo/segments/seg_2.sst.zst";
+        let unattested = "namespaces/demo/segments/seg_3.sst.zst";
         store
-            .put_immutable_verified(key, Bytes::from_static(b"immutable bytes"))
+            .put_if_absent(identical, ours.clone())
             .await
-            .expect("small immutable write");
+            .expect("seed identical");
+        store
+            .put_if_absent(different, Bytes::from_static(b"theirs"))
+            .await
+            .expect("seed different");
+        seed_scoped_object(&flaky, unattested, ours.clone()).await;
+        flaky.puts.store(0, Ordering::SeqCst);
 
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        let accepted = store
+            .put_immutable_verified(identical, ours.clone())
+            .await
+            .expect("an equal attestation is this object");
+        assert_eq!(accepted.sha256, Some(Checksum::sha256(&ours)));
+        assert!(matches!(
+            store.put_immutable_verified(different, ours.clone()).await,
+            Err(crate::ImmutableWriteError::DifferentObject { object_key }) if object_key == different
+        ));
+        assert!(matches!(
+            store.put_immutable_verified(unattested, ours).await,
+            Err(crate::ImmutableWriteError::Unattested { object_key }) if object_key == unattested
+        ));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
+        assert_eq!(flaky.heads.load(Ordering::SeqCst), 3);
         assert_eq!(
-            store.get(key, None).await.expect("get"),
-            Some(Bytes::from_static(b"immutable bytes"))
+            flaky.gets.load(Ordering::SeqCst),
+            0,
+            "no bytes are read back"
         );
     }
 
-    #[tokio::test]
-    async fn immutable_already_present_identical_is_accepted_without_rewrite() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky));
-        let key = "namespaces/demo/wal/00000001.cbor.zst";
-        let bytes = Bytes::from_static(b"identical immutable bytes");
-        seed_scoped_object(&flaky, key, bytes.clone()).await;
-
-        store
-            .put_immutable_verified(key, bytes)
-            .await
-            .expect("identical object is accepted");
-
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn immutable_different_bytes_at_key_are_corruption_class() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky));
-        let key = "namespaces/demo/wal/00000002.cbor.zst";
-        seed_scoped_object(&flaky, key, Bytes::from_static(b"theirs")).await;
-
-        let error = store
-            .put_immutable_verified(key, Bytes::from_static(b"mine"))
-            .await
-            .expect_err("different immutable bytes are rejected");
-
-        assert!(matches!(
-            error,
-            crate::ImmutableWriteError::DifferentObject { object_key } if object_key == key
-        ));
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
-    }
-
     #[tokio::test(start_paused = true)]
-    async fn immutable_ambiguous_landed_write_is_accepted_by_readback() {
+    async fn a_landed_write_whose_answer_was_lost_resolves_through_its_attestation() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
         script_puts(&flaky, [WriteScript::LandThenFail]);
@@ -2258,31 +2400,11 @@ mod tests {
         store
             .put_immutable_verified(key, Bytes::from_static(b"payload"))
             .await
-            .expect("readback proves the first attempt landed");
+            .expect("the retry finds its own landed write");
 
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn immutable_ambiguous_outcome_rejects_different_readback() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky));
-        let key = "namespaces/demo/wal/00000003.cbor.zst";
-        seed_scoped_object(&flaky, key, Bytes::from_static(b"theirs")).await;
-        script_puts(&flaky, [WriteScript::FailWithoutLanding]);
-
-        let error = store
-            .put_immutable_verified(key, Bytes::from_static(b"mine"))
-            .await
-            .expect_err("ambiguous write cannot adopt different bytes");
-
-        assert!(matches!(
-            error,
-            crate::ImmutableWriteError::DifferentObject { .. }
-        ));
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.heads.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2327,7 +2449,7 @@ mod tests {
             }
         ));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 11);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.heads.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -2598,236 +2720,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn immutable_large_write_routes_through_existing_multipart_path() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky));
-        let payload =
-            multipart_payload(usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"));
-
-        store
-            .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload.clone()))
+    async fn an_extension_without_a_provider_path_rewrites_the_base_under_its_version() {
+        let store = memory_store();
+        let pieces = Bytes::from_static(b" and pieces");
+        let written = store
+            .put_if_absent(MULTIPART_KEY, Bytes::from_static(b"base"))
             .await
-            .expect("large immutable write");
-
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
-        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
-        assert_eq!(part_attempts(&flaky, 0), 1);
-        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(Bytes::from(payload))
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn immutable_large_write_owns_completion_retry() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky));
-        let payload =
-            multipart_payload(usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"));
-        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
-
-        store
-            .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload.clone()))
-            .await
-            .expect("immutable operation retries the whole multipart write");
-
-        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 2);
-        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
-        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            flaky.gets.load(Ordering::SeqCst),
-            3,
-            "one key check per attempt and one completion read-back"
-        );
-        assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(Bytes::from(payload))
-        );
-    }
-
-    /// Reports the `algorithm` checksum of what the in-memory provider
-    /// holds, the way a provider attests to its own bytes. It reads the
-    /// in-memory provider directly, not through the counted transport,
-    /// because a stored checksum costs the client no download.
-    struct ProviderChecksums {
-        flaky: Arc<FlakyStore>,
-        algorithm: ChecksumAlgorithm,
-    }
-
-    #[async_trait]
-    impl StoredChecksumReader for ProviderChecksums {
-        async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-            let path = Path::from(format!("tenant-a/{key}"));
-            match self.flaky.inner.get(&path).await {
-                Ok(result) => {
-                    let bytes = result.bytes().await.expect("in-memory read");
-                    Ok(Some(StoredObjectChecksum {
-                        size_bytes: bytes.len() as u64,
-                        checksum: Checksum::compute(self.algorithm, &bytes),
-                    }))
-                }
-                Err(err) if provider_not_found(&err) => Ok(None),
-                Err(err) => Err(map_provider_error(key, err)),
-            }
-        }
-    }
-
-    fn checksum_reporting_store(
-        flaky: &Arc<FlakyStore>,
-        algorithm: ChecksumAlgorithm,
-    ) -> ProviderObjectStore {
-        retrying_store(Arc::clone(flaky)).checksum_reader(Arc::new(ProviderChecksums {
-            flaky: Arc::clone(flaky),
-            algorithm,
-        }))
-    }
-
-    /// A store whose provider reports stored SHA-256 checksums and one whose
-    /// provider reports none, each with the reads it needs to compare an
-    /// object already at the key.
-    fn sha256_and_checksumless_stores() -> [(Arc<FlakyStore>, ProviderObjectStore, usize); 2] {
-        let reporting = Arc::new(FlakyStore::default());
-        let silent = Arc::new(FlakyStore::default());
-        [
-            (
-                Arc::clone(&reporting),
-                checksum_reporting_store(&reporting, ChecksumAlgorithm::Sha256),
-                0,
-            ),
-            (Arc::clone(&silent), retrying_store(silent), 1),
-        ]
-    }
-
-    /// Rewrites the last four bytes of `bytes` so that its CRC-32C equals
-    /// the CRC-32C of `other`. Four bytes always suffice because a CRC is
-    /// linear: running the CRC backwards from the target fixes the table
-    /// entry that each of the last four bytes must select.
-    fn match_crc32c(bytes: &mut [u8], other: &[u8]) {
-        const REFLECTED_POLYNOMIAL: u32 = 0x82f6_3b78;
-        let table: Vec<u32> = (0..256)
-            .map(|entry| {
-                (0..8).fold(entry, |crc, _| {
-                    if crc & 1 == 1 {
-                        (crc >> 1) ^ REFLECTED_POLYNOMIAL
-                    } else {
-                        crc >> 1
-                    }
-                })
-            })
-            .collect();
-        let crc32c = |bytes: &[u8]| {
-            u32::from_str_radix(&Checksum::crc32c(bytes).value, 16)
-                .expect("a CRC-32C should be hex")
+            .expect("base");
+        let base = ExtendBase {
+            length: 4,
+            etag: written.etag.expect("etag"),
         };
-        let (prefix, tail) = bytes.split_at_mut(bytes.len() - 4);
-        let mut entries = [0; 4];
-        let mut register = !crc32c(other);
-        for entry in entries.iter_mut().rev() {
-            *entry = table
-                .iter()
-                .position(|value| value >> 24 == register >> 24)
-                .expect("every high byte should appear in the CRC-32C table");
-            register = (register ^ table[*entry]) << 8;
-        }
-        let mut register = !crc32c(prefix);
-        for (byte, entry) in tail.iter_mut().zip(entries) {
-            *byte = (register as u8) ^ (entry as u8);
-            register = (register >> 8) ^ table[entry];
-        }
-    }
-
-    #[tokio::test]
-    async fn immutable_large_write_refuses_different_bytes_at_key_and_keeps_them() {
-        let payload = Bytes::from(multipart_payload(
-            usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"),
-        ));
-        let mut last_byte_differs = payload.to_vec();
-        *last_byte_differs.last_mut().expect("nonempty payload") ^= 1;
-        let mut one_byte_longer = payload.to_vec();
-        one_byte_longer.push(0);
-
-        for theirs in [last_byte_differs, one_byte_longer].map(Bytes::from) {
-            for (flaky, store, reads) in sha256_and_checksumless_stores() {
-                seed_scoped_object(&flaky, MULTIPART_KEY, theirs.clone()).await;
-
-                let error = store
-                    .put_immutable_verified(MULTIPART_KEY, payload.clone())
-                    .await
-                    .expect_err("different bytes at the key are refused");
-
-                assert!(matches!(
-                    error,
-                    crate::ImmutableWriteError::DifferentObject { object_key }
-                        if object_key == MULTIPART_KEY
-                ));
-                assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
-                assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
-                assert_eq!(flaky.gets.load(Ordering::SeqCst), reads);
-                assert_eq!(
-                    store.get(MULTIPART_KEY, None).await.expect("get"),
-                    Some(theirs.clone())
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn immutable_large_write_accepts_identical_bytes_at_key_without_rewrite() {
-        let payload = Bytes::from(multipart_payload(
-            usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"),
-        ));
-
-        for (flaky, store, reads) in sha256_and_checksumless_stores() {
-            seed_scoped_object(&flaky, MULTIPART_KEY, payload.clone()).await;
-
-            let metadata = store
-                .put_immutable_verified(MULTIPART_KEY, payload.clone())
-                .await
-                .expect("identical bytes at the key are accepted");
-
-            assert_eq!(metadata.size_bytes, payload.len() as u64);
-            assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
-            assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
-            assert_eq!(flaky.gets.load(Ordering::SeqCst), reads);
-        }
-    }
-
-    #[tokio::test]
-    async fn immutable_large_write_refuses_different_bytes_that_share_the_payload_crc32c() {
-        let payload =
-            multipart_payload(usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"));
-        let mut theirs = payload.clone();
-        theirs[0] ^= 1;
-        match_crc32c(&mut theirs, &payload);
-        assert!(theirs != payload, "the payloads should differ");
-        assert_eq!(Checksum::crc32c(&theirs), Checksum::crc32c(&payload));
-        let theirs = Bytes::from(theirs);
-        let flaky = Arc::new(FlakyStore::default());
-        let store = checksum_reporting_store(&flaky, ChecksumAlgorithm::Crc32c);
-        seed_scoped_object(&flaky, MULTIPART_KEY, theirs.clone()).await;
-
-        let error = store
-            .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload))
-            .await
-            .expect_err("different bytes behind a matching CRC-32C are refused");
+        let extended_bytes = b"base and pieces";
+        let result = ExtendedObject {
+            sha256: Checksum::sha256(extended_bytes),
+            crc: Some(Checksum::crc64nvme(extended_bytes)),
+        };
+        let wrong_crc = ExtendedObject {
+            crc: Some(Checksum::crc64nvme(b"other bytes")),
+            ..result.clone()
+        };
 
         assert!(matches!(
-            error,
-            crate::ImmutableWriteError::DifferentObject { object_key }
-                if object_key == MULTIPART_KEY
+            store
+                .extend_object(MULTIPART_KEY, &base, pieces.clone(), &wrong_crc)
+                .await,
+            Err(ObjectStoreError::ChecksumMismatch { .. })
         ));
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
-        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            flaky.gets.load(Ordering::SeqCst),
-            1,
-            "a matching CRC-32C is settled by one bounded read"
-        );
+        let shorter = ExtendBase {
+            length: 2,
+            ..base.clone()
+        };
+        assert!(matches!(
+            store
+                .extend_object(MULTIPART_KEY, &shorter, pieces.clone(), &result)
+                .await,
+            Err(ObjectStoreError::PreconditionFailed { .. })
+        ));
         assert_eq!(
             store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(theirs)
+            Some(Bytes::from_static(b"base")),
+            "a length the version does not have writes nothing"
         );
+        let extended = store
+            .extend_object(MULTIPART_KEY, &base, pieces.clone(), &result)
+            .await
+            .expect("the refused claims wrote nothing, so the base still matches");
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from_static(extended_bytes))
+        );
+        let head = store
+            .head(MULTIPART_KEY)
+            .await
+            .expect("head")
+            .expect("extended");
+        assert_eq!(head.etag, extended.etag);
+        assert_eq!(head.sha256, Some(result.sha256.clone()));
+        assert_eq!(extended.sha256, head.sha256);
+        assert!(matches!(
+            store
+                .extend_object(MULTIPART_KEY, &base, pieces, &result)
+                .await,
+            Err(ObjectStoreError::PreconditionFailed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -2913,6 +2869,76 @@ mod tests {
             .await
             .expect("at-threshold put");
         assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A controller that counts the conditional creates handed to it and
+    /// answers with the attestation it was given.
+    #[derive(Default)]
+    struct CountingController {
+        creates: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl MultipartController for CountingController {
+        async fn put_if_absent(
+            &self,
+            _key: &str,
+            head: Bytes,
+            mut rest: PartReader,
+            sha256: Option<&Checksum>,
+        ) -> Result<ObjectMetadata> {
+            self.creates.fetch_add(1, Ordering::SeqCst);
+            let mut size_bytes = head.len() as u64;
+            while let Some(part) = rest.next_part().await? {
+                size_bytes += part.len() as u64;
+            }
+            Ok(ObjectMetadata {
+                etag: Some("\"controller\"".to_owned()),
+                version: None,
+                size_bytes,
+                last_modified_ms: None,
+                sha256: sha256.cloned(),
+            })
+        }
+
+        async fn extend_object(
+            &self,
+            _key: &str,
+            _base: &ExtendBase,
+            _pieces: Bytes,
+            _result: &ExtendedObject,
+        ) -> Result<Option<ObjectMetadata>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_large_verified_write_creates_through_the_controller() {
+        let flaky = Arc::new(FlakyStore::default());
+        let controller = Arc::new(CountingController::default());
+        let store = multipart_test_store(Arc::clone(&flaky))
+            .multipart_controller(Arc::clone(&controller) as Arc<dyn MultipartController>);
+        let payload = multipart_payload(1300);
+
+        store
+            .put_if_absent(
+                "namespaces/demo/wal/000000000000000001.wal",
+                Bytes::from(payload.clone()),
+            )
+            .await
+            .expect("a publication is one conditional request at every size");
+        assert_eq!(controller.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+
+        let written = store
+            .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload.clone()))
+            .await
+            .expect("a large verified write creates through the controller");
+        assert_eq!(controller.creates.load(Ordering::SeqCst), 1);
+        assert_eq!(written.size_bytes, payload.len() as u64);
+        assert_eq!(written.sha256, Some(Checksum::sha256(&payload)));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 
@@ -3042,9 +3068,9 @@ mod tests {
             "the whole payload is consumed before the condition is evaluated",
         );
         assert_eq!(
-            flaky.gets.load(Ordering::SeqCst),
+            flaky.heads.load(Ordering::SeqCst),
             1,
-            "one read decides the condition",
+            "one head decides the condition",
         );
         assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -3200,193 +3226,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multipart_complete_transport_failure_resolves_landed_completion() {
+    async fn an_ambiguous_multipart_completion_is_reported_without_reading_the_object() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
         script_complete(&flaky, [WriteScript::LandThenFail]);
-        let payload = multipart_payload(1300);
-
-        let metadata = store
-            .put_overwrite(MULTIPART_KEY, Bytes::from(payload.clone()))
-            .await
-            .expect("landed completion reported as the success it was");
-
-        assert_eq!(
-            flaky.multipart_completes.load(Ordering::SeqCst),
-            1,
-            "completion is attempted once before byte-identity resolution"
-        );
-        assert_eq!(
-            flaky.gets.load(Ordering::SeqCst),
-            1,
-            "one read-back proves the landed write by byte identity"
-        );
-        assert_eq!(
-            flaky.multipart_aborts.load(Ordering::SeqCst),
-            1,
-            "the proven completion still aborts the gone upload id best-effort"
-        );
-        assert_eq!(metadata.size_bytes, 1300);
-        let head = store
-            .head(MULTIPART_KEY)
-            .await
-            .expect("head")
-            .expect("object exists");
-        assert_eq!(
-            metadata.etag, head.etag,
-            "resolution reports the landed object's own metadata"
-        );
-        assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(Bytes::from(payload))
-        );
-    }
-
-    #[tokio::test]
-    async fn raw_multipart_complete_failure_without_landing_is_not_retried() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = multipart_test_store(Arc::clone(&flaky));
-        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
-        let payload = multipart_payload(1300);
-
-        let error = store
-            .put_overwrite(MULTIPART_KEY, Bytes::from(payload.clone()))
-            .await
-            .expect_err("raw overwrite surfaces the ambiguous completion");
-
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
-        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
-        assert!(store.head(MULTIPART_KEY).await.expect("head").is_none());
-    }
-
-    #[tokio::test]
-    async fn multipart_complete_rejects_stale_same_size_object() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = multipart_test_store(Arc::clone(&flaky));
-        let stale = Bytes::from(vec![0xAA_u8; 1300]);
-        seed_scoped_object(&flaky, MULTIPART_KEY, stale.clone()).await;
-        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
 
         let error = store
             .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
             .await
-            .expect_err("an unproven completion fails instead of adopting the stale object");
-
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
-        assert_eq!(
-            flaky.multipart_completes.load(Ordering::SeqCst),
-            1,
-            "raw overwrite does not replay completion"
-        );
-        assert_eq!(
-            flaky.gets.load(Ordering::SeqCst),
-            1,
-            "one read-back tested the outcome"
-        );
-        assert_eq!(
-            flaky.multipart_aborts.load(Ordering::SeqCst),
-            1,
-            "the failed upload is aborted so no parts are stranded"
-        );
-        assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(stale),
-            "the stale object is untouched"
-        );
-    }
-
-    #[tokio::test]
-    async fn multipart_complete_accepts_identical_object_and_aborts() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = multipart_test_store(Arc::clone(&flaky));
-        let payload = multipart_payload(1300);
-        seed_scoped_object(&flaky, MULTIPART_KEY, Bytes::from(payload.clone())).await;
-        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
-
-        let metadata = store
-            .put_overwrite(MULTIPART_KEY, Bytes::from(payload))
-            .await
-            .expect("byte-identical object proves the outcome");
-
-        assert_eq!(metadata.size_bytes, 1300);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            flaky.multipart_aborts.load(Ordering::SeqCst),
-            1,
-            "the dangling upload is aborted on proven success"
-        );
-        assert!(
-            flaky.multipart_uploads.lock().expect("uploads").is_empty(),
-            "no parts remain stranded"
-        );
-    }
-
-    #[tokio::test]
-    async fn multipart_complete_gone_upload_with_stale_object_fails_as_transport() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = multipart_test_store(Arc::clone(&flaky));
-        let stale = Bytes::from(vec![0xAA_u8; 1300]);
-        seed_scoped_object(&flaky, MULTIPART_KEY, stale.clone()).await;
-        script_complete(&flaky, [WriteScript::VanishThenFail]);
-
-        let error = store
-            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
-            .await
-            .expect_err("a vanished upload with a stale object is a failed write");
+            .expect_err("an unanswered completion is not a success");
 
         assert!(matches!(error, ObjectStoreError::Transport { .. }));
         assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(stale),
-            "the stale object is untouched"
-        );
-    }
-
-    #[tokio::test]
-    async fn multipart_complete_first_attempt_rejection_skips_verification() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = multipart_test_store(Arc::clone(&flaky));
-        script_complete(&flaky, [WriteScript::FailAuth]);
-
-        let error = store
-            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
-            .await
-            .expect_err("auth rejection surfaces immediately");
-
-        assert!(matches!(error, ObjectStoreError::PermissionDenied { .. }));
-        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.heads.load(Ordering::SeqCst), 0);
         assert_eq!(flaky.gets.load(Ordering::SeqCst), 0);
-        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn multipart_complete_unverifiable_outcome_surfaces_both_failures() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = multipart_test_store(Arc::clone(&flaky));
-        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
-        flaky
-            .get_script
-            .lock()
-            .expect("get script")
-            .push_back(ReadScript::Transport);
-
-        let error = store
-            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
-            .await
-            .expect_err("an unverifiable outcome is an error, not a success");
-
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
-        let message = error.message();
-        assert!(
-            message.contains("failed to verify multipart completion outcome"),
-            "message names the verification failure: {message}"
-        );
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }
 

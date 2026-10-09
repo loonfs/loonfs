@@ -37,6 +37,28 @@ pub struct ObjectMetadata {
     /// Advisory: garbage collection uses it for grace/reap age checks and
     /// treats an absent value as "young" (retain). Never a validity input.
     pub last_modified_ms: Option<u64>,
+    /// Whole-object SHA-256 the writer attested for this version, when it
+    /// attested one.
+    pub sha256: Option<Checksum>,
+}
+
+/// The version an [`ObjectStore::extend_object`] call extends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendBase {
+    /// Length in bytes of the object at that version.
+    pub length: u64,
+    /// Compare token of that version.
+    pub etag: String,
+}
+
+/// What the object holds after an [`ObjectStore::extend_object`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendedObject {
+    /// SHA-256 of the whole extended object, recorded as its attestation.
+    pub sha256: Checksum,
+    /// The provider's full-object CRC of the whole extended object, checked
+    /// where the provider can check it.
+    pub crc: Option<Checksum>,
 }
 
 /// Size and the stored full-object checksum for one object, read from a
@@ -156,6 +178,13 @@ pub enum ObjectStoreError {
     #[error("stored full-object checksum missing for `{object_key}`")]
     StoredChecksumMissing {
         /// Object whose provider metadata carried no stored checksum.
+        object_key: String,
+    },
+    /// Reports a written object whose full-object checksum differs from the
+    /// one the caller supplied.
+    #[error("full-object checksum mismatch for `{object_key}`")]
+    ChecksumMismatch {
+        /// Object whose checksum did not match.
         object_key: String,
     },
     /// Not object-scoped: the store lacks a required capability.
@@ -290,7 +319,8 @@ impl ObjectStoreError {
             } => ObjectStoreErrorClass::RetryableTransport,
             Self::Transport {
                 retryable: false, ..
-            } => ObjectStoreErrorClass::Other,
+            }
+            | Self::ChecksumMismatch { .. } => ObjectStoreErrorClass::Other,
         }
     }
 
@@ -309,6 +339,7 @@ impl ObjectStoreError {
             | Self::PreconditionFailed { object_key }
             | Self::PermissionDenied { object_key, .. }
             | Self::StoredChecksumMissing { object_key }
+            | Self::ChecksumMismatch { object_key }
             | Self::Transport { object_key, .. } => Some(object_key),
             Self::InvalidContentRef(_) | Self::Unsupported(_) | Self::Configuration(_) => None,
         }
@@ -327,6 +358,7 @@ impl ObjectStoreError {
                 format!("permission denied: {message}")
             }
             Self::StoredChecksumMissing { .. } => "stored full-object checksum missing".to_owned(),
+            Self::ChecksumMismatch { .. } => "full-object checksum mismatch".to_owned(),
             Self::Unsupported(capability) => format!("unsupported capability: {capability}"),
             Self::Configuration(message) => {
                 format!("invalid object store configuration: {message}")
@@ -452,18 +484,22 @@ pub trait ObjectStore: Send + Sync + Debug {
 
     /// Writes bytes under the requested overwrite or provider-enforced precondition.
     ///
-    /// Successful completion is immediately authoritative. Invalid keys,
-    /// failed conditions, permission failures, and ambiguous transport failures are returned.
+    /// Successful completion is immediately authoritative. A create-if-absent
+    /// write records the SHA-256 of `bytes` as the object's attestation.
+    /// Invalid keys, failed conditions, permission failures, and ambiguous
+    /// transport failures are returned.
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata>;
 
     /// Writes a stream and returns the number of bytes stored.
     ///
     /// The object must not become visible until the complete body ends without error.
     /// Implementations consume the complete stream before reporting a failed
-    /// precondition, allowing callers to finish checksums. Multipart providers
-    /// may check `mode` immediately before assembly rather than atomically with
-    /// it, so this method is only safe for immutable, uniquely named keys.
-    /// Failed multipart writes must be aborted.
+    /// precondition, allowing callers to finish checksums. A multipart
+    /// create-if-absent completes conditionally where the provider allows it;
+    /// elsewhere a multipart provider may check `mode` immediately before
+    /// assembly rather than atomically with it, so this method is only safe
+    /// for immutable, uniquely named keys. A write longer than one part
+    /// carries no attestation. Failed multipart writes must be aborted.
     ///
     /// The default implementation buffers the complete stream before calling
     /// [`Self::put`]. Providers should override it to provide bounded-memory
@@ -545,30 +581,46 @@ pub trait ObjectStore: Send + Sync + Debug {
     }
 
     /// Writes `bytes` under an immutable `key` and accepts success only when
-    /// the key contains exactly those bytes.
+    /// the key holds exactly those bytes.
     ///
-    /// At every size, a key that already holds different bytes answers
-    /// [`crate::ImmutableWriteError::DifferentObject`] and is left unchanged.
-    /// Payloads below [`crate::PROVIDER_MULTIPART_THRESHOLD_BYTES`] use
-    /// create-if-absent. Payloads at or above that threshold use the store's
-    /// multipart-capable overwrite path, which cannot refuse an occupied key,
-    /// so each attempt first compares the object at the key and writes only
-    /// to an absent key. A stored SHA-256 decides that comparison without a
-    /// download. A stored CRC never confirms identity on its own, because
-    /// different bytes can share a CRC. After a matching CRC, or when the
-    /// store keeps no checksum, the comparison reads the object's bytes.
-    /// Transport retries, and writers racing that comparison, are safe only
-    /// because every writer allowed to name this immutable key must supply
-    /// identical bytes. Mutable keys must use [`Self::put`] and own their
+    /// Every size is written with create-if-absent, which attests the
+    /// SHA-256 of `bytes`. A key found occupied is decided by one `head`: an
+    /// equal attestation is this object and returns its metadata, a
+    /// different one answers [`crate::ImmutableWriteError::DifferentObject`],
+    /// and a missing one answers [`crate::ImmutableWriteError::Unattested`].
+    /// No bytes are read back. Transport failures retry under one operation
+    /// deadline, and a retry whose earlier attempt landed resolves through
+    /// the same `head`. Mutable keys must use [`Self::put`] and own their
     /// protocol-specific ambiguity resolution.
-    /// Returns metadata from the confirmed write or exact read-back. An
-    /// identical object found before a large write reports only its size.
     async fn put_immutable_verified(
         &self,
         key: &str,
         bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         crate::immutable_write::put(self, key, bytes).await
+    }
+
+    /// Appends `pieces` to the object at `key`, which must still hold
+    /// `base.length` bytes under the version `base.etag`, and records
+    /// `result.sha256` as the new version's attestation.
+    ///
+    /// A base that no longer matches answers
+    /// [`ObjectStoreError::PreconditionFailed`]. `result.crc` is checked
+    /// where the provider can check it, and a mismatch answers
+    /// [`ObjectStoreError::ChecksumMismatch`]. Where the provider reports its
+    /// checksum only after the write (Google Cloud Storage, and Cloudflare R2
+    /// for a base it copies), the extended object then stays in place.
+    /// `pieces` is never empty. Stores that cannot extend return
+    /// [`ObjectStoreError::Unsupported`].
+    async fn extend_object(
+        &self,
+        key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<ObjectMetadata> {
+        let _ = (key, base, pieces, result);
+        Err(ObjectStoreError::Unsupported("object extension"))
     }
 
     /// Replaces `key` only while its current opaque token equals `expected_etag`.
@@ -688,6 +740,16 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().put_immutable_verified(key, bytes).await
     }
 
+    async fn extend_object(
+        &self,
+        key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<ObjectMetadata> {
+        self.as_ref().extend_object(key, base, pieces, result).await
+    }
+
     async fn compare_and_swap(
         &self,
         key: &str,
@@ -793,6 +855,16 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         (*self).put_immutable_verified(key, bytes).await
+    }
+
+    async fn extend_object(
+        &self,
+        key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<ObjectMetadata> {
+        (*self).extend_object(key, base, pieces, result).await
     }
 
     async fn compare_and_swap(

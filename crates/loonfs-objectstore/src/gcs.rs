@@ -1,22 +1,42 @@
 //! Google Cloud Storage provider.
 
 use crate::configured::ConfiguredObjectStoreKind;
+use crate::keys::scratch_object;
+use crate::keyspace::{normalize_key_prefix, scope_object_key};
+use crate::layout::parse_object_key;
 use crate::object_store::Result;
 use crate::presign::{
-    stored_crc32c, DirectTransferIssuers, GcsPresignerConfig, GcsV4Presigner, CHECKSUM_HEAD_TTL,
+    percent_encode_segment, stored_crc32c, DirectTransferIssuers, GcsPresignerConfig,
+    GcsV4Presigner, CHECKSUM_HEAD_TTL,
 };
-use crate::provider_object_store::{CompareToken, StoredChecksumReader};
-use crate::signed_request::{send_signed, stored_checksum_from_signed_head};
+use crate::provider_object_store::{
+    attested_sha256, map_provider_error, AbortUploadOnDrop, CompareToken, MultipartController,
+    PartReader, StoredChecksumReader, SHA256_METADATA_KEY,
+};
+use crate::signed_request::{
+    classify_signed_response, send, send_signed, stored_checksum_from_signed_head, SignedResponse,
+};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
-    ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig, StoredObjectChecksum,
+    ExtendBase, ExtendedObject, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
+    ProviderObjectStoreConfig, StoredObjectChecksum,
 };
 use async_trait::async_trait;
-use loonfs_types::Checksum;
+use bytes::Bytes;
+use futures::FutureExt;
+use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
+use loonfs_types::{Checksum, NamespaceId};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
-use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::SystemTime;
+
+/// Root of the JSON API object resources.
+const GCS_JSON_OBJECTS: &str = "https://storage.googleapis.com/storage/v1/b";
+
+/// Root of the JSON API media and resumable uploads.
+const GCS_JSON_UPLOADS: &str = "https://storage.googleapis.com/upload/storage/v1/b";
 
 /// Supplies explicit credentials and key scoping for the native Google Cloud Storage adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +52,9 @@ pub struct GcpGcsStoreConfig {
 struct GcsRequestSigner {
     request_signer: Arc<GcsV4Presigner>,
     http: HttpClient,
+    credentials: GcpCredentialProvider,
+    bucket: String,
+    key_prefix: Option<String>,
 }
 
 /// Builds a native GCS adapter whose compare tokens are object generations.
@@ -48,6 +71,7 @@ pub(crate) fn gcp_gcs_with_issuers(
         service_account_key_path: config.service_account_key_path.clone(),
         key_prefix: config.key_prefix.clone(),
     })?);
+    let key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
 
     let io_runtime = StoreIoRuntime::new()?;
     let http = io_runtime
@@ -58,7 +82,7 @@ pub(crate) fn gcp_gcs_with_issuers(
         .with_http_connector(io_runtime.connector())
         .with_client_options(crate::provider_object_store::provider_client_options())
         .with_retry(crate::provider_object_store::provider_retry_config())
-        .with_bucket_name(config.bucket)
+        .with_bucket_name(config.bucket.clone())
         .with_service_account_path(config.service_account_key_path);
 
     let provider = Arc::new(
@@ -67,12 +91,13 @@ pub(crate) fn gcp_gcs_with_issuers(
             .build()
             .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?,
     );
+    let credentials = Arc::clone(provider.credentials());
     let one_attempt = builder
         .with_retry(object_store::RetryConfig {
             max_retries: 0,
             ..crate::provider_object_store::provider_retry_config()
         })
-        .with_credentials(Arc::clone(provider.credentials()))
+        .with_credentials(Arc::clone(&credentials))
         .build()
         .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
     let store = ProviderObjectStore::new(
@@ -89,6 +114,9 @@ pub(crate) fn gcp_gcs_with_issuers(
     let signer = Arc::new(GcsRequestSigner {
         request_signer: Arc::clone(&request_signer),
         http,
+        credentials,
+        bucket: config.bucket,
+        key_prefix,
     });
     let direct_transfers = DirectTransferIssuers {
         get: request_signer.clone(),
@@ -98,7 +126,8 @@ pub(crate) fn gcp_gcs_with_issuers(
 
     let store = store
         .compare_token(CompareToken::Generation)
-        .checksum_reader(signer);
+        .checksum_reader(signer.clone())
+        .multipart_controller(signer);
     Ok((store, direct_transfers))
 }
 
@@ -108,6 +137,83 @@ impl GcsRequestSigner {
     #[allow(clippy::disallowed_methods)]
     fn signing_time() -> SystemTime {
         SystemTime::now()
+    }
+
+    /// The JSON API path segment naming `key`'s object.
+    fn object_name(&self, key: &str) -> Result<String> {
+        scope_object_key(self.key_prefix.as_deref(), key).map(|name| percent_encode_segment(&name))
+    }
+
+    /// Sends one JSON API request under the service account's OAuth token
+    /// and fails on any error status.
+    async fn send_authorized(
+        &self,
+        key: &str,
+        request: http::request::Builder,
+        body: HttpRequestBody,
+    ) -> Result<SignedResponse> {
+        let credential = self
+            .credentials
+            .get_credential()
+            .await
+            .map_err(|error| map_provider_error(key, error))?;
+        let request = request.header(AUTHORIZATION, format!("Bearer {}", credential.bearer));
+        succeeded(key, send(&self.http, key, request, body).await?)
+    }
+
+    /// Composes `key` and the scratch object onto `key` while `key` is still
+    /// at `generation`, attesting `sha256` on the result.
+    async fn compose(
+        &self,
+        key: &str,
+        generation: u64,
+        scratch: &str,
+        sha256: &Checksum,
+    ) -> Result<(ObjectMetadata, Option<Checksum>)> {
+        let names = [
+            scope_object_key(self.key_prefix.as_deref(), key)?,
+            scope_object_key(self.key_prefix.as_deref(), scratch)?,
+        ];
+        let url = format!(
+            "{GCS_JSON_OBJECTS}/{}/o/{}/compose?ifGenerationMatch={generation}",
+            percent_encode_segment(&self.bucket),
+            self.object_name(key)?,
+        );
+        let body = serde_json::json!({
+            "sourceObjects": names.map(|name| serde_json::json!({ "name": name })),
+            "destination": attested(Some(sha256)),
+        });
+        let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
+        let composed = self
+            .send_authorized(key, request, body.to_string().into())
+            .await?;
+        gcs_object(key, &composed.body)
+    }
+
+    /// Deletes an extension's scratch object. Best effort: one left behind
+    /// waits for a sweep of the scratch family.
+    async fn delete_scratch(&self, scratch: &str) {
+        let deleted: Result<SignedResponse> = async {
+            let url = format!(
+                "{GCS_JSON_OBJECTS}/{}/o/{}",
+                percent_encode_segment(&self.bucket),
+                self.object_name(scratch)?,
+            );
+            self.send_authorized(
+                scratch,
+                http::Request::delete(url),
+                HttpRequestBody::empty(),
+            )
+            .await
+        }
+        .await;
+        if deleted.is_err() {
+            tracing::warn!(
+                object_key = scratch,
+                operation = "delete",
+                "failed to delete an extension's scratch object; it stays until a sweep collects it",
+            );
+        }
     }
 }
 
@@ -122,6 +228,199 @@ impl StoredChecksumReader for GcsRequestSigner {
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         stored_checksum_from_signed_head(key, &response, stored_crc32c_from_headers)
     }
+}
+
+#[async_trait]
+impl MultipartController for GcsRequestSigner {
+    /// Sends the parts through one JSON API resumable upload whose start
+    /// carries `ifGenerationMatch=0`, because XML API multipart uploads
+    /// refuse preconditions.
+    async fn put_if_absent(
+        &self,
+        key: &str,
+        head: Bytes,
+        mut rest: PartReader,
+        sha256: Option<&Checksum>,
+    ) -> Result<ObjectMetadata> {
+        let url = format!(
+            "{GCS_JSON_UPLOADS}/{}/o?uploadType=resumable&ifGenerationMatch=0&name={}",
+            percent_encode_segment(&self.bucket),
+            self.object_name(key)?,
+        );
+        let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
+        let started = self
+            .send_authorized(key, request, attested(sha256).to_string().into())
+            .await?;
+        let session = started
+            .headers
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                ObjectStoreError::transport(key, "resumable upload returned no session")
+            })?
+            .to_owned();
+        let (http, cancelled, cancelled_key) = (self.http.clone(), session.clone(), key.to_owned());
+        let cancel = async move {
+            let request = http::Request::delete(cancelled);
+            send(&http, &cancelled_key, request, HttpRequestBody::empty())
+                .await
+                .map(|_| ())
+        };
+        let mut abort_on_drop = AbortUploadOnDrop::new(key, cancel.boxed());
+
+        let mut offset = 0;
+        let mut chunk = head;
+        loop {
+            let end = offset + chunk.len() as u64;
+            let last = chunk.is_empty() || rest.exhausted();
+            let content_range = match (chunk.is_empty(), last) {
+                (true, _) => format!("bytes */{offset}"),
+                (false, true) => format!("bytes {offset}-{}/{end}", end - 1),
+                (false, false) => format!("bytes {offset}-{}/*", end - 1),
+            };
+            let request = http::Request::put(&session).header(CONTENT_RANGE, content_range);
+            let response = send(&self.http, key, request, chunk.into()).await?;
+            if response.status.as_u16() != 308 {
+                let finished = succeeded(key, response)?;
+                abort_on_drop.disarm();
+                return gcs_object(key, &finished.body).map(|(metadata, _)| metadata);
+            }
+            if last || persisted_bytes(&response.headers) != Some(end) {
+                return Err(ObjectStoreError::transport(
+                    key,
+                    "the resumable upload did not keep every byte sent",
+                ));
+            }
+            offset = end;
+            chunk = rest.next_part().await?.unwrap_or_default();
+        }
+    }
+
+    /// Writes the pieces as a scratch object and composes the base and the
+    /// scratch object onto the base's own generation.
+    async fn extend_object(
+        &self,
+        key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>> {
+        let precondition_failed =
+            |object_key: String| ObjectStoreError::PreconditionFailed { object_key };
+        let generation: u64 = base
+            .etag
+            .parse()
+            .map_err(|_| precondition_failed(key.to_owned()))?;
+        let namespace_id = parse_object_key(key)
+            .and_then(|parsed| NamespaceId::parse(parsed.owner_namespace_id()).ok())
+            .ok_or_else(|| ObjectStoreError::InvalidKey {
+                object_key: key.to_owned(),
+                message: "an extended object must belong to a namespace".to_owned(),
+            })?;
+        // The compose names the base's generation, not its length, so a
+        // base longer than the caller believes would put the pieces after
+        // bytes the caller never saw.
+        let url = format!(
+            "{GCS_JSON_OBJECTS}/{}/o/{}?generation={generation}",
+            percent_encode_segment(&self.bucket),
+            self.object_name(key)?,
+        );
+        let (current, _) = self
+            .send_authorized(key, http::Request::get(url), HttpRequestBody::empty())
+            .await
+            .and_then(|response| gcs_object(key, &response.body))
+            .map_err(|error| match error {
+                ObjectStoreError::NotFound { object_key } => precondition_failed(object_key),
+                error => error,
+            })?;
+        if current.size_bytes != base.length {
+            return Err(precondition_failed(key.to_owned()));
+        }
+        let scratch = scratch_object(&namespace_id);
+        let url = format!(
+            "{GCS_JSON_UPLOADS}/{}/o?uploadType=media&ifGenerationMatch=0&name={}",
+            percent_encode_segment(&self.bucket),
+            self.object_name(&scratch)?,
+        );
+        let request = http::Request::post(url).header(CONTENT_TYPE, "application/octet-stream");
+        self.send_authorized(&scratch, request, pieces.into())
+            .await?;
+        let composed = self
+            .compose(key, generation, &scratch, &result.sha256)
+            .await;
+        self.delete_scratch(&scratch).await;
+        let (metadata, crc32c) = composed.map_err(|error| match error {
+            ObjectStoreError::NotFound { object_key } => precondition_failed(object_key),
+            error => error,
+        })?;
+        if result
+            .crc
+            .as_ref()
+            .is_some_and(|expected| crc32c.as_ref() != Some(expected))
+        {
+            return Err(ObjectStoreError::ChecksumMismatch {
+                object_key: key.to_owned(),
+            });
+        }
+        Ok(Some(metadata))
+    }
+}
+
+/// The JSON object-resource body that records `sha256` as the attestation.
+fn attested(sha256: Option<&Checksum>) -> serde_json::Value {
+    let metadata: BTreeMap<&str, &str> = sha256
+        .map(|sha256| (SHA256_METADATA_KEY, sha256.value.as_str()))
+        .into_iter()
+        .collect();
+    serde_json::json!({ "metadata": metadata })
+}
+
+fn succeeded(key: &str, response: SignedResponse) -> Result<SignedResponse> {
+    match classify_signed_response(key, response.status, None) {
+        Some(error) => Err(error),
+        None => Ok(response),
+    }
+}
+
+/// How many bytes a resumable upload kept, from its `Range: bytes=0-{last}`.
+fn persisted_bytes(headers: &http::HeaderMap) -> Option<u64> {
+    let last = headers
+        .get(http::header::RANGE)?
+        .to_str()
+        .ok()?
+        .strip_prefix("bytes=0-")?;
+    last.parse::<u64>().ok()?.checked_add(1)
+}
+
+/// The fields of a JSON API object resource that this adapter reads.
+#[derive(serde::Deserialize)]
+struct GcsObject {
+    generation: String,
+    size: String,
+    crc32c: Option<String>,
+    metadata: Option<BTreeMap<String, String>>,
+}
+
+/// Reads a JSON API object resource: its metadata, with the generation as
+/// the compare token, and its stored CRC-32C.
+fn gcs_object(key: &str, body: &[u8]) -> Result<(ObjectMetadata, Option<Checksum>)> {
+    let unreadable = || ObjectStoreError::transport(key, "unreadable object resource");
+    let object: GcsObject = serde_json::from_slice(body).map_err(|_| unreadable())?;
+    let metadata = ObjectMetadata {
+        size_bytes: object.size.parse().map_err(|_| unreadable())?,
+        etag: Some(object.generation.clone()),
+        version: Some(object.generation),
+        last_modified_ms: None,
+        sha256: object
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(SHA256_METADATA_KEY))
+            .and_then(|value| attested_sha256(value)),
+    };
+    let crc32c = object
+        .crc32c
+        .and_then(|value| stored_crc32c(&format!("crc32c={value}")));
+    Ok((metadata, crc32c))
 }
 
 /// Finds the stored CRC-32C among a metadata response's hash headers.
@@ -141,10 +440,32 @@ fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<Checksum> {
 
 #[cfg(test)]
 mod tests {
-    use super::{gcp_gcs, stored_crc32c_from_headers, GcpGcsStoreConfig};
+    use super::{gcp_gcs, gcs_object, stored_crc32c_from_headers, GcpGcsStoreConfig};
     use crate::test_support::gcs_fixture_service_account_key_file;
     use crate::{ObjectStore, ObjectStoreError};
     use bytes::Bytes;
+    use loonfs_types::Checksum;
+
+    #[test]
+    fn a_json_object_resource_reads_as_its_generation_attestation_and_crc32c() {
+        let sha256 = Checksum::sha256(b"hello");
+        let body = serde_json::json!({
+            "kind": "storage#object",
+            "generation": "1700000000000001",
+            "size": "5",
+            "crc32c": "mnG7TA==",
+            "metadata": { "sha256": sha256.value },
+        });
+
+        let (metadata, crc32c) =
+            gcs_object("key", body.to_string().as_bytes()).expect("object resource");
+
+        assert_eq!(metadata.etag.as_deref(), Some("1700000000000001"));
+        assert_eq!(metadata.version, metadata.etag);
+        assert_eq!(metadata.size_bytes, 5);
+        assert_eq!(metadata.sha256, Some(sha256));
+        assert_eq!(crc32c, Some(Checksum::crc32c(b"hello")));
+    }
 
     #[tokio::test]
     async fn invalid_keys_are_rejected_before_generation_tokens() {
