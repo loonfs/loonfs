@@ -1,7 +1,9 @@
-//! Downloads and imports of committed inline content.
+//! Downloads, imports, and appends of committed inline content.
 
 use bytes::Bytes;
-use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore};
+use loonfs::{
+    AppendFileOptions, CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore,
+};
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
@@ -360,4 +362,76 @@ async fn imports_of_fork_content_read_the_deleted_owners_key() {
         assert_eq!(imported_ref.owner_namespace_id, destination);
         assert_ne!(imported_ref.content_id, content_ref.content_id);
     }
+}
+
+#[tokio::test]
+async fn an_append_in_a_fork_starts_a_chain_the_fork_owns() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let writer = LoonFs::builder_with_store(store)
+        .writer_id("runtime-writer")
+        .build()
+        .await
+        .expect("writer");
+    let actor = loonfs_test_support::test_actor();
+    let source = NamespaceId::parse("source").expect("source");
+    let fork = NamespaceId::parse("fork").expect("fork");
+    writer
+        .create_namespace(&source, &actor)
+        .await
+        .expect("namespace");
+    let source_writer = writer.open_namespace(&source).expect("open source");
+    source_writer
+        .put_file("/log", b"first", &actor)
+        .await
+        .expect("put");
+    let guard = AppendFileOptions {
+        expected_inode_id: Some(source_writer.stat("/log").await.expect("stat").inode_id),
+        expected_revision_no: Some(RevisionNo(1)),
+        ..AppendFileOptions::default()
+    };
+    source_writer
+        .append_file_with_options("/log", b" second", &actor, &guard)
+        .await
+        .expect("append in the source");
+    writer
+        .fork_namespace(&source, &fork, &actor)
+        .await
+        .expect("fork");
+    let fork_writer = writer.open_namespace(&fork).expect("open fork");
+    let inherited = fork_writer
+        .stat("/log")
+        .await
+        .expect("inherited entry")
+        .content_ref()
+        .expect("inherited reference")
+        .clone();
+    assert_eq!(inherited.owner_namespace_id, source);
+
+    fork_writer
+        .append_file("/log", b" third", &actor)
+        .await
+        .expect("append in the fork");
+    for fold in [false, true] {
+        if fold {
+            writer
+                .maintenance(loonfs_test_support::ids::writer_id("folder"))
+                .fold_wal(&fork)
+                .await
+                .expect("fold the fork");
+        }
+        let file = fork_writer.read_file("/log").await.expect("read the fork");
+        assert_eq!(file.bytes, b"first second third");
+        let appended = file.entry.content_ref().expect("appended reference");
+        assert_eq!(appended.owner_namespace_id, fork);
+        assert_ne!(appended.content_id, inherited.content_id);
+    }
+    assert_eq!(
+        source_writer
+            .read_file("/log")
+            .await
+            .expect("read the source")
+            .bytes,
+        b"first second"
+    );
 }

@@ -318,6 +318,44 @@ impl Client {
         self.commit(namespace_id, actor, &request).await
     }
 
+    /// Adds bytes to the end of a file as its next revision.
+    pub async fn append_file(
+        &self,
+        spec: &NamespacePath,
+        bytes: &[u8],
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.append_file_with_options(spec, bytes, actor, &AppendFileOptions::default())
+            .await
+    }
+
+    /// Adds bytes to the end of a file as its next revision.
+    ///
+    /// The commit carries the bytes, from 1 byte to 256 KiB. A rerun with the
+    /// same bytes and commit ID replays.
+    pub async fn append_file_with_options(
+        &self,
+        spec: &NamespacePath,
+        bytes: &[u8],
+        actor: &ActorId,
+        options: &AppendFileOptions,
+    ) -> Result<Commit> {
+        self.commit(
+            spec.namespace(),
+            actor,
+            &single_operation(
+                &options.commit,
+                FilesystemOperation::AppendFile {
+                    path: spec.absolute_path().clone(),
+                    inline_content: bytes.to_vec(),
+                    expected_inode_id: options.expected_inode_id,
+                    expected_revision_no: options.expected_revision_no,
+                },
+            ),
+        )
+        .await
+    }
+
     /// Creates a directory at the requested path, failing when its parent is
     /// missing.
     pub async fn create_directory(&self, spec: &NamespacePath, actor: &ActorId) -> Result<Commit> {

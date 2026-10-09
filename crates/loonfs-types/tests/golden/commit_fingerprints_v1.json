@@ -674,5 +674,41 @@
     ],
     "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"create_directory\",\"path\":\"/docs\",\"parents\":false}],\"message\":null,\"preconditions\":[{\"kind\":\"name_absence\",\"parent_inode_id\":7,\"display_name\":\"report.txt\"}]}",
     "fingerprint": "v1:sha256:7fec97a48e081ff12b5c73a4d5ca974b5a32cffd30cfd3ed2526a1d7571d398a"
+  },
+  {
+    "name": "append_file",
+    "operation": {
+      "kind": "append_file",
+      "path": "/logs/app.log",
+      "inline_content": "aGVsbG8K"
+    },
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"append_file\",\"path\":\"/logs/app.log\",\"inline_content\":{\"kind\":\"append_v1\",\"sha256\":\"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\",\"size_bytes\":6},\"expected_inode_id\":null,\"expected_revision_no\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:271f7d63d4e35fb099a0ecdafc02d4aa1c30fe09f1997c1b66305c72b5eadea6"
+  },
+  {
+    "name": "append_file_guarded",
+    "operation": {
+      "kind": "append_file",
+      "path": "/logs/app.log",
+      "inline_content": "aGVsbG8K",
+      "expected_inode_id": "ino_7",
+      "expected_revision_no": 3
+    },
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"append_file\",\"path\":\"/logs/app.log\",\"inline_content\":{\"kind\":\"append_v1\",\"sha256\":\"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\",\"size_bytes\":6},\"expected_inode_id\":7,\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:3a552a84f6a87e0c7c72539ae6a87bc721d8c53c01bd6fdb6b7c06c8d747074c"
+  },
+  {
+    "name": "append_file_by_inode",
+    "operation": {
+      "kind": "append_file_by_inode",
+      "inode_id": "ino_7",
+      "inline_content": "aGVsbG8K",
+      "expected_revision_no": 3
+    },
+    "preconditions": [],
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"append_file_by_inode\",\"inode_id\":7,\"inline_content\":{\"kind\":\"append_v1\",\"sha256\":\"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\",\"size_bytes\":6},\"expected_revision_no\":3}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:256cbd68d336bb7b1040fdcd040b0b39829b63d34b0d140ecb237e8047c99058"
   }
 ]

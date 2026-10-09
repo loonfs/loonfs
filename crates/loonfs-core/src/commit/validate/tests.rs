@@ -303,6 +303,7 @@ async fn build_commit_plan(
         apply_after_seq: context.head.seq,
         assigned_seq: committed_seq(context),
         deltas,
+        appended: Vec::new(),
     }
     .finish(resulting_next_inode_id))
 }

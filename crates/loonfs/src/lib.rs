@@ -219,12 +219,13 @@ pub use metadata_cache::{
     DEFAULT_MAX_SEGMENT_BYTES,
 };
 pub use options::{
-    AccessState, AdvanceRetentionOptions, AttributeChanges, CommitOptions, CopyOptions,
-    CreateCheckpointOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
-    DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListOptions,
-    MetadataMaintenanceOptions, MoveOptions, PutFileOptions, ReadFileStreamOptions, StatOptions,
-    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
-    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
+    AccessState, AdvanceRetentionOptions, AppendFileByInodeOptions, AppendFileOptions,
+    AttributeChanges, CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions, DownloadOptions,
+    ForkNamespaceOptions, ListOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
+    ReadFileStreamOptions, StatOptions, UndeleteDestination, UndeleteOptions,
+    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
 pub use trace::{payload_class, TraceMode, TraceStoreKind};

@@ -522,7 +522,7 @@ pub enum FilesystemOperation {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            with = "crate::base64_bytes"
+            with = "crate::base64_bytes::option"
         )]
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
         inline_content: Option<Vec<u8>>,
@@ -562,7 +562,7 @@ pub enum FilesystemOperation {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            with = "crate::base64_bytes"
+            with = "crate::base64_bytes::option"
         )]
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
         inline_content: Option<Vec<u8>>,
@@ -585,12 +585,52 @@ pub enum FilesystemOperation {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            with = "crate::base64_bytes"
+            with = "crate::base64_bytes::option"
         )]
         #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
         inline_content: Option<Vec<u8>>,
         /// Current revision required for the write.
         expected_revision_no: RevisionNo,
+    },
+    /// Add bytes to the end of a file as its next revision.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationAppendFile"))]
+    AppendFile {
+        /// Absolute path that must resolve to a visible file.
+        path: AbsolutePath,
+        /// The bytes to add as base64, from 1 byte to 256 KiB.
+        #[serde(with = "crate::base64_bytes")]
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Byte))]
+        inline_content: Vec<u8>,
+        /// The inode that the path must still resolve to.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::public_inode_id::option"
+        )]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_inode_id: Option<InodeId>,
+        /// With an inode precondition, the content revision that must still be current.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_revision_no: Option<RevisionNo>,
+    },
+    /// Add bytes to the end of a file inode as its next revision.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationAppendFileByInode")
+    )]
+    AppendFileByInode {
+        /// File to append to.
+        #[serde(with = "crate::public_inode_id")]
+        inode_id: InodeId,
+        /// The bytes to add as base64, from 1 byte to 256 KiB.
+        #[serde(with = "crate::base64_bytes")]
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Byte))]
+        inline_content: Vec<u8>,
+        /// The content revision that must still be current.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        expected_revision_no: Option<RevisionNo>,
     },
     /// Delete one path.
     #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationDeletePath"))]
@@ -856,6 +896,34 @@ impl FilesystemOperation {
             | Self::PutFileRevisionByInode { content_ref, .. } => content_ref.as_ref(),
             Self::CreateDirectory { .. }
             | Self::CreateDirectoryByInode { .. }
+            | Self::AppendFile { .. }
+            | Self::AppendFileByInode { .. }
+            | Self::DeletePath { .. }
+            | Self::DeleteByInode { .. }
+            | Self::MovePath { .. }
+            | Self::MoveByInode { .. }
+            | Self::CopyPath { .. }
+            | Self::CopyByInode { .. }
+            | Self::Undelete { .. }
+            | Self::RestoreRevision { .. }
+            | Self::RestoreRevisionByInode { .. }
+            | Self::UpdateAttributes { .. }
+            | Self::UpdateAttributesByInode { .. }
+            | Self::UpdateAccess { .. }
+            | Self::UpdateAccessByInode { .. } => None,
+        }
+    }
+
+    /// Returns the bytes this operation adds to the end of a file, if any.
+    pub fn appended_content(&self) -> Option<&[u8]> {
+        match self {
+            Self::AppendFile { inline_content, .. }
+            | Self::AppendFileByInode { inline_content, .. } => Some(inline_content),
+            Self::CreateDirectory { .. }
+            | Self::CreateDirectoryByInode { .. }
+            | Self::PutFile { .. }
+            | Self::CreateFileByInode { .. }
+            | Self::PutFileRevisionByInode { .. }
             | Self::DeletePath { .. }
             | Self::DeleteByInode { .. }
             | Self::MovePath { .. }
@@ -2242,6 +2310,56 @@ mod tests {
                 serde_json::to_value(operation).expect("serialize filesystem operation"),
                 string_shaped_json
             );
+        }
+    }
+
+    #[test]
+    fn appends_carry_their_bytes_as_required_base64() {
+        let cases = [
+            (
+                FilesystemOperation::AppendFile {
+                    path: path("/logs/app.log"),
+                    inline_content: b"hi".to_vec(),
+                    expected_inode_id: Some(InodeId(7)),
+                    expected_revision_no: Some(RevisionNo(3)),
+                },
+                serde_json::json!({
+                    "kind": "append_file",
+                    "path": "/logs/app.log",
+                    "inline_content": "aGk=",
+                    "expected_inode_id": "ino_7",
+                    "expected_revision_no": 3
+                }),
+            ),
+            (
+                FilesystemOperation::AppendFileByInode {
+                    inode_id: InodeId(7),
+                    inline_content: b"hi".to_vec(),
+                    expected_revision_no: None,
+                },
+                serde_json::json!({
+                    "kind": "append_file_by_inode",
+                    "inode_id": "ino_7",
+                    "inline_content": "aGk="
+                }),
+            ),
+        ];
+        for (operation, encoded) in cases {
+            assert_eq!(
+                serde_json::to_value(&operation).expect("serialize append"),
+                encoded
+            );
+            assert_eq!(
+                serde_json::from_value::<FilesystemOperation>(encoded.clone())
+                    .expect("deserialize append"),
+                operation
+            );
+            let mut missing = encoded;
+            missing
+                .as_object_mut()
+                .expect("an operation is an object")
+                .remove("inline_content");
+            assert!(serde_json::from_value::<FilesystemOperation>(missing).is_err());
         }
     }
 

@@ -97,6 +97,7 @@ pub(crate) async fn run(
                 Command::Put(args) => {
                     fs::run_filesystem_put(kind, config_path, args, runtime).await
                 }
+                Command::Append(args) => fs::run_filesystem_append(kind, config_path, args).await,
                 Command::Revisions(args) => {
                     fs::run_filesystem_revisions(kind, config_path, args).await
                 }

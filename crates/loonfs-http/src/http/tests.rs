@@ -62,6 +62,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "allow_scan",
     "allow_stale",
     "already_published",
+    "append_file",
+    "append_file_by_inode",
     "attributes_changed",
     "attributes_revision",
     "attributes_revision_no",

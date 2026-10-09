@@ -109,6 +109,17 @@ enum OperationFingerprintInput<'a> {
         content_ref: ContentRefFingerprintInput<'a>,
         expected_revision_no: RevisionNo,
     },
+    AppendFile {
+        path: &'a str,
+        inline_content: AppendedContentFingerprintInput,
+        expected_inode_id: Option<InodeId>,
+        expected_revision_no: Option<RevisionNo>,
+    },
+    AppendFileByInode {
+        inode_id: InodeId,
+        inline_content: AppendedContentFingerprintInput,
+        expected_revision_no: Option<RevisionNo>,
+    },
     MoveByInode {
         inode_id: InodeId,
         expected_binding_version: &'a str,
@@ -326,6 +337,23 @@ enum ContentRefFingerprintInput<'a> {
     },
 }
 
+/// Canonical preimage for the bytes an append adds. Planning decides which
+/// content object receives them, so the bytes are their only identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AppendedContentFingerprintInput {
+    AppendV1 { sha256: String, size_bytes: u64 },
+}
+
+impl AppendedContentFingerprintInput {
+    fn of(bytes: &[u8]) -> Self {
+        Self::AppendV1 {
+            sha256: crate::Checksum::sha256(bytes).value,
+            size_bytes: bytes.len() as u64,
+        }
+    }
+}
+
 fn content_ref_fingerprint_input<'a>(
     content_ref: &'a ContentRef,
     inline_content_ids: &BTreeSet<ContentId>,
@@ -431,6 +459,26 @@ fn operation_fingerprint_input<'a>(
                 inline_content.as_deref(),
                 inline_content_ids,
             )?,
+            expected_revision_no: *expected_revision_no,
+        },
+        FilesystemOperation::AppendFile {
+            path,
+            inline_content,
+            expected_inode_id,
+            expected_revision_no,
+        } => OperationFingerprintInput::AppendFile {
+            path: path.as_str(),
+            inline_content: AppendedContentFingerprintInput::of(inline_content),
+            expected_inode_id: *expected_inode_id,
+            expected_revision_no: *expected_revision_no,
+        },
+        FilesystemOperation::AppendFileByInode {
+            inode_id,
+            inline_content,
+            expected_revision_no,
+        } => OperationFingerprintInput::AppendFileByInode {
+            inode_id: *inode_id,
+            inline_content: AppendedContentFingerprintInput::of(inline_content),
             expected_revision_no: *expected_revision_no,
         },
         FilesystemOperation::MoveByInode {

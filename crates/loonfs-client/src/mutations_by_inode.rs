@@ -111,6 +111,50 @@ impl Client {
         .await
     }
 
+    /// Adds bytes to the end of a file inode as its next revision, wherever
+    /// it is bound.
+    pub async fn append_file_by_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        bytes: &[u8],
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.append_file_by_inode_with_options(
+            namespace_id,
+            inode_id,
+            bytes,
+            actor,
+            &AppendFileByInodeOptions::default(),
+        )
+        .await
+    }
+
+    /// Adds bytes to the end of a file inode as its next revision, as
+    /// [`Self::append_file_with_options`] adds them to a path.
+    pub async fn append_file_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        bytes: &[u8],
+        actor: &ActorId,
+        options: &AppendFileByInodeOptions,
+    ) -> Result<Commit> {
+        self.commit(
+            namespace_id,
+            actor,
+            &single_operation(
+                &options.commit,
+                FilesystemOperation::AppendFileByInode {
+                    inode_id,
+                    inline_content: bytes.to_vec(),
+                    expected_revision_no: options.expected_revision_no,
+                },
+            ),
+        )
+        .await
+    }
+
     /// Creates a directory at a new name under a parent directory inode.
     pub async fn create_directory_by_inode(
         &self,

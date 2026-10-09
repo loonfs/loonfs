@@ -1,5 +1,5 @@
-//! Filesystem commands: ls, stat, get, put, mkdir, rm, mv, cp, revisions,
-//! and grep.
+//! Filesystem commands: ls, stat, get, put, append, mkdir, rm, mv, cp,
+//! revisions, and grep.
 
 use super::context::{
     create_directory_tolerating_existing, default_remote_put_path, destination_path_for_get,
@@ -18,10 +18,11 @@ use super::pagination::{
 use super::partial::{self, PartialDownload, PartialMeta};
 use super::recursive;
 use crate::args::{
-    CommandKind, CommitArgs, FilesystemAnnotateArgs, FilesystemCatArgs, FilesystemGetArgs,
-    FilesystemGrepArgs, FilesystemLsArgs, FilesystemMkdirArgs, FilesystemPutArgs,
-    FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemStatArgs,
-    FilesystemTransferArgs, FilesystemUndeleteArgs, PaginationArgs, RuntimeBehavior, TrashArgs,
+    CommandKind, CommitArgs, FilesystemAnnotateArgs, FilesystemAppendArgs, FilesystemCatArgs,
+    FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs, FilesystemMkdirArgs,
+    FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs,
+    FilesystemStatArgs, FilesystemTransferArgs, FilesystemUndeleteArgs, PaginationArgs,
+    RuntimeBehavior, TrashArgs,
 };
 use crate::config::ConfigLocation;
 use crate::error::CliError;
@@ -29,10 +30,11 @@ use crate::payload::{LocalPayload, STDIN_PATH};
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_client::{
-    AttributeChanges, CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath,
-    PutFileOptions, UndeleteDestination, UndeleteOptions, UpdateAttributesOptions,
+    AppendFileOptions, AttributeChanges, CommitOptions, CreateDirectoryOptions, DeleteOptions,
+    NamespacePath, PutFileOptions, UndeleteDestination, UndeleteOptions, UpdateAttributesOptions,
 };
 use loonfs_types::api::v0::UploadSessionStatus;
+use loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES;
 use loonfs_types::PinId;
 use loonfs_types::{
     AbsolutePath, AttributeKey, AttributeValue, AttributesRevisionNo, ChangeSeq, Commit, CommitId,
@@ -1160,6 +1162,69 @@ fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError
         commit: commit_options(&args.commit)?,
         expected_inode_id: args.expected_inode_id,
         expected_revision_no,
+    })
+}
+
+pub(crate) async fn run_filesystem_append(
+    kind: CommandKind,
+    config_path: &Path,
+    args: FilesystemAppendArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
+    let remote_path = parse_user_path_arg("remote_path", &args.remote_path, false)
+        .map_err(|error| context.fail(kind, error))?;
+    let spec = NamespacePath::new(context.namespace().clone(), remote_path);
+    let options = append_file_options(&args).map_err(|error| context.fail(kind, error))?;
+    let bytes = read_append_content(&args.local_path)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+    let result = context
+        .target
+        .client
+        .append_file_with_options(&spec, &bytes, context.actor(), &options)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+
+    Ok(context.output(
+        kind,
+        CommandData::FileMutation {
+            human_target: None,
+            target: render_target(context.namespace(), spec.absolute_path()),
+            committed_seq: result.committed_seq,
+            commit_id: result.commit_id,
+            inode_id: None,
+            recovery_command: None,
+        },
+    ))
+}
+
+/// Reads the bytes one append carries. The read stops one byte past what an
+/// append may carry, so an oversized source never fills memory and the
+/// server still answers it with `content_too_large`.
+async fn read_append_content(local_path: &str) -> Result<Vec<u8>, CliError> {
+    use tokio::io::AsyncReadExt as _;
+    let limit = MAX_WAL_INLINE_CONTENT_BYTES as u64 + 1;
+    let mut bytes = Vec::new();
+    let read = if local_path == STDIN_PATH {
+        tokio::io::stdin().take(limit).read_to_end(&mut bytes).await
+    } else {
+        match tokio::fs::File::open(local_path).await {
+            Ok(file) => file.take(limit).read_to_end(&mut bytes).await,
+            Err(error) => Err(error),
+        }
+    };
+    read.map_err(|error| CliError::io_for_path(Path::new(local_path), error))?;
+    Ok(bytes)
+}
+
+fn append_file_options(args: &FilesystemAppendArgs) -> Result<AppendFileOptions, CliError> {
+    Ok(AppendFileOptions {
+        commit: commit_options(&args.commit)?,
+        expected_inode_id: args.expected_inode_id,
+        expected_revision_no: args
+            .expected_revision
+            .map(|value| parse_public_ordinal_arg("--expected-revision", value, RevisionNo::parse))
+            .transpose()?,
     })
 }
 

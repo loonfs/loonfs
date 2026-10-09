@@ -10,12 +10,15 @@ use crate::path::write::PublishPlanningSession;
 use crate::storage::inline_content::InlineContent;
 use crate::wal::prepare_wal_object;
 use loonfs_test_support::ids::{attribute_key, attribute_text};
-use loonfs_types::format::wal::{WalDelta, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
+use loonfs_types::format::wal::{
+    WalDelta, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_BYTES,
+    MAX_WAL_OBJECT_INLINE_CONTENT_BYTES, WAL_OBJECT_OVERHEAD_BYTES,
+};
 use loonfs_types::{
     ActorId, AttributeKey, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId,
     ContentId, ContentRef, ContentRefKind, DestinationBehavior, DestinationPrecondition,
-    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalNo, WriterEpoch,
-    MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
+    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, Sha256State, WalNo,
+    WriterEpoch, MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
 };
 use std::collections::BTreeMap;
 
@@ -54,6 +57,13 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         size_bytes: u64::MAX,
         checksum: Checksum::sha256(b"content"),
     };
+    let mut log_state = Sha256State::new();
+    log_state.update(b"log");
+    let log_ref = ContentRef::blob_v1_streamed(
+        NamespaceId::parse("o".repeat(MAX_ID_BYTES)).expect("owner"),
+        ContentId::parse("con_fedcba9876543210fedcba9876543210").expect("content id"),
+        &log_state,
+    );
     let mut state = MetadataState::default();
     state.apply_committed_wal_deltas_mut(
         head.seq,
@@ -97,9 +107,32 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 ),
                 attributes: full_attributes(),
             },
+            WalDelta::CreateInode {
+                delta_index: 5,
+                inode_id: InodeId(3),
+                inode_kind: InodeKind::File,
+            },
+            WalDelta::BindDirentry {
+                delta_index: 6,
+                parent_inode_id: InodeId(1),
+                name_key: NameKey::parse("log").expect("key"),
+                display_name: DisplayName::parse("log").expect("name"),
+                child_inode_id: InodeId(3),
+                child_kind: loonfs_types::InodeKind::File,
+                child_created_by: actor.clone(),
+                child_created_at_ms: 0,
+            },
+            WalDelta::AppendFileRevision {
+                delta_index: 7,
+                inode_id: InodeId(3),
+                revision_no: RevisionNo(MAX_PUBLIC_INTEGER - MAX_COMMIT_OPERATIONS as u64),
+                content_ref: log_ref,
+                hash_state: Some(log_state),
+                crc64nvme: Some(Checksum::crc64nvme(b"log")),
+            },
         ],
     );
-    for kind in ["attributes", "copy", "put", "inline"] {
+    for kind in ["attributes", "copy", "put", "inline", "append"] {
         let inline = InlineContent::new(
             namespace_id.clone(),
             ContentId::generate(),
@@ -108,10 +141,10 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES
             ]),
         );
-        let operation_count = if kind == "put" || kind == "inline" {
-            1
-        } else {
-            MAX_COMMIT_OPERATIONS
+        let operation_count = match kind {
+            "put" | "inline" => 1,
+            "append" => MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES,
+            _ => MAX_COMMIT_OPERATIONS,
         };
         let request = CommitRequest {
             commit_id: CommitId::parse("c".repeat(MAX_ID_BYTES)).expect("commit"),
@@ -136,6 +169,12 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                         destination_path: AbsolutePath::parse(format!("/{index:0255}"))
                             .expect("path"),
                         precondition: DestinationPrecondition::default(),
+                    },
+                    "append" => FilesystemOperation::AppendFile {
+                        path: AbsolutePath::parse("/log").expect("path"),
+                        inline_content: vec![0; MAX_WAL_INLINE_CONTENT_BYTES],
+                        expected_inode_id: None,
+                        expected_revision_no: None,
                     },
                     _ => FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!(

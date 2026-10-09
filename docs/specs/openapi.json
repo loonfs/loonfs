@@ -1905,6 +1905,8 @@
         "description": "One filesystem operation.\n\nUnknown fields are rejected, and fieldless variants require empty objects.",
         "discriminator": {
           "mapping": {
+            "append_file": "#/components/schemas/FilesystemOperationAppendFile",
+            "append_file_by_inode": "#/components/schemas/FilesystemOperationAppendFileByInode",
             "copy_by_inode": "#/components/schemas/FilesystemOperationCopyByInode",
             "copy_path": "#/components/schemas/FilesystemOperationCopyPath",
             "create_directory": "#/components/schemas/FilesystemOperationCreateDirectory",
@@ -1941,6 +1943,12 @@
           },
           {
             "$ref": "#/components/schemas/FilesystemOperationPutFileRevisionByInode"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemOperationAppendFile"
+          },
+          {
+            "$ref": "#/components/schemas/FilesystemOperationAppendFileByInode"
           },
           {
             "$ref": "#/components/schemas/FilesystemOperationDeletePath"
@@ -1982,6 +1990,70 @@
             "$ref": "#/components/schemas/FilesystemOperationUpdateAccessByInode"
           }
         ]
+      },
+      "FilesystemOperationAppendFile": {
+        "description": "Add bytes to the end of a file as its next revision.",
+        "properties": {
+          "expected_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "The inode that the path must still resolve to."
+          },
+          "expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "With an inode precondition, the content revision that must still be current."
+          },
+          "inline_content": {
+            "description": "The bytes to add as base64, from 1 byte to 256 KiB.",
+            "format": "byte",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "append_file"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path that must resolve to a visible file."
+          }
+        },
+        "required": [
+          "path",
+          "inline_content",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "FilesystemOperationAppendFileByInode": {
+        "description": "Add bytes to the end of a file inode as its next revision.",
+        "properties": {
+          "expected_revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "The content revision that must still be current."
+          },
+          "inline_content": {
+            "description": "The bytes to add as base64, from 1 byte to 256 KiB.",
+            "format": "byte",
+            "type": "string"
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "File to append to."
+          },
+          "kind": {
+            "enum": [
+              "append_file_by_inode"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inode_id",
+          "inline_content",
+          "kind"
+        ],
+        "type": "object"
       },
       "FilesystemOperationCopyByInode": {
         "description": "Copy a file inode to a name under a parent inode.",
@@ -6312,7 +6384,7 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit, or an append carries more than 256 KiB"
           },
           "501": {
             "content": {
@@ -6322,7 +6394,7 @@
                 }
               }
             },
-            "description": "Inline content is disabled"
+            "description": "Inline content is disabled, or an append names content with no recorded digest to continue"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

@@ -1380,6 +1380,8 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FilesystemOperationPutFile",
                 "FilesystemOperationCreateFileByInode",
                 "FilesystemOperationPutFileRevisionByInode",
+                "FilesystemOperationAppendFile",
+                "FilesystemOperationAppendFileByInode",
                 "FilesystemOperationDeletePath",
                 "FilesystemOperationDeleteByInode",
                 "FilesystemOperationMovePath",

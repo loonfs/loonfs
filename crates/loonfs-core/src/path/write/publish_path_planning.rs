@@ -2,7 +2,7 @@
 
 use crate::authorize::{Absence, Authorizer, Replacement};
 use crate::binding_version;
-use crate::commit::{CandidateAllocation, CommitOp, ResolvedBinding};
+use crate::commit::{AppendedContent, CandidateAllocation, CommitOp, ResolvedBinding};
 use crate::error::{CoreError, Result};
 use crate::metadata::access::{access_chain, effective_rights, is_administrator};
 use crate::metadata::MetadataVisibilityReads;
@@ -39,14 +39,19 @@ pub(super) async fn require_vacant_path<S: ObjectStore + ?Sized>(
     }
 }
 
-/// One filesystem operation compiled into the commit operations it needs.
+/// One filesystem operation compiled into the commit operations it needs,
+/// with the bytes it appends when it is an append.
 pub(super) struct CompiledFilesystemOperation {
     pub(super) ops: Vec<CommitOp>,
+    pub(super) appended: Option<AppendedContent>,
 }
 
 impl CompiledFilesystemOperation {
     pub(super) fn new(ops: Vec<CommitOp>) -> Self {
-        Self { ops }
+        Self {
+            ops,
+            appended: None,
+        }
     }
 }
 

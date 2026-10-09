@@ -3,9 +3,9 @@
 use crate::publish::FilesystemOperation;
 use crate::Result;
 use crate::{
-    AccessState, ActorId, AttributeChanges, BindingVersion, Commit, CommitOptions, CopyOptions,
-    DeleteByInodeOptions, DisplayName, InodeId, MoveOptions, RevisionNo,
-    UpdateAccessByInodeOptions, UpdateAttributesByInodeOptions,
+    AccessState, ActorId, AppendFileByInodeOptions, AttributeChanges, BindingVersion, Commit,
+    CommitOptions, CopyOptions, DeleteByInodeOptions, DisplayName, InodeId, MoveOptions,
+    RevisionNo, UpdateAccessByInodeOptions, UpdateAttributesByInodeOptions,
 };
 use crate::{Namespace, Writable};
 
@@ -132,6 +132,60 @@ impl Namespace<Writable> {
         };
         self.commit_prepared_one(actor, options, operation, prepared_content)
             .await
+    }
+
+    /// Adds bytes to the end of a file inode as its next revision, wherever
+    /// it is bound.
+    pub async fn append_file_by_inode(
+        &self,
+        inode_id: InodeId,
+        bytes: &[u8],
+        actor: &ActorId,
+    ) -> Result<Commit> {
+        self.append_file_by_inode_with_options(
+            inode_id,
+            bytes,
+            actor,
+            &AppendFileByInodeOptions::default(),
+        )
+        .await
+    }
+
+    /// Adds bytes to the end of a file inode as its next revision, as
+    /// [`Self::append_file_with_options`] adds them to a path.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.append_file_by_inode",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "append_file_by_inode",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
+    pub async fn append_file_by_inode_with_options(
+        &self,
+        inode_id: InodeId,
+        bytes: &[u8],
+        actor: &ActorId,
+        options: &AppendFileByInodeOptions,
+    ) -> Result<Commit> {
+        let span = tracing::Span::current();
+        self.core.record_trace_context(&span);
+        span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        self.commit_one(
+            actor,
+            &options.commit,
+            FilesystemOperation::AppendFileByInode {
+                inode_id,
+                inline_content: bytes.to_vec(),
+                expected_revision_no: options.expected_revision_no,
+            },
+        )
+        .await
     }
 
     /// Creates a directory at a new name under a parent directory inode.

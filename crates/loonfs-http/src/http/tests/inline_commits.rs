@@ -253,6 +253,56 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
 }
 
 #[tokio::test]
+async fn append_commits_write_only_wal_and_replay_by_bytes() {
+    let harness = Harness::with_policy(Default::default()).await;
+    let (status, created) = harness
+        .commit(inline_request("create", "/log", "b25l"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let append = |commit_id: &str, bytes: &[u8]| {
+        json!({"commit_id": commit_id, "operations": [loonfs_types::FilesystemOperation::AppendFile {
+            path: loonfs_types::AbsolutePath::parse("/log").expect("path"),
+            inline_content: bytes.to_vec(),
+            expected_inode_id: None,
+            expected_revision_no: None,
+        }]})
+    };
+    harness.store.reset();
+    let (status, appended) = harness.commit(append("append", b" two")).await;
+    assert_eq!(status, StatusCode::OK, "{appended}");
+    assert_eq!(harness.store.count(OperationClass::Put), 1);
+    assert_eq!(harness.family_requests(DurableObjectFamily::WalObject), 1);
+    assert_eq!(harness.family_requests(DurableObjectFamily::ContentBlob), 0);
+    assert_eq!(appended["events"][0]["kind"], "content_changed");
+    assert_eq!(appended["events"][0]["revision_no"], 2);
+    harness.read("/log", b"one two").await;
+    let (status, replay) = harness.commit(append("append", b" two")).await;
+    assert_eq!((status, &replay), (StatusCode::OK, &appended));
+    let (status, conflict) = harness.commit(append("append", b" six")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["code"], ErrorCode::CommitIdReuseConflict.as_str());
+
+    harness.store.reset();
+    for (bytes, code) in [
+        (Vec::new(), ErrorCode::InvalidRequest),
+        (
+            vec![0; loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES + 1],
+            ErrorCode::ContentTooLarge,
+        ),
+    ] {
+        let (status, error) = harness.commit(append("refused", &bytes)).await;
+        assert_eq!(status, status_for_core_error_code(code), "{error}");
+        assert_eq!(error["code"], code.as_str());
+        assert_eq!(error["details"]["operation_index"], 0);
+        if code == ErrorCode::InvalidRequest {
+            assert_eq!(error["param"], "/operations/0/inline_content");
+        }
+    }
+    assert_eq!(harness.store.count(OperationClass::Put), 0);
+    harness.state.runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
     for threshold in [Some(4), None] {
         let harness = Harness::new(threshold, 1).await;

@@ -565,6 +565,35 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .min_by_key(|head| (std::cmp::Reverse(head.size_bytes), head.committed_seq)))
     }
 
+    /// The first publication row of the reference to `content_id` of
+    /// `size_bytes` among the rows visible here: the row its writer
+    /// published, which records what that writer knew of the bytes.
+    pub(crate) async fn content_publication(
+        &self,
+        content_id: &loonfs_types::ContentId,
+        size_bytes: u64,
+    ) -> Result<Option<ContentPublicationRecord>, CoreError> {
+        let manifest_row = match self.manifest_segments() {
+            Some(segments) => {
+                manifest_index::content_publication(
+                    segments,
+                    content_id,
+                    size_bytes,
+                    self.visible_seq(),
+                )
+                .await?
+            }
+            None => None,
+        };
+        Ok(self
+            .row_states()
+            .filter_map(|state| state.content_publication(content_id, size_bytes))
+            .filter(|row| row.committed_seq <= self.visible_seq())
+            .cloned()
+            .chain(manifest_row)
+            .min_by_key(|row| row.committed_seq))
+    }
+
     pub(crate) async fn find_commit_receipt(
         &self,
         commit_id: &CommitId,

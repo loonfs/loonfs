@@ -599,6 +599,68 @@ fn put_operation(path: &str, prepared: &crate::publish::PreparedContent) -> File
 }
 
 #[tokio::test]
+async fn appends_fill_the_wal_object_budget_before_inline_values() {
+    let (_directory, store, writer, namespace, namespace_writer) =
+        writer_with_policy(InlineContentPolicy {
+            inline_content_wal_object_budget_bytes: 8,
+            ..policy()
+        })
+        .await;
+    let prepared = namespace_writer
+        .prepare_content(b"four")
+        .await
+        .expect("prepare");
+    let request = CommitRequest {
+        commit_id: CommitId::parse("put-then-append").expect("commit"),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        preconditions: Vec::new(),
+        operations: vec![
+            put_operation("/file", &prepared),
+            FilesystemOperation::AppendFile {
+                path: AbsolutePath::parse("/file").expect("path"),
+                inline_content: b" and six".to_vec(),
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+        ],
+    };
+    namespace_writer
+        .commit_prepared(request, vec![prepared])
+        .await
+        .expect("commit");
+    let records = written_records(&store).await;
+    let [piece] = records[0].inline_content.as_slice() else {
+        panic!("expected the append's piece alone, got {records:?}");
+    };
+    assert_eq!(
+        (piece.offset, piece.bytes.as_slice()),
+        (4, b" and six".as_slice())
+    );
+    assert!(family_requests(&store, DurableObjectFamily::ContentBlob) > 0);
+    for fold in [false, true] {
+        if fold {
+            writer
+                .maintenance(loonfs_test_support::ids::writer_id("folder"))
+                .fold_wal(&namespace)
+                .await
+                .expect("fold");
+        }
+        assert_eq!(
+            writer
+                .namespace(&namespace)
+                .read_file("/file")
+                .await
+                .expect("read")
+                .bytes,
+            b"four and six"
+        );
+    }
+    writer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(InlineContentPolicy {

@@ -74,11 +74,11 @@ pub use ClientError as Error;
 /// Per-operation options, defined once in `loonfs-types` and shared with the
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
 pub use loonfs_types::options::{
-    AccessState, AttributeChanges, CommitOptions, CopyOptions, CreateDirectoryOptions,
-    DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions, ForkNamespaceOptions,
-    ListOptions, MoveOptions, PutFileOptions, StatOptions, UndeleteDestination, UndeleteOptions,
-    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
-    UpdateAttributesOptions,
+    AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CommitOptions,
+    CopyOptions, CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions,
+    DirectMultipartUploadOptions, ForkNamespaceOptions, ListOptions, MoveOptions, PutFileOptions,
+    StatOptions, UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions,
+    UpdateAccessOptions, UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 
 /// Result type returned by the client.

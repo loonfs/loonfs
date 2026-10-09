@@ -346,6 +346,24 @@ async fn first_content_publication<S: ObjectStore + ?Sized>(
     }
 }
 
+/// The first visible row of `content_id` at `size_bytes`: the commit that
+/// first published that reference, since the rows of one size sort by
+/// commit.
+pub(super) async fn content_publication<S: ObjectStore + ?Sized>(
+    segments: &VerifiedMetadataSegments<'_, S>,
+    content_id: &loonfs_types::ContentId,
+    size_bytes: u64,
+    visible_seq: ChangeSeq,
+) -> Result<Option<ContentPublicationRecord>> {
+    first_content_publication(
+        segments,
+        &lookup_keys::content_publication_size_prefix(content_id, size_bytes),
+        &lookup_keys::content_publication_probe(content_id),
+        visible_seq,
+    )
+    .await
+}
+
 pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     commit_id: &CommitId,

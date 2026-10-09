@@ -438,6 +438,9 @@ fn human_file_mutation(
         CommandKind::FilesystemPut => {
             format!("stored {target} @ seq {committed_seq} (commit {commit_id})")
         }
+        CommandKind::FilesystemAppend => {
+            format!("appended to {target} @ seq {committed_seq} (commit {commit_id})")
+        }
         CommandKind::FilesystemRm => match recovery_command {
             Some(recovery_command) => format!(
                 "removed {target} @ seq {committed_seq} (commit {commit_id}); recover with `{recovery_command}`"
