@@ -393,7 +393,8 @@ impl ReadView {
     ///
     /// Requires namespace administrator access. Content must be published in
     /// this view, including through a fork. Otherwise returns
-    /// `path_not_found` without reading content bytes.
+    /// `path_not_found` without reading content bytes. A published reference
+    /// whose object collection reclaimed also returns `path_not_found`.
     pub async fn read_content(&self, content_ref: &ContentRef, max_bytes: u64) -> Result<Vec<u8>> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.read(async {
@@ -1266,7 +1267,8 @@ impl<M> Namespace<M> {
     ///
     /// Requires namespace administrator access. Content must be published in
     /// the namespace's read view, including through a fork. Otherwise returns
-    /// `path_not_found` without reading content bytes.
+    /// `path_not_found` without reading content bytes. A published reference
+    /// whose object collection reclaimed also returns `path_not_found`.
     ///
     /// `max_bytes` is checked against the declared size before fetching. It is
     /// independent of the deployment's download limit so callers can apply a

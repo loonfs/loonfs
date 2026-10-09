@@ -43,6 +43,11 @@ impl ReadWorkingMemory {
         self.in_use.load(Ordering::SeqCst)
     }
 
+    /// The most bytes reservations may hold at once.
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
     pub fn try_reserve(&self, bytes: usize) -> bool {
         // `fetch_update` is deprecated since Rust 1.99 for `try_update`, which the 1.88 MSRV lacks.
         #[allow(deprecated)]

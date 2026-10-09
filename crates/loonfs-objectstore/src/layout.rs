@@ -3,7 +3,7 @@
 
 use crate::keys::namespace_prefix;
 use crate::{ObjectStore, Result};
-use loonfs_types::{EffectiveLimit, ManifestNo, NamespaceId, UploadId};
+use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, UploadId};
 use std::num::NonZeroU32;
 
 const NAMESPACES_PREFIX: &str = "namespaces/";
@@ -154,6 +154,14 @@ pub fn upload_id_of(key: &str) -> Option<UploadId> {
         .filter(|parsed| parsed.family() == DurableObjectFamily::UploadSession)
         .and_then(|parsed| parsed.identifier())
         .and_then(|identifier| UploadId::parse(identifier).ok())
+}
+
+/// Extracts and validates a content identity from its durable key.
+pub fn content_id_of(key: &str) -> Option<ContentId> {
+    parse_object_key(key)
+        .filter(|parsed| parsed.family() == DurableObjectFamily::ContentBlob)
+        .and_then(|parsed| parsed.identifier())
+        .and_then(|identifier| ContentId::parse(identifier).ok())
 }
 
 /// One page of namespace ids from [`list_namespace_ids`].

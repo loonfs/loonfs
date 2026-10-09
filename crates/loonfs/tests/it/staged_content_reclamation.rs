@@ -54,6 +54,7 @@ fn gc_options() -> GcOptions {
 async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: u64) -> GcResponse {
     loonfs_core::gc_namespace(
         store.as_ref(),
+        None,
         namespace_id,
         &gc_options(),
         &MutationContext {
@@ -93,7 +94,7 @@ async fn session_keys(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
 }
 
 #[tokio::test]
-async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
+async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
     let runtime = open_staged_runtime(store.clone(), "prepare-only").await;
@@ -128,19 +129,20 @@ async fn content_prepared_and_never_published_is_reclaimed_with_its_session() {
         "inside the grace evidence could still admit a commit for these bytes"
     );
 
-    let past = collect(
-        &store,
-        &namespace_id,
-        staged_at_ms + CONTENT_RECLAMATION_GRACE_MS + 1,
-    )
-    .await;
-    assert_eq!(
-        past.deleted.content_objects, 1,
-        "the prepared object is the one reclamation"
-    );
+    let past_ms = staged_at_ms + CONTENT_RECLAMATION_GRACE_MS + 1;
+    let past = collect(&store, &namespace_id, past_ms).await;
     assert_eq!(
         past.deleted.upload_sessions, 2,
         "both sessions have said everything they will say"
+    );
+    assert_eq!(
+        past.deleted.content_objects, 0,
+        "the pass read each session as a root before it removed the record"
+    );
+    let next = collect(&store, &namespace_id, past_ms).await;
+    assert_eq!(
+        next.deleted.content_objects, 1,
+        "the prepared object is the one reclamation"
     );
     assert!(!exists(&store, &orphan_key).await);
     assert!(session_keys(&store, &namespace_id).await.is_empty());
@@ -247,6 +249,8 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
 
     let after_reclamation =
         loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_MS + 1;
+    // The first pass removes the session record that roots the source object.
+    collect(&store, &source, after_reclamation).await;
     let source_report = collect(&store, &source, after_reclamation).await;
     assert_eq!(source_report.deleted.content_objects, 1);
     assert!(!exists(&store, &source_key).await);
@@ -320,14 +324,10 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         "one session per staging write, published or not"
     );
 
-    let report = collect(
-        &store,
-        &namespace_id,
-        loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_MS + 1,
-    )
-    .await;
-
+    let past_ms = loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_MS + 1;
+    let report = collect(&store, &namespace_id, past_ms).await;
     assert_eq!(report.deleted.upload_sessions, 2);
+    let report = collect(&store, &namespace_id, past_ms).await;
     assert_eq!(
         report.deleted.content_objects, 1,
         "exactly the duplicate the rerun staged"

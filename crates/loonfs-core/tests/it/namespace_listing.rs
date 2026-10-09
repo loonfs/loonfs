@@ -28,9 +28,15 @@ async fn namespace_listing_returns_every_namespace_id_and_skips_other_children()
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
     for _ in 0..2 {
-        loonfs_core::gc_namespace(&store, deleted, &loonfs_core::GcOptions::default(), &aged)
-            .await
-            .expect("collect the deleted namespace");
+        loonfs_core::gc_namespace(
+            &store,
+            None,
+            deleted,
+            &loonfs_core::GcOptions::default(),
+            &aged,
+        )
+        .await
+        .expect("collect the deleted namespace");
     }
     for stray in ["namespaces/Not-An-Id/hint.json", "namespaces/stray-object"] {
         store

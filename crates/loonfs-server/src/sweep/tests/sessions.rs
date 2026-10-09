@@ -294,7 +294,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
             .iter()
             .filter(|op| matches!(op, RecordedOperation::List { .. }))
             .count(),
-        9,
+        12,
         "collection lists core and grep garbage without listing namespaces"
     );
     assert!(operations.iter().all(|op| op
@@ -318,7 +318,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
             .iter()
             .filter(|op| matches!(op, RecordedOperation::List { .. }))
             .count(),
-        9
+        12
     );
     server.runtime.shutdown().await.expect("shutdown");
 }

@@ -784,6 +784,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
     // The pass that deletes it is what ends the reads.
     crate::gc::gc_namespace(
         &store,
+        None,
         &namespace_id,
         &crate::gc::GcOptions::default(),
         &mutation_context(
@@ -830,6 +831,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     for _ in 0..3 {
         crate::gc::gc_namespace(
             &store,
+            None,
             &namespace_id,
             &crate::gc::GcOptions::default(),
             &distant,
@@ -2598,6 +2600,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     let aged = mutation_context("gc", u64::MAX / 2);
     crate::gc::gc_namespace(
         &store,
+        None,
         &namespace_id,
         &crate::gc::GcOptions::default(),
         &aged,
@@ -2624,6 +2627,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .expect("delete pin");
     crate::gc::gc_namespace(
         &store,
+        None,
         &namespace_id,
         &crate::gc::GcOptions::default(),
         &aged,

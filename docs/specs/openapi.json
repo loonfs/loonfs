@@ -1269,7 +1269,7 @@
         "description": "Object counts deleted by one garbage-collection pass, grouped by family.",
         "properties": {
           "content_objects": {
-            "description": "Content reclaimed through completed upload sessions.",
+            "description": "Content objects no retained view names, deleted once older than the grace window.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1288,6 +1288,12 @@
           },
           "retired_content_objects": {
             "description": "Listed content objects deleted from a retired namespace.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "scratch_objects": {
+            "description": "Store scratch objects deleted once older than the grace window.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1311,7 +1317,8 @@
           "manifests",
           "upload_sessions",
           "content_objects",
-          "retired_content_objects"
+          "retired_content_objects",
+          "scratch_objects"
         ],
         "type": "object"
       },

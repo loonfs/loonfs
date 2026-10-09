@@ -1042,16 +1042,19 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     assert_eq!(requests(store.counts()), [0; 4]);
 
     // A read anchor costs five GETs and one HEAD, and a tombstone's costs two
-    // GETs. Collection lists pins and manifests for its live set, then five
-    // families, then a retired namespace's content.
+    // GETs. Collection of a live namespace lists upload sessions, pins, and
+    // manifests for its live set and reads the current manifest's revisions
+    // through the shared segment cache, which the metadata loop filled, then
+    // lists seven families. A deleted namespace skips the sessions, the
+    // revisions, and the content family, and a retired one lists its content.
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
-        (&idle, [5, 1, 0, 0], None, [5, 1, 7, 0], None),
-        (&claimed, [5, 1, 0, 0], None, [5, 1, 7, 0], None),
+        (&idle, [5, 1, 0, 0], None, [5, 1, 10, 0], None),
+        (&claimed, [5, 1, 0, 0], None, [5, 1, 10, 0], None),
         (
             &retired,
             [2, 0, 0, 0],
             Some(crate::ErrorCode::NamespaceDeleted),
-            [2, 0, 8, 0],
+            [2, 0, 9, 0],
             None,
         ),
         (
@@ -1155,6 +1158,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     store.reset();
     let first = loonfs_core::gc_namespace(
         store.as_ref(),
+        None,
         &namespace_id,
         &crate::GcOptions::default(),
         &context,
@@ -1173,6 +1177,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     store.reset();
     let repeated = loonfs_core::gc_namespace(
         store.as_ref(),
+        None,
         &namespace_id,
         &crate::GcOptions::default(),
         &context,

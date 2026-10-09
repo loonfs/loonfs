@@ -92,12 +92,17 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 }
 
 /// Minimum age of an unreachable object before garbage collection or repair
-/// may remove it. The value covers the longest publication budget, provider
-/// operation time, and the combined clock-error and scheduling allowance.
-pub const GC_MIN_GRACE_WINDOW_MS: u64 =
-    max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
-        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-        + GC_SAFETY_MARGIN_MS;
+/// may remove it. The value covers the longer of two spans, then provider
+/// operation time and the combined clock-error and scheduling allowance. The
+/// first span is the longest publication budget. The second is the
+/// revalidation bound plus the lifetime of a direct transfer capability: a
+/// view up to the bound old can still issue a capability, and the capability
+/// outlives the view.
+pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
+    max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS),
+    READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS,
+) + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+    + GC_SAFETY_MARGIN_MS;
 
 /// Longest gap a reader may leave between the manifest probe it relies on
 /// and the successor check that confirms it. A successor published after the
@@ -131,13 +136,9 @@ pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 /// Minimum retirement grace from the deletion call's clock. The tombstone put
 /// starts within the publication budget, and the provider applies it within
 /// its request bound. Outstanding reads and direct capabilities run from that
-/// landing.
-pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 = METADATA_PUBLICATION_BUDGET_MS
-    + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-    + max_u64(
-        GC_MIN_GRACE_WINDOW_MS,
-        DIRECT_TRANSFER_URL_TTL_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS,
-    );
+/// landing, and the minimum grace window covers them.
+pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 =
+    METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_MIN_GRACE_WINDOW_MS;
 
 /// Default age of an unreachable object before garbage collection may remove it.
 pub const GC_DEFAULT_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
@@ -192,9 +193,9 @@ mod tests {
 
     #[test]
     fn derived_minimum_grace_window_sits_below_the_default() {
-        // 15 min publication + 2 min retry budget + 15 s final backoff
-        // + 2 min payload attempt + 3 min margin = 22 min 15 s.
-        assert_eq!(GC_MIN_GRACE_WINDOW_MS, 1_335_000);
+        // 19 min 15 s revalidation bound + 15 min capability lifetime
+        // + 4 min 15 s request bound + 3 min margin = 41 min 30 s.
+        assert_eq!(GC_MIN_GRACE_WINDOW_MS, 2_490_000);
         assert!(
             GC_MIN_GRACE_WINDOW_MS < GcOptions::default().grace_window_ms,
             "the conservative default grace window must satisfy its own floor"

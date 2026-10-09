@@ -1,7 +1,9 @@
 //! Complete collection across pin and upload families.
 
 use super::*;
-use loonfs_objectstore::keys::{pin, upload_session, upload_session_prefix};
+use loonfs_objectstore::keys::{
+    content_prefix, pin, scratch_prefix, upload_session, upload_session_prefix,
+};
 use loonfs_test_support::stores::RecordedOperation;
 
 #[tokio::test]
@@ -71,6 +73,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     store.reset();
     let report = gc_namespace(
         &store,
+        None,
         &namespace_id,
         &options(),
         &context(2_000 + GRACE_MS),
@@ -103,6 +106,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     assert_eq!(
         listings,
         vec![
+            upload_session_prefix(&namespace_id), // Root content before reading the WAL tail.
             pin_prefix(&namespace_id),
             metadata_manifest_prefix(&namespace_id), // Discover superseded roots before sweeping.
             metadata_manifest_prefix(&namespace_id),
@@ -110,6 +114,8 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             metadata_segment_prefix(&namespace_id),
             pin_prefix(&namespace_id),
             upload_session_prefix(&namespace_id),
+            content_prefix(&namespace_id),
+            scratch_prefix(&namespace_id),
         ]
     );
     assert!(store

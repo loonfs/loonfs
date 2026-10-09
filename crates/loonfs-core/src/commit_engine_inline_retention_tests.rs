@@ -213,6 +213,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
     gc_namespace(
         &aged,
+        None,
         &namespace_id,
         &GcOptions::default(),
         &MutationContext {

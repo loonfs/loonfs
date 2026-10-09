@@ -70,7 +70,7 @@ A daily pass costs one namespace listing per page plus the following requests fo
 | Pass | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- | --- |
 | Does not collect | 6 GET or HEAD | 7 GET or HEAD | 26 GET or HEAD |
-| Collects | 12 GET or HEAD and 7 LIST | 20 GET or HEAD and 9 LIST | 38 GET or HEAD and 9 LIST |
+| Collects | 13 GET or HEAD and 10 LIST | 21 GET or HEAD and 12 LIST | 39 GET or HEAD and 12 LIST |
 
 Objects still inside their grace windows and due work add requests. Deleted namespaces stay listed because their tombstone manifests remain durable.
 
@@ -82,7 +82,7 @@ Each kind of work starts again from durable state:
 | --- | --- |
 | WAL fold | Current manifest and the numbered WAL tail. |
 | Metadata compaction | Current manifest, selected input descriptors, and a new runtime epoch claim. |
-| Core garbage collection | Fresh current-manifest discovery and a complete pin listing. |
+| Core garbage collection | Fresh current-manifest discovery and complete upload-session and pin listings. |
 | Grep indexing | Current grep manifest and its build or reorganization cursor. |
 | Grep garbage collection | Fresh grep-manifest discovery and complete candidate listings. |
 

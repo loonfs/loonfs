@@ -699,8 +699,10 @@ impl Maintenance {
         options: &crate::GcOptions,
     ) -> Result<crate::GcResponse> {
         self.core.record_trace_context(&tracing::Span::current());
+        let segment_cache = self.core.metadata_segment_cache();
         let report = loonfs_core::gc_namespace(
             self.core.store(),
+            Some(segment_cache.as_ref()),
             namespace_id,
             options,
             &self.core.mutation_context(&self.actor)?,

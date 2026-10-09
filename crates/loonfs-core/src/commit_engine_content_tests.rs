@@ -13,7 +13,7 @@ use crate::protocol::{
 use crate::test_support::ops::create;
 use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, MetadataMapStore, OperationClass};
 use loonfs_types::{AbsolutePath, DestinationBehavior, WriterId};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
@@ -195,16 +195,16 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         timer
             .0
             .store(reclaimed.now_ms - publication.now_ms, Ordering::SeqCst);
-        let report = gc_namespace(
-            &store,
-            &namespace_id,
-            &GcOptions {
-                grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
-            },
-            &reclaimed,
-        )
-        .await
-        .expect("gc");
+        let aged = MetadataMapStore::aged(&store, KeyPredicate::content_blob());
+        let options = GcOptions {
+            grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
+        };
+        gc_namespace(&aged, None, &namespace_id, &options, &reclaimed)
+            .await
+            .expect("gc removes the session record");
+        let report = gc_namespace(&aged, None, &namespace_id, &options, &reclaimed)
+            .await
+            .expect("gc reclaims the content");
         assert_eq!(report.deleted.content_objects, 1);
         assert!(store
             .head(&content_key)

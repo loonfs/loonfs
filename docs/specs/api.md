@@ -94,7 +94,7 @@ either way.
     "commit.max_message_bytes": 4096,
     "commit.max_operations": 4096,
     "commit.max_preconditions": 1024,
-    "maintenance.gc.min_grace_window_ms": 1335000,
+    "maintenance.gc.min_grace_window_ms": 2490000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
     "query.grep.default_limit": 1000,
@@ -144,7 +144,7 @@ Registered limit keys:
 | `commit.max_content_tokens` | Most content tokens one commit may carry. Over-limit requests answer `invalid_request` before planning. |
 | `commit.max_external_content_refs` | Most distinct external content refs one commit's operations may name. Over-limit requests answer `invalid_request` before planning. |
 | `commit.max_message_bytes` | Largest accepted commit `message`, in bytes; a longer one answers `invalid_request` before planning. |
-| `maintenance.gc.min_grace_window_ms` | Smallest accepted `grace_window_ms` on a `gc` request; smaller values answer `invalid_request`. Derived from the publication budgets, not tuned. |
+| `maintenance.gc.min_grace_window_ms` | Smallest accepted `grace_window_ms` on a `gc` request; smaller values answer `invalid_request`. Derived from the publication budgets and the direct transfer capability lifetime, not tuned. |
 | `snapshot.max_ttl_ms` | Largest `ttl_ms` accepted by snapshot create and extend requests. A larger value returns `invalid_request`. |
 | `snapshot.max_lifetime_ms` | Largest snapshot lifetime measured from the record's creation time. Extension never moves the expiry past this ceiling. |
 | `snapshot.max_live_per_namespace` | Most live, unexpired snapshots one namespace may hold. Creation past this limit returns `snapshot_quota_exceeded`. |
@@ -1136,9 +1136,11 @@ each file keeps its newest revision. Once the floor advances, a base
 compaction removes the older revisions, so a revision listing ends at that
 newest revision and reading or restoring a removed revision returns
 `revision_not_found`. A deleted file keeps its newest revision, so undelete
-still restores its content. File content and recoverable deletions in the
-trash are never pruned. They remain at least until the namespace is deleted
-and retired, and no operation in this version reclaims file content.
+still restores its content. Recoverable deletions in the trash are never
+pruned. They remain until the namespace is deleted and retired. GC reclaims
+the content object of a removed revision once no retained view names it and
+it is older than the grace window
+([format section 11.9](format.md#119-content-roots)).
 
 #### Checkpoint inventory
 
@@ -1275,21 +1277,23 @@ A GC response includes `next_reclamation_at_ms` when a deleted namespace is insi
 
 `reclaimable_at_ms` is the deadline defined in [format section 9.5](format.md#95-retirement) when the current manifest is deleted, including when pins still block reclamation. It is absent for an active namespace.
 
-Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. Collection roots follow [format section 11.2](format.md#112-reference-roots). Manifest read failures fail the call before sweeping.
+Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. Collection roots follow [format section 11.2](format.md#112-reference-roots), and content roots follow [section 11.9](format.md#119-content-roots). Manifest read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_objects`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`,
-and `retired_content_objects`. `deleted_checkpoints_by_owner` contains `user`, `snapshot`, and `fork` counts for pins deleted in the pass.
+`retired_content_objects`, and `scratch_objects`. `deleted_checkpoints_by_owner` contains `user`, `snapshot`, and `fork` counts for pins deleted in the pass.
 Their sum is the total number of pins deleted. Each deletion
 is counted once. A target's deletion of its source pin contributes to `fork`
 when the pin was present before deletion. Repeating that deletion on an
 absent pin adds no count. Every count field is present, including zero values.
 
-`content_objects` counts reclamation through completed upload sessions.
+`content_objects` counts content objects in an active namespace that no
+retained view names, deleted once older than the grace window.
 `retired_content_objects` counts keys listed under the deleted namespace’s
 content prefix and successfully deleted. With no new objects, a repeat content
 sweep makes one empty LIST, no DELETE, and reports zero. This count contributes
-to maintenance progress.
+to maintenance progress. `scratch_objects` counts store scratch objects
+deleted once older than the grace window.
 
 Every core GC response carries `retained`, the candidates the pass kept, split by
 the decision that spared each one. The reasons are a closed
@@ -1318,19 +1322,25 @@ An ordinary operation that observes namespace deletion returns `namespace_delete
 Retirement eligibility and content reclamation follow [format sections 9.5](format.md#95-retirement) and [11.8](format.md#118-sweeping-a-retired-owners-content). Purging the tombstone and hint is outside this API.
 
 Retention is coarse: a deleted ancestor keeps every object it
-published while a live descendant still depends on it. GC does not select
-individual published objects within a namespace. Deleting a file or tree in an active
-namespace also does not reclaim its published content, and neither does a
-compaction that removes old revisions at or below the retention floor.
+published while a live descendant still depends on it. In an active
+namespace, GC reclaims a content object once it is older than the grace
+window and nothing names it. A revision names it in the current manifest, a
+pinned manifest, a manifest whose successor is younger than the grace window,
+or the unfolded WAL tail. An upload session record names its own content
+([format section 11.9](format.md#119-content-roots)). Deleting a file or tree
+reclaims nothing, because a deleted file keeps its newest revision. A
+compaction that removes old revisions at or below the retention floor makes
+their content collectable.
 
 The metadata retention floor is separate. It limits WAL replay history and
 file revision history, and makes older WAL objects eligible for GC. Advance
 it explicitly with `POST .../runs` and body `{"kind":"retention"}`, or
 `loonfs maintenance retention advance`. After it advances, a base compaction
 keeps every revision above the floor and each file's newest revision at or
-below it. Completed upload sessions in active namespaces use the derived
-content reclamation grace, slightly longer than seven days, before GC can
-reclaim staged content that no commit published.
+below it. Completed upload sessions in active namespaces keep their records
+for the derived content reclamation grace, slightly longer than seven days.
+A record roots its content, so GC reclaims staged content that no commit
+published on a pass after the record is removed.
 
 Run GC repeatedly, including after a pass finds nothing left to delete. An
 already-issued upload capability can write an object after deletion, and a

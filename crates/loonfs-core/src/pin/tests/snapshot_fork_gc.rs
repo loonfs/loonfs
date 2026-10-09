@@ -142,6 +142,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
     let collect = async {
         gc_namespace(
             &gc_gate,
+            None,
             &fixture.source,
             &GcOptions::default(),
             &fixture.context,
@@ -176,6 +177,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
     tokio::join!(collect, fork, release_snapshot);
     gc_namespace(
         &fixture.store,
+        None,
         &fixture.source,
         &GcOptions::default(),
         &fixture.context,
@@ -239,6 +241,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             fixture.delete_snapshot().await;
             gc_namespace(
                 &fixture.store,
+                None,
                 &fixture.source,
                 &GcOptions::default(),
                 &fixture.context,
@@ -264,6 +267,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         .is_none());
     gc_namespace(
         &fixture.store,
+        None,
         &fixture.source,
         &GcOptions::default(),
         &fixture.context,
