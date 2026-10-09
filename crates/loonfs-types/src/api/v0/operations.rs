@@ -1365,8 +1365,8 @@ pub struct DeletedObjectCounts {
     pub content_objects: u64,
     /// Listed content objects deleted from a retired namespace.
     pub retired_content_objects: u64,
-    /// Store scratch objects deleted once older than the grace window.
-    pub scratch_objects: u64,
+    /// Store temporary objects deleted once older than the grace window.
+    pub temporary_objects: u64,
 }
 
 impl DeletedObjectCounts {
@@ -1379,7 +1379,7 @@ impl DeletedObjectCounts {
             upload_sessions,
             content_objects,
             retired_content_objects,
-            scratch_objects,
+            temporary_objects,
         } = other;
         self.wal_objects += wal_objects;
         self.metadata_segments += metadata_segments;
@@ -1387,7 +1387,7 @@ impl DeletedObjectCounts {
         self.upload_sessions += upload_sessions;
         self.content_objects += content_objects;
         self.retired_content_objects += retired_content_objects;
-        self.scratch_objects += scratch_objects;
+        self.temporary_objects += temporary_objects;
     }
 }
 

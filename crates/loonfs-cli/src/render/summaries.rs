@@ -193,7 +193,7 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
         ("upload sessions", deleted.upload_sessions),
         ("content objects", deleted.content_objects),
         ("retired content objects", deleted.retired_content_objects),
-        ("scratch objects", deleted.scratch_objects),
+        ("temporary objects", deleted.temporary_objects),
     ]
 }
 

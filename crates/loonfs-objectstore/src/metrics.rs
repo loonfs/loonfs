@@ -844,7 +844,9 @@ fn classify_key(key: &str) -> KeyClass {
     };
 
     match parsed.family() {
-        DurableObjectFamily::ContentBlob | DurableObjectFamily::ScratchObject => KeyClass::Content,
+        DurableObjectFamily::ContentBlob | DurableObjectFamily::TemporaryObject => {
+            KeyClass::Content
+        }
         DurableObjectFamily::WalObject => KeyClass::WalObject,
         DurableObjectFamily::MetadataManifest | DurableObjectFamily::Hint => {
             KeyClass::NamespaceManifest

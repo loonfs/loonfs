@@ -2,7 +2,7 @@
 
 use super::*;
 use loonfs_objectstore::keys::{
-    content_prefix, pin, scratch_prefix, upload_session, upload_session_prefix,
+    content_prefix, pin, temporary_prefix, upload_session, upload_session_prefix,
 };
 use loonfs_test_support::stores::RecordedOperation;
 
@@ -115,7 +115,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             pin_prefix(&namespace_id),
             upload_session_prefix(&namespace_id),
             content_prefix(&namespace_id),
-            scratch_prefix(&namespace_id),
+            temporary_prefix(&namespace_id),
         ]
     );
     assert!(store

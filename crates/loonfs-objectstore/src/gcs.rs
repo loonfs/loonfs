@@ -1,7 +1,7 @@
 //! Google Cloud Storage provider.
 
 use crate::configured::ConfiguredObjectStoreKind;
-use crate::keys::scratch_object;
+use crate::keys::temporary_object;
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::layout::parse_object_key;
 use crate::object_store::Result;
@@ -161,18 +161,18 @@ impl GcsRequestSigner {
         succeeded(key, send(&self.http, key, request, body).await?)
     }
 
-    /// Composes `key` and the scratch object onto `key` while `key` is still
+    /// Composes `key` and the temporary object onto `key` while `key` is still
     /// at `generation`, attesting `sha256` on the result.
     async fn compose(
         &self,
         key: &str,
         generation: u64,
-        scratch: &str,
+        temporary: &str,
         sha256: &Checksum,
     ) -> Result<(ObjectMetadata, Option<Checksum>)> {
         let names = [
             scope_object_key(self.key_prefix.as_deref(), key)?,
-            scope_object_key(self.key_prefix.as_deref(), scratch)?,
+            scope_object_key(self.key_prefix.as_deref(), temporary)?,
         ];
         let url = format!(
             "{GCS_JSON_OBJECTS}/{}/o/{}/compose?ifGenerationMatch={generation}",
@@ -190,17 +190,17 @@ impl GcsRequestSigner {
         gcs_object(key, &composed.body)
     }
 
-    /// Deletes an extension's scratch object. Best effort: one left behind
-    /// waits for a sweep of the scratch family.
-    async fn delete_scratch(&self, scratch: &str) {
+    /// Deletes an extension's temporary object. Best effort: one left behind
+    /// waits for a sweep of the temporary family.
+    async fn delete_temporary(&self, temporary: &str) {
         let deleted: Result<SignedResponse> = async {
             let url = format!(
                 "{GCS_JSON_OBJECTS}/{}/o/{}",
                 percent_encode_segment(&self.bucket),
-                self.object_name(scratch)?,
+                self.object_name(temporary)?,
             );
             self.send_authorized(
-                scratch,
+                temporary,
                 http::Request::delete(url),
                 HttpRequestBody::empty(),
             )
@@ -209,9 +209,9 @@ impl GcsRequestSigner {
         .await;
         if deleted.is_err() {
             tracing::warn!(
-                object_key = scratch,
+                object_key = temporary,
                 operation = "delete",
-                "failed to delete an extension's scratch object; it stays until a sweep collects it",
+                "failed to delete an extension's temporary object; it stays until a sweep collects it",
             );
         }
     }
@@ -296,8 +296,8 @@ impl MultipartController for GcsRequestSigner {
         }
     }
 
-    /// Writes the pieces as a scratch object and composes the base and the
-    /// scratch object onto the base's own generation.
+    /// Writes the pieces as a temporary object and composes the base and the
+    /// temporary object onto the base's own generation.
     async fn extend_object(
         &self,
         key: &str,
@@ -336,19 +336,19 @@ impl MultipartController for GcsRequestSigner {
         if current.size_bytes != base.length {
             return Err(precondition_failed(key.to_owned()));
         }
-        let scratch = scratch_object(&namespace_id);
+        let temporary = temporary_object(&namespace_id);
         let url = format!(
             "{GCS_JSON_UPLOADS}/{}/o?uploadType=media&ifGenerationMatch=0&name={}",
             percent_encode_segment(&self.bucket),
-            self.object_name(&scratch)?,
+            self.object_name(&temporary)?,
         );
         let request = http::Request::post(url).header(CONTENT_TYPE, "application/octet-stream");
-        self.send_authorized(&scratch, request, pieces.into())
+        self.send_authorized(&temporary, request, pieces.into())
             .await?;
         let composed = self
-            .compose(key, generation, &scratch, &result.sha256)
+            .compose(key, generation, &temporary, &result.sha256)
             .await;
-        self.delete_scratch(&scratch).await;
+        self.delete_temporary(&temporary).await;
         let (metadata, crc32c) = composed.map_err(|error| match error {
             ObjectStoreError::NotFound { object_key } => precondition_failed(object_key),
             error => error,

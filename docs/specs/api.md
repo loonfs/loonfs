@@ -1281,7 +1281,7 @@ Every call reads the current manifest and uses one fixed clock. It keeps its liv
 
 A GC response groups related counts. `deleted` contains `wal_objects`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`,
-`retired_content_objects`, and `scratch_objects`. `deleted_checkpoints_by_owner` contains `user`, `snapshot`, and `fork` counts for pins deleted in the pass.
+`retired_content_objects`, and `temporary_objects`. `deleted_checkpoints_by_owner` contains `user`, `snapshot`, and `fork` counts for pins deleted in the pass.
 Their sum is the total number of pins deleted. Each deletion
 is counted once. A target's deletion of its source pin contributes to `fork`
 when the pin was present before deletion. Repeating that deletion on an
@@ -1292,7 +1292,7 @@ retained view names, deleted once older than the grace window.
 `retired_content_objects` counts keys listed under the deleted namespace’s
 content prefix and successfully deleted. With no new objects, a repeat content
 sweep makes one empty LIST, no DELETE, and reports zero. This count contributes
-to maintenance progress. `scratch_objects` counts store scratch objects
+to maintenance progress. `temporary_objects` counts store temporary objects
 deleted once older than the grace window.
 
 Every core GC response carries `retained`, the candidates the pass kept, split by

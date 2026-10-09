@@ -196,11 +196,11 @@ namespaces/{namespace_id}/
 ├── pins/{pin_id}.json
 ├── uploads/{upload_id}.json
 ├── content/
-├── scratch/{scratch_id}
+├── temporary/{temporary_id}
 └── extensions/{extension_name}/...
 ```
 
-A scratch object holds the pieces that an extension adds to an object on a provider that composes objects. The extension creates it and deletes it (section 3.2).
+A temporary object holds the pieces that an extension adds to an object on a provider that composes objects. The extension creates it and deletes it (section 3.2).
 
 A segment inherited by a fork can remain under an ancestor's namespace. Its descriptor records `owner_namespace_id`; the reading namespace is not substituted into the key. All newly written metadata segments, including compaction output, use the producing namespace's `segments/` prefix.
 
@@ -217,7 +217,7 @@ The key layout is part of the format. Other objects must not collide with these 
 | Pin record | Retain one manifest for a user, snapshot, or fork | Create and delete; snapshot expiry can be extended by CAS. |
 | Upload session | Own a transfer and its completed content until publication or cleanup | Conditional lifecycle transitions. |
 | Content object | Bytes of file revisions; each revision names a prefix | Create, then extend. Existing bytes never change. |
-| Scratch object | Pieces an extension composes onto its object | Create, then delete. |
+| Temporary object | Pieces an extension composes onto its object | Create, then delete. |
 
 A manifest publication can change physical layout or control state without creating a logical commit. A WAL publication can advance logical history without creating a manifest. The hint selects neither history nor visibility: its number may lag successful publications.
 
@@ -976,7 +976,7 @@ Being unreferenced makes an object a candidate; it does not make it immediately 
 | Pin record | Owner-specific rules in section 11.7. |
 | Upload session | Status-specific rules in section 11.6. |
 | Content object in an active namespace | No content root names it (section 11.9), with provider age at least `T`. |
-| Scratch object | Provider age at least `T`. |
+| Temporary object | Provider age at least `T`. |
 | An eligible tombstone’s owned content | Sections 9.5 and 11.8. |
 
 The hint and current manifest are never swept. Unrecognized keys outside an eligible tombstone’s content prefix are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age.
@@ -1510,7 +1510,7 @@ These patterns define the core object families. Segment owners can differ from t
 | **Upload sessions** | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Hint** | `namespaces/{namespace_id}/hint.json` |
 | **Content objects** | `namespaces/{owner_namespace_id}/content/{content_id}` |
-| **Scratch objects** | `namespaces/{namespace_id}/scratch/{scratch_id}` |
+| **Temporary objects** | `namespaces/{namespace_id}/temporary/{temporary_id}` |
 
 ## Appendix B. Semantic commit fingerprints
 

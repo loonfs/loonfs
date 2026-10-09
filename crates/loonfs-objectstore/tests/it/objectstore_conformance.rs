@@ -775,11 +775,11 @@ async fn assert_attested_writes_and_extension<S: ObjectStore>(
     }
     assert!(
         store
-            .list_prefix("namespaces/demo/scratch/")
+            .list_prefix("namespaces/demo/temporary/")
             .await
-            .expect("list scratch objects")
+            .expect("list temporary objects")
             .is_empty(),
-        "an extension leaves no scratch object behind"
+        "an extension leaves no temporary object behind"
     );
 }
 
