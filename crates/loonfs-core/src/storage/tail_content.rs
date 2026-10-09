@@ -81,8 +81,13 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized>(
     let newest = &content.content_ref;
     let object_key = content_object_key_for_ref(newest)?;
     let first = &content.pieces[0];
-    if first.offset == 0 && create(store, &object_key, pieces.clone()).await? {
-        return Ok(None);
+    if first.offset == 0 {
+        let written = store
+            .put_immutable_verified(&object_key, pieces.clone())
+            .await;
+        if let Attempt::Written(state) = created(&object_key, written, None)? {
+            return Ok(state);
+        }
     }
     for _ in 0..CONTENTION_RETRY_LIMIT {
         let metadata = store
@@ -193,11 +198,7 @@ async fn extend<S: ObjectStore + ?Sized>(
         .await
     {
         Ok(_) => Ok(Attempt::Written(computed)),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(Attempt::Changed),
-        Err(ObjectStoreError::ChecksumMismatch { .. }) => Err(CoreError::NamespaceCorrupt(
-            format!("content object `{object_key}` does not match the checksum its pieces record"),
-        )),
-        Err(error) => Err(store_error(error)),
+        Err(error) => refused(object_key, error),
     }
 }
 
@@ -233,19 +234,6 @@ async fn holds_pieces<S: ObjectStore + ?Sized>(
         offset = chunk_end;
     }
     Ok(true)
-}
-
-/// Writes a whole value under create-if-absent. Returns `false` when the
-/// key already holds another prefix of the chain, which another fold wrote.
-async fn create<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    bytes: Bytes,
-) -> Result<bool, CoreError> {
-    created(
-        object_key,
-        store.put_immutable_verified(object_key, bytes).await,
-    )
 }
 
 /// Creates the chain's own object from its base: the base's prefix copied
@@ -306,11 +294,7 @@ async fn copy_from_base<S: ObjectStore + ?Sized>(
         .await
     {
         Ok(created) => Ok(created.map(|_| Attempt::Written(None))),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(Some(Attempt::Changed)),
-        Err(ObjectStoreError::ChecksumMismatch { .. }) => Err(CoreError::NamespaceCorrupt(
-            format!("content object `{object_key}` does not match the checksum its pieces record"),
-        )),
-        Err(error) => Err(CoreError::store(object_key, &error)),
+        Err(error) => refused(object_key, error).map(Some),
     }
 }
 
@@ -368,25 +352,22 @@ async fn stream_from_base<S: ObjectStore + ?Sized>(
     {
         return Err(error.into());
     }
-    Ok(if created(&object_key, written)? {
-        Attempt::Written(computed)
-    } else {
-        Attempt::Changed
-    })
+    created(&object_key, written, computed)
 }
 
-/// Whether a create landed. `false` is a key that already holds another
-/// fold's object, with a different attestation or none, which the length
-/// table decides.
+/// How a create ended. A landed create carries `state`. `Attempt::Changed`
+/// is a key that already holds another fold's object, with a different
+/// attestation or none, which the length table decides.
 fn created(
     object_key: &str,
     written: Result<ObjectMetadata, ImmutableWriteError>,
-) -> Result<bool, CoreError> {
+    state: Option<Sha256State>,
+) -> Result<Attempt, CoreError> {
     let error = match written {
-        Ok(_) => return Ok(true),
+        Ok(_) => return Ok(Attempt::Written(state)),
         Err(
             ImmutableWriteError::DifferentObject { .. } | ImmutableWriteError::Unattested { .. },
-        ) => return Ok(false),
+        ) => return Ok(Attempt::Changed),
         Err(error) => error,
     };
     tracing::error!(object_key, %error, "content materialization failed");
@@ -400,4 +381,17 @@ fn created(
         ),
         error => CoreError::from(error),
     })
+}
+
+/// How an extension or a copy that the store refused ended. A base that
+/// moved, or a key another fold created, is a change; a checksum mismatch
+/// is corruption.
+fn refused(object_key: &str, error: ObjectStoreError) -> Result<Attempt, CoreError> {
+    match error {
+        ObjectStoreError::PreconditionFailed { .. } => Ok(Attempt::Changed),
+        ObjectStoreError::ChecksumMismatch { .. } => Err(CoreError::NamespaceCorrupt(format!(
+            "content object `{object_key}` does not match the checksum its pieces record"
+        ))),
+        error => Err(CoreError::store(object_key, &error)),
+    }
 }

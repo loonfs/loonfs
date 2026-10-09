@@ -13,7 +13,7 @@ use thiserror::Error;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ContentRefKind {
-    /// One immutable content object, addressed by its random content id.
+    /// A prefix of one content object, addressed by its random content id.
     BlobV1,
 }
 
@@ -412,11 +412,12 @@ pub enum ContentRefValidationError {
     InvalidChecksum(ChecksumValidationError),
 }
 
-/// Identifies one piece of immutable file content.
+/// Identifies the bytes of one file revision: the first `size_bytes` bytes
+/// of a content object, which appends extend but never change.
 ///
 /// The owner namespace and content id name the content object that holds the
-/// bytes. A reference is not proof that the object exists: content committed
-/// inline has no object until a fold writes it.
+/// bytes. A reference is not proof that the object holds them: bytes
+/// committed inline reach their object when a fold writes them.
 // Request bodies and durable records share this type, so it rejects unknown
 // fields in every context. After release, new content kinds, not new fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -429,9 +430,9 @@ pub struct ContentRef {
     pub owner_namespace_id: NamespaceId,
     /// Immutable identity of the content; with the owner, it determines the object key.
     pub content_id: ContentId,
-    /// Complete byte length of the referenced content.
+    /// Byte length of the referenced bytes, a prefix of the content object.
     pub size_bytes: u64,
-    /// Mandatory checksum over the complete object.
+    /// Mandatory checksum over the referenced bytes.
     pub checksum: Checksum,
 }
 

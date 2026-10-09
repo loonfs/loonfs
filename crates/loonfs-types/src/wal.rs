@@ -23,7 +23,7 @@ pub const WAL_FORMAT_VERSION: u32 = 1;
 /// Largest decompressed WAL document allowed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
 pub const MAX_WAL_OBJECT_BYTES: usize = 512 * 1024 * 1024;
 
-/// Reader limit per inline value in
+/// Reader limit per inline entry in
 /// [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records);
 /// writer thresholds are policy at or below this limit.
 pub const MAX_WAL_INLINE_CONTENT_BYTES: usize = 256 * 1024;
@@ -329,7 +329,7 @@ pub struct WalCommitPayload {
     pub message: Option<String>,
     /// Materialized mutations in their authoritative `delta_index` order.
     pub deltas: Vec<WalCommitDelta>,
-    /// Content values governed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
+    /// Content pieces governed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_content: Vec<WalInlineContent>,
 }
@@ -456,7 +456,7 @@ fn decode_wal_object_envelope_zstd_with_limit(
 }
 
 /// Checks what a revision delta records about its reference's bytes against
-/// the reference (A.4). A `hash_state` is the SHA-256 state after exactly
+/// the reference (A.5). A `hash_state` is the SHA-256 state after exactly
 /// the bytes a SHA-256 reference names, so its length and digest are the
 /// reference's. A `crc64nvme` is a CRC-64/NVME, and the reference's own
 /// checksum when that is one.

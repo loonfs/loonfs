@@ -21,7 +21,7 @@ pub(crate) fn wal_payload_from_prepared_commit(commit: &PreparedCommit) -> WalCo
                 bytes: value.bytes().to_vec(),
                 base: None,
             })
-            .chain(prepared.appended.iter().map(|value| value.piece.clone()))
+            .chain(prepared.appended.iter().cloned())
             .collect(),
         deltas: prepared.deltas.clone(),
     }

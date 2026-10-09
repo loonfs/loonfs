@@ -140,10 +140,8 @@ fn sample_hash_state() -> Sha256State {
     state
 }
 
-/// A reference whose only evidence is a provider-computed full-object CRC.
-///
-/// No current write path produces one; it is here so the fixtures prove the
-/// format decodes what direct multipart will write in the next wave.
+/// A reference whose only evidence is a provider-computed full-object CRC,
+/// as a direct upload records.
 fn sample_crc_content_ref() -> ContentRef {
     ContentRef {
         kind: ContentRefKind::BlobV1,

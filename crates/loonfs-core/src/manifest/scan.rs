@@ -208,17 +208,13 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
         limit: usize,
         filter_probe: &str,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
         Ok(strip_row_keys(
-            self.scan_range_page_rows(
+            self.scan_range_page_with_keys_for_lookup(
                 family,
                 lower_bound,
                 upper_bound,
                 limit,
-                Some(filter_probe),
-                Readahead::Stored,
+                filter_probe,
             )
             .await?,
         ))

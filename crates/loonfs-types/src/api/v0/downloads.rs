@@ -33,9 +33,10 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
-/// A presigned URL for one content object.
+/// A presigned URL for one revision's bytes of a content object.
 ///
-/// The URL expires at `access.expires_at_ms`; later path changes do not change the object.
+/// The URL expires at `access.expires_at_ms`; later path changes and appends
+/// do not change the bytes it reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateDownloadResponse {
@@ -46,7 +47,7 @@ pub struct CreateDownloadResponse {
     pub path: AbsolutePath,
     /// Revision the capability reads, resolved from the request.
     pub revision_no: RevisionNo,
-    /// The identity, byte length, and checksum of the object to download.
+    /// The identity, byte length, and checksum of the revision's bytes.
     pub content_ref: ContentRef,
     /// Short-lived read capability the client uses without learning the raw object key.
     pub access: ObjectTransferAccess,

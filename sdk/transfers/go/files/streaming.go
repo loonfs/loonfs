@@ -69,8 +69,7 @@ func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*Downloa
 			return nil, fmt.Errorf("transfers: download grant has no content reference")
 		}
 		result = &DownloadStream{Content: http.NoBody, NamespaceID: grant.NamespaceID, Path: grant.Path, RevisionNo: grant.RevisionNo, ContentRef: grant.ContentRef}
-		// A grant of zero bytes signs no range and needs no request; its
-		// object may not exist.
+		// A grant of zero bytes signs no range and needs no request.
 		if grant.ContentRef.SizeBytes != 0 {
 			response, err := sendPresignedWithClient(ctx, c.transferHTTPClient(), grant.Access, http.MethodGet, nil, 0)
 			if err != nil {

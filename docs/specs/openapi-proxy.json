@@ -651,11 +651,11 @@
       },
       "ContentRef": {
         "additionalProperties": false,
-        "description": "Identifies one piece of immutable file content.\n\nThe owner namespace and content id name the content object that holds the\nbytes. A reference is not proof that the object exists: content committed\ninline has no object until a fold writes it.",
+        "description": "Identifies the bytes of one file revision: the first `size_bytes` bytes\nof a content object, which appends extend but never change.\n\nThe owner namespace and content id name the content object that holds the\nbytes. A reference is not proof that the object holds them: bytes\ncommitted inline reach their object when a fold writes them.",
         "properties": {
           "checksum": {
             "$ref": "#/components/schemas/Checksum",
-            "description": "Mandatory checksum over the complete object."
+            "description": "Mandatory checksum over the referenced bytes."
           },
           "content_id": {
             "$ref": "#/components/schemas/ContentId",
@@ -670,7 +670,7 @@
             "description": "Namespace that originally wrote the bytes."
           },
           "size_bytes": {
-            "description": "Complete byte length of the referenced content.",
+            "description": "Byte length of the referenced bytes, a prefix of the content object.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -740,7 +740,7 @@
         "type": "object"
       },
       "CreateDownloadResponse": {
-        "description": "A presigned URL for one content object.\n\nThe URL expires at `access.expires_at_ms`; later path changes do not change the object.",
+        "description": "A presigned URL for one revision's bytes of a content object.\n\nThe URL expires at `access.expires_at_ms`; later path changes and appends\ndo not change the bytes it reads.",
         "properties": {
           "access": {
             "$ref": "#/components/schemas/ObjectTransferAccess",
@@ -748,7 +748,7 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "The identity, byte length, and checksum of the object to download."
+            "description": "The identity, byte length, and checksum of the revision's bytes."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -2539,7 +2539,7 @@
         ]
       },
       "ObjectTransferAccessPresignedUrl": {
-        "description": "Short-lived URL plus required headers for one object-store write.",
+        "description": "Short-lived URL plus required headers for one object-store read or write.",
         "properties": {
           "expires_at_ms": {
             "description": "Expiration timestamp in Unix milliseconds.",

@@ -500,8 +500,7 @@ class FilesClient(_GeneratedFilesClient):
         if grant.access.method.upper() != "GET":
             raise RuntimeError("download grant must use GET")
         if grant.content_ref.size_bytes == 0:
-            # A grant of zero bytes signs no range and needs no request;
-            # its object may not exist.
+            # A grant of zero bytes signs no range and needs no request.
             chunks = _no_chunks()
             return DownloadStream(
                 chunks,
@@ -942,8 +941,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         if grant.access.method.upper() != "GET":
             raise RuntimeError("download grant must use GET")
         if grant.content_ref.size_bytes == 0:
-            # A grant of zero bytes signs no range and needs no request;
-            # its object may not exist.
+            # A grant of zero bytes signs no range and needs no request.
             chunks = _no_async_chunks()
             return AsyncDownloadStream(
                 chunks,

@@ -1,4 +1,5 @@
-//! Shared reservations for bytes retained by metadata block memos.
+//! Shared reservations for bytes that reads hold: metadata block memos and
+//! the collector's table of content roots.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

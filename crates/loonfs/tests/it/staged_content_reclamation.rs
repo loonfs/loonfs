@@ -103,8 +103,8 @@ async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    // A published file, so the reference scan has a root to read and the
-    // verdict on the prepared object is "absent" rather than "unknown".
+    // A published file: a revision keeps its content while the prepared
+    // object goes once its session record is removed.
     namespace_writer
         .put_file(
             "/docs/live.txt",

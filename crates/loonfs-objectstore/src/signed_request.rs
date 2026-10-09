@@ -62,7 +62,6 @@ pub(crate) async fn send(
     })
 }
 
-/// Reads an object's size and checksum from a signed `HEAD` response.
 /// The object length and ETag a signed `HEAD` reports, or `None` when the
 /// object is absent.
 pub(crate) fn object_length_from_signed_head(
@@ -90,6 +89,7 @@ pub(crate) fn object_length_from_signed_head(
     Ok(Some((size_bytes, etag)))
 }
 
+/// Reads an object's size and checksum from a signed `HEAD` response.
 pub(crate) fn stored_checksum_from_signed_head(
     key: &str,
     response: &SignedResponse,

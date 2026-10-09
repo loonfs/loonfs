@@ -17,7 +17,9 @@ use loonfs_types::format::manifest::{
     NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_types::format::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
-use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::format::wal::{
+    ContentBase, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
+};
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,
     Checksum, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName, InodeId,
@@ -380,11 +382,13 @@ impl HeapBytes for WalCommitDelta {
 
 impl HeapBytes for WalInlineContent {
     fn heap_bytes(&self) -> usize {
-        self.content_id.heap_bytes()
-            + self.bytes.capacity()
-            + self.base.as_ref().map_or(0, |base| {
-                base.owner_namespace_id.heap_bytes() + base.content_id.heap_bytes()
-            })
+        self.content_id.heap_bytes() + self.bytes.capacity() + self.base.heap_bytes()
+    }
+}
+
+impl HeapBytes for ContentBase {
+    fn heap_bytes(&self) -> usize {
+        self.owner_namespace_id.heap_bytes() + self.content_id.heap_bytes()
     }
 }
 

@@ -6,7 +6,7 @@ use crate::wal::ProjectedWalTail;
 use bytes::Bytes;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteRange, ObjectMetadata, ObjectStore};
-use loonfs_types::{ContentId, ContentRef, NamespaceId};
+use loonfs_types::ContentRef;
 
 /// Where a published reference's bytes are read from: the first bytes of an
 /// object, then pieces the WAL tail holds. Content errors are reported under
@@ -26,36 +26,21 @@ struct ObjectPrefix {
 }
 
 impl ContentLocation {
-    /// Locates the bytes a reference names.
+    /// Locates the bytes a reference names. The object prefix ends at the
+    /// lowest unfolded offset of the content id at or below the reference's
+    /// size, or at that size when the tail holds nothing there. A first
+    /// piece that names a base takes its prefix from the base, located the
+    /// same way.
     pub(crate) fn resolve(
         tail: Option<&ProjectedWalTail>,
         content_ref: &ContentRef,
     ) -> Result<Self, DurableContentValidationError> {
         let object_key = content_object_key_for_ref(content_ref)?;
-        Ok(Self {
-            object_key,
-            ..Self::prefix_of(
-                tail,
-                &content_ref.owner_namespace_id,
-                &content_ref.content_id,
-                content_ref.size_bytes,
-            )
-        })
-    }
-
-    /// Locates the first `length` bytes of a content id. The object prefix
-    /// ends at the lowest unfolded offset of the id at or below `length`, or
-    /// at `length` when the tail holds nothing there. A first piece that
-    /// names a base takes its prefix from the base, located the same way.
-    pub(crate) fn prefix_of(
-        tail: Option<&ProjectedWalTail>,
-        owner_namespace_id: &NamespaceId,
-        content_id: &ContentId,
-        length: u64,
-    ) -> Self {
-        let object_key = content_blob(owner_namespace_id, content_id);
-        let mut chain = (owner_namespace_id.clone(), content_id.clone());
-        let mut end = length;
+        let mut chain = (
+            content_ref.owner_namespace_id.clone(),
+            content_ref.content_id.clone(),
+        );
+        let mut end = content_ref.size_bytes;
         let mut runs = Vec::new();
         // Each step moves to an older chain, so a tail of n chains takes at
         // most n steps; a longer walk is a corrupt tail and reads the object.
@@ -87,14 +72,14 @@ impl ContentLocation {
                 _ => break,
             }
         }
-        Self {
+        Ok(Self {
             object_key,
             prefix: (end > 0 || runs.is_empty()).then(|| ObjectPrefix {
                 object_key: content_blob(&chain.0, &chain.1),
                 length: end,
             }),
             pieces: runs.into_iter().rev().flatten().collect(),
-        }
+        })
     }
 
     /// The object that holds the referenced content once it is folded.

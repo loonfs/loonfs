@@ -142,7 +142,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         apply_after_seq: head.seq,
         assigned_seq: committed_seq,
         deltas,
-        appended,
+        appended: appended.into_iter().map(|value| value.piece).collect(),
     })
 }
 

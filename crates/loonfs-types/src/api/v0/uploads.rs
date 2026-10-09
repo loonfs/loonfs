@@ -84,7 +84,7 @@ impl CreateUploadBody {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObjectTransferAccess {
-    /// Short-lived URL plus required headers for one object-store write.
+    /// Short-lived URL plus required headers for one object-store read or write.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "ObjectTransferAccessPresignedUrl")

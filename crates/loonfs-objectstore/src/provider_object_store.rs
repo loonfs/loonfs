@@ -65,9 +65,9 @@ pub const PROVIDER_MAX_RETRY_BACKOFF: Duration = Duration::from_secs(15);
 
 /// Minimum payload size for native multipart uploads.
 ///
-/// An overwrite at or above it uploads parts. A create-if-absent at or above
-/// it uses the provider's own conditional path where the provider has one,
-/// and one request elsewhere. A compare-and-swap is always one request.
+/// A `put` overwrite at or above it uploads parts, and a conditional `put`
+/// is one request at every size. A verified immutable write at or above it
+/// uses the provider's own conditional path where the provider has one.
 pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Fixed size of every multipart part except the last. Cloudflare R2
@@ -77,7 +77,8 @@ pub const PROVIDER_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 /// cheap retry that fits comfortably inside one flat attempt bound.
 pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Concurrent in-flight parts per multipart upload.
+/// Concurrent in-flight parts of one multipart overwrite or verified
+/// immutable write. A `put_streamed` write sends one part at a time.
 pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
 
 /// The smallest part AWS S3 and Cloudflare R2 accept anywhere but last, and
@@ -1310,8 +1311,8 @@ impl ObjectStore for ProviderObjectStore {
 impl ProviderObjectStore {
     /// Writes one object and records `sha256` as its attestation when given.
     ///
-    /// A large create-if-absent uses the provider's own conditional requests
-    /// where it has them; every other conditional write is one request.
+    /// A large overwrite uploads parts; a conditional write is one request at
+    /// every size.
     async fn put_attested(
         &self,
         key: &str,
@@ -3053,7 +3054,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn large_creates_go_through_the_controller_and_only_verified_ones_get_the_window() {
+    async fn a_publication_is_one_put_and_only_verified_creates_get_the_part_window() {
         let flaky = Arc::new(FlakyStore::default());
         let controller = Arc::new(CountingController::default());
         let store = multipart_test_store(Arc::clone(&flaky))

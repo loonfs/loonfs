@@ -264,9 +264,10 @@ impl S3CompatiblePresigner {
     ///
     /// AWS S3 treats that checksum as a precondition and refuses to assemble
     /// an object that does not match it. Cloudflare R2 accepts the request
-    /// and stores the true checksum instead, which is why completion still
+    /// and stores the true checksum instead, so a client-driven completion
     /// reads the object's checksum back rather than trusting this call's
-    /// success.
+    /// success, and an assembly from a base holds the claim to its parts'
+    /// checksums before it sends this request.
     pub(crate) async fn presign_complete_multipart(
         &self,
         object_key: &str,
