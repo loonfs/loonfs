@@ -54,7 +54,9 @@ pub enum DirentryBindingState {
 }
 
 /// One commit's publication of a reference to a content id, with what its
-/// delta recorded about the reference's bytes.
+/// delta recorded about the reference's bytes. A fold can also write the
+/// SHA-256 state it computed for a reference whose delta recorded none, but
+/// only into segment rows. The model replays deltas and never folds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentPublicationRecord {
     pub content_id: loonfs_types::ContentId,

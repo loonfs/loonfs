@@ -2304,12 +2304,15 @@ revision's reference, with owner `O`, content ID `C`, and size `S`:
   source's content. An append to an empty file also starts a new content ID.
 
 Earlier revisions keep their references and still read their own bytes. The
-checksum continues from what the commit that first published `S` bytes of `C`
-recorded: its SHA-256 state, which gives a SHA-256 reference, or else its
-CRC-64/NVME, which gives a CRC-64/NVME reference. Content that recorded neither,
-which only a direct upload on a provider without CRC-64/NVME produces, answers
-`not_supported` with a message that names the file and no `feature`, because
-the cause is the file's content, not the deployment. Write the whole file with
+checksum continues from what was recorded about the first `S` bytes of `C`: a
+SHA-256 state, which gives a SHA-256 reference, or else a CRC-64/NVME, which
+gives a CRC-64/NVME reference. A direct upload on a provider with CRC-64/NVME
+records only that CRC, so appends to it give CRC-64/NVME references until a fold
+writes their bytes. The fold records the SHA-256 state of those bytes, and later
+appends give SHA-256 references. Content that recorded neither, which only a
+direct upload on a provider without CRC-64/NVME produces, answers
+`not_supported` with a message that names the file and no `feature`, because the
+cause is the file's content, not the deployment. Write the whole file with
 `put_file` instead.
 
 A retry under the same commit ID with the same bytes replays the original

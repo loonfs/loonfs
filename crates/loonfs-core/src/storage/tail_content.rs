@@ -10,7 +10,7 @@ use crate::error::CoreError;
 use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::wal::{ProjectedContent, ProjectedWalTail};
 use bytes::Bytes;
-use futures::stream::{self, StreamExt};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use loonfs_objectstore::{
     required_etag, ByteRange, ExtendBase, ExtendedObject, ImmutableWriteError, ObjectMetadata,
     ObjectStore, ObjectStoreError,
@@ -52,23 +52,37 @@ pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Bytes,
     Ok(bytes)
 }
 
+/// How one attempt to write a chain ended.
+enum Attempt {
+    /// The object holds the chain. The state is the SHA-256 state of the
+    /// newest reference's bytes, when that reference is not a SHA-256 and
+    /// the attempt computed it.
+    Written(Option<Sha256State>),
+    /// The object changed after the attempt measured it.
+    Changed,
+}
+
 /// Writes `pieces`, the bytes from the first unfolded offset of `content`
 /// to the end of its newest reference. Bytes that start at 0 are the whole
 /// value. A chain that starts from a base streams the base's prefix and the
 /// pieces into the id's own key, so the base is never held whole. A key
 /// that already holds part of the chain is extended from the length it
 /// holds.
+///
+/// Returns the SHA-256 state of the newest reference's bytes when that
+/// reference is not a SHA-256 and this call computed the state: to attest
+/// an extension, or alongside the check of a chain from a base.
 pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized>(
     store: &S,
     tail: &ProjectedWalTail,
     content: &ProjectedContent,
     pieces: Bytes,
-) -> Result<(), CoreError> {
+) -> Result<Option<Sha256State>, CoreError> {
     let newest = &content.content_ref;
     let object_key = content_object_key_for_ref(newest)?;
     let first = &content.pieces[0];
     if first.offset == 0 && create(store, &object_key, pieces.clone()).await? {
-        return Ok(());
+        return Ok(None);
     }
     for _ in 0..CONTENTION_RETRY_LIMIT {
         let metadata = store
@@ -82,28 +96,29 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized>(
                     first.offset
                 )));
             }
-            if create_from_base(store, tail, newest).await? {
-                return Ok(());
+            if let Attempt::Written(state) = create_from_base(store, tail, newest).await? {
+                return Ok(state);
             }
             continue;
         };
-        if extend(store, &object_key, content, &pieces, metadata).await? {
-            return Ok(());
+        if let Attempt::Written(state) =
+            extend(store, &object_key, content, &pieces, metadata).await?
+        {
+            return Ok(state);
         }
     }
     Err(CoreError::contention_exhausted(&object_key))
 }
 
 /// Extends the object from the length it holds, or finds that another fold
-/// already did. Returns `false` when the object changed after `metadata`
-/// was read.
+/// already did.
 async fn extend<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     content: &ProjectedContent,
     pieces: &Bytes,
     metadata: ObjectMetadata,
-) -> Result<bool, CoreError> {
+) -> Result<Attempt, CoreError> {
     let newest = &content.content_ref;
     let first = content.pieces[0].offset;
     let length = metadata.size_bytes;
@@ -127,18 +142,23 @@ async fn extend<S: ObjectStore + ?Sized>(
                         "content object `{object_key}` does not hold the bytes its newest reference names"
                     )));
                 }
-                Ok(true)
+                Ok(Attempt::Written(None))
             }
-            _ => holds_pieces(store, object_key, first, pieces).await,
+            _ => Ok(if holds_pieces(store, object_key, first, pieces).await? {
+                Attempt::Written(None)
+            } else {
+                Attempt::Changed
+            }),
         };
     }
     let store_error = |error: ObjectStoreError| CoreError::store(object_key, &error);
     let remaining = pieces.slice((length - first) as usize..);
-    let sha256 = match attested {
-        Some(sha256) => sha256,
+    let (sha256, computed) = match attested {
+        Some(sha256) => (sha256, None),
         // A chain without a SHA-256 started from a client's direct upload,
         // which recorded no hash state, so the attestation has to read the
-        // bytes the object holds.
+        // bytes the object holds. The fold records the state it computes,
+        // so the chain's next append continues a SHA-256.
         None => {
             let mut state = Sha256State::new();
             while state.length() < length {
@@ -152,12 +172,12 @@ async fn extend<S: ObjectStore + ?Sized>(
                     .map_err(store_error)?
                     .filter(|held| !held.is_empty())
                 else {
-                    return Ok(false);
+                    return Ok(Attempt::Changed);
                 };
                 state.update(&held);
             }
             state.update(&remaining);
-            state.finish()
+            (state.finish(), Some(state))
         }
     };
     let base = ExtendBase {
@@ -172,8 +192,8 @@ async fn extend<S: ObjectStore + ?Sized>(
         .extend_object(object_key, &base, remaining, &result)
         .await
     {
-        Ok(_) => Ok(true),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(false),
+        Ok(_) => Ok(Attempt::Written(computed)),
+        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(Attempt::Changed),
         Err(ObjectStoreError::ChecksumMismatch { .. }) => Err(CoreError::NamespaceCorrupt(
             format!("content object `{object_key}` does not match the checksum its pieces record"),
         )),
@@ -232,13 +252,14 @@ async fn create<S: ObjectStore + ?Sized>(
 /// the pieces, into the chain's own key, `CONTENT_READ_CHUNK_BYTES` at a
 /// time. The stream checks the whole value against the newest reference as
 /// it passes and ends in an error when they differ, so the store creates
-/// nothing. Returns `false` when the key already holds another fold's
-/// object.
+/// nothing. When the newest reference is not a SHA-256, the same bytes give
+/// its SHA-256 state. `Attempt::Changed` is a key that already holds
+/// another fold's object.
 async fn create_from_base<S: ObjectStore + ?Sized>(
     store: &S,
     tail: &ProjectedWalTail,
     newest: &ContentRef,
-) -> Result<bool, CoreError> {
+) -> Result<Attempt, CoreError> {
     let location = ContentLocation::resolve(Some(tail), newest)?;
     let object_key = location.object_key().to_owned();
     let chunk_bytes = NonZeroU64::new(CONTENT_READ_CHUNK_BYTES)
@@ -246,6 +267,9 @@ async fn create_from_base<S: ObjectStore + ?Sized>(
     let source =
         FileContentStream::open_inner(store, location, None, newest.clone(), chunk_bytes, 0)
             .await?;
+    let sha256 =
+        (newest.checksum.algorithm == ChecksumAlgorithm::Sha256).then_some(&newest.checksum);
+    let mut computed = sha256.is_none().then(Sha256State::new);
     // The store sees only that the stream failed; the reason stays here.
     let failure = Mutex::new(None);
     let failed = &failure;
@@ -264,9 +288,12 @@ async fn create_from_base<S: ObjectStore + ?Sized>(
             }
         }
     })
+    .inspect_ok(|chunk| {
+        if let Some(state) = &mut computed {
+            state.update(chunk);
+        }
+    })
     .boxed();
-    let sha256 =
-        (newest.checksum.algorithm == ChecksumAlgorithm::Sha256).then_some(&newest.checksum);
     let written = store
         .put_immutable_verified_stream(&object_key, newest.size_bytes, sha256, body)
         .await;
@@ -276,7 +303,11 @@ async fn create_from_base<S: ObjectStore + ?Sized>(
     {
         return Err(error.into());
     }
-    created(&object_key, written)
+    Ok(if created(&object_key, written)? {
+        Attempt::Written(computed)
+    } else {
+        Attempt::Changed
+    })
 }
 
 /// Whether a create landed. `false` is a key that already holds another

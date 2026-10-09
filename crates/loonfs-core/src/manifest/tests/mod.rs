@@ -92,7 +92,7 @@ use loonfs_types::{
     AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, EffectiveLimit, InodeId, ManifestNo,
     NameKey, NamespaceId, PinId, RevisionNo, RunNo,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
@@ -787,8 +787,14 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     let mut next_run_no = next_run_no_after(run_no)?;
     let runs = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(previous.manifest.payload()) => {
-            let run_segments =
-                build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
+            let run_segments = build_manifest_segments(
+                store,
+                namespace_id,
+                metadata_state,
+                &HashMap::new(),
+                policy,
+            )
+            .await?;
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
             vec![MetadataRunRef {
                 run_no,
@@ -812,6 +818,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
                             namespace_id,
                             previous.manifest.payload().head_seq,
                             metadata_state,
+                            &HashMap::new(),
                             policy,
                         )
                         .await?,
@@ -823,8 +830,14 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             runs
         }
         Some(_) => {
-            let run_segments =
-                build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
+            let run_segments = build_manifest_segments(
+                store,
+                namespace_id,
+                metadata_state,
+                &HashMap::new(),
+                policy,
+            )
+            .await?;
             debug_assert_manifest_segments_do_not_overlap(&run_segments);
             vec![MetadataRunRef {
                 run_no,
@@ -834,8 +847,14 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             }]
         }
         _ => {
-            let run_segments =
-                build_manifest_segments(store, namespace_id, metadata_state, policy).await?;
+            let run_segments = build_manifest_segments(
+                store,
+                namespace_id,
+                metadata_state,
+                &HashMap::new(),
+                policy,
+            )
+            .await?;
             vec![MetadataRunRef {
                 run_no,
                 run_seq: head_seq,
