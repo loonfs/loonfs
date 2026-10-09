@@ -251,6 +251,44 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
 }
 
 #[tokio::test]
+async fn a_reference_published_in_the_tail_is_found_without_reading_a_segment() {
+    let (_directory, store, mut publisher, context) = setup().await;
+    let namespace_id = publisher.namespace_id.clone();
+    // An appended id: its folded row passes the manifest's filter, so a
+    // manifest probe for it would read the segment.
+    let (inode_id, original) = folded_file(&store, &mut publisher, &context, b"hello").await;
+    let appended = commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &original.content_id,
+        b"hello world",
+        5,
+        None,
+    )
+    .await;
+    store.reset();
+    let read_context = fresh_context(&store, &namespace_id).await;
+    let engine = NamespaceEngine::reader(&store, namespace_id.clone());
+    assert_eq!(
+        engine
+            .read_content_ref(&appended, u64::MAX, &read_context)
+            .await
+            .expect("appended reference"),
+        b"hello world"
+    );
+    let segment_reads = store
+        .snapshot()
+        .into_iter()
+        .filter(|operation| matches!(
+            loonfs_objectstore::layout::parse_object_key(operation.key()),
+            Some(key) if key.family() == loonfs_objectstore::layout::DurableObjectFamily::MetadataSegment
+        ))
+        .collect::<Vec<_>>();
+    assert!(segment_reads.is_empty(), "{segment_reads:?}");
+}
+
+#[tokio::test]
 async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     let (_directory, store, mut publisher, mutation_context) = setup().await;
     let value = inline(&publisher.namespace_id, Bytes::from_static(b"copied"));

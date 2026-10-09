@@ -419,3 +419,29 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
     );
     assert!(sink.is_empty());
 }
+
+#[tokio::test]
+async fn a_grant_from_past_the_start_is_refused_before_any_request() {
+    let payload = b"ten bytes!".to_vec();
+    let content_ref = ContentRef::blob_v1(
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+    );
+    // The grant signs `range: bytes=5-9`.
+    let resumed = grant_from(content_ref, "http://example.invalid/object", 5);
+
+    let transport = scripted_transport::script([Outcome::Success(payload[5..].to_vec())]);
+    let mut sink = Vec::new();
+    let error = client_for(&transport)
+        .download_via_presigned_url(&resumed, &mut sink)
+        .await
+        .expect_err("the helper takes a grant from offset 0");
+    assert!(
+        matches!(&error, ClientError::Protocol(message)
+            if message.contains("offset 5") && message.contains("open_direct_download")),
+        "unexpected error: {error}"
+    );
+    assert_eq!(transport.attempts(), 0);
+    assert!(sink.is_empty());
+}

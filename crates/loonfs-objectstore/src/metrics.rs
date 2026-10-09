@@ -34,11 +34,10 @@ pub struct ObjectStoreMetricSample {
     /// call that never retried.
     ///
     /// Retries are what makes an otherwise unexplained `elapsed_micros`
-    /// readable. The count covers the bounded retry loops inside the store
-    /// this wrapper measures; a retry loop that sits *above* the wrapper —
-    /// [`crate::ObjectStore::put_immutable_verified`] is the one — surfaces
-    /// as one sample per attempt instead, because each of its attempts
-    /// really is a separate measured call.
+    /// readable. The count covers every bounded retry loop inside the store
+    /// this wrapper measures. That includes the retries of
+    /// [`crate::ObjectStore::put_immutable_verified`], which records one
+    /// sample for the whole write.
     pub attempts: u32,
     /// Cardinality-bounded success or failure classification.
     pub result: ObjectStoreResultClass,
@@ -528,6 +527,32 @@ where
         result
     }
 
+    /// Forwarded so the inner store's own verified write runs, which for a
+    /// provider sends a large body through the conditional multipart create.
+    /// One `put` sample covers the whole write, retries included.
+    async fn put_immutable_verified(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        let start = sample_clock();
+        let bytes_in = bytes.len() as u64;
+        let (result, attempts) =
+            counting_attempts(self.inner.put_immutable_verified(key, bytes)).await;
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::Put,
+            key,
+            start.elapsed(),
+            attempts,
+            classify_immutable_write(&result),
+            self.store_kind.clone(),
+        );
+        sample.bytes_in = Some(bytes_in);
+        sample.put_mode = Some(PutModeClass::CreateIfAbsent);
+        self.record(sample);
+        result
+    }
+
     /// Recorded as the streamed create-if-absent it is.
     async fn put_immutable_verified_stream(
         &self,
@@ -542,17 +567,12 @@ where
                 .put_immutable_verified_stream(key, size_bytes, sha256, body),
         )
         .await;
-        let class = match &result {
-            Ok(_) => ObjectStoreResultClass::Ok,
-            Err(crate::ImmutableWriteError::Transport { source, .. }) => source.class().into(),
-            Err(_) => ObjectStoreResultClass::PreconditionFailed,
-        };
         let mut sample = ObjectStoreMetricSample::new(
             ObjectStoreOperation::PutStreamed,
             key,
             start.elapsed(),
             attempts,
-            class,
+            classify_immutable_write(&result),
             self.store_kind.clone(),
         );
         sample.bytes_in = Some(size_bytes);
@@ -908,6 +928,16 @@ fn classify_result<T>(result: &Result<T>) -> ObjectStoreResultClass {
     match result {
         Ok(_) => ObjectStoreResultClass::Ok,
         Err(error) => error.class().into(),
+    }
+}
+
+fn classify_immutable_write(
+    result: &std::result::Result<ObjectMetadata, crate::ImmutableWriteError>,
+) -> ObjectStoreResultClass {
+    match result {
+        Ok(_) => ObjectStoreResultClass::Ok,
+        Err(crate::ImmutableWriteError::Transport { source, .. }) => source.class().into(),
+        Err(_) => ObjectStoreResultClass::PreconditionFailed,
     }
 }
 

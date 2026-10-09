@@ -342,7 +342,7 @@ impl CommitCandidate {
                 bytes = bytes
                     .saturating_add(PreparedContent::estimated_owned_staging_payload_bytes(
                         namespace_id,
-                        value.content_ref(),
+                        value,
                     ))
                     .saturating_add(std::mem::size_of::<ContentId>())
                     .saturating_add(value.content_ref().content_id.as_str().len());

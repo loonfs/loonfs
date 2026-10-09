@@ -557,6 +557,26 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .min_by_key(|head| (std::cmp::Reverse(head.size_bytes), head.committed_seq)))
     }
 
+    /// The row states answer first, so a publication still in the WAL tail
+    /// costs no manifest probe.
+    pub(crate) async fn content_published(
+        &self,
+        content_id: &loonfs_types::ContentId,
+    ) -> Result<bool, CoreError> {
+        if self
+            .row_states()
+            .filter_map(|state| state.content_head(content_id))
+            .any(|head| head.committed_seq <= self.visible_seq())
+        {
+            return Ok(true);
+        }
+        let Some(segments) = self.manifest_segments() else {
+            return Ok(false);
+        };
+        let head = manifest_index::content_head(segments, content_id, self.visible_seq()).await?;
+        Ok(head.is_some())
+    }
+
     /// The first publication row of the reference to `content_id` of
     /// `size_bytes` among the rows visible here: the row its writer
     /// published, which records what that writer knew of the bytes.

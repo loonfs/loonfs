@@ -247,20 +247,24 @@ async fn create_from_base<S: ObjectStore + ?Sized>(
 ) -> Result<Attempt, CoreError> {
     let newest = &content.content_ref;
     let location = ContentLocation::resolve(Some(tail), newest)?;
-    if let Some(attempt) = copy_from_base(store, &location, content).await? {
-        return Ok(attempt);
+    if let Some(held) = location.check_prefix(store).await? {
+        if let Some(attempt) = copy_from_base(store, &location, held, content).await? {
+            return Ok(attempt);
+        }
     }
     stream_from_base(store, location, newest).await
 }
 
-/// Asks the store to copy the base's prefix into the chain's own key and
-/// add the pieces after it. The store records the newest reference's
-/// checksum as the attestation, so only a SHA-256 chain asks, and only for
-/// a prefix a provider copies. Returns `None` when the chain does not ask
-/// or the store cannot copy, and otherwise how the copy attempt ended.
+/// Asks the store to copy the base's prefix, which `held` describes, into
+/// the chain's own key and add the pieces after it. The store records the
+/// newest reference's checksum as the attestation, so only a SHA-256 chain
+/// asks, and only for a prefix a provider copies. Returns `None` when the
+/// chain does not ask or the store cannot copy, and otherwise how the copy
+/// attempt ended.
 async fn copy_from_base<S: ObjectStore + ?Sized>(
     store: &S,
     location: &ContentLocation,
+    held: ObjectMetadata,
     content: &ProjectedContent,
 ) -> Result<Option<Attempt>, CoreError> {
     let newest = &content.content_ref;
@@ -268,9 +272,6 @@ async fn copy_from_base<S: ObjectStore + ?Sized>(
         *length >= PROVIDER_MIN_COPIED_PART_BYTES
             && newest.checksum.algorithm == ChecksumAlgorithm::Sha256
     }) else {
-        return Ok(None);
-    };
-    let Some(held) = location.check_prefix(store).await? else {
         return Ok(None);
     };
     let object_key = location.object_key();
@@ -304,7 +305,7 @@ async fn copy_from_base<S: ObjectStore + ?Sized>(
 /// it passes and ends in an error when they differ, so the store creates
 /// nothing. When the newest reference is not a SHA-256, the same bytes give
 /// its SHA-256 state. `Attempt::Changed` is a key that already holds
-/// another fold's object.
+/// another fold's object. The caller has checked the base's prefix.
 async fn stream_from_base<S: ObjectStore + ?Sized>(
     store: &S,
     location: ContentLocation,
@@ -313,9 +314,15 @@ async fn stream_from_base<S: ObjectStore + ?Sized>(
     let object_key = location.object_key().to_owned();
     let chunk_bytes = NonZeroU64::new(CONTENT_READ_CHUNK_BYTES)
         .expect("content read chunk size should be nonzero");
-    let source =
-        FileContentStream::open_inner(store, location, None, newest.clone(), chunk_bytes, 0)
-            .await?;
+    let source = FileContentStream::open_with_checked_prefix(
+        store,
+        location,
+        None,
+        newest.clone(),
+        chunk_bytes,
+        0,
+    )
+    .await?;
     let sha256 =
         (newest.checksum.algorithm == ChecksumAlgorithm::Sha256).then_some(&newest.checksum);
     let mut computed = sha256.is_none().then(Sha256State::new);

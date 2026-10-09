@@ -138,6 +138,11 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
             "deleted_snapshot_checkpoints",
             gc.deleted_checkpoints_by_owner.snapshot,
         ),
+        ("deleted_temporary_objects", gc.deleted.temporary_objects),
+        (
+            "deleted_retired_content_objects",
+            gc.deleted.retired_content_objects,
+        ),
     ] {
         assert_eq!(
             counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)],),

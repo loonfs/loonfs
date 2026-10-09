@@ -124,7 +124,7 @@ impl MetricLabel for PublishOutcome {
 type GcCategory = (&'static str, fn(&GcResponse) -> u64);
 
 /// Counts each deletion once, with pins grouped by owner.
-const GC_CATEGORIES: [GcCategory; 8] = [
+const GC_CATEGORIES: [GcCategory; 10] = [
     ("deleted_wal_objects", |gc| gc.deleted.wal_objects),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
@@ -140,6 +140,12 @@ const GC_CATEGORIES: [GcCategory; 8] = [
     ("deleted_content_objects", |gc| gc.deleted.content_objects),
     ("deleted_snapshot_checkpoints", |gc| {
         gc.deleted_checkpoints_by_owner.snapshot
+    }),
+    ("deleted_temporary_objects", |gc| {
+        gc.deleted.temporary_objects
+    }),
+    ("deleted_retired_content_objects", |gc| {
+        gc.deleted.retired_content_objects
     }),
 ];
 
@@ -1524,6 +1530,8 @@ mod tests {
             deleted: loonfs_types::DeletedObjectCounts {
                 wal_objects: 3,
                 content_objects: 5,
+                temporary_objects: 11,
+                retired_content_objects: 13,
                 ..loonfs_types::DeletedObjectCounts::default()
             },
             deleted_checkpoints_by_owner: loonfs_types::DeletedCheckpointsByOwner {
@@ -1563,11 +1571,13 @@ mod tests {
         assert_eq!(counter(&snapshot, "loonfs.gc.retained", &[]), 4);
         // Every family registers at construction, so a scrape names the
         // whole reclaimable vocabulary rather than only what has happened.
-        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 8);
+        assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 10);
         for (category, expected) in [
             ("deleted_fork_checkpoints", 4),
             ("deleted_expired_checkpoints", 6),
             ("deleted_snapshot_checkpoints", 14),
+            ("deleted_temporary_objects", 22),
+            ("deleted_retired_content_objects", 26),
         ] {
             assert_eq!(
                 counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)]),
