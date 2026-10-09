@@ -1065,7 +1065,7 @@ async fn a_store_that_copies_gets_a_sha256_chain_copied_and_a_crc_chain_streamed
 }
 
 #[tokio::test]
-async fn a_copy_that_misses_its_reference_is_corruption_and_leaves_no_object() {
+async fn a_copy_that_misses_its_reference_is_corruption_and_creates_nothing() {
     let (directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let (inode_id, _) = folded_file(&store, &mut engine, &context, b"hello").await;

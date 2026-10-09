@@ -258,7 +258,7 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
 }
 
 /// Publishes `deltas` and `inline_content` as one commit in the next WAL
-/// object, without planning, for WAL shapes no operation writes yet.
+/// object, without planning, so a test controls the exact deltas and pieces.
 #[allow(
     clippy::disallowed_methods,
     reason = "a test writes the next numbered WAL object directly"

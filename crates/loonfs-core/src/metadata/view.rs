@@ -536,14 +536,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             }))
     }
 
-    /// Whether any commit visible here published a reference to `content_id`.
-    pub(crate) async fn find_content_publication(
-        &self,
-        content_id: &loonfs_types::ContentId,
-    ) -> Result<bool, CoreError> {
-        Ok(self.content_head(content_id).await?.is_some())
-    }
-
     /// The first publication row of `content_id` in row-key order among the
     /// rows visible here: the chain head, which names the longest reference.
     pub(crate) async fn content_head(

@@ -324,9 +324,9 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
 }
 
 /// Writes every piece the tail holds into its content object. Every chain
-/// is assembled, and checked where memory allows, before anything is
-/// written. Returns, by content id, the SHA-256 states the writes computed
-/// for newest references that are not a SHA-256.
+/// is assembled, and every whole value that starts at offset 0 checked,
+/// before anything is written. Returns, by content id, the SHA-256 states
+/// the writes computed for newest references that are not a SHA-256.
 async fn materialize_tail_content<S: ObjectStore + ?Sized>(
     store: &S,
     projection: &ManifestProjection<'_, S>,

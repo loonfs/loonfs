@@ -146,7 +146,7 @@ impl LiveSet {
         };
         // A tombstone roots its runs like any current manifest: an import from
         // a deleted owner is still authorized against its final access state.
-        live.protect_manifest(store, segment_cache, namespace_id, &anchor.manifest)
+        live.protect_manifest(store, segment_cache, &anchor.manifest)
             .await?;
         if !live.namespace_deleted {
             for revision in project_anchor_tail(store, segment_cache, &anchor)
@@ -154,7 +154,7 @@ impl LiveSet {
                 .rows
                 .revisions()
             {
-                live.protect_content(namespace_id, &revision.content_ref)?;
+                live.protect_content(&revision.content_ref)?;
             }
         }
         let mut manifests = BTreeSet::from([head.manifest_no]);
@@ -260,7 +260,7 @@ impl LiveSet {
                 envelope: Arc::new(envelope),
             },
         };
-        self.protect_manifest(store, segment_cache, namespace_id, &manifest)
+        self.protect_manifest(store, segment_cache, &manifest)
             .await?;
         manifests.insert(manifest_no);
         Ok(true)
@@ -270,7 +270,6 @@ impl LiveSet {
         &mut self,
         store: &S,
         segment_cache: Option<&MetadataSegmentCache>,
-        namespace_id: &NamespaceId,
         manifest: &LoadedManifest,
     ) -> Result<()> {
         self.objects.insert(manifest.object_key.clone());
@@ -306,7 +305,7 @@ impl LiveSet {
             lower_bound = lookup_keys::after_row_key(last_key);
             let exhausted = rows.len() < REVISION_PAGE_ROWS;
             for (_, row) in rows {
-                self.protect_content(namespace_id, &revision_from_manifest_row(row)?.content_ref)?;
+                self.protect_content(&revision_from_manifest_row(row)?.content_ref)?;
             }
             if exhausted {
                 return Ok(());
@@ -314,12 +313,8 @@ impl LiveSet {
         }
     }
 
-    fn protect_content(
-        &mut self,
-        namespace_id: &NamespaceId,
-        content_ref: &ContentRef,
-    ) -> Result<()> {
-        if content_ref.owner_namespace_id == *namespace_id {
+    fn protect_content(&mut self, content_ref: &ContentRef) -> Result<()> {
+        if content_ref.owner_namespace_id == self.content_roots.namespace_id {
             self.content_roots.insert(&content_ref.content_id)?;
         }
         Ok(())

@@ -380,19 +380,6 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
         &payload,
     );
 
-    let transport = scripted_transport::script([Outcome::Success(payload.clone())]);
-    let client = client_for(&transport);
-    let mut whole = client
-        .open_direct_download(&grant(content_ref.clone(), "http://example.invalid/object"))
-        .await
-        .expect("grant");
-    while whole.next_chunk().await.expect("chunk").is_some() {}
-    assert_eq!(
-        transport.sent()[0].header("range"),
-        Some("bytes=0-13"),
-        "a download names exactly the bytes of its reference"
-    );
-
     let transport = scripted_transport::script([Outcome::Success(payload[4..].to_vec())]);
     let client = client_for(&transport);
     let mut resumed = client

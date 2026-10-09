@@ -787,14 +787,14 @@ compact, or collect, costs:
 | Pass | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- | --- |
 | Does not collect | 6 GET or HEAD | 7 GET or HEAD | 26 GET or HEAD |
-| Collects | 13 GET or HEAD and 10 LIST | 21 GET or HEAD and 12 LIST | 39 GET or HEAD and 12 LIST |
+| Collects | 12 GET or HEAD and 10 LIST | 20 GET or HEAD and 12 LIST | 38 GET or HEAD and 12 LIST |
 
 An object still inside its collection grace adds a request on a collection
 pass, and a namespace with work due adds the requests of that work. Deleted
 namespaces stay listed, so each one keeps this cost on every full pass. Core
-metadata still costs 6 requests per visit and GC adds 17, for 23 total. A
+metadata still costs 6 requests per visit and GC adds 16, for 22 total. A
 server with 1,000 caught-up idle namespaces and no grep sends no requests for
-them between full passes, and about 23,000 on each daily full pass, plus the
+them between full passes, and about 22,000 on each daily full pass, plus the
 namespace listing.
 
 The full pass collects deleted namespaces too. Their content becomes eligible

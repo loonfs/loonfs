@@ -21,8 +21,8 @@
 | **Name key** | The value used for sibling-name comparison and lookup. The namespace's naming mode derives it from a display name: normalized, and also case-folded in a `case_insensitive` namespace ([format section 1.4](format.md#14-names-and-paths)). |
 | **Naming mode** | A namespace's fixed choice of how sibling names compare: `case_insensitive` (the default) or `case_sensitive`. |
 | **Revision** | One committed content state of a file, ordered by a revision number scoped to that inode. |
-| **Content object** | The complete bytes of one piece of file content, stored immutably under `namespaces/{owner_namespace_id}/content/{content_id}`. |
-| **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, complete size, and checksum. It identifies content; it does not prove that the content object exists yet. |
+| **Content object** | The bytes of one content ID, stored under `namespaces/{owner_namespace_id}/content/{content_id}`. An append extends it and never changes the bytes it already holds ([format section 1.5](format.md#15-file-contents-and-ownership)). |
+| **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, the size of the prefix of the content object it names, and the checksum of that prefix. It identifies content; it does not prove that the content object holds those bytes yet. |
 | **Content root** | A record that keeps an active namespace's content object: a revision row in a manifest the GC pass roots, a revision in the unfolded WAL tail, or an upload session record ([format section 11.9](format.md#119-content-roots)). |
 | **Temporary object** | An object that an object extension writes and deletes under `namespaces/{namespace_id}/temporary/`. Nothing references it, and collection deletes one that is older than the reclamation grace. |
 | **Inline content** | File bytes carried in the WAL commit that references them. A fold writes them to a content object before the WAL object can be collected ([format section 1.5](format.md#15-file-contents-and-ownership)). |

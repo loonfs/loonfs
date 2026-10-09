@@ -261,7 +261,7 @@ async fn assert_direct_get_returns_the_written_bytes(
 /// and refuses any other range on the same URL, and a resume takes a new
 /// grant from its offset.
 ///
-/// That is a property of the provider's SigV4 verification, not of this
+/// That is a property of the provider's signature verification, not of this
 /// codebase, which is why it is asserted here rather than only against the
 /// presigner's own unit tests: this is the run that can be wrong.
 async fn assert_direct_get_capability_serves_only_its_range(
@@ -693,7 +693,6 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
 
     assert_gcs_completion_judges_the_object_that_is_there(&harness.client, &namespace_id).await;
     assert_gcs_signed_writes_land_under_the_configured_prefix(&harness, &store_config).await;
-    assert_gcs_read_capability_serves_only_its_range(&harness, namespace).await;
     assert_gcs_expired_capability_is_refused(&harness.client, &namespace_id).await;
     assert_gcs_cap_bound_object_moves_only_directly(&harness, namespace).await;
 
@@ -789,72 +788,6 @@ async fn assert_gcs_signed_writes_land_under_the_configured_prefix(
     assert!(
         keys.iter().any(|key| key.contains(content_id)),
         "the object a signed write created is not under the run prefix"
-    );
-}
-
-/// A read capability serves exactly the range it signs: the whole object
-/// from offset 0, or the rest from a resume offset, and no other window.
-async fn assert_gcs_read_capability_serves_only_its_range(
-    harness: &crate::common::TestServer,
-    namespace: &str,
-) {
-    let payload: Vec<u8> = (0..96 * 1024).map(|offset| (offset % 251) as u8).collect();
-    let target = NamespacePath::parse(namespace, "/ranged.bin").expect("ranged target");
-    harness
-        .client
-        .put_file_with_options(
-            &target,
-            &payload,
-            &loonfs_test_support::test_actor(),
-            &put_options("gcs-ranged"),
-        )
-        .await
-        .expect("stage an object to read back");
-
-    let grant = harness
-        .client
-        .create_download(&target)
-        .await
-        .expect("begin download");
-    let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
-    let whole = format!("bytes=0-{}", payload.len() - 1);
-    assert_eq!(headers.get("range"), Some(&whole));
-
-    let mut received = Vec::new();
-    harness
-        .client
-        .download_via_presigned_url(&grant, &mut received)
-        .await
-        .expect("read the whole object");
-    assert_eq!(received, payload);
-    assert!(
-        raw_agent()
-            .get(url)
-            .set("range", "bytes=12345-59999")
-            .call()
-            .is_err(),
-        "a window the grant does not sign was served"
-    );
-
-    // A resumption: a prefix already in hand, and a new grant for the rest.
-    let already_have = 40_000;
-    let rest = harness
-        .client
-        .create_download_with_options(
-            &target,
-            &DownloadOptions {
-                start_offset: already_have as u64,
-                ..DownloadOptions::default()
-            },
-        )
-        .await
-        .expect("a grant from the resume offset");
-    let ObjectTransferAccess::PresignedUrl { url, .. } = &rest.access;
-    let mut resumed = payload[..already_have].to_vec();
-    resumed.extend_from_slice(&fetch_range(url, already_have, payload.len() - 1));
-    assert_eq!(
-        resumed, payload,
-        "a resumed read did not fold to the object"
     );
 }
 

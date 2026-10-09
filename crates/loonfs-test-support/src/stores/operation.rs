@@ -27,8 +27,6 @@ pub enum OperationClass {
     PutCreateIfAbsent,
     /// Compare-and-swap calls and CAS-mode puts.
     CompareAndSwap,
-    /// Extensions of an existing object.
-    Extend,
     /// Deletes.
     Delete,
     /// Prefix-list calls.
@@ -84,7 +82,6 @@ impl OperationClass {
                         mode: PutMode::CompareAndSwap { .. },
                     }
             ),
-            Self::Extend => matches!(kind, OperationKind::Extend { .. }),
             Self::Delete => matches!(kind, OperationKind::Delete),
             Self::List => matches!(kind, OperationKind::List),
         }
@@ -347,7 +344,6 @@ impl RecordedOperation {
                         ..
                     }
             ),
-            OperationClass::Extend => matches!(self, Self::Extend { .. }),
             OperationClass::Delete => matches!(self, Self::Delete { .. }),
             OperationClass::List => matches!(self, Self::List { .. }),
         }

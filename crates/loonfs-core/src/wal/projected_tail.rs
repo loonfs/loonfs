@@ -162,7 +162,7 @@ impl ProjectedWalTail {
             base: entry.base.clone(),
         };
         self.inline_bytes += piece.bytes.len();
-        self.inline_entry_heap_bytes += base_heap_bytes(&piece.base);
+        self.inline_entry_heap_bytes += piece.base.heap_bytes();
         let slots = content.pieces.capacity();
         match content
             .pieces
@@ -171,19 +171,13 @@ impl ProjectedWalTail {
             Ok(index) => {
                 let previous = std::mem::replace(&mut content.pieces[index], piece);
                 self.inline_bytes -= previous.bytes.len();
-                self.inline_entry_heap_bytes -= base_heap_bytes(&previous.base);
+                self.inline_entry_heap_bytes -= previous.base.heap_bytes();
             }
             Err(index) => content.pieces.insert(index, piece),
         }
         self.inline_entry_heap_bytes +=
             (content.pieces.capacity() - slots) * size_of::<ProjectedPiece>();
     }
-}
-
-fn base_heap_bytes(base: &Option<ContentBase>) -> usize {
-    base.as_ref().map_or(0, |base| {
-        base.owner_namespace_id.heap_bytes() + base.content_id.heap_bytes()
-    })
 }
 
 #[cfg(test)]

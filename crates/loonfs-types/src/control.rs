@@ -376,7 +376,7 @@ pub enum UploadSessionRecordStatus {
     /// receipts or replay completion.
     Completed {
         /// Unix-millisecond stamp written by the completing compare-and-swap,
-        /// and the only input to when the content may be reclaimed.
+        /// and the only input to when the record may be deleted.
         completed_at_ms: u64,
         /// Verified immutable content produced by this session.
         content_ref: ContentRef,

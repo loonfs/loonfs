@@ -264,7 +264,7 @@ export class FilesClient extends GeneratedFilesClient {
             }
             const grant = await this.createDownload(input, options);
             requirePresignedMethod(grant.access, "GET", "download");
-            // A grant of zero bytes signs no range and needs no request; its object may not exist.
+            // A grant of zero bytes signs no range and needs no request.
             if (grant.content_ref.size_bytes === 0) {
                 body = new ReadableStream<Uint8Array>({ start: (controller) => controller.close() });
             } else {

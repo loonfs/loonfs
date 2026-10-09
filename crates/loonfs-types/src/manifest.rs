@@ -1128,7 +1128,9 @@ impl<'de> Deserialize<'de> for ActivityCounter {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestActivity {
-    /// Full content length of every committed file revision, including reused content.
+    /// Full content length of every committed file revision, including reused
+    /// content. A revision whose bytes its commit's pieces add counts only
+    /// those bytes, so an append counts the bytes it appends.
     pub content_bytes: ActivityCounter,
     /// Number of committed file revisions, including empty revisions.
     pub file_revisions: ActivityCounter,

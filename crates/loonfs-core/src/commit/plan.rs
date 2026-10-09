@@ -31,7 +31,7 @@ pub(crate) struct CommitPlan {
     pub apply_after_seq: ChangeSeq,
     pub assigned_seq: ChangeSeq,
     pub(crate) deltas: Vec<WalCommitDelta>,
-    pub(crate) appended: Vec<AppendedContent>,
+    pub(crate) appended: Vec<WalInlineContent>,
     pub resulting_next_inode_id: InodeId,
 }
 
@@ -52,7 +52,7 @@ pub(crate) struct ValidatedCommitPlan {
     pub(crate) apply_after_seq: ChangeSeq,
     pub(crate) assigned_seq: ChangeSeq,
     pub(crate) deltas: Vec<WalCommitDelta>,
-    pub(crate) appended: Vec<AppendedContent>,
+    pub(crate) appended: Vec<WalInlineContent>,
 }
 
 impl ValidatedCommitPlan {
