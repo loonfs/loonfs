@@ -15,7 +15,9 @@ use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, Sto
 use loonfs_objectstore::s3_compatible::{
     aws_s3, cloudflare_r2, AwsS3StoreConfig, CloudflareR2StoreConfig,
 };
-use loonfs_objectstore::{AwsS3Credentials, ObjectStore};
+use loonfs_objectstore::{
+    AwsS3Credentials, ByteRange, ObjectStore, PROVIDER_MIN_COPIED_PART_BYTES,
+};
 use loonfs_objectstore::{ExtendBase, ExtendedObject, ImmutableWriteError, ObjectStoreError};
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, NamespaceId, Page};
@@ -96,6 +98,7 @@ async fn local_fs_honours_attested_writes_and_extension() {
         &store,
         &[(16, 30), (1024, 30)],
         ChecksumAlgorithm::Crc64nvme,
+        CopyFromBase::Never,
     )
     .await;
 }
@@ -118,12 +121,17 @@ async fn aws_s3_attested_writes_and_extension() {
         force_path_style: false,
     })
     .expect("create AWS S3 object store");
-    // 1 KiB is one PUT and a rewrite. 9 MiB is a create with two parts in
-    // flight at once, and an extension that copies the base.
+    // 1 KiB is one PUT and a rewrite, and too short to copy into a new key.
+    // 9 MiB is a create with two parts in flight at once, an extension that
+    // copies the base, and new keys copied from the whole base and from a
+    // prefix of the extended one, each under `x-amz-copy-source-if-match`
+    // and completed with `If-None-Match: *`. A wrong claim is refused before
+    // completion, so nothing lands.
     assert_attested_writes_and_extension(
         &store,
         &[(1024, 30), (9 * MIB, 30)],
         ChecksumAlgorithm::Crc64nvme,
+        CopyFromBase::Parts,
     )
     .await;
 }
@@ -142,16 +150,21 @@ async fn cloudflare_r2_attested_writes_and_extension() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
-    // 1 KiB is one PUT and a rewrite. 9 MiB is copied as one part, and the
-    // 10 MiB appended to it is a last part longer than the copied part. The
-    // provider reference marks that unconfirmed, so this run must show that
-    // R2 accepts it. 65 MiB is a create with more parts than the window
-    // holds, and an extension that copies one 64 MiB part and re-sends the
-    // rest of the base with the pieces.
+    // 1 KiB is one PUT and a rewrite, and too short to copy into a new key.
+    // 9 MiB is copied as one part, and the 10 MiB appended to it is a last
+    // part longer than the copied part. The provider reference marks that
+    // unconfirmed, so this run must show that R2 accepts it. 65 MiB is a
+    // create with more parts than the window holds, and an extension that
+    // copies one 64 MiB part and re-sends the rest of the base with the
+    // pieces. The 9 MiB and 65 MiB bases are also copied into new keys,
+    // whole and as a prefix of the extended base, completed with
+    // `If-None-Match: *`. A wrong claim is refused before completion, from
+    // the checksums R2 reports for the copied parts, so nothing lands.
     assert_attested_writes_and_extension(
         &store,
         &[(1024, 30), (9 * MIB, 10 * MIB), (65 * MIB, 30)],
         ChecksumAlgorithm::Crc64nvme,
+        CopyFromBase::Parts,
     )
     .await;
 }
@@ -167,10 +180,14 @@ async fn gcp_gcs_attested_writes_and_extension() {
         key_prefix: Some(config.prefix),
     })
     .expect("create GCP GCS object store");
+    // Each base is composed whole into a new key, held to its generation by
+    // the source precondition; a prefix of the extended base is declined,
+    // and a copy whose CRC-32C claim the compose shows wrong stays in place.
     assert_attested_writes_and_extension(
         &store,
         &[(1024, 30), (9 * MIB, 30)],
         ChecksumAlgorithm::Crc32c,
+        CopyFromBase::WholeObjects,
     )
     .await;
 }
@@ -192,6 +209,7 @@ async fn azure_abs_attested_writes_and_extension() {
         &store,
         &[(1024, 30), (9 * MIB, 30)],
         ChecksumAlgorithm::Crc64nvme,
+        CopyFromBase::Never,
     )
     .await;
 }
@@ -734,16 +752,19 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
 
 /// Pins attested immutable writes and extension on one store, for each case
 /// of a base length and an appended length: a write attests its bytes, an
-/// occupied key is decided by that attestation, and an extension appends
-/// only under the version it names.
+/// occupied key is decided by that attestation, an extension appends only
+/// under the version it names, and a new key is created from a prefix of a
+/// base where the store copies one, as `copy` describes.
 async fn assert_attested_writes_and_extension<S: ObjectStore>(
     store: &S,
     cases: &[(usize, usize)],
     crc: ChecksumAlgorithm,
+    copy: CopyFromBase,
 ) {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     for &(base_length, appended_length) in cases {
         let key = content_blob(&namespace_id, &ContentId::generate());
+        let copy_key = content_blob(&namespace_id, &ContentId::generate());
         let base: Vec<u8> = (0..base_length).map(|index| (index % 251) as u8).collect();
         let pieces: Bytes = (0..appended_length)
             .map(|index| (index % 241) as u8)
@@ -765,6 +786,16 @@ async fn assert_attested_writes_and_extension<S: ObjectStore>(
         ));
 
         let version = current_version(store, &key).await;
+        assert_creates_from_base(
+            store,
+            &copy_key,
+            &key,
+            &version,
+            &pieces,
+            crc,
+            copy.copies(base_length, base_length),
+        )
+        .await;
         let extended = [base.as_slice(), &pieces].concat();
         let result = ExtendedObject {
             sha256: Checksum::sha256(&extended),
@@ -786,6 +817,31 @@ async fn assert_attested_writes_and_extension<S: ObjectStore>(
                 .await,
             Err(ObjectStoreError::PreconditionFailed { .. })
         ));
+        let stale = store
+            .put_immutable_extended(&copy_key, &key, &version, pieces.clone(), &result)
+            .await;
+        if copy.copies(base_length, base_length) {
+            assert!(
+                matches!(stale, Err(ObjectStoreError::PreconditionFailed { .. })),
+                "{stale:?}"
+            );
+        } else {
+            assert!(matches!(stale, Ok(None)), "{stale:?}");
+        }
+        let prefix = ExtendBase {
+            length: version.length,
+            ..current_version(store, &key).await
+        };
+        assert_creates_from_base(
+            store,
+            &copy_key,
+            &key,
+            &prefix,
+            &pieces,
+            crc,
+            copy.copies(extended.len(), base_length),
+        )
+        .await;
 
         let twice = [extended.as_slice(), &pieces].concat();
         let wrong_crc = ExtendedObject {
@@ -804,6 +860,38 @@ async fn assert_attested_writes_and_extension<S: ObjectStore>(
             matches!(refused, Err(ObjectStoreError::ChecksumMismatch { .. })),
             "{refused:?}"
         );
+        let whole = current_version(store, &key).await;
+        let expected_length = match copy {
+            CopyFromBase::WholeObjects => twice.len(),
+            CopyFromBase::Never | CopyFromBase::Parts => extended.len(),
+        };
+        assert_eq!(
+            whole.length as usize, expected_length,
+            "only a compose found wrong after the write leaves the longer object"
+        );
+        let refused = store
+            .put_immutable_extended(&copy_key, &key, &whole, pieces.clone(), &wrong_crc)
+            .await;
+        let whole_length = whole.length as usize;
+        let copied = copy.copies(whole_length, whole_length);
+        if copied {
+            assert!(
+                matches!(refused, Err(ObjectStoreError::ChecksumMismatch { .. })),
+                "{refused:?}"
+            );
+        } else {
+            assert!(matches!(refused, Ok(None)), "{refused:?}");
+        }
+        let left = store.head(&copy_key).await.expect("head");
+        assert_eq!(
+            left.is_some(),
+            copied && copy == CopyFromBase::WholeObjects,
+            "only a compose found wrong after the write leaves its copy: {left:?}"
+        );
+        store
+            .delete(&copy_key)
+            .await
+            .expect("delete what a wrong claim left in place");
         store.delete(&key).await.expect("delete extended object");
     }
     assert!(
@@ -814,6 +902,82 @@ async fn assert_attested_writes_and_extension<S: ObjectStore>(
             .is_empty(),
         "an extension leaves no temporary object behind"
     );
+}
+
+/// Creates `key` from the first `base.length` bytes of `base_key`
+/// followed by `pieces`. A store that `copies` then holds exactly those
+/// bytes under their attestation and refuses to create `key` again; one
+/// that does not answers `None` and creates nothing.
+async fn assert_creates_from_base<S: ObjectStore>(
+    store: &S,
+    key: &str,
+    base_key: &str,
+    base: &ExtendBase,
+    pieces: &Bytes,
+    crc: ChecksumAlgorithm,
+    copies: bool,
+) {
+    let prefix = ByteRange {
+        start_inclusive: 0,
+        end_exclusive: base.length,
+    };
+    let prefix = store
+        .get(base_key, Some(prefix))
+        .await
+        .expect("get the base")
+        .expect("base present");
+    let expected = [prefix.as_ref(), pieces].concat();
+    let result = ExtendedObject {
+        sha256: Checksum::sha256(&expected),
+        crc: Some(Checksum::compute(crc, &expected)),
+    };
+    let created = store
+        .put_immutable_extended(key, base_key, base, pieces.clone(), &result)
+        .await
+        .expect("create from a base");
+    assert_eq!(created.is_some(), copies, "{created:?}");
+    if !copies {
+        assert_eq!(store.head(key).await.expect("head"), None);
+        return;
+    }
+    assert_eq!(
+        store.get(key, None).await.expect("get").as_deref(),
+        Some(expected.as_slice())
+    );
+    let head = store.head(key).await.expect("head").expect("created");
+    assert_eq!(head.sha256, Some(result.sha256.clone()));
+    assert!(matches!(
+        store
+            .put_immutable_extended(key, base_key, base, pieces.clone(), &result)
+            .await,
+        Err(ObjectStoreError::PreconditionFailed { .. })
+    ));
+    store.delete(key).await.expect("delete the created object");
+}
+
+/// How a store creates a new key from a base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyFromBase {
+    /// It declines every base (the local store, Azure Blob Storage).
+    Never,
+    /// It copies any prefix of at least one part and refuses a wrong claim
+    /// before completion (AWS S3, Cloudflare R2).
+    Parts,
+    /// It composes whole objects only, and finds a wrong claim after the
+    /// compose with the copy in place (Google Cloud Storage).
+    WholeObjects,
+}
+
+impl CopyFromBase {
+    /// Whether the store copies a prefix of `prefix` bytes from an object of
+    /// `object` bytes.
+    fn copies(self, object: usize, prefix: usize) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Parts => prefix as u64 >= PROVIDER_MIN_COPIED_PART_BYTES,
+            Self::WholeObjects => object == prefix,
+        }
+    }
 }
 
 async fn current_version<S: ObjectStore>(store: &S, key: &str) -> ExtendBase {

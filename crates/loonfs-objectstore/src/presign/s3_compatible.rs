@@ -177,24 +177,25 @@ impl S3CompatiblePresigner {
         )
     }
 
-    /// Signs `UploadPartCopy` of `source` of the object at `object_key` into
-    /// part `part_number`, copied only while the object's ETag is
-    /// `source_etag` when one is given.
+    /// Signs `UploadPartCopy` of `source` of the object at `source_key` into
+    /// part `part_number` of the upload at `object_key`, copied only while
+    /// the source's ETag is `source_etag` when one is given.
     #[allow(
         clippy::too_many_arguments,
-        reason = "a part copy names its upload, its part, and its source range and version"
+        reason = "a part copy names its upload, its part, and its source object, range, and version"
     )]
     pub(crate) async fn presign_copy_part(
         &self,
         object_key: &str,
         provider_upload_id: &str,
         part_number: u32,
+        source_key: &str,
         source: &ByteRange,
         source_etag: Option<&str>,
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        let scoped_key = scope_object_key(self.config.key_prefix.as_deref(), object_key)?;
+        let scoped_key = scope_object_key(self.config.key_prefix.as_deref(), source_key)?;
         let mut required_headers = BTreeMap::from([
             (
                 S3_COPY_SOURCE_HEADER.to_owned(),
@@ -950,11 +951,13 @@ mod tests {
                 .url
                 .contains(&format!("X-Amz-SignedHeaders=host%3B{header}&")));
         }
+        let base_key = "namespaces/other/content/con_fedcba9876543210fedcba9876543210";
         let copied = signer
             .presign_copy_part(
                 CONTENT_KEY,
                 "upload",
                 2,
+                base_key,
                 &ByteRange {
                     start_inclusive: 0,
                     end_exclusive: 10,
@@ -966,15 +969,13 @@ mod tests {
             .await
             .expect("presign copy");
         for (header, value) in [
-            (
-                "x-amz-copy-source",
-                format!("bucket/tenant-a/{CONTENT_KEY}"),
-            ),
+            ("x-amz-copy-source", format!("bucket/tenant-a/{base_key}")),
             ("x-amz-copy-source-range", "bytes=0-9".to_owned()),
             ("x-amz-copy-source-if-match", "\"base\"".to_owned()),
         ] {
             assert_eq!(copied.headers.get(header), Some(&value));
         }
+        assert!(copied.url.contains(&format!("tenant-a/{CONTENT_KEY}?")));
         assert!(copied.url.contains("partNumber=2&uploadId=upload"));
     }
 

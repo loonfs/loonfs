@@ -101,6 +101,8 @@ pub enum ObjectStoreOperation {
     PutStreamed,
     /// Measures appending pieces to an object under its base version.
     ExtendObject,
+    /// Measures creating an object from a copied base prefix and pieces.
+    PutImmutableExtended,
     /// Measures an idempotent object delete.
     Delete,
     /// Measures opening a client-driven multipart upload.
@@ -127,6 +129,7 @@ impl ObjectStoreOperation {
             Self::Put => "put",
             Self::PutStreamed => "put_streamed",
             Self::ExtendObject => "extend_object",
+            Self::PutImmutableExtended => "put_immutable_extended",
             Self::Delete => "delete",
             Self::CreateMultipartUpload => "create_multipart_upload",
             Self::CompleteMultipartUpload => "complete_multipart_upload",
@@ -580,6 +583,42 @@ where
         sample.bytes_in = Some(bytes_in);
         self.record(sample);
         extended
+    }
+
+    /// A store that cannot copy the base answers `None`, recorded as
+    /// `unsupported`, so the samples show how often the copy is declined.
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>> {
+        let start = sample_clock();
+        let bytes_in = pieces.len() as u64;
+        let (created, attempts) = counting_attempts(
+            self.inner
+                .put_immutable_extended(key, base_key, base, pieces, result),
+        )
+        .await;
+        let class = match &created {
+            Ok(Some(_)) => ObjectStoreResultClass::Ok,
+            Ok(None) => ObjectStoreResultClass::Unsupported,
+            Err(error) => error.class().into(),
+        };
+        let mut sample = ObjectStoreMetricSample::new(
+            ObjectStoreOperation::PutImmutableExtended,
+            key,
+            start.elapsed(),
+            attempts,
+            class,
+            self.store_kind.clone(),
+        );
+        sample.bytes_in = Some(bytes_in);
+        sample.put_mode = Some(PutModeClass::CreateIfAbsent);
+        self.record(sample);
+        created
     }
 
     async fn delete(&self, key: &str) -> Result<()> {

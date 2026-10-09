@@ -42,16 +42,23 @@ pub struct ObjectMetadata {
     pub sha256: Option<Checksum>,
 }
 
-/// The version an [`ObjectStore::extend_object`] call extends.
+/// The version of an object that an extension starts from:
+/// [`ObjectStore::extend_object`] appends to it, and
+/// [`ObjectStore::put_immutable_extended`] copies its first `length` bytes
+/// into a new key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtendBase {
-    /// Length in bytes of the object at that version.
+    /// Length in bytes of the base: the whole object at that version for
+    /// [`ObjectStore::extend_object`], and the prefix copied for
+    /// [`ObjectStore::put_immutable_extended`].
     pub length: u64,
     /// Compare token of that version.
     pub etag: String,
 }
 
-/// What the object holds after an [`ObjectStore::extend_object`] call.
+/// What an extension's result holds: the object after
+/// [`ObjectStore::extend_object`], or the new object
+/// [`ObjectStore::put_immutable_extended`] creates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtendedObject {
     /// SHA-256 of the whole extended object, recorded as its attestation.
@@ -639,11 +646,11 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// A base that no longer matches answers
     /// [`ObjectStoreError::PreconditionFailed`]. `result.crc` is checked
     /// where the provider can check it, and a mismatch answers
-    /// [`ObjectStoreError::ChecksumMismatch`]. Where the provider reports its
-    /// checksum only after the write (Google Cloud Storage, and Cloudflare R2
-    /// for a base it copies), the extended object then stays in place.
-    /// `pieces` is never empty. Stores that cannot extend return
-    /// [`ObjectStoreError::Unsupported`].
+    /// [`ObjectStoreError::ChecksumMismatch`]. AWS S3 and Cloudflare R2 find
+    /// a mismatch before anything is written. Google Cloud Storage reports
+    /// its checksum only after the write, so there the extended object then
+    /// stays in place. `pieces` is never empty. Stores that cannot extend
+    /// return [`ObjectStoreError::Unsupported`].
     async fn extend_object(
         &self,
         key: &str,
@@ -653,6 +660,36 @@ pub trait ObjectStore: Send + Sync + Debug {
     ) -> Result<ObjectMetadata> {
         let _ = (key, base, pieces, result);
         Err(ObjectStoreError::Unsupported("object extension"))
+    }
+
+    /// Creates `key` from the first `base.length` bytes of the object at
+    /// `base_key`, which must still be at the version `base.etag`, followed
+    /// by `pieces`, only while `key` is absent, and records `result.sha256`
+    /// as the new object's attestation.
+    ///
+    /// The provider copies the base's bytes instead of receiving them
+    /// again. An occupied `key`, or a base that no longer holds
+    /// `base.length` bytes under `base.etag`, answers
+    /// [`ObjectStoreError::PreconditionFailed`]. `result.crc` is checked
+    /// where the provider can check it, and a mismatch answers
+    /// [`ObjectStoreError::ChecksumMismatch`]. AWS S3 and Cloudflare R2 find
+    /// a mismatch before anything is written: R2 would complete under a
+    /// wrong claim, so the claim is held to the checksums the provider
+    /// reports for the parts, and the upload is abandoned before completion.
+    /// Google Cloud Storage reports its checksum only after the write, so
+    /// there the new object then stays in place. A store that cannot copy
+    /// this base answers `None` and writes nothing, so the caller sends the
+    /// bytes itself. The default answers `None`.
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>> {
+        let _ = (key, base_key, base, pieces, result);
+        Ok(None)
     }
 
     /// Replaces `key` only while its current opaque token equals `expected_etag`.
@@ -794,6 +831,19 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().extend_object(key, base, pieces, result).await
     }
 
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>> {
+        self.as_ref()
+            .put_immutable_extended(key, base_key, base, pieces, result)
+            .await
+    }
+
     async fn compare_and_swap(
         &self,
         key: &str,
@@ -921,6 +971,19 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         result: &ExtendedObject,
     ) -> Result<ObjectMetadata> {
         (*self).extend_object(key, base, pieces, result).await
+    }
+
+    async fn put_immutable_extended(
+        &self,
+        key: &str,
+        base_key: &str,
+        base: &ExtendBase,
+        pieces: Bytes,
+        result: &ExtendedObject,
+    ) -> Result<Option<ObjectMetadata>> {
+        (*self)
+            .put_immutable_extended(key, base_key, base, pieces, result)
+            .await
     }
 
     async fn compare_and_swap(
