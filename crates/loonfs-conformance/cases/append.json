@@ -1,0 +1,35 @@
+{
+  "name": "append",
+  "intent": "Checks that an append adds bytes to a file as its next revision in the same content object, that the previous revision still reads its own bytes through the proxied read and through a direct download whose signed range leaves out the appended bytes, that a download grant from an offset names the rest of the file, that an empty file downloads directly and an append to it starts a new content object, and that an append of empty content is refused.",
+  "request": {
+    "namespace_id": "conf-append",
+    "path": "/logs/app.log",
+    "empty_path": "/logs/empty.log",
+    "actor_id": "conformance-append",
+    "content_utf8": "first line\n",
+    "appended_utf8": "second line\n",
+    "commit_ids": {
+      "put": "conf-append-put",
+      "append": "conf-append-append",
+      "empty_append": "conf-append-empty-content",
+      "empty_put": "conf-append-empty-file",
+      "append_to_empty": "conf-append-to-empty-file"
+    }
+  },
+  "expected": {
+    "put_committed_seq": 1,
+    "append_committed_seq": 2,
+    "previous_revision_no": 1,
+    "previous_size_bytes": 11,
+    "previous_range": "bytes=0-10",
+    "appended_revision_no": 2,
+    "appended_size_bytes": 23,
+    "resumed_range": "bytes=11-22",
+    "empty_append": {
+      "status": 400,
+      "code": "invalid_request"
+    },
+    "empty_put_committed_seq": 3,
+    "append_to_empty_committed_seq": 4
+  }
+}

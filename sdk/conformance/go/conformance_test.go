@@ -35,6 +35,7 @@ type conformanceCase struct {
 }
 
 var expectedCases = []string{
+	"append",
 	"changes",
 	"children_by_inode",
 	"commit_replay",
@@ -90,6 +91,8 @@ func TestSDKConformance(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.Name, func(t *testing.T) {
 			switch testCase.Name {
+			case "append":
+				runAppend(t, h, testCase)
 			case "children_by_inode":
 				runChildrenByInode(t, h, testCase)
 			case "inode_addressing":
@@ -789,6 +792,201 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	if !bytes.Equal(readback, payload) {
 		t.Error("downloaded content did not match payload")
 	}
+}
+
+type appendRequest struct {
+	NamespaceID  string          `json:"namespace_id"`
+	Path         string          `json:"path"`
+	EmptyPath    string          `json:"empty_path"`
+	ActorID      loonfs.ActorID  `json:"actor_id"`
+	ContentUTF8  string          `json:"content_utf8"`
+	AppendedUTF8 string          `json:"appended_utf8"`
+	CommitIDs    appendCommitIDs `json:"commit_ids"`
+}
+
+type appendCommitIDs struct {
+	Put           string `json:"put"`
+	Append        string `json:"append"`
+	EmptyAppend   string `json:"empty_append"`
+	EmptyPut      string `json:"empty_put"`
+	AppendToEmpty string `json:"append_to_empty"`
+}
+
+type appendExpected struct {
+	PutCommittedSeq           int64               `json:"put_committed_seq"`
+	AppendCommittedSeq        int64               `json:"append_committed_seq"`
+	PreviousRevisionNo        int64               `json:"previous_revision_no"`
+	PreviousSizeBytes         int64               `json:"previous_size_bytes"`
+	PreviousRange             string              `json:"previous_range"`
+	AppendedRevisionNo        int64               `json:"appended_revision_no"`
+	AppendedSizeBytes         int64               `json:"appended_size_bytes"`
+	ResumedRange              string              `json:"resumed_range"`
+	EmptyAppend               errorStatusExpected `json:"empty_append"`
+	EmptyPutCommittedSeq      int64               `json:"empty_put_committed_seq"`
+	AppendToEmptyCommittedSeq int64               `json:"append_to_empty_committed_seq"`
+}
+
+func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
+	t.Helper()
+	request, expected := decodeCaseValues[appendRequest, appendExpected](t, testCase)
+	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
+	ctx := context.Background()
+	actor := option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}})
+	namespaceID := loonfs.NamespaceID(request.NamespaceID)
+	path := loonfs.AbsolutePath(request.Path)
+	content := []byte(request.ContentUTF8)
+	appended := []byte(request.AppendedUTF8)
+
+	put, err := h.client.Files.Upload(ctx, files.UploadInput{
+		NamespaceID: namespaceID, Path: path, Content: content, CommitID: loonfs.CommitID(request.CommitIDs.Put),
+	}, actor)
+	if err != nil {
+		t.Fatalf("put the file to append to: %v", err)
+	}
+	if int64(put.CommittedSeq) != expected.PutCommittedSeq {
+		t.Errorf("put committed_seq = %d, want %d", put.CommittedSeq, expected.PutCommittedSeq)
+	}
+	appendCommit, err := h.client.Files.Append(ctx, files.AppendInput{
+		NamespaceID: namespaceID, Path: path, Content: appended, CommitID: loonfs.CommitID(request.CommitIDs.Append),
+	}, actor)
+	if err != nil {
+		t.Fatalf("append to the file: %v", err)
+	}
+	if int64(appendCommit.CommittedSeq) != expected.AppendCommittedSeq {
+		t.Errorf("append committed_seq = %d, want %d", appendCommit.CommittedSeq, expected.AppendCommittedSeq)
+	}
+
+	stat := requireFileProjection(t, statPath(t, h.client, request.NamespaceID, request.Path))
+	if int64(stat.RevisionNo) != expected.AppendedRevisionNo {
+		t.Errorf("appended revision_no = %d, want %d", stat.RevisionNo, expected.AppendedRevisionNo)
+	}
+	current := downloadFile(t, h.client, request.NamespaceID, request.Path)
+	assertContentRefEqual(t, current.ContentRef, stat.ContentRef)
+	if current.ContentRef.SizeBytes != expected.AppendedSizeBytes {
+		t.Errorf("appended size_bytes = %d, want %d", current.ContentRef.SizeBytes, expected.AppendedSizeBytes)
+	}
+	if !bytes.Equal(current.Content, bytes.Join([][]byte{content, appended}, nil)) {
+		t.Errorf("appended file = %q", current.Content)
+	}
+
+	previousRevision := loonfs.RevisionNo(expected.PreviousRevisionNo)
+	proxied := readSDKFileBytes(t, h.client, &loonfs.GetFileBytesRequest{
+		NamespaceID: request.NamespaceID, Path: request.Path, RevisionNo: &previousRevision,
+	}, "read the previous revision through the server")
+	if !bytes.Equal(proxied, content) {
+		t.Errorf("proxied previous revision = %q, want %q", proxied, content)
+	}
+	grant, err := h.client.Files.CreateDownload(ctx, &loonfs.CreateDownloadRequest{
+		NamespaceID: request.NamespaceID, Path: path, RevisionNo: &previousRevision,
+	})
+	if err != nil {
+		t.Fatalf("grant the previous revision: %v", err)
+	}
+	// The append extended this object, so only the signed range keeps the
+	// appended bytes out of this read.
+	if grant.ContentRef.ContentID != current.ContentRef.ContentID {
+		t.Errorf("previous content_id = %q, want the appended revision's %q", grant.ContentRef.ContentID, current.ContentRef.ContentID)
+	}
+	if grant.ContentRef.SizeBytes != expected.PreviousSizeBytes {
+		t.Errorf("previous size_bytes = %d, want %d", grant.ContentRef.SizeBytes, expected.PreviousSizeBytes)
+	}
+	if signed := signedRange(grant.Access); signed != expected.PreviousRange {
+		t.Errorf("previous signed range = %q, want %q", signed, expected.PreviousRange)
+	}
+	previous, err := h.client.Files.Download(ctx, files.DownloadInput{NamespaceID: namespaceID, Path: path, RevisionNo: &previousRevision})
+	if err != nil {
+		t.Fatalf("download the previous revision: %v", err)
+	}
+	if !bytes.Equal(previous.Content, content) {
+		t.Errorf("downloaded previous revision = %q, want %q", previous.Content, content)
+	}
+
+	startOffset := expected.PreviousSizeBytes
+	resumed, err := h.client.Files.CreateDownload(ctx, &loonfs.CreateDownloadRequest{
+		NamespaceID: request.NamespaceID, Path: path, StartOffset: &startOffset,
+	})
+	if err != nil {
+		t.Fatalf("grant the appended bytes: %v", err)
+	}
+	if signed := signedRange(resumed.Access); signed != expected.ResumedRange {
+		t.Errorf("resumed signed range = %q, want %q", signed, expected.ResumedRange)
+	}
+	if rest := getPresigned(t, resumed.Access); !bytes.Equal(rest, appended) {
+		t.Errorf("resumed download = %q, want %q", rest, appended)
+	}
+
+	if _, err := h.client.Files.Append(ctx, files.AppendInput{
+		NamespaceID: namespaceID, Path: path, CommitID: loonfs.CommitID(request.CommitIDs.EmptyAppend),
+	}, actor); err == nil {
+		t.Fatal("the append helper accepted empty content")
+	}
+	_, err = h.client.Commits.Create(ctx, &loonfs.CommitRequest{
+		NamespaceID: request.NamespaceID,
+		CommitID:    loonfs.CommitID(request.CommitIDs.EmptyAppend),
+		Operations:  []*loonfs.FilesystemOperation{{AppendFile: &loonfs.FilesystemOperationAppendFile{Path: path}}},
+	}, actor)
+	assertBadRequestError(t, err, expected.EmptyAppend)
+
+	emptyPath := loonfs.AbsolutePath(request.EmptyPath)
+	emptyPut, err := h.client.Files.Upload(ctx, files.UploadInput{
+		NamespaceID: namespaceID, Path: emptyPath, Content: []byte{}, CommitID: loonfs.CommitID(request.CommitIDs.EmptyPut),
+	}, actor)
+	if err != nil {
+		t.Fatalf("put an empty file: %v", err)
+	}
+	if int64(emptyPut.CommittedSeq) != expected.EmptyPutCommittedSeq {
+		t.Errorf("empty put committed_seq = %d, want %d", emptyPut.CommittedSeq, expected.EmptyPutCommittedSeq)
+	}
+	emptyGrant, err := h.client.Files.CreateDownload(ctx, &loonfs.CreateDownloadRequest{NamespaceID: request.NamespaceID, Path: emptyPath})
+	if err != nil {
+		t.Fatalf("grant the empty file: %v", err)
+	}
+	if emptyGrant.ContentRef.SizeBytes != 0 {
+		t.Errorf("empty size_bytes = %d", emptyGrant.ContentRef.SizeBytes)
+	}
+	if signed := signedRange(emptyGrant.Access); signed != "" {
+		t.Errorf("empty grant signs range %q", signed)
+	}
+	if empty := downloadFile(t, h.client, request.NamespaceID, request.EmptyPath); len(empty.Content) != 0 {
+		t.Errorf("empty file = %q", empty.Content)
+	}
+
+	appendToEmpty, err := h.client.Files.Append(ctx, files.AppendInput{
+		NamespaceID: namespaceID, Path: emptyPath, Content: appended, CommitID: loonfs.CommitID(request.CommitIDs.AppendToEmpty),
+	}, actor)
+	if err != nil {
+		t.Fatalf("append to the empty file: %v", err)
+	}
+	if int64(appendToEmpty.CommittedSeq) != expected.AppendToEmptyCommittedSeq {
+		t.Errorf("append to empty committed_seq = %d, want %d", appendToEmpty.CommittedSeq, expected.AppendToEmptyCommittedSeq)
+	}
+	filled := downloadFile(t, h.client, request.NamespaceID, request.EmptyPath)
+	if !bytes.Equal(filled.Content, appended) {
+		t.Errorf("appended empty file = %q, want %q", filled.Content, appended)
+	}
+	if filled.ContentRef.ContentID == emptyGrant.ContentRef.ContentID {
+		t.Error("an append to an empty file kept its content_id")
+	}
+	stillEmpty, err := h.client.Files.Download(ctx, files.DownloadInput{NamespaceID: namespaceID, Path: emptyPath, RevisionNo: &previousRevision})
+	if err != nil {
+		t.Fatalf("download the empty revision: %v", err)
+	}
+	if len(stillEmpty.Content) != 0 {
+		t.Errorf("empty revision = %q", stillEmpty.Content)
+	}
+	assertContentRefEqual(t, stillEmpty.ContentRef, emptyGrant.ContentRef)
+}
+
+func signedRange(access *loonfs.ObjectTransferAccess) string {
+	if access == nil || access.PresignedURL == nil {
+		return ""
+	}
+	for name, value := range access.PresignedURL.Headers {
+		if strings.EqualFold(name, "range") {
+			return value
+		}
+	}
+	return ""
 }
 
 type endToEndRequest struct {

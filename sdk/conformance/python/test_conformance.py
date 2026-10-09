@@ -35,6 +35,7 @@ from loonfs.server import (
     Commit,
     CompletedUploadPart,
     ConflictError,
+    FilesystemOperation_AppendFile,
     FilesystemOperation_CopyByInode,
     FilesystemOperation_CreateDirectory,
     FilesystemOperation_CreateDirectoryByInode,
@@ -70,6 +71,7 @@ from loonfs.proxy import LoonFSProxy, ProxyAuthorization, ProxyRefusal, ProxyRou
 
 RUNNER_SKIP = "run scripts/run-sdk-conformance.sh python"
 EXPECTED_CASES = [
+    "append",
     "changes",
     "children_by_inode",
     "commit_replay",
@@ -204,6 +206,41 @@ class DownloadExpected:
     size_bytes: int
     checksum_algorithm: str
     committed_seq: int
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class AppendCommitIds:
+    put: str
+    append: str
+    empty_append: str
+    empty_put: str
+    append_to_empty: str
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class AppendRequest:
+    namespace_id: str
+    path: str
+    empty_path: str
+    actor_id: ActorId
+    content_utf8: str
+    appended_utf8: str
+    commit_ids: AppendCommitIds
+
+
+@pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
+class AppendExpected:
+    put_committed_seq: int
+    append_committed_seq: int
+    previous_revision_no: int
+    previous_size_bytes: int
+    previous_range: str
+    appended_revision_no: int
+    appended_size_bytes: int
+    resumed_range: str
+    empty_append: ErrorStatusExpected
+    empty_put_committed_seq: int
+    append_to_empty_committed_seq: int
 
 
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
@@ -2187,6 +2224,128 @@ def test_download(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         downloaded.content,
     )
     assert downloaded.content == payload
+
+
+def _signed_range(access: Any) -> str | None:
+    for name, value in (access.headers or {}).items():
+        if name.lower() == "range":
+            return value
+    return None
+
+
+def test_append(cases: dict[str, ConformanceCase], harness: Harness) -> None:
+    request, expected = _decode(cases["append"], AppendRequest, AppendExpected)
+    client = harness.client
+    actor = {"additional_headers": {"Loonfs-Actor": request.actor_id}}
+    client.namespaces.create(namespace_id=request.namespace_id, request_options=actor)
+    content = request.content_utf8.encode()
+    appended = request.appended_utf8.encode()
+
+    put = client.files.upload(
+        request.namespace_id,
+        path=request.path,
+        content=content,
+        commit_id=request.commit_ids.put,
+        request_options=actor,
+    )
+    assert put.committed_seq == expected.put_committed_seq
+    append = client.files.append(
+        request.namespace_id,
+        path=request.path,
+        content=appended,
+        commit_id=request.commit_ids.append,
+        request_options=actor,
+    )
+    assert append.committed_seq == expected.append_committed_seq
+
+    stat = _file_entry(client.files.retrieve(request.namespace_id, path=request.path))
+    assert stat.revision_no == expected.appended_revision_no
+    current = client.files.download(request.namespace_id, path=request.path)
+    assert current.content == content + appended
+    assert current.content_ref == stat.content_ref
+    assert current.content_ref.size_bytes == expected.appended_size_bytes
+
+    previous_revision = expected.previous_revision_no
+    proxied = b"".join(
+        client.files.content(
+            request.namespace_id, path=request.path, revision_no=previous_revision
+        )
+    )
+    assert proxied == content
+    grant = client.files.create_download(
+        request.namespace_id, path=request.path, revision_no=previous_revision
+    )
+    # The append extended this object, so only the signed range keeps the
+    # appended bytes out of this read.
+    assert grant.content_ref.content_id == current.content_ref.content_id
+    assert grant.content_ref.size_bytes == expected.previous_size_bytes
+    assert _signed_range(grant.access) == expected.previous_range
+    previous = client.files.download(
+        request.namespace_id, path=request.path, revision_no=previous_revision
+    )
+    assert previous.content == content
+
+    resumed = client.files.create_download(
+        request.namespace_id,
+        path=request.path,
+        start_offset=expected.previous_size_bytes,
+    )
+    assert _signed_range(resumed.access) == expected.resumed_range
+    rest = httpx.get(resumed.access.url, headers=resumed.access.headers or {})
+    rest.raise_for_status()
+    assert rest.content == appended
+
+    with pytest.raises(ValueError):
+        client.files.append(
+            request.namespace_id,
+            path=request.path,
+            content=b"",
+            commit_id=request.commit_ids.empty_append,
+            request_options=actor,
+        )
+    with pytest.raises(BadRequestError) as refused:
+        _apply(
+            client,
+            request.namespace_id,
+            request.commit_ids.empty_append,
+            request.actor_id,
+            FilesystemOperation_AppendFile(path=request.path, inline_content=""),
+        )
+    assert refused.value.status_code == expected.empty_append.status
+    assert refused.value.body.code == expected.empty_append.code
+
+    empty_put = client.files.upload(
+        request.namespace_id,
+        path=request.empty_path,
+        content=b"",
+        commit_id=request.commit_ids.empty_put,
+        request_options=actor,
+    )
+    assert empty_put.committed_seq == expected.empty_put_committed_seq
+    empty_grant = client.files.create_download(
+        request.namespace_id, path=request.empty_path
+    )
+    assert empty_grant.content_ref.size_bytes == 0
+    assert _signed_range(empty_grant.access) is None
+    empty = client.files.download(request.namespace_id, path=request.empty_path)
+    assert empty.content == b""
+
+    append_to_empty = client.files.append(
+        request.namespace_id,
+        path=request.empty_path,
+        content=appended,
+        commit_id=request.commit_ids.append_to_empty,
+        request_options=actor,
+    )
+    assert append_to_empty.committed_seq == expected.append_to_empty_committed_seq
+    filled = client.files.download(request.namespace_id, path=request.empty_path)
+    assert filled.content == appended
+    assert filled.content_ref.content_id != empty_grant.content_ref.content_id
+    still_empty = client.files.download(
+        request.namespace_id, path=request.empty_path, revision_no=previous_revision
+    )
+    assert still_empty.content == b""
+    assert still_empty.content_ref == empty_grant.content_ref
 
 
 def test_prepared_upload_replays_after_a_rename(harness: Harness) -> None:

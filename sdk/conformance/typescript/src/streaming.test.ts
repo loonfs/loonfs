@@ -17,6 +17,7 @@ type Fixture = {
     algorithm: "sha256" | "crc32c" | "crc64nvme";
     checksum: string;
     size_bytes: number;
+    range: string | null;
     error: boolean;
     transport_error?: boolean;
 };
@@ -38,6 +39,8 @@ function fakeFetch(fixture: Fixture, direct: boolean, body: ReadableStream<Uint8
         if (url.pathname === "/object") {
             assert.equal(headers.has("Authorization"), false);
             assert.equal(headers.has("X-Private"), false);
+            assert.ok(fixture.size_bytes > 0, "a grant of zero bytes needs no request");
+            assert.equal(headers.get("range"), fixture.range);
             assert.ok(init?.signal, "direct bytes must use the operation's cancellation signal");
             return new Response(body);
         }
@@ -58,6 +61,7 @@ function fakeFetch(fixture: Fixture, direct: boolean, body: ReadableStream<Uint8
                     kind: "presigned_url",
                     method: "GET",
                     url: "http://objects.test/object",
+                    ...(fixture.range === null ? {} : { headers: { range: fixture.range } }),
                     expires_at_ms: 2000000000000,
                 },
             });
@@ -71,6 +75,7 @@ function fakeFetch(fixture: Fixture, direct: boolean, body: ReadableStream<Uint8
             });
         if (url.pathname.endsWith("/content")) {
             assert.equal(url.searchParams.get("revision_no"), "1");
+            assert.equal(headers.has("range"), false);
             assert.ok(init?.signal, "proxy bytes must use the operation's cancellation signal");
             return new Response(body);
         }

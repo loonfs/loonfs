@@ -4,9 +4,10 @@
 
 use bytes::Bytes;
 use loonfs_client::{
-    AccessState, AttributeChanges, Client, ClientConfig, ClientError, CommitOptions,
-    CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
-    UndeleteDestination, UndeleteOptions, UpdateAttributesByInodeOptions,
+    AccessState, AppendFileOptions, AttributeChanges, Client, ClientConfig, ClientError,
+    CommitOptions, CreateDirectoryOptions, DeleteOptions, DownloadOptions, MoveOptions,
+    NamespacePath, PutFileOptions, UndeleteDestination, UndeleteOptions,
+    UpdateAttributesByInodeOptions,
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
@@ -14,7 +15,7 @@ use loonfs_test_support::ids::{first_page, page_limit};
 use loonfs_types::api::v0::{
     CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
     DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
-    ListSnapshotsResponse, SnapshotSummary, UploadContentClaim, UploadMode,
+    ListSnapshotsResponse, ObjectTransferAccess, SnapshotSummary, UploadContentClaim, UploadMode,
     UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_types::options::DirectMultipartUploadOptions;
@@ -36,6 +37,7 @@ async fn rust_client_matches_the_reference_corpus() {
 
     for case in &cases {
         match case.name.as_str() {
+            "append" => run_append(&harness, case).await,
             "children_by_inode" => run_children_by_inode(&harness, case).await,
             "inode_addressing" => run_inode_addressing(&harness, case).await,
             "inode_mutations" => run_inode_mutations(&harness, case).await,
@@ -717,6 +719,216 @@ async fn stream_grant(
         bytes.extend_from_slice(&chunk);
     }
     bytes
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppendRequest {
+    namespace_id: String,
+    path: String,
+    empty_path: String,
+    actor_id: ActorId,
+    content_utf8: String,
+    appended_utf8: String,
+    commit_ids: AppendCommitIds,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppendCommitIds {
+    put: String,
+    append: String,
+    empty_append: String,
+    empty_put: String,
+    append_to_empty: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppendExpected {
+    put_committed_seq: u64,
+    append_committed_seq: u64,
+    previous_revision_no: u64,
+    previous_size_bytes: u64,
+    previous_range: String,
+    appended_revision_no: u64,
+    appended_size_bytes: u64,
+    resumed_range: String,
+    empty_append: ErrorStatusExpected,
+    empty_put_committed_seq: u64,
+    append_to_empty_committed_seq: u64,
+}
+
+fn append_options(id: &str) -> AppendFileOptions {
+    AppendFileOptions {
+        commit: commit_options(id),
+        ..Default::default()
+    }
+}
+
+fn signed_range(access: &ObjectTransferAccess) -> Option<&str> {
+    let ObjectTransferAccess::PresignedUrl { headers, .. } = access;
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+        .map(|(_, value)| value.as_str())
+}
+
+async fn run_append(harness: &Harness, case: &Case) {
+    let (request, expected) = parse_values::<AppendRequest, AppendExpected>(case);
+    let client = &harness.client;
+    let actor = &request.actor_id;
+    client
+        .create_namespace(&namespace_id(&request.namespace_id), actor)
+        .await
+        .expect("create append namespace");
+    let spec = namespace_path(&request.namespace_id, &request.path);
+    let content = request.content_utf8.as_bytes();
+    let appended = request.appended_utf8.as_bytes();
+
+    let put = client
+        .put_file_with_options(&spec, content, actor, &put_options(&request.commit_ids.put))
+        .await
+        .expect("put the file to append to");
+    assert_eq!(put.committed_seq.0, expected.put_committed_seq);
+    let append = client
+        .append_file_with_options(
+            &spec,
+            appended,
+            actor,
+            &append_options(&request.commit_ids.append),
+        )
+        .await
+        .expect("append to the file");
+    assert_eq!(append.committed_seq.0, expected.append_committed_seq);
+
+    let stat = client.stat(&spec).await.expect("stat the appended file");
+    assert_eq!(
+        stat.revision_no().expect("appended revision").0,
+        expected.appended_revision_no
+    );
+    let current = client
+        .create_download(&spec)
+        .await
+        .expect("grant the appended revision");
+    assert_eq!(stat.content_ref(), Some(&current.content_ref));
+    assert_eq!(current.content_ref.size_bytes, expected.appended_size_bytes);
+    assert_eq!(
+        stream_grant(client, &current).await,
+        [content, appended].concat()
+    );
+
+    let previous_revision = RevisionNo::from(expected.previous_revision_no);
+    let proxied = client
+        .read_file_revision(&spec, previous_revision)
+        .await
+        .expect("read the previous revision through the server");
+    assert_eq!(proxied, content);
+    let previous = client
+        .create_revision_download(&spec, previous_revision)
+        .await
+        .expect("grant the previous revision");
+    // The append extended this object, so only the signed range keeps the
+    // appended bytes out of this read.
+    assert_eq!(
+        previous.content_ref.content_id,
+        current.content_ref.content_id
+    );
+    assert_eq!(
+        previous.content_ref.size_bytes,
+        expected.previous_size_bytes
+    );
+    assert_eq!(
+        signed_range(&previous.access),
+        Some(expected.previous_range.as_str())
+    );
+    assert_eq!(stream_grant(client, &previous).await, content);
+
+    let resumed = client
+        .create_download_with_options(
+            &spec,
+            &DownloadOptions {
+                start_offset: expected.previous_size_bytes,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("grant the appended bytes");
+    assert_eq!(
+        signed_range(&resumed.access),
+        Some(expected.resumed_range.as_str())
+    );
+    let mut stream = client
+        .open_direct_download(&resumed)
+        .await
+        .expect("open the resumed download");
+    stream.fold_resumed_prefix(content);
+    let mut rest = Vec::new();
+    while let Some(chunk) = stream
+        .next_chunk()
+        .await
+        .expect("read the resumed download")
+    {
+        rest.extend_from_slice(&chunk);
+    }
+    assert_eq!(rest, appended);
+
+    let refused = client
+        .append_file_with_options(
+            &spec,
+            &[],
+            actor,
+            &append_options(&request.commit_ids.empty_append),
+        )
+        .await
+        .expect_err("an empty append is refused");
+    assert_api_error(&refused, &expected.empty_append);
+
+    let empty_spec = namespace_path(&request.namespace_id, &request.empty_path);
+    let empty_put = client
+        .put_file_with_options(
+            &empty_spec,
+            &[],
+            actor,
+            &put_options(&request.commit_ids.empty_put),
+        )
+        .await
+        .expect("put an empty file");
+    assert_eq!(empty_put.committed_seq.0, expected.empty_put_committed_seq);
+    let empty = client
+        .create_download(&empty_spec)
+        .await
+        .expect("grant the empty file");
+    assert_eq!(empty.content_ref.size_bytes, 0);
+    assert_eq!(signed_range(&empty.access), None);
+    assert!(stream_grant(client, &empty).await.is_empty());
+
+    let append_to_empty = client
+        .append_file_with_options(
+            &empty_spec,
+            appended,
+            actor,
+            &append_options(&request.commit_ids.append_to_empty),
+        )
+        .await
+        .expect("append to the empty file");
+    assert_eq!(
+        append_to_empty.committed_seq.0,
+        expected.append_to_empty_committed_seq
+    );
+    let filled = client
+        .create_download(&empty_spec)
+        .await
+        .expect("grant the appended empty file");
+    assert_ne!(filled.content_ref.content_id, empty.content_ref.content_id);
+    assert_eq!(stream_grant(client, &filled).await, appended);
+    let still_empty = client
+        .create_revision_download(&empty_spec, previous_revision)
+        .await
+        .expect("grant the empty revision");
+    assert_eq!(still_empty.content_ref, empty.content_ref);
+    assert_eq!(signed_range(&still_empty.access), None);
+    assert!(stream_grant(client, &still_empty).await.is_empty());
 }
 
 #[derive(Debug, Deserialize)]

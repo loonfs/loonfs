@@ -38,6 +38,7 @@ def stream_client(fixture, direct, body):
         "checksum": {"algorithm": fixture["algorithm"], "value": fixture["checksum"]},
     }
     requests = []
+    signed = [fixture["range"]] if fixture.get("range") else []
 
     def handle(request):
         requests.append(request)
@@ -47,6 +48,8 @@ def stream_client(fixture, direct, body):
             assert "authorization" not in request.headers
             assert "x-private" not in request.headers
             assert "cookie" not in request.headers
+            assert fixture["size_bytes"] > 0, "a grant of zero bytes needs no request"
+            assert request.headers.get_list("range") == signed
             return httpx.Response(200, stream=body)
         assert request.headers["authorization"] == "Bearer private-token"
         if path.endswith("/capabilities"):
@@ -56,17 +59,20 @@ def stream_client(fixture, direct, body):
                 "features": {"filesystem.downloads.direct_get": direct},
             }
         elif path.endswith("/downloads"):
+            access = {
+                "kind": "presigned_url",
+                "method": "GET",
+                "url": "http://objects.test/object",
+                "expires_at_ms": 2000000000000,
+            }
+            if signed:
+                access["headers"] = {"range": signed[0]}
             value = {
                 "namespace_id": "demo",
                 "path": "/file",
                 "revision_no": 1,
                 "content_ref": claim,
-                "access": {
-                    "kind": "presigned_url",
-                    "method": "GET",
-                    "url": "http://objects.test/object",
-                    "expires_at_ms": 2000000000000,
-                },
+                "access": access,
             }
         elif path.endswith("/entry"):
             actor = "test"
@@ -86,6 +92,7 @@ def stream_client(fixture, direct, body):
             }
         elif path.endswith("/content"):
             assert request.url.params["revision_no"] == "1"
+            assert "range" not in request.headers
             return httpx.Response(200, stream=body)
         else:
             raise AssertionError(str(request.url))
@@ -118,7 +125,8 @@ def test_streaming_download_conformance(fixture, direct):
                     b"".join(stream)
             else:
                 assert b"".join(stream) == fixture["content"].encode()
-        assert body.closed
+        # A direct grant of zero bytes makes no object request, so no body opens.
+        assert body.closed or (direct and fixture["size_bytes"] == 0)
 
 
 @pytest.mark.parametrize("direct", [False, True])

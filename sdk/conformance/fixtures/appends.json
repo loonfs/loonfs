@@ -1,0 +1,27 @@
+[
+  {
+    "name": "one_byte",
+    "bytes": 1,
+    "sent": true
+  },
+  {
+    "name": "binary",
+    "bytes": 257,
+    "sent": true
+  },
+  {
+    "name": "limit",
+    "bytes": 262144,
+    "sent": true
+  },
+  {
+    "name": "over_limit",
+    "bytes": 262145,
+    "sent": false
+  },
+  {
+    "name": "empty",
+    "bytes": 0,
+    "sent": false
+  }
+]

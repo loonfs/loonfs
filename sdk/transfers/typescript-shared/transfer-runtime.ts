@@ -2,6 +2,7 @@
 type ChecksumAlgorithm = "sha256" | "crc32c" | "crc64nvme";
 const TRANSFER_CHUNK_BYTES = 64 * 1024;
 const MAX_INLINE_BYTES = 64 * 1024;
+const MAX_APPEND_BYTES = 256 * 1024;
 
 interface TransferRequestOptions {
     timeoutInSeconds?: number;
@@ -337,11 +338,7 @@ export class UploadSource {
         let length = 0;
         while (length < bytes.length) {
             const chunk = await this.read(bytes.length - length);
-            if (chunk === undefined) {
-                let binary = "";
-                for (const byte of bytes.subarray(0, length)) binary += String.fromCharCode(byte);
-                return btoa(binary);
-            }
+            if (chunk === undefined) return base64(bytes.subarray(0, length));
             bytes.set(chunk, length);
             length += chunk.length;
         }
@@ -424,6 +421,20 @@ export class UploadSource {
         this.pending = undefined;
         this.prefix = new Uint8Array(0);
     }
+}
+
+function base64(bytes: Uint8Array): string {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+}
+
+/** Base64 of the 1 byte to 256 KiB one append carries; anything else is refused before sending. */
+export function appendContent(bytes: Uint8Array): string {
+    if (bytes.length === 0) throw new Error("append content is empty");
+    if (bytes.length > MAX_APPEND_BYTES)
+        throw new Error(`${bytes.length}-byte append is larger than the ${MAX_APPEND_BYTES}-byte limit`);
+    return base64(bytes);
 }
 
 export function bytesSource(bytes: Uint8Array): UploadContent {
