@@ -2542,7 +2542,10 @@ mod tests {
             .await
             .expect("status of an open session");
         assert!(matches!(open.status, UploadSessionStatus::Open { .. }));
-        assert!(evidence.is_none(), "an open session attests nothing");
+        assert!(
+            evidence.is_none(),
+            "an open session provides no stored checksum evidence"
+        );
 
         complete(&store, &namespace_id, &upload_id, &context(2_000))
             .await
@@ -2581,7 +2584,10 @@ mod tests {
             aborted.status,
             UploadSessionStatus::Aborted { .. }
         ));
-        assert!(evidence.is_none(), "an aborted session attests nothing");
+        assert!(
+            evidence.is_none(),
+            "an aborted session provides no stored checksum evidence"
+        );
     }
 
     #[tokio::test]

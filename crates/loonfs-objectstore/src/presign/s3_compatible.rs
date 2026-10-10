@@ -904,7 +904,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn internal_multipart_requests_sign_their_attestation_condition_and_copy_source() {
+    async fn internal_multipart_requests_sign_their_checksum_condition_and_copy_source() {
         let signer = presigner(Some("tenant-a"), None);
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let ttl = Duration::from_secs(60);

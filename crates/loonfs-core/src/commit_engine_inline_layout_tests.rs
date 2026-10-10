@@ -209,7 +209,7 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
 }
 
 #[tokio::test]
-async fn a_merged_span_must_match_its_objects_attestation() {
+async fn a_merged_span_must_match_its_objects_stored_checksum() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
@@ -249,13 +249,13 @@ async fn a_merged_span_must_match_its_objects_attestation() {
     store.reset();
     let error = fold_wal(&incorrect, &namespace_id)
         .await
-        .expect_err("attestation mismatch");
+        .expect_err("stored checksum mismatch");
     assert!(matches!(error, CoreError::NamespaceCorrupt(message) if message.contains(&key)));
     assert_no_writes(&store);
 }
 
 #[tokio::test]
-async fn a_retry_accepts_an_attested_span_without_changing_it() {
+async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing_it() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];

@@ -569,13 +569,13 @@ async fn a_materialization_transport_failure_remains_retryable() {
         store.clone(),
         KeyPredicate::content_blob(),
         OperationClass::Head,
-        InjectedError::Transport("attestation head failure".to_owned()),
+        InjectedError::Transport("stored checksum head failure".to_owned()),
     );
     failing.fail_all();
     store.reset();
     let error = fold_wal(&failing, &engine.namespace_id)
         .await
-        .expect_err("attestation head failure");
+        .expect_err("stored checksum head failure");
     assert!(
         matches!(
             error,

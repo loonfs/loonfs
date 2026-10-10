@@ -120,13 +120,13 @@ pub(crate) async fn decide_occupied<S: ObjectStore + ?Sized>(
     conflict: ObjectStoreError,
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
     match store.head(key).await {
-        Ok(Some(existing)) => decide_attestation(key, expected, existing),
+        Ok(Some(existing)) => check_stored_checksum(key, expected, existing),
         Ok(None) => Err(transport(key, conflict)),
         Err(error) => Err(transport(key, error)),
     }
 }
 
-pub(crate) fn decide_attestation(
+pub(crate) fn check_stored_checksum(
     key: &str,
     expected: &Checksum,
     existing: ObjectMetadata,
@@ -156,7 +156,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn occupied_keys_require_an_equal_attestation_in_the_same_algorithm() {
+    fn occupied_keys_require_an_equal_stored_checksum_in_the_same_algorithm() {
         let expected = Checksum::crc64nvme(b"bytes");
         let metadata = |checksum| ObjectMetadata {
             etag: None,
@@ -165,15 +165,15 @@ mod tests {
             last_modified_ms: None,
             checksum,
         };
-        assert!(decide_attestation("key", &expected, metadata(Some(expected.clone()))).is_ok());
+        assert!(check_stored_checksum("key", &expected, metadata(Some(expected.clone()))).is_ok());
         for actual in [Checksum::crc64nvme(b"other"), Checksum::crc32c(b"bytes")] {
             assert!(matches!(
-                decide_attestation("key", &expected, metadata(Some(actual))),
+                check_stored_checksum("key", &expected, metadata(Some(actual))),
                 Err(ImmutableWriteError::DifferentObject { .. })
             ));
         }
         assert!(matches!(
-            decide_attestation("key", &expected, metadata(None)),
+            check_stored_checksum("key", &expected, metadata(None)),
             Err(ImmutableWriteError::StoredChecksumMissing { .. })
         ));
     }
