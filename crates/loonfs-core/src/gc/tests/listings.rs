@@ -58,6 +58,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("fork");
@@ -66,6 +67,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         &target,
         DeleteNamespaceOptions::default(),
         &context(1_000),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
     )
     .await
     .expect("delete target");
