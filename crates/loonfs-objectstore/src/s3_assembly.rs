@@ -2,7 +2,6 @@
 
 use super::{assembled_crc64nvme, S3RequestSigner, MULTIPART_CONTROL_TTL};
 use crate::assembly::{check_expected, plan_parts, source_range, READ_BYTES};
-use crate::presign::{base64_crc64nvme, DirectPutIssuer, PresignedPutRequest};
 use crate::provider_object_store::{
     MAX_PROVIDER_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
@@ -127,20 +126,10 @@ impl S3RequestSigner {
         bytes: Bytes,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
-        let mut signed = self
+        let signed = self
             .request_signer
-            .presign_put(
-                PresignedPutRequest {
-                    object_key: key,
-                    expires_in: MULTIPART_CONTROL_TTL,
-                },
-                Self::signing_time(),
-            )
+            .presign_create_checked(key, expected, MULTIPART_CONTROL_TTL, Self::signing_time())
             .await?;
-        signed.headers.insert(
-            "x-amz-checksum-crc64nvme".to_owned(),
-            base64_crc64nvme(expected)?,
-        );
         let size_bytes = bytes.len() as u64;
         let response = self.send_checked(key, signed, bytes.into()).await?;
         let etag = response

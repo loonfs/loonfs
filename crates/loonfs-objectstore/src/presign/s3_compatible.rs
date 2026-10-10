@@ -120,6 +120,33 @@ impl S3CompatiblePresigner {
     /// `GetObjectAttributes` would answer the same question on AWS S3 and
     /// return 501 on Cloudflare R2, so the head is the only portable surface
     /// and the only one this crate signs.
+    /// Signs a create-only PUT whose CRC-64/NVME the provider verifies and
+    /// stores. The checksum header is signed with the create-only header,
+    /// because S3 rejects an `x-amz-` header that is present but unsigned.
+    pub(crate) async fn presign_create_checked(
+        &self,
+        key: &str,
+        checksum: &Checksum,
+        expires_in: Duration,
+        now: SystemTime,
+    ) -> Result<PresignedUrl> {
+        let credentials = self.signing_credentials(expires_in, now).await?;
+        self.presign(
+            &credentials,
+            "PUT",
+            key,
+            BTreeMap::from([
+                (S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned()),
+                (
+                    S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
+                    base64_crc64nvme(checksum)?,
+                ),
+            ]),
+            expires_in,
+            now,
+        )
+    }
+
     pub(crate) async fn presign_head(
         &self,
         object_key: &str,
@@ -779,6 +806,36 @@ mod tests {
             },
         )
         .expect("signer")
+    }
+
+    #[tokio::test]
+    async fn a_checked_create_signs_its_checksum_header_with_the_create_only_header() {
+        let checksum = loonfs_types::Checksum::crc64nvme(b"assembled bytes");
+        let signed = presigner(Some("tenant-a"), None)
+            .presign_create_checked(
+                CONTENT_KEY,
+                &checksum,
+                Duration::from_secs(900),
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .await
+            .expect("presign");
+
+        assert_eq!(signed.method, "PUT");
+        assert_eq!(
+            signed.headers.get("if-none-match").map(String::as_str),
+            Some("*")
+        );
+        assert_eq!(
+            signed
+                .headers
+                .get("x-amz-checksum-crc64nvme")
+                .map(String::as_str),
+            Some(super::base64_crc64nvme(&checksum).expect("base64").as_str())
+        );
+        assert!(signed
+            .url
+            .contains("X-Amz-SignedHeaders=host%3Bif-none-match%3Bx-amz-checksum-crc64nvme"));
     }
 
     #[tokio::test]
