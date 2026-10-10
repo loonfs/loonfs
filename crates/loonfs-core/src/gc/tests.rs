@@ -1314,7 +1314,7 @@ async fn the_wal_tail_roots_inline_content_a_direct_download_wrote_early() {
     )
     .await
     .expect("download target");
-    assert_eq!(target.object_key, key);
+    assert_eq!(target.ranges[0].object_key, key);
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(&store, None, &namespace_id, &options(), &aged)

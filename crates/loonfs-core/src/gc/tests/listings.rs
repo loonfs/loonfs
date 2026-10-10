@@ -48,6 +48,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         .collect();
     assert_eq!(heads, [metadata_manifest_object(&namespace_id, &successor)]);
     let target = NamespaceId::parse("retired-no-heads").expect("target");
+    let merge_memory = Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024));
     fork_namespace(
         &recorded,
         &namespace_id,
@@ -58,7 +59,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &merge_memory,
     )
     .await
     .expect("fork");
@@ -67,7 +68,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         &target,
         DeleteNamespaceOptions::default(),
         &context(1_000),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        merge_memory,
     )
     .await
     .expect("delete target");

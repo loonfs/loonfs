@@ -15,4 +15,4 @@ pub(crate) use materialized_view::{
     ensure_within_read_limit, load_metadata_view, load_metadata_view_for_authorization,
     LoadedMetadataView, ReadLoadContext,
 };
-pub use materialized_view::{DirectDownloadByInodeTarget, DirectDownloadTarget};
+pub use materialized_view::{DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange};

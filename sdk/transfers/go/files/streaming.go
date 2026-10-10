@@ -69,18 +69,11 @@ func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*Downloa
 			return nil, fmt.Errorf("transfers: download grant has no content reference")
 		}
 		result = &DownloadStream{Content: http.NoBody, NamespaceID: grant.NamespaceID, Path: grant.Path, RevisionNo: grant.RevisionNo, ContentRef: grant.ContentRef}
-		// A grant of zero bytes signs no range and needs no request.
-		if grant.ContentRef.SizeBytes != 0 {
-			response, err := sendPresignedWithClient(ctx, c.transferHTTPClient(), grant.Access, http.MethodGet, nil, 0)
-			if err != nil {
-				return nil, err
-			}
-			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				defer response.Body.Close()
-				return nil, responseStatusError(response)
-			}
-			result.Content = response.Body
+		if err := validateDownloadRanges(grant.Ranges, grant.ContentRef.SizeBytes); err != nil {
+			return nil, err
 		}
+		result.Content = &downloadRangeReader{ctx: ctx, client: c.transferHTTPClient(), ranges: grant.Ranges}
+
 	} else {
 		result, err = c.downloadProxiedStream(ctx, in)
 		if err != nil {
@@ -240,4 +233,92 @@ func (r *verifiedReader) Close() error {
 	r.closed = true
 	r.cancel()
 	return r.body.Close()
+}
+
+func validateDownloadRanges(ranges []*loonfs.DownloadRange, sizeBytes int64) error {
+	if len(ranges) == 0 || (sizeBytes == 0 && len(ranges) != 1) {
+		return fmt.Errorf("transfers: download grant has invalid ranges")
+	}
+	var offset int64
+	for _, part := range ranges {
+		if part == nil || part.StartOffset != offset || part.Length < 0 ||
+			(part.Length == 0 && sizeBytes != 0) || part.Length > sizeBytes-offset {
+			return fmt.Errorf("transfers: download grant has invalid ranges")
+		}
+		if part.Access == nil || part.Access.PresignedURL == nil || part.Access.PresignedURL.Method != http.MethodGet {
+			return fmt.Errorf("transfers: download grant must use GET")
+		}
+		offset += part.Length
+	}
+	if offset != sizeBytes {
+		return fmt.Errorf("transfers: download grant has invalid ranges")
+	}
+	return nil
+}
+
+type downloadRangeReader struct {
+	ctx       context.Context
+	client    core.HTTPClient
+	ranges    []*loonfs.DownloadRange
+	body      io.ReadCloser
+	remaining int64
+	closed    bool
+}
+
+func (r *downloadRangeReader) Read(buffer []byte) (int, error) {
+	if r.closed {
+		return 0, io.ErrClosedPipe
+	}
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	for {
+		if r.body == nil {
+			if len(r.ranges) == 0 {
+				return 0, io.EOF
+			}
+			part := r.ranges[0]
+			r.ranges = r.ranges[1:]
+			if part.Length == 0 {
+				continue
+			}
+			response, err := sendPresignedWithClient(r.ctx, r.client, part.Access, http.MethodGet, nil, 0)
+			if err != nil {
+				return 0, err
+			}
+			if response.StatusCode < 200 || response.StatusCode >= 300 {
+				defer response.Body.Close()
+				return 0, responseStatusError(response)
+			}
+			r.body, r.remaining = response.Body, part.Length
+		}
+		n, err := r.body.Read(buffer)
+		r.remaining -= int64(n)
+		if r.remaining < 0 {
+			return 0, fmt.Errorf("transfers: download range exceeded its declared length")
+		}
+		if err == io.EOF {
+			r.body.Close()
+			r.body = nil
+			if r.remaining != 0 {
+				return n, fmt.Errorf("transfers: download range ended before its declared length")
+			}
+			if n == 0 {
+				continue
+			}
+			return n, nil
+		}
+		return n, err
+	}
+}
+
+func (r *downloadRangeReader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	if r.body != nil {
+		return r.body.Close()
+	}
+	return nil
 }

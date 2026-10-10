@@ -71,5 +71,77 @@
     "range": "bytes=0-8",
     "error": true,
     "transport_error": true
+  },
+  {
+    "name": "two_ranges",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "range": "bytes=0-8",
+    "error": false,
+    "range_error": false,
+    "ranges": [
+      {
+        "start_offset": 0,
+        "length": 5,
+        "range": "bytes=7-11",
+        "content": "12345"
+      },
+      {
+        "start_offset": 5,
+        "length": 4,
+        "range": "bytes=2-5",
+        "content": "6789"
+      }
+    ]
+  },
+  {
+    "name": "short_first_range",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "range": "bytes=0-8",
+    "error": false,
+    "range_error": true,
+    "ranges": [
+      {
+        "start_offset": 0,
+        "length": 5,
+        "range": "bytes=7-11",
+        "content": "1234"
+      },
+      {
+        "start_offset": 5,
+        "length": 4,
+        "range": "bytes=2-5",
+        "content": "56789"
+      }
+    ]
+  },
+  {
+    "name": "long_first_range",
+    "content": "123456789",
+    "algorithm": "sha256",
+    "checksum": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "size_bytes": 9,
+    "range": "bytes=0-8",
+    "error": false,
+    "range_error": true,
+    "ranges": [
+      {
+        "start_offset": 0,
+        "length": 5,
+        "range": "bytes=7-11",
+        "content": "123456"
+      },
+      {
+        "start_offset": 5,
+        "length": 4,
+        "range": "bytes=2-5",
+        "content": "789"
+      }
+    ]
   }
 ]

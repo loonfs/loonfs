@@ -112,12 +112,16 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
                 .create_revision_download_by_inode(inode_id, RevisionNo(1))
                 .await
                 .expect("inode download")
+                .ranges
+                .remove(0)
                 .object_key
         } else {
             namespace
                 .create_download("/file")
                 .await
                 .expect("path download")
+                .ranges
+                .remove(0)
                 .object_key
         };
         assert_eq!(recording.count(OperationClass::Put), 1);

@@ -312,7 +312,7 @@ The full registry (`ErrorCode` in `loonfs-types`):
 | `server_busy` | 503 | The server is at its configured concurrency limit for requests, proxied upload bodies, or proxied content reads; back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit may still land after this response; reconcile it by commit id before retrying. |
-| `content_not_materialized` | 503 | The file is committed, but a direct download requires a content object that this deployment cannot create. Read through the proxied content route, or retry after a fold writes the object. |
+| `content_not_materialized` | 503 | The file is committed, but this deployment cannot write its pending content pieces for a direct download. Read through the proxied content route, or retry after a fold writes the pieces. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: the pin exists but its manifest is gone, pin creation could not verify its basis, or a metadata publication ran past its budget before publishing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. The WAL write-stop threshold refuses new commits. A commit id the namespace already knows is still answered from its receipt. |
 | `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget. Run maintenance or set `allow_stale`, then retry. |
@@ -2925,12 +2925,12 @@ bypass that service limit and keep object traffic off the server. So
 any direct write — the read is not a separate decision, and a deployment
 that offers none of them cannot have created such a file in the first place.
 
-A direct download requires one object that holds the revision's bytes.
-A revision of a chain that starts in the tail is served from the chain's object,
-written first as a fold would when it is absent. A revision whose bytes lie in
-several objects, or follow an object the tail extends, returns
-`content_not_materialized`. The proxied content route reads both.
-A zero-byte reference writes its empty whole object when absent and signs it.
+A direct download grants one signed range per immutable extent. Pending WAL
+pieces are written as the chain's next extent through the same writer a fold
+uses. Existing objects are never rewritten. `content_not_materialized` means
+only that the deployment cannot write the pending pieces. A chain that starts
+in the tail reuses its whole object when that object covers the reference.
+A zero-byte reference writes its empty whole object when absent.
 
 `POST /v0/namespaces/{ns}/filesystem/downloads` takes a path and, optionally,
 the revision to read and the first byte to read in its JSON body:
@@ -2956,13 +2956,17 @@ checks the arriving bytes against:
     "size_bytes": 314572800,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
   },
-  "access": {
-    "kind": "presigned_url",
-    "method": "GET",
-    "url": "https://bucket.s3.us-east-1.amazonaws.com/...&X-Amz-Signature=...",
-    "headers": { "range": "bytes=1048576-314572799" },
-    "expires_at_ms": 1780000000000
-  }
+  "ranges": [{
+    "start_offset": 1048576,
+    "length": 313524224,
+    "access": {
+      "kind": "presigned_url",
+      "method": "GET",
+      "url": "https://bucket.s3.us-east-1.amazonaws.com/...&X-Amz-Signature=...",
+      "headers": { "range": "bytes=1048576-314572799" },
+      "expires_at_ms": 1780000000000
+    }
+  }]
 }
 ```
 
@@ -2983,13 +2987,17 @@ parameter, and its response does not include a path:
     "size_bytes": 314572800,
     "checksum": { "algorithm": "sha256", "value": "42d..." }
   },
-  "access": {
-    "kind": "presigned_url",
-    "method": "GET",
-    "url": "https://bucket.s3.us-east-1.amazonaws.com/...&X-Amz-Signature=...",
-    "headers": { "range": "bytes=0-314572799" },
-    "expires_at_ms": 1780000000000
-  }
+  "ranges": [{
+    "start_offset": 0,
+    "length": 314572800,
+    "access": {
+      "kind": "presigned_url",
+      "method": "GET",
+      "url": "https://bucket.s3.us-east-1.amazonaws.com/...&X-Amz-Signature=...",
+      "headers": { "range": "bytes=0-314572799" },
+      "expires_at_ms": 1780000000000
+    }
+  }]
 }
 ```
 
@@ -3006,37 +3014,30 @@ renames and returns `inode_not_found` once it is deleted.
 
 Five properties follow from the shape, and clients may rely on all of them.
 
-**The grant names exactly `[start_offset, size_bytes)` of one object.**
-`content_ref.size_bytes` bytes from the start of the object are the
-revision's bytes, and they never change. A commit that replaces the file
-writes a new content object and leaves this one alone, and an append adds
-bytes after the end of an object without changing the bytes before it. So an
-issued capability does not go stale when the path moves on, and it reads the
-revision it was issued for rather than whatever is current when it is used.
+**The grant names exactly `[start_offset, size_bytes)` as ordered ranges.**
+The ranges are contiguous and ascending. Their lengths sum to
+`size_bytes - start_offset`. Each names bytes in an immutable object. Later
+commits and appends do not change those bytes.
 
-**A client sends the headers as given.** The capability signs
-`Range: bytes={start_offset}-{size_bytes - 1}`, and `access.headers` carries
-that header. A client sends `access.headers` unchanged and adds no `Range` of
-its own. The object can be longer than the revision, and the provider
-refuses any other range, so a capability for a revision never reads the
-bytes an append adds after it. A client still treats a longer response as a
-failure. A revision of zero bytes has one grant, from offset 0, which signs
-no range: there is no byte to name, and an object of zero bytes is never
-extended. Such a grant needs no request.
+**A client sends each range's headers as given.** Each range's `access.headers`
+carries the signed `Range` for its object. The object offset can differ from
+`start_offset`, which is an offset in the revision. The client sends the headers
+unchanged and adds no range of its own. It checks each response's length against
+that range's `length`. A zero-byte revision has one range at offset 0, of length
+0, whose access signs no `Range` header. It needs no object request.
 
-**To resume, ask for a new grant.** One grant serves one range. A client
-that holds the first `n` bytes asks for a grant with `start_offset` `n`.
-`start_offset` at or past `size_bytes` answers `invalid_request` with `param`
-`start_offset`, so a client that holds every byte asks for nothing.
+**To resume, ask for a new grant.** A client that holds the first `n` bytes asks
+for a grant with `start_offset` `n`. An offset at or past `size_bytes` answers
+`invalid_request` with `param` `start_offset`, except offset 0 for a zero-byte
+revision. A client that holds every byte asks for nothing.
 
-**The client verifies the complete file.** It checks the byte length and
-recomputes the algorithm in `content_ref.checksum`. This applies to SHA-256,
-CRC-64/NVME, and CRC-32C, including downloads resumed from an offset, whose
-client folds the bytes it already holds into the check. A mismatch fails the
-download.
+**The client verifies the complete file across ranges.** It reads the ranges in
+order and checks the complete byte length and `content_ref.checksum`. This
+applies to SHA-256, CRC-64/NVME, and CRC-32C. A resumed download includes the held
+prefix in the same checksum. A mismatch fails the download.
 
-**The raw object key is never exposed.** A client learns a URL that expires,
-the same way a `direct_put` client does.
+**The raw object keys are never exposed.** Each range carries a URL that expires,
+as a direct upload does.
 
 The capability is short-lived — a transfer's worth of time, not a session's.
 A reader that runs out of time asks for another grant from the byte it
@@ -3614,9 +3615,9 @@ none is supplied. TypeScript uses `timeoutInSeconds` (client default, otherwise
 request/client HTTPX timeout for I/O waits on both transports; its synchronous
 iterator closes the response on early exit from a `with` block. The async iterator
 uses an `async with` block. API authorization, cookies and API headers are not
-copied into presigned object-store requests. A direct request sends the grant's
-`access.headers` unchanged and adds no `Range`, and a grant of zero bytes makes
-no request.
+copied into presigned object-store requests. Each direct request sends its
+range's `access.headers` unchanged and adds no `Range`. The helpers check each response's length and one checksum across all
+ranges. A grant of zero bytes makes no request.
 
 ### SDK streaming uploads
 

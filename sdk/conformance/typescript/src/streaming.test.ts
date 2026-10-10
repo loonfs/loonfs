@@ -20,6 +20,8 @@ type Fixture = {
     range: string | null;
     error: boolean;
     transport_error?: boolean;
+    range_error?: boolean;
+    ranges?: { start_offset: number; length: number; range: string; content: string }[];
 };
 const fixtures: Fixture[] = JSON.parse(
     readFileSync(join(__dirname, "../../../../../fixtures/streaming_downloads.json"), "utf8"),
@@ -27,15 +29,22 @@ const fixtures: Fixture[] = JSON.parse(
 
 function fakeFetch(fixture: Fixture, direct: boolean, body: ReadableStream<Uint8Array>): typeof fetch {
     const claim = {
-        kind: "blob",
+        kind: "blob_v1",
         owner_namespace_id: "demo",
-        content_id: "cnt_00000000000000000000000000000001",
+        content_id: "con_00000000000000000000000000000001",
         size_bytes: fixture.size_bytes,
         checksum: { algorithm: fixture.algorithm, value: fixture.checksum },
     };
     return (async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(input instanceof Request ? input.url : input.toString());
         const headers = new Headers(init?.headers);
+        if (url.pathname.startsWith("/object/")) {
+            const part = fixture.ranges![Number(url.pathname.split("/").pop())]!;
+            assert.equal(headers.has("Authorization"), false);
+            assert.equal(headers.has("X-Private"), false);
+            assert.equal(headers.get("range"), part.range);
+            return new Response(part.content);
+        }
         if (url.pathname === "/object") {
             assert.equal(headers.has("Authorization"), false);
             assert.equal(headers.has("X-Private"), false);
@@ -57,13 +66,17 @@ function fakeFetch(fixture: Fixture, direct: boolean, body: ReadableStream<Uint8
                 path: "/file",
                 revision_no: 1,
                 content_ref: claim,
-                access: {
+                ranges: fixture.ranges?.map((part, index) => ({
+                    start_offset: part.start_offset, length: part.length,
+                    access: { kind: "presigned_url", method: "GET", url: `http://objects.test/object/${index}`,
+                              headers: { range: part.range }, expires_at_ms: 2000000000000 },
+                })) ?? [{ start_offset: 0, length: fixture.size_bytes, access: {
                     kind: "presigned_url",
                     method: "GET",
                     url: "http://objects.test/object",
                     ...(fixture.range === null ? {} : { headers: { range: fixture.range } }),
                     expires_at_ms: 2000000000000,
-                },
+                } }],
             });
         if (url.pathname.endsWith("/entry"))
             return Response.json({
@@ -116,7 +129,7 @@ for (const browser of [false, true])
                       });
                 assert.equal(reads, 0, "opening must not consume the response body");
                 const collected = new Response(stream.content).text();
-                if (fixture.error) await assert.rejects(collected);
+                if (fixture.error || (direct && fixture.range_error)) await assert.rejects(collected);
                 else assert.equal(await collected, fixture.content);
             });
         }

@@ -63,6 +63,12 @@ and body reads; without one, the operation has a 60-second deadline. Direct and
 proxied transfers use the configured HTTP client and the same context. Direct
 requests carry only the presigned headers, and do not follow redirects.
 
+Direct download grants contain ordered `ranges`. Each range carries its revision
+`start_offset`, `length`, and signed `access`. The helpers send each range's
+headers unchanged, check its length, and verify one checksum across the complete
+file. To resume through the grant API, request a new grant from the held byte
+count and include the held prefix when verifying the complete file.
+
 `client.Files.Download` collects that stream into memory. `client.Files.Upload`
 accepts an in-memory byte slice through the same transfer path.
 `client.Files.PrepareStream(ctx, namespaceID, reader, sizeBytes)` consumes an

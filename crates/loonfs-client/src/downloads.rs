@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
-use std::collections::BTreeMap;
+use loonfs_types::api::v0::DownloadRange;
 
 /// Options for a download of a file's content by path or by inode.
 ///
@@ -28,9 +28,12 @@ pub struct DownloadOptions {
 /// any streaming read whose digest cannot be known until the end.
 pub struct DirectDownloadStream {
     body: payload::PayloadStream,
+    client: Client,
+    ranges: std::collections::VecDeque<DownloadRange>,
+    range_remaining: u64,
     expected: ContentRef,
     target: String,
-    /// Running checksum for the complete object.
+    /// Running checksum for the complete revision.
     digest: StreamingChecksum,
     size_bytes: u64,
     /// Requested starting offset. Zero means a complete download.
@@ -48,7 +51,7 @@ impl DirectDownloadStream {
 
     /// Adds existing prefix bytes to the checksum for a resumed download.
     ///
-    /// The caller must provide bytes in order from the start of the object.
+    /// The caller must provide bytes in order from the start of the revision.
     /// Incorrect prefix bytes cause final checksum verification to fail.
     pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) {
         self.digest.update(bytes);
@@ -56,12 +59,12 @@ impl DirectDownloadStream {
     }
 
     /// Returns the next response-body chunk, or `None` once the complete
-    /// object has passed its declared-length and whole-file digest checks.
+    /// revision has passed its length and checksum checks.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
         if self.prefix_folded != self.resumed_from {
             return Err(ClientError::Http(format!(
                 "a download of `{}` resumed at offset {} was given {} bytes of what it \
-                 skipped; verification covers the whole object, so all of them are needed \
+                 skipped; verification covers the whole revision, so all of them are needed \
                  first",
                 self.target, self.resumed_from, self.prefix_folded
             )));
@@ -69,53 +72,71 @@ impl DirectDownloadStream {
         if self.finished {
             return Ok(None);
         }
-        match self.body.next().await {
-            Some(Ok(chunk)) => {
-                self.size_bytes = self.size_bytes.saturating_add(chunk.len() as u64);
-                if self.size_bytes > self.expected.size_bytes {
+        loop {
+            match self.body.next().await {
+                Some(Ok(chunk)) => {
+                    let length = chunk.len() as u64;
+                    if length > self.range_remaining {
+                        self.finished = true;
+                        return Err(ClientError::Protocol(format!(
+                            "direct read of `{}` exceeded the range length the grant named",
+                            self.target
+                        )));
+                    }
+                    self.range_remaining -= length;
+                    self.size_bytes += length;
+                    self.digest.update(&chunk);
+                    return Ok(Some(chunk));
+                }
+                Some(Err(error)) => {
                     self.finished = true;
-                    return Err(ClientError::Protocol(format!(
-                        "direct download of `{}` sent more than the {} bytes the grant named",
-                        self.target, self.expected.size_bytes
+                    return Err(ClientError::Io(format!(
+                        "read of `{}` failed: {error}",
+                        self.target
                     )));
                 }
-                self.digest.update(&chunk);
-                Ok(Some(chunk))
-            }
-            Some(Err(error)) => {
-                self.finished = true;
-                Err(ClientError::Io(format!(
-                    "read of `{}` failed: {error}",
-                    self.target
-                )))
-            }
-            None => {
-                self.finished = true;
-                if self.size_bytes != self.expected.size_bytes {
-                    return Err(ClientError::Protocol(format!(
-                        "direct download of `{}` ended after {} bytes, not the {} the grant named",
-                        self.target, self.size_bytes, self.expected.size_bytes
-                    )));
+                None => {
+                    if self.range_remaining != 0 {
+                        self.finished = true;
+                        return Err(ClientError::Protocol(format!(
+                            "direct read of `{}` lacks {} bytes from the range the grant named",
+                            self.target, self.range_remaining
+                        )));
+                    }
+                    if let Some(range) = self.ranges.pop_front() {
+                        self.finished = true;
+                        self.body = self.client.open_download_range(&range).await?;
+                        self.range_remaining = range.length;
+                        self.finished = false;
+                        continue;
+                    }
+                    self.finished = true;
+                    if self.size_bytes != self.expected.size_bytes {
+                        return Err(ClientError::Protocol(format!(
+                            "direct download of `{}` ended after {} bytes, not the {} the grant named",
+                            self.target, self.size_bytes, self.expected.size_bytes
+                        )));
+                    }
+                    let expected = &self.expected.checksum;
+                    // Finalizing consumes the checksum state. `finished` prevents
+                    // this branch from running again.
+                    let observed = std::mem::replace(
+                        &mut self.digest,
+                        StreamingChecksum::for_algorithm(expected.algorithm),
+                    )
+                    .finish();
+                    if observed != *expected {
+                        return Err(ClientError::Protocol(format!(
+                            "direct download of `{}` produced {}:{}, not the {}:{} the grant named",
+                            self.target,
+                            observed.algorithm,
+                            observed.value,
+                            expected.algorithm,
+                            expected.value
+                        )));
+                    }
+                    return Ok(None);
                 }
-                let expected = &self.expected.checksum;
-                // Finalizing consumes the checksum state. `finished` prevents
-                // this branch from running again.
-                let observed = std::mem::replace(
-                    &mut self.digest,
-                    StreamingChecksum::for_algorithm(expected.algorithm),
-                )
-                .finish();
-                if observed != *expected {
-                    return Err(ClientError::Protocol(format!(
-                        "direct download of `{}` produced {}:{}, not the {}:{} the grant named",
-                        self.target,
-                        observed.algorithm,
-                        observed.value,
-                        expected.algorithm,
-                        expected.value
-                    )));
-                }
-                Ok(None)
             }
         }
     }
@@ -188,8 +209,7 @@ impl Client {
             snapshot_id: options.snapshot_id.clone(),
             start_offset: options.start_offset,
         };
-        // A grant creates nothing and names nothing new, so asking twice
-        // costs two URLs and changes no state: this one may be resent.
+        // Repeating the request writes only the same immutable extent bytes.
         self.request_json::<_, CreateDownloadResponse>(
             self.post(&url),
             Some(&request),
@@ -294,16 +314,16 @@ impl Client {
 
     /// Opens a download grant, sending the headers it carries unchanged.
     ///
-    /// The grant names `[start_offset, size_bytes)` of one object and the
+    /// The grant names `[start_offset, size_bytes)` of the revision and the
     /// stream starts where it does. For a grant from a nonzero offset, call
     /// [`DirectDownloadStream::fold_resumed_prefix`] with the bytes below it
-    /// before reading, so the final checksum covers the complete object.
+    /// before reading, so the final checksum covers the complete revision.
     pub async fn open_direct_download(
         &self,
         download: &CreateDownloadResponse,
     ) -> Result<DirectDownloadStream> {
         self.open_direct_download_target(
-            &download.access,
+            &download.ranges,
             &download.content_ref,
             download.path.to_string(),
         )
@@ -316,7 +336,7 @@ impl Client {
         download: &CreateDownloadByInodeResponse,
     ) -> Result<DirectDownloadStream> {
         self.open_direct_download_target(
-            &download.access,
+            &download.ranges,
             &download.content_ref,
             format!(
                 "inode {} revision {}",
@@ -329,39 +349,23 @@ impl Client {
 
     async fn open_direct_download_target(
         &self,
-        access: &ObjectTransferAccess,
+        ranges: &[DownloadRange],
         content_ref: &ContentRef,
         target: String,
     ) -> Result<DirectDownloadStream> {
-        let ObjectTransferAccess::PresignedUrl {
-            method,
-            url,
-            headers,
-            ..
-        } = access;
-        if method != "GET" {
-            return Err(ClientError::Protocol(format!(
-                "unsupported presigned download method `{method}`"
-            )));
-        }
-        let start_offset = granted_start(headers, content_ref, &target)?;
-        // A grant of zero bytes signs no range and needs no request.
-        let body = if start_offset == content_ref.size_bytes {
-            futures::stream::empty().boxed()
-        } else {
-            let mut request = WireRequest::presigned(http::Method::GET, url);
-            for (name, value) in headers {
-                request = request.header(name, value);
-            }
-            self.call_for_response_stream(&request).await?
-        };
+        let start_offset = granted_start(ranges, content_ref, &target)?;
+        let (first, remaining) = ranges
+            .split_first()
+            .expect("validated grant should contain a range");
+        let body = self.open_download_range(first).await?;
         Ok(DirectDownloadStream {
             body,
+            client: self.clone(),
+            ranges: remaining.iter().cloned().collect(),
+            range_remaining: first.length,
             expected: content_ref.clone(),
             target,
             digest: StreamingChecksum::for_algorithm(content_ref.checksum.algorithm),
-            // The counter measures the whole object, not this response, so
-            // the length check at the end lands where it always did.
             size_bytes: start_offset,
             resumed_from: start_offset,
             prefix_folded: 0,
@@ -369,27 +373,24 @@ impl Client {
         })
     }
 
-    /// Streams a granted object's bytes into `sink`, checking them against
-    /// the reference the grant carried, and reports how many arrived.
+    async fn open_download_range(&self, range: &DownloadRange) -> Result<payload::PayloadStream> {
+        if range.length == 0 {
+            return Ok(futures::stream::empty().boxed());
+        }
+        let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &range.access;
+        let mut request = WireRequest::presigned(http::Method::GET, url);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        self.call_for_response_stream(&request).await
+    }
+
+    /// Streams the granted ranges into `sink` and verifies the complete revision.
     ///
-    /// The grant must read from byte 0, since the check covers the whole
-    /// object. A grant from a later offset, which resumes a download, is
-    /// refused before any request. Resume with [`Self::open_direct_download`]
+    /// Requires a grant from offset 0. Resume with [`Self::open_direct_download`]
     /// and [`DirectDownloadStream::fold_resumed_prefix`] instead.
-    ///
-    /// The payload is never held: each chunk is hashed and written as it
-    /// arrives, so this costs one chunk of memory whatever the object's
-    /// length. That is the entire reason the grant exists — a file past the
-    /// deployment's proxy cap has no other way home.
-    ///
-    /// Verification is what keeps a direct read no weaker than a proxied
-    /// one: length and the reference's complete-payload checksum are checked
-    /// for every supported algorithm.
-    ///
-    /// A failure is reported *after* the sink has already received bytes,
-    /// because that is the only order a streamed read allows. Callers must
-    /// treat the sink as provisional until this returns: write to a
-    /// temporary and install it on success.
+    /// The bytes are hashed and written as they arrive. Callers must treat the
+    /// sink as provisional until this returns successfully.
     pub async fn download_via_presigned_url<W>(
         &self,
         download: &CreateDownloadResponse,
@@ -400,8 +401,7 @@ impl Client {
     {
         use tokio::io::AsyncWriteExt as _;
         let path = &download.path;
-        let ObjectTransferAccess::PresignedUrl { headers, .. } = &download.access;
-        let start_offset = granted_start(headers, &download.content_ref, path.as_str())?;
+        let start_offset = granted_start(&download.ranges, &download.content_ref, path.as_str())?;
         if start_offset != 0 {
             return Err(ClientError::Protocol(format!(
                 "the grant for `{path}` starts at offset {start_offset}; \
@@ -424,34 +424,32 @@ impl Client {
     }
 }
 
-/// The first byte a grant reads: the start of the `Range` it signed, which
-/// ends at the reference's last byte, or 0 for a grant that signs none.
-fn granted_start(
-    headers: &BTreeMap<String, String>,
-    content_ref: &ContentRef,
-    target: &str,
-) -> Result<u64> {
-    let Some((_, range)) = headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("range"))
-    else {
-        return Ok(0);
-    };
-    let granted = range
-        .strip_prefix("bytes=")
-        .and_then(|range| range.split_once('-'))
-        .and_then(|(first, last)| Some((first.parse::<u64>().ok()?, last.parse::<u64>().ok()?)));
-    match granted {
-        Some((first, last))
-            if first <= last && last.checked_add(1) == Some(content_ref.size_bytes) =>
-        {
-            Ok(first)
-        }
-        _ => Err(ClientError::Protocol(format!(
-            "the grant for `{target}` signs `range: {range}`, which does not end at its {} bytes",
-            content_ref.size_bytes
-        ))),
+fn granted_start(ranges: &[DownloadRange], content_ref: &ContentRef, target: &str) -> Result<u64> {
+    let invalid = || ClientError::Protocol(format!("the grant for `{target}` has invalid ranges"));
+    let first = ranges.first().ok_or_else(invalid)?;
+    let start = first.start_offset;
+    if (content_ref.size_bytes == 0 && (start != 0 || ranges.len() != 1))
+        || (content_ref.size_bytes != 0 && start >= content_ref.size_bytes)
+    {
+        return Err(invalid());
     }
+    let mut offset = start;
+    for range in ranges {
+        let ObjectTransferAccess::PresignedUrl { method, .. } = &range.access;
+        if method != "GET" {
+            return Err(ClientError::Protocol(format!(
+                "unsupported presigned download method `{method}`"
+            )));
+        }
+        if range.start_offset != offset || (range.length == 0 && content_ref.size_bytes != 0) {
+            return Err(invalid());
+        }
+        offset = offset.checked_add(range.length).ok_or_else(invalid)?;
+    }
+    if offset != content_ref.size_bytes {
+        return Err(invalid());
+    }
+    Ok(start)
 }
 
 #[cfg(test)]

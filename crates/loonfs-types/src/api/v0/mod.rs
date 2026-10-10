@@ -11,7 +11,9 @@ mod search;
 mod uploads;
 
 pub use commits::{Commit, DirectoryBinding, FilesystemChange, ListChangesResponse};
-pub use downloads::{CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse};
+pub use downloads::{
+    CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse, DownloadRange,
+};
 pub use operations::{
     validate_access_precondition, validate_attributes_precondition, AdvanceRetentionRequest,
     AdvanceRetentionResponse, ApiError, Checkpoint, CheckpointOwnerSummary, CommitPrecondition,

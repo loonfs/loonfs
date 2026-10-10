@@ -244,7 +244,7 @@ async fn assert_direct_get_returns_the_written_bytes(
         .create_download(target)
         .await
         .expect("begin download");
-    let ObjectTransferAccess::PresignedUrl { method, .. } = &grant.access;
+    let ObjectTransferAccess::PresignedUrl { method, .. } = &grant.ranges[0].access;
     assert_eq!(method, "GET");
     assert_eq!(grant.content_ref.size_bytes, bytes.len() as u64);
 
@@ -273,7 +273,7 @@ async fn assert_direct_get_capability_serves_only_its_range(
         .create_download(target)
         .await
         .expect("begin download");
-    let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
+    let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.ranges[0].access;
     let whole = format!("bytes=0-{}", bytes.len() - 1);
     assert_eq!(headers.get("range"), Some(&whole));
     assert_eq!(fetch_range(url, 0, bytes.len() - 1), bytes);
@@ -297,7 +297,7 @@ async fn assert_direct_get_capability_serves_only_its_range(
         )
         .await
         .expect("a grant from the resume offset");
-    let ObjectTransferAccess::PresignedUrl { url, .. } = &rest.access;
+    let ObjectTransferAccess::PresignedUrl { url, .. } = &rest.ranges[0].access;
     assert_eq!(fetch_range(url, split, bytes.len() - 1), &bytes[split..]);
 }
 
