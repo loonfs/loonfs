@@ -11,7 +11,7 @@
   "expected": {
     "mode": "direct_put",
     "size_bytes": 26,
-    "checksum_algorithm": "sha256",
+    "checksum_algorithm": "crc64nvme",
     "committed_seq": 1,
     "begin_status": "open"
   }

@@ -18,7 +18,7 @@ fn creates_content(operation: &RecordedOperation) -> bool {
         operation,
         RecordedOperation::Put { .. }
             | RecordedOperation::PutImmutableStream { .. }
-            | RecordedOperation::PutImmutableExtended { .. }
+            | RecordedOperation::Assemble { .. }
     ) && family(operation) == Some(DurableObjectFamily::ContentBlob)
 }
 

@@ -12,8 +12,8 @@ use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::ListedObject;
 use crate::{
-    ByteRange, ByteStream, ConfiguredObjectStoreKind, ExtendBase, ExtendedObject, MultipartPart,
-    ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    AssemblySource, ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartPart, ObjectBody,
+    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -181,6 +181,7 @@ pub(crate) enum CompareToken {
 
 #[async_trait]
 pub(crate) trait StoredChecksumReader: Send + Sync {
+    async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>>;
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>>;
 }
 
@@ -199,7 +200,7 @@ pub(crate) fn attested_sha256(value: &str) -> Option<Checksum> {
 
 /// The provider's own multi-request writes, sent as requests this crate
 /// signs: client-driven multipart uploads, large conditional creates, and
-/// extensions.
+/// assemblies.
 #[async_trait]
 pub(crate) trait MultipartController: Send + Sync {
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
@@ -242,27 +243,13 @@ pub(crate) trait MultipartController: Send + Sync {
         part_window: usize,
     ) -> Result<ObjectMetadata>;
 
-    /// Extends `key` without moving its base through this process, or
-    /// answers `None` when the provider must rewrite this base instead.
-    async fn extend_object(
+    async fn assemble(
         &self,
         key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>>;
-
-    /// Creates `key` from a prefix of the object at `base_key` without
-    /// moving it through this process, or answers `None` when the provider
-    /// cannot copy this base.
-    async fn put_immutable_extended(
-        &self,
-        key: &str,
-        base_key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>>;
+        sources: &[AssemblySource],
+        tail: Bytes,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata>;
 }
 
 /// Adapts the upstream `object_store` provider surface to the narrower LoonFS contract.
@@ -390,7 +377,7 @@ impl ProviderObjectStore {
             version: meta.version,
             size_bytes: meta.size,
             last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
-            sha256: attributes
+            attestation: attributes
                 .get(&Attribute::Metadata(SHA256_METADATA_KEY.into()))
                 .and_then(|value| attested_sha256(value)),
         })
@@ -402,7 +389,7 @@ impl ProviderObjectStore {
             version: result.version,
             size_bytes,
             last_modified_ms: None,
-            sha256: None,
+            attestation: None,
         })
     }
 
@@ -806,6 +793,9 @@ impl MultipartWrite<'_> {
 #[async_trait]
 impl ObjectStore for ProviderObjectStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+        if let Some(reader) = &self.checksum_reader {
+            return reader.head_metadata(key).await;
+        }
         let path = self.to_path(key)?;
         let options = GetOptions {
             head: true,
@@ -815,8 +805,8 @@ impl ObjectStore for ProviderObjectStore {
             Ok(result) => Ok(Some(
                 self.metadata_from_meta(result.meta, &result.attributes),
             )),
-            Err(err) if provider_not_found(&err) => Ok(None),
-            Err(err) => Err(map_provider_error(key, err)),
+            Err(error) if provider_not_found(&error) => Ok(None),
+            Err(error) => Err(map_provider_error(key, error)),
         }
     }
 
@@ -1097,88 +1087,30 @@ impl ObjectStore for ProviderObjectStore {
         .map_err(|error| map_provider_error(key, error))
     }
 
-    /// A provider without a path that leaves the base in place rewrites it:
-    /// one ranged read of the base, then one compare-and-swap of base and
-    /// pieces.
-    async fn extend_object(
+    async fn assemble(
         &self,
         key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<ObjectMetadata> {
-        if let Some(controller) = &self.multipart_controller {
-            if let Some(extended) = controller
-                .extend_object(key, base, pieces.clone(), result)
-                .await?
-            {
-                return Ok(extended);
-            }
-        }
-        let precondition_failed = || ObjectStoreError::PreconditionFailed {
-            object_key: key.to_owned(),
+        sources: &[AssemblySource],
+        tail: Bytes,
+        expected: &Checksum,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        let Some(controller) = &self.multipart_controller else {
+            return crate::assembly::put_buffered(self, key, sources, tail, expected).await;
         };
-        // The read names the version by its ETag and reports the object's
-        // whole length, so a base that moved on, or one longer than the
-        // caller believes, fails here instead of being rewritten short.
-        let existing = if base.length == 0 {
-            let metadata = self.head(key).await?.ok_or_else(precondition_failed)?;
-            if metadata.size_bytes != 0 || metadata.etag.as_deref() != Some(&base.etag) {
-                return Err(precondition_failed());
+        match self.head(key).await {
+            Ok(Some(existing)) => {
+                return crate::immutable_write::decide_attestation(key, expected, existing)
             }
-            Bytes::new()
-        } else {
-            let path = self.to_path(key)?;
-            let options = GetOptions {
-                if_match: Some(base.etag.clone()),
-                range: Some(GetRange::Bounded(Range {
-                    start: 0,
-                    end: base.length,
-                })),
-                ..Default::default()
-            };
-            let result = match self.inner.get_opts(&path, options).await {
-                Ok(result) => result,
-                Err(err) if provider_not_found(&err) => return Err(precondition_failed()),
-                Err(err) => return Err(map_provider_error(key, err)),
-            };
-            if result.meta.size != base.length {
-                return Err(precondition_failed());
+            Err(source) => {
+                return Err(crate::ImmutableWriteError::Transport {
+                    object_key: key.to_owned(),
+                    source,
+                })
             }
-            result
-                .bytes()
-                .await
-                .map_err(|err| map_provider_error(key, err))?
-        };
-        let bytes = Bytes::from([existing.as_ref(), pieces.as_ref()].concat());
-        if result.crc.as_ref().is_some_and(|crc| !crc.matches(&bytes)) {
-            return Err(ObjectStoreError::ChecksumMismatch {
-                object_key: key.to_owned(),
-            });
+            Ok(None) => {}
         }
-        let mode = PutMode::CompareAndSwap {
-            expected_etag: base.etag.clone(),
-        };
-        self.put_attested(key, bytes, mode, Some(result.sha256.clone()))
-            .await
-    }
-
-    async fn put_immutable_extended(
-        &self,
-        key: &str,
-        base_key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>> {
-        match &self.multipart_controller {
-            Some(controller) => {
-                controller
-                    .put_immutable_extended(key, base_key, base, pieces, result)
-                    .await
-            }
-            None => Ok(None),
-        }
+        let created = controller.assemble(key, sources, tail, expected).await;
+        crate::immutable_write::decide_created(self, key, Some(expected), created).await
     }
 
     fn list_entries_from_stream(
@@ -1376,7 +1308,7 @@ impl ProviderObjectStore {
             .await
         {
             Ok(result) => Ok(ObjectMetadata {
-                sha256,
+                attestation: sha256,
                 ..self.metadata_from_put_result(result, size_bytes)
             }),
             Err(err) if compare_and_swap && provider_not_found(&err) => {
@@ -2472,10 +2404,10 @@ mod tests {
             .await
             .expect("get")
             .expect("created");
-        assert_eq!(head.sha256, attested);
-        assert_eq!(body.metadata.sha256, attested);
+        assert_eq!(head.attestation, attested);
+        assert_eq!(body.metadata.attestation, attested);
         let replaced = store.head(replaced).await.expect("head").expect("replaced");
-        assert_eq!(replaced.sha256, None);
+        assert_eq!(replaced.attestation, None);
     }
 
     #[tokio::test]
@@ -2494,8 +2426,8 @@ mod tests {
                 .await
                 .expect("immutable write");
             let head = store.head(key).await.expect("head").expect("written");
-            assert_eq!(written.sha256, Some(Checksum::sha256(&payload)));
-            assert_eq!(head.sha256, written.sha256);
+            assert_eq!(written.attestation, Some(Checksum::sha256(&payload)));
+            assert_eq!(head.attestation, written.attestation);
         }
 
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
@@ -2525,7 +2457,7 @@ mod tests {
             .put_immutable_verified(identical, ours.clone())
             .await
             .expect("an equal attestation is this object");
-        assert_eq!(accepted.sha256, Some(Checksum::sha256(&ours)));
+        assert_eq!(accepted.attestation, Some(Checksum::sha256(&ours)));
         assert!(matches!(
             store.put_immutable_verified(different, ours.clone()).await,
             Err(crate::ImmutableWriteError::DifferentObject { object_key }) if object_key == different
@@ -2873,101 +2805,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_extension_without_a_provider_path_rewrites_the_base_under_its_version() {
-        let store = memory_store();
-        let pieces = Bytes::from_static(b" and pieces");
-        let written = store
-            .put_if_absent(MULTIPART_KEY, Bytes::from_static(b"base"))
-            .await
-            .expect("base");
-        let base = ExtendBase {
-            length: 4,
-            etag: written.etag.expect("etag"),
-        };
-        let extended_bytes = b"base and pieces";
-        let result = ExtendedObject {
-            sha256: Checksum::sha256(extended_bytes),
-            crc: Some(Checksum::crc64nvme(extended_bytes)),
-        };
-        let wrong_crc = ExtendedObject {
-            crc: Some(Checksum::crc64nvme(b"other bytes")),
-            ..result.clone()
-        };
-
-        assert!(matches!(
-            store
-                .extend_object(MULTIPART_KEY, &base, pieces.clone(), &wrong_crc)
-                .await,
-            Err(ObjectStoreError::ChecksumMismatch { .. })
-        ));
-        let shorter = ExtendBase {
-            length: 2,
-            ..base.clone()
-        };
-        assert!(matches!(
-            store
-                .extend_object(MULTIPART_KEY, &shorter, pieces.clone(), &result)
-                .await,
-            Err(ObjectStoreError::PreconditionFailed { .. })
-        ));
-        assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(Bytes::from_static(b"base")),
-            "a length the version does not have writes nothing"
-        );
-        let extended = store
-            .extend_object(MULTIPART_KEY, &base, pieces.clone(), &result)
-            .await
-            .expect("the refused claims wrote nothing, so the base still matches");
-        assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(Bytes::from_static(extended_bytes))
-        );
-        let head = store
-            .head(MULTIPART_KEY)
-            .await
-            .expect("head")
-            .expect("extended");
-        assert_eq!(head.etag, extended.etag);
-        assert_eq!(head.sha256, Some(result.sha256.clone()));
-        assert_eq!(extended.sha256, head.sha256);
-        assert!(matches!(
-            store
-                .extend_object(MULTIPART_KEY, &base, pieces, &result)
-                .await,
-            Err(ObjectStoreError::PreconditionFailed { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_store_without_a_provider_path_copies_no_base_into_a_new_key() {
-        let store = memory_store();
-        let written = store
-            .put_if_absent(MULTIPART_KEY, Bytes::from_static(b"base"))
-            .await
-            .expect("base");
-        let key = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
-        let copied = store
-            .put_immutable_extended(
-                key,
-                MULTIPART_KEY,
-                &ExtendBase {
-                    length: 4,
-                    etag: written.etag.expect("etag"),
-                },
-                Bytes::from_static(b" and pieces"),
-                &ExtendedObject {
-                    sha256: Checksum::sha256(b"base and pieces"),
-                    crc: None,
-                },
-            )
-            .await
-            .expect("a store without a provider path declines");
-        assert_eq!(copied, None);
-        assert_eq!(store.head(key).await.expect("head"), None);
-    }
-
-    #[tokio::test]
     async fn large_put_routes_through_multipart_and_preserves_bytes() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
@@ -3089,29 +2926,18 @@ mod tests {
                 version: None,
                 size_bytes,
                 last_modified_ms: None,
-                sha256: sha256.cloned(),
+                attestation: sha256.cloned(),
             })
         }
 
-        async fn extend_object(
+        async fn assemble(
             &self,
             _key: &str,
-            _base: &ExtendBase,
-            _pieces: Bytes,
-            _result: &ExtendedObject,
-        ) -> Result<Option<ObjectMetadata>> {
-            Ok(None)
-        }
-
-        async fn put_immutable_extended(
-            &self,
-            _key: &str,
-            _base_key: &str,
-            _base: &ExtendBase,
-            _pieces: Bytes,
-            _result: &ExtendedObject,
-        ) -> Result<Option<ObjectMetadata>> {
-            Ok(None)
+            _sources: &[AssemblySource],
+            _tail: Bytes,
+            _expected: &Checksum,
+        ) -> Result<ObjectMetadata> {
+            Err(ObjectStoreError::Unsupported("test assembly"))
         }
     }
 
@@ -3140,7 +2966,7 @@ mod tests {
             .expect("a large verified write creates through the controller");
         assert_eq!(controller.part_windows(), [PROVIDER_MULTIPART_PART_WINDOW]);
         assert_eq!(written.size_bytes, payload.len() as u64);
-        assert_eq!(written.sha256, Some(Checksum::sha256(&payload)));
+        assert_eq!(written.attestation, Some(Checksum::sha256(&payload)));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
 
         let written = store
@@ -3157,7 +2983,7 @@ mod tests {
             [PROVIDER_MULTIPART_PART_WINDOW; 2]
         );
         assert_eq!(written.size_bytes, payload.len() as u64);
-        assert_eq!(written.sha256, Some(Checksum::sha256(&payload)));
+        assert_eq!(written.attestation, Some(Checksum::sha256(&payload)));
 
         let small = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
         store
@@ -3170,7 +2996,7 @@ mod tests {
         );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         let held = store.head(small).await.expect("head").expect("object");
-        assert_eq!(held.sha256, None, "no attestation was asked for");
+        assert_eq!(held.attestation, None, "no attestation was asked for");
 
         let uploaded = store
             .put_streamed(

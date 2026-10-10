@@ -2147,6 +2147,7 @@ dependencies = [
  "hmac",
  "http 1.4.0",
  "http-body 1.0.1",
+ "httpdate",
  "loonfs-test-support",
  "loonfs-types",
  "object_store",

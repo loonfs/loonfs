@@ -2205,7 +2205,7 @@ mod tests {
             &store,
             &namespace_id,
             None,
-            ChecksumAlgorithm::Sha256,
+            ChecksumAlgorithm::Crc64nvme,
             &setup,
         )
         .await
@@ -2249,7 +2249,7 @@ mod tests {
         let completion = ResolvedUploadCompletion::DirectPut {
             content: UploadContentClaim {
                 size_bytes: BYTES.len() as u64,
-                checksum: Checksum::sha256(BYTES),
+                checksum: Checksum::crc64nvme(BYTES),
             },
         };
         let first = complete_upload(
@@ -2356,7 +2356,7 @@ mod tests {
             &store,
             &namespace_id,
             None,
-            ChecksumAlgorithm::Sha256,
+            ChecksumAlgorithm::Crc64nvme,
             &setup,
         )
         .await
@@ -2379,7 +2379,7 @@ mod tests {
             ResolvedUploadCompletion::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: BYTES.len() as u64,
-                    checksum: Checksum::sha256(BYTES),
+                    checksum: Checksum::crc64nvme(BYTES),
                 },
             },
             &context(2_000),
@@ -2408,7 +2408,7 @@ mod tests {
             ResolvedUploadCompletion::DirectPut {
                 content: UploadContentClaim {
                     size_bytes: written.len() as u64,
-                    checksum: Checksum::sha256(&written),
+                    checksum: Checksum::crc64nvme(&written),
                 },
             },
             &context(3_000),
@@ -2421,7 +2421,7 @@ mod tests {
                 .content_ref()
                 .expect("completed content ref")
                 .checksum,
-            Checksum::sha256(&written)
+            Checksum::crc64nvme(&written)
         );
     }
 

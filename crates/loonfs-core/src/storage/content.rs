@@ -910,7 +910,8 @@ mod tests {
         let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = b"provider-verified bytes";
-        let content_ref = content_ref(bytes);
+        let mut content_ref = content_ref(bytes);
+        content_ref.checksum = Checksum::crc64nvme(bytes);
         put_content_object(&store, &content_ref, bytes).await;
 
         store.reset();

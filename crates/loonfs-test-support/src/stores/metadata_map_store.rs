@@ -200,7 +200,7 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
                             etag: None,
                             version: None,
                             size_bytes: 0,
-                            sha256: None,
+                            attestation: None,
                         })
                         .last_modified_ms;
                     }

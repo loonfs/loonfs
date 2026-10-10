@@ -1,7 +1,7 @@
 //! Object-store operation descriptions used by wrapper predicates and logs.
 
 use bytes::Bytes;
-use loonfs_objectstore::{ByteRange, ExtendBase, PutMode};
+use loonfs_objectstore::{AssemblySource, ByteRange, PutMode};
 use loonfs_types::Checksum;
 
 use super::Outcome;
@@ -49,8 +49,7 @@ impl OperationClass {
                 OperationKind::Put { .. }
                     | OperationKind::PutStreamed { .. }
                     | OperationKind::PutImmutableStream { .. }
-                    | OperationKind::PutImmutableExtended { .. }
-                    | OperationKind::Extend { .. }
+                    | OperationKind::Assemble { .. }
             ),
             Self::PutOverwrite => matches!(
                 kind,
@@ -69,7 +68,7 @@ impl OperationClass {
                 } | OperationKind::PutStreamed {
                     mode: PutMode::CreateIfAbsent,
                 } | OperationKind::PutImmutableStream { .. }
-                    | OperationKind::PutImmutableExtended { .. }
+                    | OperationKind::Assemble { .. }
             ),
             Self::CompareAndSwap => matches!(
                 kind,
@@ -140,23 +139,19 @@ impl<'a> OperationContext<'a> {
                 sha256: sha256.cloned(),
                 bytes: outcome.streamed_bytes(),
             },
-            OperationKind::PutImmutableExtended {
-                base_key,
-                base,
-                pieces,
-            } => RecordedOperation::PutImmutableExtended {
+            OperationKind::Assemble {
+                sources,
+                tail,
+                expected,
+            } => RecordedOperation::Assemble {
                 key: self.key.to_owned(),
-                base_key: (*base_key).to_owned(),
-                base_length: base.length,
-                bytes: pieces.len(),
+                sources: sources.to_vec(),
+                bytes: tail.len(),
+                expected: (*expected).clone(),
             },
             OperationKind::CompareAndSwap { bytes, .. } => RecordedOperation::CompareAndSwap {
                 key: self.key.to_owned(),
                 bytes: bytes.len(),
-            },
-            OperationKind::Extend { pieces } => RecordedOperation::Extend {
-                key: self.key.to_owned(),
-                bytes: pieces.len(),
             },
             OperationKind::Delete => RecordedOperation::Delete {
                 key: self.key.to_owned(),
@@ -197,14 +192,14 @@ pub enum OperationKind<'a> {
         /// Attestation supplied by the caller.
         sha256: Option<&'a Checksum>,
     },
-    /// A `put_immutable_extended` call.
-    PutImmutableExtended {
-        /// Object whose prefix the new object starts with.
-        base_key: &'a str,
-        /// Version and prefix length of that object.
-        base: &'a ExtendBase,
-        /// Bytes that follow the prefix.
-        pieces: &'a Bytes,
+    /// A create from source ranges and tail bytes.
+    Assemble {
+        /// Selected objects and ranges.
+        sources: &'a [AssemblySource],
+        /// Bytes following the sources.
+        tail: &'a Bytes,
+        /// Whole result checksum.
+        expected: &'a Checksum,
     },
     /// A `compare_and_swap` call.
     CompareAndSwap {
@@ -212,11 +207,6 @@ pub enum OperationKind<'a> {
         expected_etag: &'a str,
         /// Bytes supplied by the caller.
         bytes: &'a Bytes,
-    },
-    /// An `extend_object` call.
-    Extend {
-        /// Bytes appended to the object.
-        pieces: &'a Bytes,
     },
     /// A `delete` call.
     Delete,
@@ -256,19 +246,15 @@ pub enum RecordedOperation {
         sha256: Option<Checksum>,
         bytes: Option<u64>,
     },
-    /// A create-if-absent that asked for the first `base_length` bytes of
-    /// `base_key` followed by `bytes` of pieces, whether or not the store
-    /// copied them.
-    PutImmutableExtended {
+    /// A create from source ranges and tail bytes.
+    Assemble {
         key: String,
-        base_key: String,
-        base_length: u64,
+        sources: Vec<AssemblySource>,
         bytes: usize,
+        expected: Checksum,
     },
     /// A compare-and-swap call.
     CompareAndSwap { key: String, bytes: usize },
-    /// An extension of an existing object by `bytes`.
-    Extend { key: String, bytes: usize },
     /// A delete.
     Delete { key: String },
     /// A prefix-list call.
@@ -285,9 +271,8 @@ impl RecordedOperation {
             | Self::Put { key, .. }
             | Self::PutStreamed { key, .. }
             | Self::PutImmutableStream { key, .. }
-            | Self::PutImmutableExtended { key, .. }
+            | Self::Assemble { key, .. }
             | Self::CompareAndSwap { key, .. }
-            | Self::Extend { key, .. }
             | Self::Delete { key } => key,
             Self::List { prefix } => prefix,
         }
@@ -307,9 +292,8 @@ impl RecordedOperation {
                 Self::Put { .. }
                     | Self::PutStreamed { .. }
                     | Self::PutImmutableStream { .. }
-                    | Self::PutImmutableExtended { .. }
+                    | Self::Assemble { .. }
                     | Self::CompareAndSwap { .. }
-                    | Self::Extend { .. }
             ),
             OperationClass::PutOverwrite => matches!(
                 self,
@@ -330,7 +314,7 @@ impl RecordedOperation {
                     mode: PutMode::CreateIfAbsent,
                     ..
                 } | Self::PutImmutableStream { .. }
-                    | Self::PutImmutableExtended { .. }
+                    | Self::Assemble { .. }
             ),
             OperationClass::CompareAndSwap => matches!(
                 self,

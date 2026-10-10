@@ -333,7 +333,7 @@ impl From<ImmutableWriteError> for CoreError {
                 "immutable object `{object_key}` already exists with different bytes"
             )),
             ImmutableWriteError::Unattested { object_key } => Self::NamespaceCorrupt(format!(
-                "immutable object `{object_key}` already exists without a sha256 attestation"
+                "immutable object `{object_key}` already exists without an attestation"
             )),
             ImmutableWriteError::Transport { object_key, source } => Self::Store {
                 object_key,

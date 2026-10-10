@@ -6,8 +6,8 @@ use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, ExtendBase, ExtendedObject, ImmutableWriteError, MultipartPart,
-    ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    AssemblySource, ByteRange, ByteStream, ImmutableWriteError, MultipartPart, ObjectBody,
+    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt::Debug;
@@ -304,52 +304,47 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         Self::finish(&self.interceptor, &context, intercept, result, outcome)
     }
 
-    async fn extend_object(
+    async fn assemble(
         &self,
         key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let context = OperationContext::new(key, OperationKind::Extend { pieces: &pieces });
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
+        sources: &[AssemblySource],
+        tail: Bytes,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata, ImmutableWriteError> {
+        let failed = |source| ImmutableWriteError::Transport {
+            object_key: key.to_owned(),
+            source,
         };
-        let extended = self
-            .inner
-            .extend_object(key, base, pieces.clone(), result)
-            .await;
-        let outcome = result_outcome(&extended);
-        Self::finish(&self.interceptor, &context, intercept, extended, outcome)
-    }
-
-    async fn put_immutable_extended(
-        &self,
-        key: &str,
-        base_key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let context = OperationContext::new(
             key,
-            OperationKind::PutImmutableExtended {
-                base_key,
-                base,
-                pieces: &pieces,
+            OperationKind::Assemble {
+                sources,
+                tail: &tail,
+                expected,
             },
         );
         let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
+            Intercept::FailBefore(error) => return Err(failed(error)),
             intercept => intercept,
         };
-        let created = self
+        let result = self
             .inner
-            .put_immutable_extended(key, base_key, base, pieces.clone(), result)
+            .assemble(key, sources, tail.clone(), expected)
             .await;
-        let outcome = result_outcome(&created);
-        Self::finish(&self.interceptor, &context, intercept, created, outcome)
+        if intercept.calls_after() {
+            self.interceptor.after(
+                &context,
+                &if result.is_ok() {
+                    Outcome::Success
+                } else {
+                    Outcome::Failure
+                },
+            );
+        }
+        match (intercept, result) {
+            (Intercept::FailAfter(error), Ok(_)) => Err(failed(error)),
+            (_, result) => result,
+        }
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {

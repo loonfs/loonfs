@@ -6,8 +6,8 @@ use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::ListedObject;
 use crate::{
-    ByteRange, ByteStream, ExtendBase, ExtendedObject, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
+    AssemblySource, ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -42,7 +42,7 @@ pub struct ObjectStoreMetricSample {
     pub attempts: u32,
     /// Cardinality-bounded success or failure classification.
     pub result: ObjectStoreResultClass,
-    /// Request payload bytes for a put or an extension, including failed
+    /// Request payload bytes for a put or an assembly, including failed
     /// attempts; otherwise `None`.
     pub bytes_in: Option<u64>,
     /// Response payload bytes for a successful get, including zero; otherwise `None`.
@@ -99,10 +99,8 @@ pub enum ObjectStoreOperation {
     Put,
     /// Measures a write whose payload arrived as a stream.
     PutStreamed,
-    /// Measures appending pieces to an object under its base version.
-    ExtendObject,
-    /// Measures creating an object from a copied base prefix and pieces.
-    PutImmutableExtended,
+    /// Measures copying source ranges followed by tail bytes into a new object.
+    Assemble,
     /// Measures an idempotent object delete.
     Delete,
     /// Measures opening a client-driven multipart upload.
@@ -128,8 +126,7 @@ impl ObjectStoreOperation {
             Self::Get => "get",
             Self::Put => "put",
             Self::PutStreamed => "put_streamed",
-            Self::ExtendObject => "extend_object",
-            Self::PutImmutableExtended => "put_immutable_extended",
+            Self::Assemble => "assemble",
             Self::Delete => "delete",
             Self::CreateMultipartUpload => "create_multipart_upload",
             Self::CompleteMultipartUpload => "complete_multipart_upload",
@@ -582,64 +579,29 @@ where
         result
     }
 
-    async fn extend_object(
+    async fn assemble(
         &self,
         key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<ObjectMetadata> {
+        sources: &[AssemblySource],
+        tail: Bytes,
+        expected: &Checksum,
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         let start = sample_clock();
-        let bytes_in = pieces.len() as u64;
-        let (extended, attempts) =
-            counting_attempts(self.inner.extend_object(key, base, pieces, result)).await;
+        let bytes_in = tail.len() as u64;
+        let (result, attempts) =
+            counting_attempts(self.inner.assemble(key, sources, tail, expected)).await;
         let mut sample = ObjectStoreMetricSample::new(
-            ObjectStoreOperation::ExtendObject,
+            ObjectStoreOperation::Assemble,
             key,
             start.elapsed(),
             attempts,
-            classify_result(&extended),
-            self.store_kind.clone(),
-        );
-        sample.bytes_in = Some(bytes_in);
-        self.record(sample);
-        extended
-    }
-
-    /// A store that cannot copy the base answers `None`, recorded as
-    /// `unsupported`, so the samples show how often the copy is declined.
-    async fn put_immutable_extended(
-        &self,
-        key: &str,
-        base_key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>> {
-        let start = sample_clock();
-        let bytes_in = pieces.len() as u64;
-        let (created, attempts) = counting_attempts(
-            self.inner
-                .put_immutable_extended(key, base_key, base, pieces, result),
-        )
-        .await;
-        let class = match &created {
-            Ok(Some(_)) => ObjectStoreResultClass::Ok,
-            Ok(None) => ObjectStoreResultClass::Unsupported,
-            Err(error) => error.class().into(),
-        };
-        let mut sample = ObjectStoreMetricSample::new(
-            ObjectStoreOperation::PutImmutableExtended,
-            key,
-            start.elapsed(),
-            attempts,
-            class,
+            classify_immutable_write(&result),
             self.store_kind.clone(),
         );
         sample.bytes_in = Some(bytes_in);
         sample.put_mode = Some(PutModeClass::CreateIfAbsent);
         self.record(sample);
-        created
+        result
     }
 
     async fn delete(&self, key: &str) -> Result<()> {

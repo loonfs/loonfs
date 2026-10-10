@@ -112,10 +112,9 @@ async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
         store.reset();
         fold_wal(&store, &namespace_id).await.expect("fold");
         let operations = content_operations(&store);
-        assert!(operations.iter().all(|operation| !matches!(
-            operation,
-            RecordedOperation::Extend { .. } | RecordedOperation::PutImmutableExtended { .. }
-        )));
+        assert!(operations
+            .iter()
+            .all(|operation| !matches!(operation, RecordedOperation::Assemble { .. })));
         let row = layout(&store, &reference).await;
         assert_eq!(
             row.layout
@@ -231,7 +230,7 @@ async fn a_merged_span_must_match_its_objects_attestation() {
         store.clone(),
         KeyPredicate::exact(key.clone()),
         |mut metadata| {
-            metadata.sha256 = Some(Checksum::sha256(b"bad"));
+            metadata.attestation = Some(Checksum::sha256(b"bad"));
             metadata
         },
     );

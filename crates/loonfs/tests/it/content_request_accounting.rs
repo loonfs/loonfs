@@ -576,7 +576,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .expect("open namespace");
     let bytes = b"direct provider upload";
     let begin = namespace
-        .create_direct_put_upload_target(loonfs_types::ChecksumAlgorithm::Sha256)
+        .create_direct_put_upload_target(loonfs_types::ChecksumAlgorithm::Crc64nvme)
         .await
         .expect("begin direct put");
     harness.recording.reset();
@@ -594,7 +594,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
             Ok(loonfs::uploads::ResolvedUploadCompletion::DirectPut {
                 content: loonfs::UploadContentClaim {
                     size_bytes: bytes.len() as u64,
-                    checksum: loonfs_types::Checksum::sha256(bytes),
+                    checksum: loonfs_types::Checksum::crc64nvme(bytes),
                 },
             })
         })

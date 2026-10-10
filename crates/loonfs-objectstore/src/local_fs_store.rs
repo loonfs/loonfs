@@ -14,8 +14,8 @@ use crate::keyspace::{
 use crate::object_store::Result;
 use crate::ListedObject;
 use crate::{
-    ByteRange, ByteStream, ExtendBase, ExtendedObject, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -162,7 +162,7 @@ impl LocalFsStore {
             version: None,
             size_bytes: metadata.len(),
             last_modified_ms: last_modified_ms(metadata),
-            sha256: Some(sha256),
+            attestation: Some(sha256),
         })
     }
 
@@ -455,55 +455,6 @@ impl LocalFsStore {
         Self::metadata_from_fs_metadata(key, &metadata, Checksum::sha256(bytes), &path)
     }
 
-    /// Appends in place, so the base's bytes never move and a concurrent
-    /// reader of the whole object can observe a partial append.
-    async fn extend_file(
-        &self,
-        key: &str,
-        base: &ExtendBase,
-        pieces: &[u8],
-        result: &ExtendedObject,
-    ) -> Result<ObjectMetadata> {
-        let path = self.resolve_key(key)?;
-        let _guard = self.write_lock.lock().await;
-        let _cross_process_guard = self.acquire_cross_process_write_lock(key).await?;
-        let precondition_failed = || ObjectStoreError::PreconditionFailed {
-            object_key: key.to_owned(),
-        };
-        let mut bytes = Self::read_for_digest(key, &path)
-            .await?
-            .ok_or_else(precondition_failed)?;
-        if bytes.len() as u64 != base.length || etag(&Checksum::sha256(&bytes)) != base.etag {
-            return Err(precondition_failed());
-        }
-        bytes.extend_from_slice(pieces);
-        let sha256 = Checksum::sha256(&bytes);
-        if sha256 != result.sha256 || result.crc.as_ref().is_some_and(|crc| !crc.matches(&bytes)) {
-            return Err(ObjectStoreError::ChecksumMismatch {
-                object_key: key.to_owned(),
-            });
-        }
-
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(|err| io_error(key, err))?;
-        let appended: Result<()> = async {
-            file.write_all(pieces)
-                .await
-                .map_err(|err| io_error(key, err))?;
-            file.sync_all().await.map_err(|err| io_error(key, err))
-        }
-        .await;
-        if let Err(error) = appended {
-            let _ = file.set_len(base.length).await;
-            return Err(error);
-        }
-        let metadata = file.metadata().await.map_err(|err| io_error(key, err))?;
-        Self::metadata_from_fs_metadata(key, &metadata, sha256, &path)
-    }
-
     async fn delete_object(&self, key: &str) -> Result<()> {
         let path = self.resolve_key(key)?;
         let _guard = self.write_lock.lock().await;
@@ -534,10 +485,11 @@ impl ObjectStore for LocalFsStore {
         self.head_object(&self.scoped(key)?).await
     }
 
-    /// The reference provider stores no checksum beside an object, so it
-    /// computes one from the object it holds. That is the same guarantee a
-    /// cloud provider's stored checksum gives — the provider attesting to
-    /// the bytes it actually has — and it never crosses a network.
+    /// The reference provider stores no checksum, so it computes one from
+    /// the bytes it holds. It reports CRC-64/NVME, the S3-family shape, because
+    /// the fold's assembly combines source checksums and SHA-256 cannot be
+    /// combined. This provides the same guarantee as a cloud provider's
+    /// stored checksum: the provider attests to the bytes it actually holds.
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         let scoped = self.scoped(key)?;
         let Some(bytes) = self.get_object(&scoped, None).await? else {
@@ -545,7 +497,7 @@ impl ObjectStore for LocalFsStore {
         };
         Ok(Some(StoredObjectChecksum {
             size_bytes: bytes.len() as u64,
-            checksum: Checksum::sha256(&bytes),
+            checksum: Checksum::crc64nvme(&bytes),
         }))
     }
 
@@ -589,17 +541,6 @@ impl ObjectStore for LocalFsStore {
         }
         .await;
         crate::immutable_write::decide_created(self, key, sha256, created).await
-    }
-
-    async fn extend_object(
-        &self,
-        key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<ObjectMetadata> {
-        self.extend_file(&self.scoped(key)?, base, &pieces, result)
-            .await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
@@ -1026,11 +967,10 @@ mod tests {
     // Tests panic in unexpected match arms for precise diagnostics.
 
     use super::LocalFsStore;
-    use super::{ByteRange, ExtendBase, ExtendedObject, ObjectStore, ObjectStoreError, PutMode};
+    use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
     use crate::keys::{hint, upload_session};
     use bytes::Bytes;
     use futures::{stream, StreamExt};
-    use loonfs_types::Checksum;
     use std::fs;
     use std::sync::Arc;
     use tokio::sync::Barrier;
@@ -1333,84 +1273,6 @@ mod tests {
             .expect("read final counter")
             .expect("counter exists");
         assert_eq!(std::str::from_utf8(&bytes).expect("utf8"), "40");
-    }
-
-    #[tokio::test]
-    async fn an_extension_appends_only_to_the_base_it_names_and_only_with_true_checksums() {
-        let temp_dir = test_dir("extend");
-        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = "namespaces/ns-1/content/con_00000000000000000000000000000001";
-        let pieces = Bytes::from_static(b" and pieces");
-        let written = store
-            .put_if_absent(key, Bytes::from_static(b"base"))
-            .await
-            .expect("write base");
-        assert_eq!(written.sha256, Some(Checksum::sha256(b"base")));
-        let base = ExtendBase {
-            length: 4,
-            etag: written.etag.expect("etag"),
-        };
-        let extended_bytes = b"base and pieces";
-        let result = ExtendedObject {
-            sha256: Checksum::sha256(extended_bytes),
-            crc: Some(Checksum::crc64nvme(extended_bytes)),
-        };
-
-        for stale in [
-            ExtendBase {
-                length: 3,
-                ..base.clone()
-            },
-            ExtendBase {
-                etag: "local-fs-v1:sha256:0".to_owned(),
-                ..base.clone()
-            },
-        ] {
-            assert!(matches!(
-                store
-                    .extend_object(key, &stale, pieces.clone(), &result)
-                    .await,
-                Err(ObjectStoreError::PreconditionFailed { .. })
-            ));
-        }
-        for wrong in [
-            ExtendedObject {
-                crc: Some(Checksum::crc64nvme(b"other bytes")),
-                ..result.clone()
-            },
-            ExtendedObject {
-                sha256: Checksum::sha256(b"other bytes"),
-                ..result.clone()
-            },
-        ] {
-            assert!(matches!(
-                store
-                    .extend_object(key, &base, pieces.clone(), &wrong)
-                    .await,
-                Err(ObjectStoreError::ChecksumMismatch { .. })
-            ));
-        }
-        assert_eq!(
-            store.get(key, None).await.expect("get"),
-            Some(Bytes::from_static(b"base")),
-            "a refused extension leaves the base as it was"
-        );
-
-        let extended = store
-            .extend_object(key, &base, pieces, &result)
-            .await
-            .expect("extend");
-        assert_eq!(extended.sha256, Some(result.sha256));
-        assert_eq!(extended.size_bytes, extended_bytes.len() as u64);
-        assert_eq!(
-            store.head(key).await.expect("head"),
-            Some(extended),
-            "the new version is the file's own digest"
-        );
-        assert_eq!(
-            store.get(key, None).await.expect("get"),
-            Some(Bytes::from_static(extended_bytes))
-        );
     }
 
     #[tokio::test]

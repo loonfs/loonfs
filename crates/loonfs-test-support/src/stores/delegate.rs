@@ -19,8 +19,7 @@ macro_rules! delegate_object_store {
             put_if_absent,
             put_immutable_verified,
             put_immutable_verified_stream,
-            extend_object,
-            put_immutable_extended,
+            assemble,
             compare_and_swap,
             delete,
             list_prefix_stream,
@@ -38,7 +37,6 @@ macro_rules! delegate_object_store {
             abort_multipart_upload,
             get_with_metadata,
             get,
-            extend_object,
             delete,
             list_prefix_stream,
             list_entries_from_stream,
@@ -60,8 +58,7 @@ macro_rules! delegate_object_store {
             put_if_absent,
             put_immutable_verified,
             put_immutable_verified_stream,
-            extend_object,
-            put_immutable_extended,
+            assemble,
             compare_and_swap,
             delete,
             list_prefix_stream,
@@ -440,64 +437,19 @@ macro_rules! __delegate_object_store_method {
             })
         }
     };
-    (extend_object, $receiver:ident, $inner:expr) => {
-        fn extend_object<'store, 'key, 'base, 'result, 'future>(
+    (assemble, $receiver:ident, $inner:expr) => {
+        fn assemble<'store, 'key, 'sources, 'expected, 'future>(
             &'store $receiver,
             key: &'key str,
-            base: &'base ::loonfs_objectstore::ExtendBase,
-            pieces: ::bytes::Bytes,
-            result: &'result ::loonfs_objectstore::ExtendedObject,
+            sources: &'sources [::loonfs_objectstore::AssemblySource],
+            tail: ::bytes::Bytes,
+            expected: &'expected ::loonfs_types::Checksum,
         ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<
-                    Output = Result<
-                        ::loonfs_objectstore::ObjectMetadata,
-                        ::loonfs_objectstore::ObjectStoreError,
-                    >,
-                > + Send
-                + 'future,
+            dyn ::core::future::Future<Output = Result<::loonfs_objectstore::ObjectMetadata, ::loonfs_objectstore::ImmutableWriteError>> + Send + 'future,
         >>
-        where
-            'store: 'future,
-            'key: 'future,
-            'base: 'future,
-            'result: 'future,
-            Self: 'future,
+        where 'store: 'future, 'key: 'future, 'sources: 'future, 'expected: 'future, Self: 'future,
         {
-            ::std::boxed::Box::pin(async move {
-                $inner.extend_object(key, base, pieces, result).await
-            })
-        }
-    };
-    (put_immutable_extended, $receiver:ident, $inner:expr) => {
-        fn put_immutable_extended<'store, 'key, 'base_key, 'base, 'result, 'future>(
-            &'store $receiver,
-            key: &'key str,
-            base_key: &'base_key str,
-            base: &'base ::loonfs_objectstore::ExtendBase,
-            pieces: ::bytes::Bytes,
-            result: &'result ::loonfs_objectstore::ExtendedObject,
-        ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<
-                    Output = Result<
-                        Option<::loonfs_objectstore::ObjectMetadata>,
-                        ::loonfs_objectstore::ObjectStoreError,
-                    >,
-                > + Send
-                + 'future,
-        >>
-        where
-            'store: 'future,
-            'key: 'future,
-            'base_key: 'future,
-            'base: 'future,
-            'result: 'future,
-            Self: 'future,
-        {
-            ::std::boxed::Box::pin(async move {
-                $inner
-                    .put_immutable_extended(key, base_key, base, pieces, result)
-                    .await
-            })
+            ::std::boxed::Box::pin(async move { $inner.assemble(key, sources, tail, expected).await })
         }
     };
     (list_prefix_stream, $receiver:ident, $inner:expr) => {

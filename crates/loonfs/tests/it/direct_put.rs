@@ -19,7 +19,7 @@ use loonfs_types::Checksum;
 fn direct_put_claim(bytes: &[u8]) -> UploadContentClaim {
     UploadContentClaim {
         size_bytes: bytes.len() as u64,
-        checksum: Checksum::sha256(bytes),
+        checksum: Checksum::crc64nvme(bytes),
     }
 }
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -102,7 +102,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
         .expect("create namespace");
     let claim = direct_put_claim(bytes);
     let begin =
-        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Crc64nvme))
             .expect("begin direct put");
     // The target is minted here, before a byte is written, and the key it
     // names is derived from that identity alone.
@@ -156,7 +156,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
         .expect("create namespace");
     let claim = direct_put_claim(bytes);
     let begin =
-        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Crc64nvme))
             .expect("begin direct put");
 
     // Stands in for the provider-verified presigned upload.
@@ -174,7 +174,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
             .content_ref()
             .expect("completed content ref")
             .checksum,
-        Checksum::sha256(bytes)
+        Checksum::crc64nvme(bytes)
     );
     assert_eq!(
         raw_store.count(OperationClass::Read),
@@ -197,7 +197,7 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
         .expect("create namespace");
     let begin =
-        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Crc64nvme))
             .expect("begin direct put");
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes)))
@@ -225,7 +225,7 @@ fn direct_put_completion_rejects_bytes_that_do_not_match_the_claim_and_keeps_the
         .expect("create namespace");
     let claim = direct_put_claim(promised);
     let begin =
-        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Crc64nvme))
             .expect("begin direct put");
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(delivered)))
@@ -263,7 +263,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
         .expect("open namespace");
     let claim = direct_put_claim(bytes);
     let begin =
-        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Sha256))
+        block_on(fs.create_direct_put_upload_target(&namespace_id, ChecksumAlgorithm::Crc64nvme))
             .expect("begin direct put");
 
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
@@ -299,7 +299,7 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
             .content_ref()
             .expect("completed content ref")
             .checksum,
-        Checksum::sha256(bytes)
+        Checksum::crc64nvme(bytes)
     );
 }
 

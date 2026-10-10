@@ -12,6 +12,7 @@
 #![warn(missing_docs)]
 
 pub mod abs;
+mod assembly;
 mod attempts;
 mod aws_credentials;
 mod configured;
@@ -41,9 +42,9 @@ mod transfer_timeouts;
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use immutable_write::ImmutableWriteError;
 pub use object_store::{
-    required_etag, ByteRange, ByteStream, ExtendBase, ExtendedObject, ListedObject, MultipartPart,
-    ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode,
-    Result, SharedObjectStore, StoredObjectChecksum,
+    required_etag, AssemblySource, ByteRange, ByteStream, ListedObject, MultipartPart, ObjectBody,
+    ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, Result,
+    SharedObjectStore, StoredObjectChecksum,
 };
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
 pub use provider_object_store::{

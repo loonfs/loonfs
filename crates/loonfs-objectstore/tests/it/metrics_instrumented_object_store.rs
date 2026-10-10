@@ -13,8 +13,8 @@ use loonfs_objectstore::metrics::{
 };
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    ByteRange, ExtendBase, ExtendedObject, ImmutableWriteError, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode,
+    AssemblySource, ByteRange, ImmutableWriteError, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, ObjectStoreErrorClass, PutMode,
 };
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::{Checksum, EffectiveLimit, ManifestNo, Page};
@@ -107,35 +107,31 @@ async fn records_put_success() {
 }
 
 #[tokio::test]
-async fn records_an_extension_with_its_pieces_as_bytes_in() {
+async fn records_an_assembly_with_its_tail_as_bytes_in() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
     let key = "namespaces/ns-1/content/con_00000000000000000000000000000001";
-    let written = store
-        .put(key, bytes(b"base"), PutMode::CreateIfAbsent)
-        .await
-        .expect("put base");
-
     store
-        .extend_object(
+        .put("source", bytes(b"base"), PutMode::CreateIfAbsent)
+        .await
+        .expect("source");
+    store
+        .assemble(
             key,
-            &ExtendBase {
-                length: 4,
-                etag: written.etag.expect("etag"),
-            },
+            &[AssemblySource {
+                key: "source".to_owned(),
+                range: None,
+                checksum: Checksum::sha256(b"base"),
+            }],
             bytes(b" more"),
-            &ExtendedObject {
-                sha256: Checksum::sha256(b"base more"),
-                crc: None,
-            },
+            &Checksum::sha256(b"base more"),
         )
         .await
-        .expect("extend");
-
+        .expect("assembly");
     let samples = recorder.samples();
-    let sample = samples.last().expect("extension sample");
-    assert_eq!(sample.operation, ObjectStoreOperation::ExtendObject);
+    let sample = samples.last().expect("assembly sample");
+    assert_eq!(sample.operation, ObjectStoreOperation::Assemble);
     assert_eq!(sample.result, ObjectStoreResultClass::Ok);
     assert_eq!(sample.bytes_in, Some(5));
     assert_eq!(sample.key_class, KeyClass::Content);
@@ -478,7 +474,7 @@ impl DelegatingWriteStore {
             version: None,
             size_bytes: 0,
             last_modified_ms: None,
-            sha256: None,
+            attestation: None,
         }
     }
 }

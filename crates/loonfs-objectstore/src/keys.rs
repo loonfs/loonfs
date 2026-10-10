@@ -99,7 +99,7 @@ pub fn content_span(
     )
 }
 
-/// Builds a fresh key for a temporary object that an extension writes and
+/// Builds a fresh key for a temporary object that an assembly writes and
 /// deletes under one namespace.
 pub fn temporary_object(namespace_id: &NamespaceId) -> String {
     format!(
@@ -108,7 +108,7 @@ pub fn temporary_object(namespace_id: &NamespaceId) -> String {
     )
 }
 
-/// Builds the listing prefix for the temporary objects that an extension writes
+/// Builds the listing prefix for the temporary objects that an assembly writes
 /// and deletes under one namespace.
 pub fn temporary_prefix(namespace_id: &NamespaceId) -> String {
     format!("namespaces/{namespace_id}/temporary/")
