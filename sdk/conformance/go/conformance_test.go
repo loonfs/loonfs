@@ -784,7 +784,7 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	if grant.ContentRef.Checksum == nil || string(grant.ContentRef.Checksum.Algorithm) != expected.ChecksumAlgorithm {
 		t.Errorf("download checksum = %#v, want algorithm %q", grant.ContentRef.Checksum, expected.ChecksumAlgorithm)
 	}
-	readback := getPresigned(t, grant.Access)
+	readback := getPresigned(t, grant.Ranges[0].Access)
 	if int64(len(readback)) != grant.ContentRef.SizeBytes {
 		t.Errorf("downloaded bytes = %d, want %d", len(readback), grant.ContentRef.SizeBytes)
 	}
@@ -795,13 +795,14 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type appendRequest struct {
-	NamespaceID  string          `json:"namespace_id"`
-	Path         string          `json:"path"`
-	EmptyPath    string          `json:"empty_path"`
-	ActorID      loonfs.ActorID  `json:"actor_id"`
-	ContentUTF8  string          `json:"content_utf8"`
-	AppendedUTF8 string          `json:"appended_utf8"`
-	CommitIDs    appendCommitIDs `json:"commit_ids"`
+	NamespaceID        string          `json:"namespace_id"`
+	Path               string          `json:"path"`
+	EmptyPath          string          `json:"empty_path"`
+	ActorID            loonfs.ActorID  `json:"actor_id"`
+	ContentRepetitions int             `json:"content_repetitions"`
+	ContentUTF8        string          `json:"content_utf8"`
+	AppendedUTF8       string          `json:"appended_utf8"`
+	CommitIDs          appendCommitIDs `json:"commit_ids"`
 }
 
 type appendCommitIDs struct {
@@ -820,6 +821,7 @@ type appendExpected struct {
 	PreviousRange             string              `json:"previous_range"`
 	AppendedRevisionNo        int64               `json:"appended_revision_no"`
 	AppendedSizeBytes         int64               `json:"appended_size_bytes"`
+	ResumeOffset              int64               `json:"resume_offset"`
 	ResumedRange              string              `json:"resumed_range"`
 	EmptyAppend               errorStatusExpected `json:"empty_append"`
 	EmptyPutCommittedSeq      int64               `json:"empty_put_committed_seq"`
@@ -834,7 +836,7 @@ func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
 	actor := option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(request.ActorID)}})
 	namespaceID := loonfs.NamespaceID(request.NamespaceID)
 	path := loonfs.AbsolutePath(request.Path)
-	content := []byte(request.ContentUTF8)
+	content := bytes.Repeat([]byte(request.ContentUTF8), request.ContentRepetitions)
 	appended := []byte(request.AppendedUTF8)
 
 	put, err := h.client.Files.Upload(ctx, files.UploadInput{
@@ -882,15 +884,17 @@ func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("grant the previous revision: %v", err)
 	}
-	// The append extended this object, so only the signed range keeps the
-	// appended bytes out of this read.
-	if grant.ContentRef.ContentID != current.ContentRef.ContentID {
-		t.Errorf("previous content_id = %q, want the appended revision's %q", grant.ContentRef.ContentID, current.ContentRef.ContentID)
+	wholeGrant, err := h.client.Files.CreateDownload(ctx, &loonfs.CreateDownloadRequest{NamespaceID: request.NamespaceID, Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wholeGrant.Ranges) != 2 {
+		t.Fatalf("expected two ranges, got %d", len(wholeGrant.Ranges))
 	}
 	if grant.ContentRef.SizeBytes != expected.PreviousSizeBytes {
 		t.Errorf("previous size_bytes = %d, want %d", grant.ContentRef.SizeBytes, expected.PreviousSizeBytes)
 	}
-	if signed := signedRange(grant.Access); signed != expected.PreviousRange {
+	if signed := signedRange(grant.Ranges[0].Access); signed != expected.PreviousRange {
 		t.Errorf("previous signed range = %q, want %q", signed, expected.PreviousRange)
 	}
 	previous, err := h.client.Files.Download(ctx, files.DownloadInput{NamespaceID: namespaceID, Path: path, RevisionNo: &previousRevision})
@@ -901,19 +905,25 @@ func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("downloaded previous revision = %q, want %q", previous.Content, content)
 	}
 
-	startOffset := expected.PreviousSizeBytes
+	startOffset := expected.ResumeOffset
 	resumed, err := h.client.Files.CreateDownload(ctx, &loonfs.CreateDownloadRequest{
 		NamespaceID: request.NamespaceID, Path: path, StartOffset: &startOffset,
 	})
 	if err != nil {
 		t.Fatalf("grant the appended bytes: %v", err)
 	}
-	if signed := signedRange(resumed.Access); signed != expected.ResumedRange {
+	if signed := signedRange(resumed.Ranges[0].Access); signed != expected.ResumedRange {
 		t.Errorf("resumed signed range = %q, want %q", signed, expected.ResumedRange)
 	}
-	if rest := getPresigned(t, resumed.Access); !bytes.Equal(rest, appended) {
-		t.Errorf("resumed download = %q, want %q", rest, appended)
+	if len(resumed.Ranges) != 1 || resumed.Ranges[0].StartOffset != startOffset {
+		t.Fatal("invalid resumed ranges")
 	}
+	rest := getPresigned(t, resumed.Ranges[0].Access)
+	whole := bytes.Join([][]byte{content, appended}, nil)
+	if !bytes.Equal(rest, whole[startOffset:]) {
+		t.Fatalf("resumed download = %q", rest)
+	}
+	assertChecksum(t, resumed.ContentRef.Checksum, append(append([]byte{}, whole[:startOffset]...), rest...))
 
 	if _, err := h.client.Files.Append(ctx, files.AppendInput{
 		NamespaceID: namespaceID, Path: path, CommitID: loonfs.CommitID(request.CommitIDs.EmptyAppend),
@@ -944,7 +954,7 @@ func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
 	if emptyGrant.ContentRef.SizeBytes != 0 {
 		t.Errorf("empty size_bytes = %d", emptyGrant.ContentRef.SizeBytes)
 	}
-	if signed := signedRange(emptyGrant.Access); signed != "" {
+	if signed := signedRange(emptyGrant.Ranges[0].Access); signed != "" {
 		t.Errorf("empty grant signs range %q", signed)
 	}
 	if empty := downloadFile(t, h.client, request.NamespaceID, request.EmptyPath); len(empty.Content) != 0 {

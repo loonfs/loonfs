@@ -497,45 +497,20 @@ class FilesClient(_GeneratedFilesClient):
             revision_no=revision_no,
             request_options=request_options,
         )
-        if grant.access.method.upper() != "GET":
-            raise RuntimeError("download grant must use GET")
-        if grant.content_ref.size_bytes == 0:
-            # A grant of zero bytes signs no range and needs no request.
-            chunks = _no_chunks()
-            return DownloadStream(
-                chunks,
-                chunks.close,
-                grant.namespace_id,
-                grant.path,
-                grant.revision_no,
-                grant.content_ref,
-            )
+        _validate_download_ranges(grant.ranges, grant.content_ref.size_bytes)
         client = http_client or self._root._client_wrapper.httpx_client.httpx_client
         timeout = (request_options or {}).get(
             "timeout", self._root._client_wrapper.get_timeout()
         )
-        # Construct a fresh request: SDK authorization, cookies and custom
-        # API headers must never be forwarded to the object-store capability.
-        request = httpx.Request(
-            "GET",
-            grant.access.url,
-            headers=grant.access.headers or {},
-            extensions={"timeout": httpx.Timeout(timeout).as_dict()},
+        chunks = _download_ranges(client, grant.ranges, timeout)
+        return DownloadStream(
+            chunks,
+            chunks.close,
+            grant.namespace_id,
+            grant.path,
+            grant.revision_no,
+            grant.content_ref,
         )
-        response = client.send(request, stream=True, auth=None, follow_redirects=False)
-        try:
-            response.raise_for_status()
-            return DownloadStream(
-                response.iter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES),
-                response.close,
-                grant.namespace_id,
-                grant.path,
-                grant.revision_no,
-                grant.content_ref,
-            )
-        except BaseException:
-            response.close()
-            raise
 
     def download(
         self,
@@ -938,47 +913,20 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
             revision_no=revision_no,
             request_options=request_options,
         )
-        if grant.access.method.upper() != "GET":
-            raise RuntimeError("download grant must use GET")
-        if grant.content_ref.size_bytes == 0:
-            # A grant of zero bytes signs no range and needs no request.
-            chunks = _no_async_chunks()
-            return AsyncDownloadStream(
-                chunks,
-                chunks.aclose,
-                grant.namespace_id,
-                grant.path,
-                grant.revision_no,
-                grant.content_ref,
-            )
+        _validate_download_ranges(grant.ranges, grant.content_ref.size_bytes)
         client = http_client or self._root._client_wrapper.httpx_client.httpx_client
         timeout = (request_options or {}).get(
             "timeout", self._root._client_wrapper.get_timeout()
         )
-        # Construct a fresh request: SDK authorization, cookies and custom
-        # API headers must never be forwarded to the object-store capability.
-        request = httpx.Request(
-            "GET",
-            grant.access.url,
-            headers=grant.access.headers or {},
-            extensions={"timeout": httpx.Timeout(timeout).as_dict()},
+        chunks = _async_download_ranges(client, grant.ranges, timeout)
+        return AsyncDownloadStream(
+            chunks,
+            chunks.aclose,
+            grant.namespace_id,
+            grant.path,
+            grant.revision_no,
+            grant.content_ref,
         )
-        response = await client.send(
-            request, stream=True, auth=None, follow_redirects=False
-        )
-        try:
-            response.raise_for_status()
-            return AsyncDownloadStream(
-                response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES),
-                response.aclose,
-                grant.namespace_id,
-                grant.path,
-                grant.revision_no,
-                grant.content_ref,
-            )
-        except BaseException:
-            await response.aclose()
-            raise
 
     async def download(
         self,
@@ -1035,13 +983,79 @@ __all__ = [
 ]
 
 
-def _no_chunks():
-    yield from ()
+def _validate_download_ranges(ranges, size_bytes):
+    if not ranges or (size_bytes == 0 and len(ranges) != 1):
+        raise RuntimeError("download grant has invalid ranges")
+    offset = 0
+    for part in ranges:
+        if part.access.method.upper() != "GET":
+            raise RuntimeError("download grant must use GET")
+        if (
+            part.start_offset != offset
+            or part.length < 0
+            or (part.length == 0 and size_bytes != 0)
+        ):
+            raise RuntimeError("download grant has invalid ranges")
+        offset += part.length
+    if offset != size_bytes:
+        raise RuntimeError("download grant has invalid ranges")
 
 
-async def _no_async_chunks():
-    for chunk in ():
-        yield chunk
+def _download_range_request(part, timeout):
+    return httpx.Request(
+        "GET",
+        part.access.url,
+        headers=part.access.headers or {},
+        extensions={"timeout": httpx.Timeout(timeout).as_dict()},
+    )
+
+
+def _download_ranges(client, ranges, timeout):
+    for part in ranges:
+        if part.length == 0:
+            continue
+        response = client.send(
+            _download_range_request(part, timeout),
+            stream=True,
+            auth=None,
+            follow_redirects=False,
+        )
+        try:
+            response.raise_for_status()
+            count = 0
+            for chunk in response.iter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES):
+                count += len(chunk)
+                if count > part.length:
+                    raise RuntimeError("download range exceeded its declared length")
+                yield chunk
+            if count != part.length:
+                raise RuntimeError("download range ended before its declared length")
+        finally:
+            response.close()
+
+
+async def _async_download_ranges(client, ranges, timeout):
+    for part in ranges:
+        if part.length == 0:
+            continue
+        response = await client.send(
+            _download_range_request(part, timeout),
+            stream=True,
+            auth=None,
+            follow_redirects=False,
+        )
+        try:
+            response.raise_for_status()
+            count = 0
+            async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES):
+                count += len(chunk)
+                if count > part.length:
+                    raise RuntimeError("download range exceeded its declared length")
+                yield chunk
+            if count != part.length:
+                raise RuntimeError("download range ended before its declared length")
+        finally:
+            await response.aclose()
 
 
 def _proxied_claim(client, namespace_id, path, revision_no, request_options):

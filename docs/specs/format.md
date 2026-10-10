@@ -418,7 +418,7 @@ Inherited layouts retain their object owners. WAL replay loads pieces with metad
 
 Reclaiming a WAL object does not remove bytes already held in a read view’s projection. If that projection must be rebuilt and the required WAL objects are gone, the read must fail. Finding a content object is insufficient because the missing WAL is also required to reconstruct the view’s metadata.
 
-For a streamed read, the full-file checksum is verified only after the complete stream has been processed. The transport must report a verification failure even if some bytes have already reached the client. For provider-direct downloads, the client receives bytes directly from object storage; the [API specification][api-spec] defines its verification responsibilities.
+For a streamed read, the full-file checksum is verified only after the complete stream has been processed. The transport must report a verification failure even if some bytes have already reached the client. A direct download grants one range per extent. For provider-direct downloads, the client receives bytes directly from object storage; the [API specification][api-spec] defines its verification responsibilities.
 
 ### 4.6 Speculative reads
 

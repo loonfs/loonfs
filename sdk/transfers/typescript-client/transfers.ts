@@ -1,6 +1,7 @@
 import {
     TransferScope,
     verifiedDownload,
+    downloadRanges,
     UploadSource,
     bytesSource,
     IncrementalChecksum,
@@ -268,20 +269,7 @@ export class FilesClient extends GeneratedFilesClient {
                 return { ...result, content: verifiedDownload(body, result.content_ref, scope) };
             }
             const grant = await this.createDownload(input, options);
-            requirePresignedMethod(grant.access, "GET", "download");
-            // A grant of zero bytes signs no range and needs no request.
-            if (grant.content_ref.size_bytes === 0) {
-                body = new ReadableStream<Uint8Array>({ start: (controller) => controller.close() });
-            } else {
-                const response = await (this._options.fetch ?? fetch)(grant.access.url, {
-                    redirect: "error",
-                    method: grant.access.method,
-                    headers: grant.access.headers,
-                    signal: scope.signal,
-                });
-                body = response.body;
-                requireSuccessfulResponse(response, "download");
-            }
+            body = await downloadRanges(grant.ranges, grant.content_ref.size_bytes, this._options.fetch ?? fetch, scope);
             return {
                 namespace_alias: input.namespace_alias,
                 path: grant.path,

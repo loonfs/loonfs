@@ -31,9 +31,9 @@ class Chunks(httpx.SyncByteStream):
 
 def stream_client(fixture, direct, body):
     claim = {
-        "kind": "blob",
+        "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "cnt_00000000000000000000000000000001",
+        "content_id": "con_00000000000000000000000000000001",
         "size_bytes": fixture["size_bytes"],
         "checksum": {"algorithm": fixture["algorithm"], "value": fixture["checksum"]},
     }
@@ -44,6 +44,13 @@ def stream_client(fixture, direct, body):
         requests.append(request)
         assert request.extensions["timeout"]["read"] == 7
         path = request.url.path
+        if path.startswith("/object/"):
+            part = fixture["ranges"][int(path.rsplit("/", 1)[1])]
+            assert "authorization" not in request.headers
+            assert "x-private" not in request.headers
+            assert "cookie" not in request.headers
+            assert request.headers.get_list("range") == [part["range"]]
+            return httpx.Response(200, content=part["content"].encode())
         if path == "/object":
             assert "authorization" not in request.headers
             assert "x-private" not in request.headers
@@ -72,8 +79,27 @@ def stream_client(fixture, direct, body):
                 "path": "/file",
                 "revision_no": 1,
                 "content_ref": claim,
-                "access": access,
+                "ranges": [
+                    {
+                        "start_offset": 0,
+                        "length": fixture["size_bytes"],
+                        "access": access,
+                    }
+                ],
             }
+            if "ranges" in fixture:
+                value["ranges"] = [
+                    {
+                        "start_offset": part["start_offset"],
+                        "length": part["length"],
+                        "access": {
+                            **access,
+                            "url": f"http://objects.test/object/{index}",
+                            "headers": {"range": part["range"]},
+                        },
+                    }
+                    for index, part in enumerate(fixture["ranges"])
+                ]
         elif path.endswith("/entry"):
             actor = "test"
             value = {
@@ -120,13 +146,15 @@ def test_streaming_download_conformance(fixture, direct):
             "demo", path="/file", request_options={"timeout": 7}
         ) as stream:
             assert body.reads == 0, "opening the download must not consume its body"
-            if fixture["error"]:
+            if fixture["error"] or (direct and fixture.get("range_error", False)):
                 with pytest.raises((RuntimeError, httpx.ReadError)):
                     b"".join(stream)
             else:
                 assert b"".join(stream) == fixture["content"].encode()
         # A direct grant of zero bytes makes no object request, so no body opens.
-        assert body.closed or (direct and fixture["size_bytes"] == 0)
+        assert body.closed or (
+            direct and (fixture["size_bytes"] == 0 or "ranges" in fixture)
+        )
 
 
 @pytest.mark.parametrize("direct", [False, True])

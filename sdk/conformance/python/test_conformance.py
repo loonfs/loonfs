@@ -224,6 +224,7 @@ class AppendRequest:
     empty_path: str
     actor_id: ActorId
     content_utf8: str
+    content_repetitions: int
     appended_utf8: str
     commit_ids: AppendCommitIds
 
@@ -237,6 +238,7 @@ class AppendExpected:
     previous_range: str
     appended_revision_no: int
     appended_size_bytes: int
+    resume_offset: int
     resumed_range: str
     empty_append: ErrorStatusExpected
     empty_put_committed_seq: int
@@ -2238,7 +2240,7 @@ def test_append(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     client = harness.client
     actor = {"additional_headers": {"Loonfs-Actor": request.actor_id}}
     client.namespaces.create(namespace_id=request.namespace_id, request_options=actor)
-    content = request.content_utf8.encode()
+    content = request.content_utf8.encode() * request.content_repetitions
     appended = request.appended_utf8.encode()
 
     put = client.files.upload(
@@ -2275,11 +2277,10 @@ def test_append(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     grant = client.files.create_download(
         request.namespace_id, path=request.path, revision_no=previous_revision
     )
-    # The append extended this object, so only the signed range keeps the
-    # appended bytes out of this read.
-    assert grant.content_ref.content_id == current.content_ref.content_id
+    whole_grant = client.files.create_download(request.namespace_id, path=request.path)
+    assert len(whole_grant.ranges) == 2
     assert grant.content_ref.size_bytes == expected.previous_size_bytes
-    assert _signed_range(grant.access) == expected.previous_range
+    assert _signed_range(grant.ranges[0].access) == expected.previous_range
     previous = client.files.download(
         request.namespace_id, path=request.path, revision_no=previous_revision
     )
@@ -2288,12 +2289,20 @@ def test_append(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     resumed = client.files.create_download(
         request.namespace_id,
         path=request.path,
-        start_offset=expected.previous_size_bytes,
+        start_offset=expected.resume_offset,
     )
-    assert _signed_range(resumed.access) == expected.resumed_range
-    rest = httpx.get(resumed.access.url, headers=resumed.access.headers or {})
+    assert _signed_range(resumed.ranges[0].access) == expected.resumed_range
+    rest = httpx.get(
+        resumed.ranges[0].access.url, headers=resumed.ranges[0].access.headers or {}
+    )
     rest.raise_for_status()
-    assert rest.content == appended
+    assert len(resumed.ranges) == 1
+    assert resumed.ranges[0].start_offset == expected.resume_offset
+    assert rest.content == (content + appended)[expected.resume_offset :]
+    assert resumed.content_ref.checksum == _checksum(
+        resumed.content_ref.checksum.algorithm,
+        (content + appended)[: expected.resume_offset] + rest.content,
+    )
 
     with pytest.raises(ValueError):
         client.files.append(
@@ -2326,7 +2335,7 @@ def test_append(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         request.namespace_id, path=request.empty_path
     )
     assert empty_grant.content_ref.size_bytes == 0
-    assert _signed_range(empty_grant.access) is None
+    assert _signed_range(empty_grant.ranges[0].access) is None
     empty = client.files.download(request.namespace_id, path=request.empty_path)
     assert empty.content == b""
 

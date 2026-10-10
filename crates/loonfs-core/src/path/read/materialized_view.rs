@@ -120,12 +120,7 @@ pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
     load_metadata_view(store, namespace_id, context).await
 }
 
-/// Where one file's bytes actually live, for a host that is about to
-/// authorize a client to read them without passing them through itself.
-///
-/// It names one immutable content object, so it does not go stale when the
-/// path moves on: a commit that replaces the file writes a new object and
-/// leaves this one where it is.
+/// Immutable object ranges for a selected revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectDownloadTarget {
     /// Absolute path as rendered from stored display names.
@@ -137,8 +132,8 @@ pub struct DirectDownloadTarget {
     /// The first byte the download reads: it reads
     /// `[start_offset, content_ref.size_bytes)`.
     pub start_offset: u64,
-    /// Logical unscoped object key an issuer signs a read of.
-    pub object_key: String,
+    /// Consecutive object ranges starting at `start_offset`.
+    pub ranges: Vec<GrantedRange>,
 }
 
 /// Content information needed to authorize an inode download.
@@ -153,8 +148,19 @@ pub struct DirectDownloadByInodeTarget {
     /// The first byte the download reads: it reads
     /// `[start_offset, content_ref.size_bytes)`.
     pub start_offset: u64,
-    /// Object key used to sign the read.
+    /// Consecutive object ranges starting at `start_offset`.
+    pub ranges: Vec<GrantedRange>,
+}
+
+/// Object bytes for a host to sign without proxying them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantedRange {
+    /// Logical unscoped key passed to the object-store signer.
     pub object_key: String,
+    /// Offset within the object, which may differ from the revision offset.
+    pub object_start: u64,
+    /// Number of object bytes authorized.
+    pub length: u64,
 }
 
 /// A coherent, seq-pinned namespace read view.
@@ -401,21 +407,28 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         ContentLocation::resolve(&self.metadata_view(), Some(&self.wal_tail), content_ref).await
     }
 
-    /// Serves any prefix of a chain that starts in the tail from its own object,
-    /// or writes the head value as a fold would before selecting its object.
-    async fn download_object_key(
+    async fn download_ranges(
         &self,
         store: &S,
         content_ref: &ContentRef,
         start_offset: u64,
         merge_memory: &Semaphore,
-    ) -> Result<String> {
+    ) -> Result<Vec<GrantedRange>> {
         if start_offset != 0 && start_offset >= content_ref.size_bytes {
             return Err(CoreError::ResumeOffsetOutOfRange {
                 start_offset,
                 size_bytes: content_ref.size_bytes,
             });
         }
+        let cannot_write = |error| match error {
+            CoreError::Store {
+                class: StoreFailureClass::PermissionDenied,
+                ..
+            } => CoreError::ContentNotMaterialized {
+                content_id: content_ref.content_id.clone(),
+            },
+            error => error,
+        };
         let location = self.resolve_content_location(content_ref).await?;
         if content_ref.size_bytes == 0 {
             let key = location.object_key();
@@ -427,9 +440,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             {
                 store
                     .put_immutable_verified(key, bytes::Bytes::new())
-                    .await?;
+                    .await
+                    .map_err(CoreError::from)
+                    .map_err(cannot_write)?;
             }
-            return Ok(key.to_owned());
+            return Ok(vec![GrantedRange {
+                object_key: key.to_owned(),
+                object_start: 0,
+                length: 0,
+            }]);
         }
         if location.is_resident() && location.has_pieces() {
             let key = location.object_key();
@@ -439,13 +458,19 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .map_err(|error| CoreError::store(key, &error))?
                 .is_some_and(|metadata| metadata.size_bytes >= content_ref.size_bytes)
             {
-                return Ok(key.to_owned());
+                return Ok(vec![GrantedRange {
+                    object_key: key.to_owned(),
+                    object_start: start_offset,
+                    length: content_ref.size_bytes - start_offset,
+                }]);
             }
+        }
+        let extents = if location.has_pieces() {
             let content = self
                 .wal_tail
                 .content_by_id(&content_ref.owner_namespace_id, &content_ref.content_id)
                 .expect("resident pieces should name a projected chain");
-            let layout = write_tail_content(
+            write_tail_content(
                 store,
                 &self.metadata_view(),
                 &self.wal_tail,
@@ -454,31 +479,35 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 merge_memory,
             )
             .await
-            .map_err(|error| match error {
-                CoreError::Store {
-                    class: StoreFailureClass::PermissionDenied,
-                    ..
-                } => CoreError::ContentNotMaterialized {
-                    content_id: content_ref.content_id.clone(),
-                },
-                error => error,
-            })?;
-            return Ok(extent_object_key(
-                layout
-                    .layout
-                    .extents
-                    .last()
-                    .expect("a tail write should produce an extent"),
-            ));
-        }
-        if let [extent] = location.extents.as_slice() {
-            if !location.has_pieces() && extent.extent.offset == 0 {
-                return Ok(extent.object_key.clone());
+            .map_err(cannot_write)?
+            .layout
+            .extents
+        } else {
+            location
+                .extents
+                .into_iter()
+                .map(|located| located.extent)
+                .collect()
+        };
+        let mut ranges = Vec::new();
+        let mut offset = 0;
+        for extent in extents {
+            let end = offset + extent.length;
+            let first = offset.max(start_offset);
+            let last = end.min(content_ref.size_bytes);
+            if first < last {
+                ranges.push(GrantedRange {
+                    object_key: extent_object_key(&extent),
+                    object_start: extent.offset + (first - offset),
+                    length: last - first,
+                });
+            }
+            offset = end;
+            if offset >= content_ref.size_bytes {
+                break;
             }
         }
-        Err(CoreError::ContentNotMaterialized {
-            content_id: content_ref.content_id.clone(),
-        })
+        Ok(ranges)
     }
 
     pub(crate) async fn direct_download_target(
@@ -499,8 +528,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 kind: InodeKind::Directory,
             });
         };
-        let object_key = self
-            .download_object_key(store, &content_ref, start_offset, merge_memory)
+        let ranges = self
+            .download_ranges(store, &content_ref, start_offset, merge_memory)
             .await?;
 
         Ok(DirectDownloadTarget {
@@ -508,7 +537,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             revision_no,
             content_ref,
             start_offset,
-            object_key,
+            ranges,
         })
     }
 
@@ -600,15 +629,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
             None => self.current_revision_for_inode(inode_id, access).await?,
         };
-        let object_key = self
-            .download_object_key(store, &revision.content_ref, start_offset, merge_memory)
+        let ranges = self
+            .download_ranges(store, &revision.content_ref, start_offset, merge_memory)
             .await?;
         Ok(DirectDownloadByInodeTarget {
             inode_id,
             revision_no: revision.revision_no,
             content_ref: revision.content_ref,
             start_offset,
-            object_key,
+            ranges,
         })
     }
 

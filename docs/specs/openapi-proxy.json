@@ -740,12 +740,8 @@
         "type": "object"
       },
       "CreateDownloadResponse": {
-        "description": "A presigned URL for one revision's bytes of a content object.\n\nThe URL expires at `access.expires_at_ms`; later path changes and appends\ndo not change the bytes it reads.",
+        "description": "Signed object ranges for one revision.",
         "properties": {
-          "access": {
-            "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "Short-lived read capability the client uses without learning the raw object key."
-          },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
             "description": "The identity, byte length, and checksum of the revision's bytes."
@@ -758,6 +754,13 @@
             "$ref": "#/components/schemas/AbsolutePath",
             "description": "Absolute path as rendered from stored display names."
           },
+          "ranges": {
+            "description": "The revision's bytes from the requested offset, in order.",
+            "items": {
+              "$ref": "#/components/schemas/DownloadRange"
+            },
+            "type": "array"
+          },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
             "description": "Revision the capability reads, resolved from the request."
@@ -768,7 +771,7 @@
           "path",
           "revision_no",
           "content_ref",
-          "access"
+          "ranges"
         ],
         "type": "object"
       },
@@ -933,6 +936,33 @@
         "description": "User-facing spelling of one path component.",
         "example": "report.txt",
         "type": "string"
+      },
+      "DownloadRange": {
+        "description": "One contiguous run of a revision's bytes, read from one object.",
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/ObjectTransferAccess",
+            "description": "Short-lived read capability for exactly those bytes."
+          },
+          "length": {
+            "description": "Bytes in the run.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_offset": {
+            "description": "Offset of the run's first byte in the revision.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_offset",
+          "length",
+          "access"
+        ],
+        "type": "object"
       },
       "ErrorDetails": {
         "description": "Optional machine-readable identifiers and state for an `ErrorResponse`.",
@@ -3606,7 +3636,7 @@
     },
     "/v0/namespace-aliases/{namespace_alias}/filesystem/downloads": {
       "post": {
-        "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. The capability reads exactly `[start_offset, size_bytes)` of the object: it signs that `Range`, and `access.headers` carries it for the client to send unchanged. A client that resumes asks for a new grant from its offset. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
+        "description": "Returns ordered signed object ranges covering exactly `[start_offset, size_bytes)` of the selected revision. Each range carries its signed headers in `access.headers`, which the client sends unchanged. The client checks each range's length and the complete revision's checksum. A client that resumes asks for a new grant from its offset. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
         "operationId": "create_download",
         "parameters": [
           {

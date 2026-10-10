@@ -195,7 +195,8 @@ pub use manifest::{
 pub use manifest::{ManifestLoadError, ManifestLoadFailureClass};
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
-    CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, MAX_RESOLVE_CURRENT_FILES,
+    CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange,
+    MAX_RESOLVE_CURRENT_FILES,
 };
 pub use pin::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,

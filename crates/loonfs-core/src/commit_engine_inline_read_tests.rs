@@ -394,8 +394,8 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
         .direct_download_target_by_inode(inode_id, Some(RevisionNo(1)), 0, &context)
         .await
         .expect("inode download");
-    assert_eq!(path_target.object_key, stored.object_key());
-    assert_eq!(inode_target.object_key, stored.object_key());
+    assert_eq!(path_target.ranges[0].object_key, stored.object_key());
+    assert_eq!(inode_target.ranges[0].object_key, stored.object_key());
 }
 
 // This test inserts a checksum mismatch through the WAL codec.

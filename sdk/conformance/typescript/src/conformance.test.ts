@@ -277,6 +277,7 @@ interface AppendRequest {
     empty_path: string;
     actor_id: LoonFS.ActorId;
     content_utf8: string;
+    content_repetitions: number;
     appended_utf8: string;
     commit_ids: AppendCommitIds;
 }
@@ -289,6 +290,7 @@ interface AppendExpected {
     previous_range: string;
     appended_revision_no: number;
     appended_size_bytes: number;
+    resume_offset: number;
     resumed_range: string;
     empty_append: ErrorStatusExpected;
     empty_put_committed_seq: number;
@@ -586,6 +588,7 @@ const APPEND_REQUEST_FIELDS = [
     "empty_path",
     "actor_id",
     "content_utf8",
+    "content_repetitions",
     "appended_utf8",
     "commit_ids",
 ] as const;
@@ -597,6 +600,7 @@ const APPEND_EXPECTED_FIELDS = [
     "previous_range",
     "appended_revision_no",
     "appended_size_bytes",
+    "resume_offset",
     "resumed_range",
     "empty_append",
     "empty_put_committed_seq",
@@ -3055,7 +3059,7 @@ conformanceTest("append", async (activeHarness, testCase) => {
     const client = activeHarness.client;
     const actor = { headers: { "Loonfs-Actor": request.actor_id } };
     await client.namespaces.create({ namespace_id: request.namespace_id }, actor);
-    const content = new TextEncoder().encode(request.content_utf8);
+    const content = new TextEncoder().encode(request.content_utf8.repeat(request.content_repetitions));
     const appended = new TextEncoder().encode(request.appended_utf8);
     const whole = new Uint8Array(content.length + appended.length);
     whole.set(content);
@@ -3104,11 +3108,10 @@ conformanceTest("append", async (activeHarness, testCase) => {
         path: request.path,
         revision_no: previousRevision,
     });
-    // The append extended this object, so only the signed range keeps the
-    // appended bytes out of this read.
-    assert.equal(grant.content_ref.content_id, current.content_ref.content_id);
+    const wholeGrant = await client.files.createDownload({ namespace_id: request.namespace_id, path: request.path });
+    assert.equal(wholeGrant.ranges.length, 2);
     assert.equal(grant.content_ref.size_bytes, expected.previous_size_bytes);
-    assert.equal(signedRange(grant.access), expected.previous_range);
+    assert.equal(signedRange(grant.ranges[0]!.access), expected.previous_range);
     const previous = await client.files.download({
         namespace_id: request.namespace_id,
         path: request.path,
@@ -3119,12 +3122,18 @@ conformanceTest("append", async (activeHarness, testCase) => {
     const resumed = await client.files.createDownload({
         namespace_id: request.namespace_id,
         path: request.path,
-        start_offset: expected.previous_size_bytes,
+        start_offset: expected.resume_offset,
     });
-    assert.equal(signedRange(resumed.access), expected.resumed_range);
-    const rest = await fetch(resumed.access.url, { headers: resumed.access.headers });
+    assert.equal(signedRange(resumed.ranges[0]!.access), expected.resumed_range);
+    const rest = await fetch(resumed.ranges[0]!.access.url, { headers: resumed.ranges[0]!.access.headers });
     assert.ok(rest.ok, `resumed download failed with HTTP ${rest.status}`);
-    assert.deepEqual(new Uint8Array(await rest.arrayBuffer()), appended);
+    assert.equal(resumed.ranges.length, 1);
+    assert.equal(resumed.ranges[0]!.start_offset, expected.resume_offset);
+    const suffix = new Uint8Array(await rest.arrayBuffer());
+    assert.deepEqual(suffix, whole.subarray(expected.resume_offset));
+    const verified = whole.slice();
+    verified.set(suffix, expected.resume_offset);
+    assert.deepEqual(checksum(resumed.content_ref.checksum.algorithm, verified), resumed.content_ref.checksum);
 
     await assert.rejects(
         client.files.append(
@@ -3170,7 +3179,7 @@ conformanceTest("append", async (activeHarness, testCase) => {
         path: request.empty_path,
     });
     assert.equal(emptyGrant.content_ref.size_bytes, 0);
-    assert.equal(signedRange(emptyGrant.access), undefined);
+    assert.equal(signedRange(emptyGrant.ranges[0]!.access), undefined);
     const empty = await client.files.download({
         namespace_id: request.namespace_id,
         path: request.empty_path,

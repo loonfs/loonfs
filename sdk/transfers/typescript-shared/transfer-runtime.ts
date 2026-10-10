@@ -171,6 +171,95 @@ export class IncrementalChecksum {
     }
 }
 
+interface DownloadRange {
+    start_offset: number;
+    length: number;
+    access: { method: string; url: string; headers?: Record<string, string> };
+}
+
+export async function downloadRanges(
+    ranges: DownloadRange[],
+    sizeBytes: number,
+    send: typeof fetch,
+    scope: TransferScope,
+): Promise<ReadableStream<Uint8Array>> {
+    let offset = 0;
+    if (ranges.length === 0 || (sizeBytes === 0 && ranges.length !== 1))
+        throw new Error("download grant has invalid ranges");
+    for (const range of ranges) {
+        if (range.access.method !== "GET") throw new Error("download grant must use GET");
+        if (range.start_offset !== offset || !Number.isSafeInteger(range.length) || range.length < 0 ||
+            (range.length === 0 && sizeBytes !== 0)) throw new Error("download grant has invalid ranges");
+        offset += range.length;
+    }
+    if (!Number.isSafeInteger(offset) || offset !== sizeBytes)
+        throw new Error("download grant has invalid ranges");
+    let index = 0;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let remaining = 0;
+    let cancelled = false;
+    const openNext = async (): Promise<boolean> => {
+        while (index < ranges.length && !cancelled) {
+            scope.check();
+            const range = ranges[index++]!;
+            if (range.length === 0) continue;
+            const response = await send(range.access.url, {
+                redirect: "error",
+                method: range.access.method,
+                headers: range.access.headers,
+                signal: scope.signal,
+            });
+            if (cancelled) { await response.body?.cancel(); return false; }
+            if (!response.ok || !response.body) {
+                await response.body?.cancel();
+                throw new Error(`download failed with HTTP ${response.status}`);
+            }
+            reader = response.body.getReader();
+            remaining = range.length;
+            return true;
+        }
+        return false;
+    };
+    await openNext();
+    return new ReadableStream<Uint8Array>({
+        async pull(controller) {
+            try {
+                while (!cancelled) {
+                    scope.check();
+                    if (!reader && !await openNext()) {
+                        if (!cancelled) controller.close();
+                        return;
+                    }
+                    const next = await reader!.read();
+                    if (cancelled) return;
+                    if (next.done) {
+                        reader!.releaseLock();
+                        reader = undefined;
+                        if (remaining !== 0) throw new Error("download range ended before its declared length");
+                        continue;
+                    }
+                    remaining -= next.value.length;
+                    if (remaining < 0) throw new Error("download range exceeded its declared length");
+                    controller.enqueue(next.value);
+                    return;
+                }
+            } catch (error) {
+                await reader?.cancel(error).catch(() => {});
+                reader?.releaseLock();
+                reader = undefined;
+                if (!cancelled) controller.error(error);
+            }
+        },
+        async cancel(reason) {
+            cancelled = true;
+            scope.controller.abort(reason);
+            await reader?.cancel(reason).catch(() => {});
+            reader?.releaseLock();
+            reader = undefined;
+        },
+    }, { highWaterMark: 0 });
+}
+
 /** Verification belongs to EOF, on the same stream as the bytes it checks. */
 export function verifiedDownload(
     body: ReadableStream<Uint8Array> | null,

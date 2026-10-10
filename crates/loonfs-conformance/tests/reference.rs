@@ -729,6 +729,7 @@ struct AppendRequest {
     empty_path: String,
     actor_id: ActorId,
     content_utf8: String,
+    content_repetitions: usize,
     appended_utf8: String,
     commit_ids: AppendCommitIds,
 }
@@ -753,6 +754,7 @@ struct AppendExpected {
     previous_range: String,
     appended_revision_no: u64,
     appended_size_bytes: u64,
+    resume_offset: u64,
     resumed_range: String,
     empty_append: ErrorStatusExpected,
     empty_put_committed_seq: u64,
@@ -783,7 +785,8 @@ async fn run_append(harness: &Harness, case: &Case) {
         .await
         .expect("create append namespace");
     let spec = namespace_path(&request.namespace_id, &request.path);
-    let content = request.content_utf8.as_bytes();
+    let content = request.content_utf8.repeat(request.content_repetitions);
+    let content = content.as_bytes();
     let appended = request.appended_utf8.as_bytes();
 
     let put = client
@@ -828,18 +831,13 @@ async fn run_append(harness: &Harness, case: &Case) {
         .create_revision_download(&spec, previous_revision)
         .await
         .expect("grant the previous revision");
-    // The append extended this object, so only the signed range keeps the
-    // appended bytes out of this read.
-    assert_eq!(
-        previous.content_ref.content_id,
-        current.content_ref.content_id
-    );
+    assert_eq!(current.ranges.len(), 2);
     assert_eq!(
         previous.content_ref.size_bytes,
         expected.previous_size_bytes
     );
     assert_eq!(
-        signed_range(&previous.access),
+        signed_range(&previous.ranges[0].access),
         Some(expected.previous_range.as_str())
     );
     assert_eq!(stream_grant(client, &previous).await, content);
@@ -848,21 +846,23 @@ async fn run_append(harness: &Harness, case: &Case) {
         .create_download_with_options(
             &spec,
             &DownloadOptions {
-                start_offset: expected.previous_size_bytes,
+                start_offset: expected.resume_offset,
                 ..Default::default()
             },
         )
         .await
         .expect("grant the appended bytes");
     assert_eq!(
-        signed_range(&resumed.access),
+        signed_range(&resumed.ranges[0].access),
         Some(expected.resumed_range.as_str())
     );
+    assert_eq!(resumed.ranges.len(), 1);
+    assert_eq!(resumed.ranges[0].start_offset, expected.resume_offset);
     let mut stream = client
         .open_direct_download(&resumed)
         .await
         .expect("open the resumed download");
-    stream.fold_resumed_prefix(content);
+    stream.fold_resumed_prefix(&[content, appended].concat()[..expected.resume_offset as usize]);
     let mut rest = Vec::new();
     while let Some(chunk) = stream
         .next_chunk()
@@ -871,7 +871,10 @@ async fn run_append(harness: &Harness, case: &Case) {
     {
         rest.extend_from_slice(&chunk);
     }
-    assert_eq!(rest, appended);
+    assert_eq!(
+        rest,
+        appended[(expected.resume_offset - expected.previous_size_bytes) as usize..]
+    );
 
     let refused = client
         .append_file_with_options(
@@ -900,7 +903,7 @@ async fn run_append(harness: &Harness, case: &Case) {
         .await
         .expect("grant the empty file");
     assert_eq!(empty.content_ref.size_bytes, 0);
-    assert_eq!(signed_range(&empty.access), None);
+    assert_eq!(signed_range(&empty.ranges[0].access), None);
     assert!(stream_grant(client, &empty).await.is_empty());
 
     let append_to_empty = client
@@ -927,7 +930,7 @@ async fn run_append(harness: &Harness, case: &Case) {
         .await
         .expect("grant the empty revision");
     assert_eq!(still_empty.content_ref, empty.content_ref);
-    assert_eq!(signed_range(&still_empty.access), None);
+    assert_eq!(signed_range(&still_empty.ranges[0].access), None);
     assert!(stream_grant(client, &still_empty).await.is_empty());
 }
 

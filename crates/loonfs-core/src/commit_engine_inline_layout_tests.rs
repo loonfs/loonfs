@@ -5,6 +5,7 @@ use crate::authorize::{Authorizer, ReadAccess};
 use crate::limits::MAX_MERGED_EXTENT_BYTES;
 use crate::storage::content::DurableContentValidationError;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
+use crate::GrantedRange;
 use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::manifest::ContentLayoutRecord;
@@ -344,7 +345,8 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
         )
         .await
         .expect("equal whole download")
-        .object_key,
+        .ranges[0]
+            .object_key,
         content_blob(&namespace_id, &original.content_ref().content_id)
     );
     let inode_id = tail.rows.revisions()[0].inode_id;
@@ -378,7 +380,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
             .expect("download revision");
         let bytes = store
             .get(
-                &target.object_key,
+                &target.ranges[0].object_key,
                 Some(loonfs_objectstore::ByteRange {
                     start_inclusive: 0,
                     end_exclusive: target.content_ref.size_bytes,
@@ -510,72 +512,64 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
 }
 
 #[tokio::test]
-async fn downloads_require_one_object_and_create_empty_whole_objects() {
+async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_objects() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
-    let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let mut bytes = vec![b'a'; 100];
+    let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
+    for (revision, added) in [(2, 10), (3, 3)] {
+        let offset = bytes.len();
+        bytes.resize(offset + added, b'b' + revision as u8);
+        commit_piece(
+            &store,
+            &namespace_id,
+            (inode_id, RevisionNo(revision)),
+            &original.content_id,
+            &bytes,
+            offset,
+            None,
+        )
+        .await;
+        fold_wal(&store, &namespace_id).await.expect("fold extent");
+    }
     let access = ReadAccess::live(Authorizer::Unrestricted);
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("view");
+    let merge_memory = Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize);
+    store.reset();
     let target = view
+        .direct_download_target(&store, "/file-0", None, 105, &access, &merge_memory)
+        .await
+        .expect("resumed ranges");
+    assert_eq!(
+        target.ranges,
+        vec![
+            GrantedRange {
+                object_key: content_span(&namespace_id, &original.content_id, 100, 110),
+                object_start: 5,
+                length: 5,
+            },
+            GrantedRange {
+                object_key: content_span(&namespace_id, &original.content_id, 110, 113),
+                object_start: 0,
+                length: 3,
+            },
+        ]
+    );
+    assert!(content_operations(&store).is_empty());
+    let previous = view
         .direct_download_target(
             &store,
             "/file-0",
-            None,
-            0,
+            Some(RevisionNo(2)),
+            105,
             &access,
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &merge_memory,
         )
         .await
-        .expect("one object");
-    assert_eq!(
-        target.object_key,
-        content_blob(&namespace_id, &original.content_id)
-    );
-    commit_piece(
-        &store,
-        &namespace_id,
-        (inode_id, RevisionNo(2)),
-        &original.content_id,
-        b"hello!",
-        5,
-        None,
-    )
-    .await;
-    let view = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view with pieces");
-    store.reset();
-    assert!(matches!(
-        view.direct_download_target(
-            &store,
-            "/file-0",
-            None,
-            0,
-            &access,
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
-        )
-        .await,
-        Err(CoreError::ContentNotMaterialized { .. })
-    ));
-    assert!(content_operations(&store).is_empty());
-    fold_wal(&store, &namespace_id).await.expect("fold");
-    let view = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view");
-    assert!(matches!(
-        view.direct_download_target(
-            &store,
-            "/file-0",
-            None,
-            0,
-            &access,
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
-        )
-        .await,
-        Err(CoreError::ContentNotMaterialized { .. })
-    ));
+        .expect("previous revision");
+    assert_eq!(previous.ranges, target.ranges[..1]);
     let empty = inline(&namespace_id, Bytes::new());
     engine.invalidate_projection();
     publish(
@@ -600,13 +594,16 @@ async fn downloads_require_one_object_and_create_empty_whole_objects() {
         )
         .await
         .expect("empty download");
+    assert_eq!(target.ranges.len(), 1);
+    assert_eq!(target.ranges[0].length, 0);
+    assert_eq!(target.ranges[0].object_start, 0);
     assert_eq!(
-        target.object_key,
+        target.ranges[0].object_key,
         content_blob(&namespace_id, &empty.content_ref().content_id)
     );
     assert_eq!(
         store
-            .head(&target.object_key)
+            .head(&target.ranges[0].object_key)
             .await
             .expect("head")
             .expect("empty object")
@@ -682,7 +679,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         &namespace_id,
         vec![candidate],
         &context,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        Arc::new(Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize)),
     )
     .await
     .pop()
@@ -1015,7 +1012,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
                 )
                 .await
                 .expect("download revision");
-            assert_eq!(target.object_key, key);
+            assert_eq!(target.ranges[0].object_key, key);
             assert_eq!(
                 target.content_ref.content_id,
                 original.content_ref().content_id
@@ -1289,6 +1286,61 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
         assert_eq!(read.bytes, b"hello");
         fold_wal(&store, &namespace_id).await.expect("fold copy");
     }
+}
+
+#[tokio::test]
+async fn downloads_report_unwritable_pieces_without_changing_content() {
+    use loonfs_test_support::stores::{FailStore, InjectedError, OperationKind};
+
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        candidate(
+            "file",
+            vec![
+                inline(&namespace_id, Bytes::from_static(b"pieces")),
+                inline(&namespace_id, Bytes::new()),
+            ],
+        ),
+    )
+    .await
+    .expect("publish pieces");
+    let denied = FailStore::matching(
+        store,
+        |operation| {
+            matches!(operation.kind(), OperationKind::Put { .. })
+                && loonfs_objectstore::layout::content_id_of(operation.key()).is_some()
+        },
+        InjectedError::PermissionDenied("read-only store".to_owned()),
+    );
+    denied.fail_all();
+    let view = load_current_metadata_view(&denied, &namespace_id)
+        .await
+        .expect("view");
+    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let merge_memory = Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize);
+    let store = denied.inner();
+    store.reset();
+    for path in ["/file-0", "/file-1"] {
+        assert!(matches!(
+            view.direct_download_target(&denied, path, None, 10, &access, &merge_memory)
+                .await,
+            Err(CoreError::ResumeOffsetOutOfRange { .. })
+        ));
+    }
+    assert_eq!(denied.attempts(), 0);
+    for path in ["/file-0", "/file-1"] {
+        assert!(matches!(
+            view.direct_download_target(&denied, path, None, 0, &access, &merge_memory)
+                .await,
+            Err(CoreError::ContentNotMaterialized { .. })
+        ));
+    }
+    assert_eq!(denied.attempts(), 2);
+    assert_no_writes(store);
 }
 
 #[tokio::test]

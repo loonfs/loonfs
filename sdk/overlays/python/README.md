@@ -50,6 +50,12 @@ Direct requests do not inherit API authorization, cookies or API headers, and
 never follow redirects. Closing the stream or interrupting its `with` block is
 the synchronous cancellation mechanism.
 
+Direct download grants contain ordered `ranges`. Each range carries its revision
+`start_offset`, `length`, and signed `access`. The helpers send each range's
+headers unchanged, check its length, and verify one checksum across the complete
+file. To resume through the grant API, request a new grant from the held byte
+count and include the held prefix when verifying the complete file.
+
 `client.files.download` collects the same verified stream into memory.
 `client.files.upload` accepts in-memory bytes through the same transfer path.
 Use `prepare_stream` to retain prepared content for publication retries:

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,13 @@ type streamCase struct {
 	Range          *string `json:"range"`
 	Error          bool    `json:"error"`
 	TransportError bool    `json:"transport_error"`
+	RangeError     bool    `json:"range_error"`
+	Ranges         []struct {
+		StartOffset int64  `json:"start_offset"`
+		Length      int64  `json:"length"`
+		Range       string `json:"range"`
+		Content     string `json:"content"`
+	} `json:"ranges"`
 }
 
 func streamingCases(t *testing.T) []streamCase {
@@ -46,12 +54,28 @@ func streamingCases(t *testing.T) []streamCase {
 func streamTestServer(t *testing.T, fixture streamCase, direct bool, content func(http.ResponseWriter, *http.Request)) *httptest.Server {
 	t.Helper()
 	var host *httptest.Server
-	claim := map[string]any{"kind": "blob", "owner_namespace_id": "demo", "content_id": "cnt_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
+	claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
 	var signed []string
 	if fixture.Range != nil {
 		signed = []string{*fixture.Range}
 	}
 	host = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/object/") {
+			index, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/object/"))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			part := fixture.Ranges[index]
+			if r.Header.Get("Authorization") != "" || r.Header.Get("X-Private") != "" {
+				t.Error("API credentials leaked to object store")
+			}
+			if r.Header.Get("Range") != part.Range {
+				t.Errorf("range = %q, want %q", r.Header.Get("Range"), part.Range)
+			}
+			io.WriteString(w, part.Content)
+			return
+		}
 		if r.URL.Path == "/object" {
 			if r.Header.Get("Authorization") != "" || r.Header.Get("X-Private") != "" {
 				t.Error("API credentials leaked to object store")
@@ -77,7 +101,15 @@ func streamTestServer(t *testing.T, fixture streamCase, direct bool, content fun
 			if fixture.Range != nil {
 				access["headers"] = map[string]string{"range": *fixture.Range}
 			}
-			json.NewEncoder(w).Encode(map[string]any{"namespace_id": "demo", "path": "/file", "revision_no": 1, "content_ref": claim, "access": access})
+			ranges := []any{map[string]any{"start_offset": 0, "length": fixture.SizeBytes, "access": access}}
+			if len(fixture.Ranges) > 0 {
+				ranges = nil
+				for index, part := range fixture.Ranges {
+					ranges = append(ranges, map[string]any{"start_offset": part.StartOffset, "length": part.Length,
+						"access": map[string]any{"kind": "presigned_url", "method": "GET", "url": host.URL + "/object/" + strconv.Itoa(index), "headers": map[string]string{"range": part.Range}, "expires_at_ms": 2000000000000}})
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"namespace_id": "demo", "path": "/file", "revision_no": 1, "content_ref": claim, "ranges": ranges})
 		case strings.HasSuffix(r.URL.Path, "/entry"):
 			json.NewEncoder(w).Encode(map[string]any{"inode_kind": "file", "namespace_id": "demo", "path": "/file", "revision_no": 1, "content_ref": claim})
 		case strings.HasSuffix(r.URL.Path, "/content"):
@@ -115,7 +147,7 @@ func TestStreamingDownloadConformance(t *testing.T) {
 				}
 				defer opened.Content.Close()
 				data, err := io.ReadAll(opened.Content)
-				if fixture.Error {
+				if fixture.Error || (direct && fixture.RangeError) {
 					if err == nil {
 						t.Fatal("invalid body passed verification")
 					}

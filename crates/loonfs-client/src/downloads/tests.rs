@@ -103,13 +103,17 @@ fn grant_from(content_ref: ContentRef, url: &str, start_offset: u64) -> CreateDo
         namespace_id: NamespaceId::parse("demo").expect("namespace id"),
         path: AbsolutePath::parse("/big.bin").expect("absolute path"),
         revision_no: RevisionNo(1),
+        ranges: vec![DownloadRange {
+            start_offset,
+            length: content_ref.size_bytes - start_offset,
+            access: ObjectTransferAccess::PresignedUrl {
+                method: "GET".to_owned(),
+                url: url.to_owned(),
+                headers,
+                expires_at_ms: 0,
+            },
+        }],
         content_ref,
-        access: ObjectTransferAccess::PresignedUrl {
-            method: "GET".to_owned(),
-            url: url.to_owned(),
-            headers,
-            expires_at_ms: 0,
-        },
     }
 }
 
@@ -321,7 +325,7 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
         inode_id: loonfs_types::InodeId(1),
         revision_no: path_grant.revision_no,
         content_ref: path_grant.content_ref,
-        access: path_grant.access,
+        ranges: path_grant.ranges,
     };
 
     let transport = scripted_transport::script([
@@ -405,7 +409,7 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
         &payload,
     );
     let mut grant = grant(content_ref, "http://example.invalid/object");
-    let ObjectTransferAccess::PresignedUrl { method, .. } = &mut grant.access;
+    let ObjectTransferAccess::PresignedUrl { method, .. } = &mut grant.ranges[0].access;
     *method = "PUT".to_owned();
 
     let mut sink = Vec::new();
@@ -444,4 +448,61 @@ async fn a_grant_from_past_the_start_is_refused_before_any_request() {
     );
     assert_eq!(transport.attempts(), 0);
     assert!(sink.is_empty());
+}
+
+#[tokio::test]
+async fn ranges_verify_the_whole_revision_and_resume_inside_the_second_object() {
+    let payload = b"firstsecond";
+    let reference = crc32c_content_ref(payload);
+    let mut whole = grant(reference.clone(), "http://example.invalid/first");
+    whole.ranges[0].length = 5;
+    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut whole.ranges[0].access;
+    headers.insert("range".to_owned(), "bytes=7-11".to_owned());
+    let mut second = grant_from(reference, "http://example.invalid/second", 5)
+        .ranges
+        .remove(0);
+    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut second.access;
+    headers.insert("range".to_owned(), "bytes=0-5".to_owned());
+    whole.ranges.push(second);
+    let mut resumed = whole.clone();
+    resumed.ranges.remove(0);
+    resumed.ranges[0].start_offset = 7;
+    resumed.ranges[0].length = 4;
+    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut resumed.ranges[0].access;
+    headers.insert("range".to_owned(), "bytes=2-5".to_owned());
+    let transport = scripted_transport::script([
+        Outcome::Success(b"first".to_vec()),
+        Outcome::Success(b"second".to_vec()),
+        Outcome::Success(b"cond".to_vec()),
+        Outcome::Success(b"firs".to_vec()),
+        Outcome::Success(b"firsts".to_vec()),
+        Outcome::Success(b"first".to_vec()),
+        Outcome::Success(b"SECOND".to_vec()),
+    ]);
+    let client = client_for(&transport);
+    let mut bytes = Vec::new();
+    client
+        .download_via_presigned_url(&whole, &mut bytes)
+        .await
+        .expect("whole revision");
+    assert_eq!(bytes, payload);
+    let mut stream = client.open_direct_download(&resumed).await.expect("resume");
+    stream.fold_resumed_prefix(&payload[..7]);
+    let mut suffix = Vec::new();
+    while let Some(chunk) = stream.next_chunk().await.expect("verified suffix") {
+        suffix.extend_from_slice(&chunk);
+    }
+    assert_eq!(suffix, b"cond");
+    let sent = transport.sent();
+    assert_eq!(sent[0].header("range"), Some("bytes=7-11"));
+    assert_eq!(sent[1].header("range"), Some("bytes=0-5"));
+    assert_eq!(sent[2].header("range"), Some("bytes=2-5"));
+    for expected_attempts in [4, 5, 7] {
+        let error = client
+            .download_via_presigned_url(&whole, &mut Vec::new())
+            .await
+            .expect_err("invalid range bytes");
+        assert!(matches!(error, ClientError::Protocol(_)));
+        assert_eq!(transport.attempts(), expected_attempts);
+    }
 }

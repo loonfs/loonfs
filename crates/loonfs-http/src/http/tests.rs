@@ -3076,8 +3076,13 @@ mod direct_download {
                     continue;
                 }
                 let grant: serde_json::Value = serde_json::from_slice(&bytes).expect("grant");
+                assert!(grant.get("access").is_none());
+                let ranges = grant["ranges"].as_array().expect("ranges");
+                assert_eq!(ranges.len(), 1);
+                assert_eq!(ranges[0]["start_offset"], 0);
+                assert_eq!(ranges[0]["length"], value.len());
                 let access: loonfs_types::api::v0::ObjectTransferAccess =
-                    serde_json::from_value(grant["access"].clone()).expect("access");
+                    serde_json::from_value(ranges[0]["access"].clone()).expect("access");
                 let loonfs_types::api::v0::ObjectTransferAccess::PresignedUrl {
                     method,
                     url,
@@ -3632,25 +3637,62 @@ mod direct_download {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_grant_signs_its_range_from_the_offset_and_refuses_an_offset_at_the_end() {
+    #[tokio::test]
+    async fn a_grant_signs_each_object_range_on_path_and_inode_routes() {
+        use http_body_util::BodyExt as _;
+        use loonfs_client::{Body, TransportError};
+        use tower::ServiceExt as _;
+
         let temp_dir = tempdir().expect("tempdir");
-        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
-        let transfers = DirectTransferIssuers {
-            get: LoopbackIssuer::at(object_base_url),
-            put: None,
-            multipart: None,
-        };
-        let client = start(temp_dir.path(), "grant-ranges", Some(transfers)).await;
+        let store = object_store_at(temp_dir.path());
+        let objects = object_router(store.clone());
+        let mut config = test_options(temp_dir.path(), "grant-ranges");
+        config.binding.max_download_bytes = PROXY_CAP_BYTES;
+        let (router, state) = test_app(
+            config,
+            TestAppOptions {
+                store: Some(store),
+                direct_transfers: Some(DirectTransferIssuers {
+                    get: LoopbackIssuer::at("http://objects"),
+                    put: None,
+                    multipart: None,
+                }),
+            },
+        )
+        .await
+        .expect("app");
+        let service = tower::service_fn(move |request: axum::http::Request<Body>| {
+            let router = if request.uri().host() == Some("objects") {
+                objects.clone()
+            } else {
+                router.clone()
+            };
+            async move {
+                let response = router
+                    .oneshot(request)
+                    .await
+                    .map_err(|never| match never {})?;
+                Ok(response.map(|body| Body::new(body.map_err(TransportError::body))))
+            }
+        });
+        let client = Client::with_transport(
+            ClientConfig {
+                server_url: "http://127.0.0.1".to_owned(),
+                auth_token: Some("test-token".into()),
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: None,
+            },
+            service,
+        )
+        .expect("client");
         let namespace = namespace_id("grant-ranges");
         client
             .create_namespace(&namespace, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/ranged.bin").expect("target");
-        let payload: Vec<u8> = (0..PROXY_CAP_BYTES as usize * 2)
-            .map(|index| (index % 251) as u8)
-            .collect();
+        let mut payload: Vec<u8> = (0..70_000).map(|index| (index % 251) as u8).collect();
         client
             .put_file_with_options(
                 &target,
@@ -3660,6 +3702,11 @@ mod direct_download {
             )
             .await
             .expect("seed the file");
+        client
+            .append_file(&target, b"append", &loonfs_test_support::test_actor())
+            .await
+            .expect("append second object");
+        payload.extend_from_slice(b"append");
         let inode_id = client.stat(&target).await.expect("stat").inode_id;
 
         let held = 100;
@@ -3667,15 +3714,23 @@ mod direct_download {
             start_offset: held,
             ..DownloadOptions::default()
         };
-        let signed = BTreeMap::from([(
-            "range".to_owned(),
-            format!("bytes={held}-{}", payload.len() - 1),
-        )]);
+        let signed = BTreeMap::from([("range".to_owned(), format!("bytes={held}-69999"))]);
         let grant = client
             .create_download_with_options(&target, &from)
             .await
             .expect("a grant from the offset");
-        assert_eq!(signed_headers(&grant.access), &signed);
+        assert_eq!(grant.ranges.len(), 2);
+        assert_eq!(grant.ranges[0].start_offset, held);
+        assert_eq!(grant.ranges[0].length, 70_000 - held);
+        assert_eq!(grant.ranges[1].start_offset, 70_000);
+        assert_eq!(grant.ranges[1].length, 6);
+        assert_eq!(signed_headers(&grant.ranges[0].access), &signed);
+        assert_eq!(
+            signed_headers(&grant.ranges[1].access)
+                .get("range")
+                .map(String::as_str),
+            Some("bytes=0-5")
+        );
         for inode_grant in [
             client
                 .create_download_by_inode_with_options(&namespace, inode_id, &from)
@@ -3685,13 +3740,21 @@ mod direct_download {
                 .create_revision_download_by_inode_with_options(
                     &namespace,
                     inode_id,
-                    RevisionNo(1),
+                    RevisionNo(2),
                     &from,
                 )
                 .await
                 .expect("a revision grant from the offset"),
         ] {
-            assert_eq!(signed_headers(&inode_grant.access), &signed);
+            assert_eq!(inode_grant.ranges.len(), grant.ranges.len());
+            for (actual, expected) in inode_grant.ranges.iter().zip(&grant.ranges) {
+                assert_eq!(actual.start_offset, expected.start_offset);
+                assert_eq!(actual.length, expected.length);
+                assert_eq!(
+                    signed_headers(&actual.access),
+                    signed_headers(&expected.access)
+                );
+            }
         }
         let mut download = client
             .open_direct_download(&grant)
@@ -3715,7 +3778,7 @@ mod direct_download {
                     .create_revision_download_by_inode_with_options(
                         &namespace,
                         inode_id,
-                        RevisionNo(1),
+                        RevisionNo(2),
                         &past,
                     )
                     .await,
@@ -3738,7 +3801,9 @@ mod direct_download {
             .create_download(&empty)
             .await
             .expect("a grant of zero bytes");
-        assert!(signed_headers(&grant.access).is_empty());
+        assert_eq!(grant.ranges.len(), 1);
+        assert_eq!(grant.ranges[0].length, 0);
+        assert!(signed_headers(&grant.ranges[0].access).is_empty());
         let mut sink = Vec::new();
         assert_eq!(
             client
@@ -3758,6 +3823,7 @@ mod direct_download {
                 )
                 .await,
         );
+        state.runtime.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

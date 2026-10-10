@@ -19,9 +19,9 @@ use loonfs_types::ApiError;
 use loonfs_types::{
     api::v0::{
         CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse,
-        ObjectTransferAccess,
+        DownloadRange, ObjectTransferAccess,
     },
-    ContentRef, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_DOWNLOADS_DIRECT_GET,
 };
 use std::time::Duration;
 
@@ -63,7 +63,7 @@ impl InodeDownloadQuery {
         path = "/v0/namespaces/{namespace_id}/filesystem/downloads",
         tag = "filesystem",
         summary = "Begin download",
-        description = "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. The capability reads exactly `[start_offset, size_bytes)` of the object: it signs that `Range`, and `access.headers` carries it for the client to send unchanged. A client that resumes asks for a new grant from its offset. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
+        description = "Returns ordered signed object ranges covering exactly `[start_offset, size_bytes)` of the selected revision. Each range carries its signed headers in `access.headers`, which the client sends unchanged. The client checks each range's length and the complete revision's checksum. A client that resumes asks for a new grant from its offset. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.service_proxied.max_content_bytes`.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id")
         ),
@@ -100,20 +100,14 @@ pub(super) async fn create_download(
         .create_download(request.path.as_str(), request.revision_no, &options)
         .await
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
-    let access = presigned_access(
-        issuer,
-        &download.object_key,
-        download.start_offset,
-        &download.content_ref,
-    )
-    .await?;
+    let ranges = presigned_ranges(issuer, &download.ranges, download.start_offset).await?;
 
     Ok(Json(CreateDownloadResponse {
         namespace_id,
         path: download.absolute_path,
         revision_no: download.revision_no,
         content_ref: download.content_ref,
-        access,
+        ranges,
     }))
 }
 
@@ -224,19 +218,13 @@ async fn inode_download_response(
     namespace_id: loonfs_types::NamespaceId,
     target: loonfs::downloads::DirectDownloadByInodeTarget,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
-    let access = presigned_access(
-        issuer,
-        &target.object_key,
-        target.start_offset,
-        &target.content_ref,
-    )
-    .await?;
+    let ranges = presigned_ranges(issuer, &target.ranges, target.start_offset).await?;
     Ok(Json(CreateDownloadByInodeResponse {
         namespace_id,
         inode_id: target.inode_id,
         revision_no: target.revision_no,
         content_ref: target.content_ref,
-        access,
+        ranges,
     }))
 }
 
@@ -255,33 +243,38 @@ fn direct_get_issuer(state: &BindingState) -> Result<&dyn DirectGetIssuer, ApiRe
         })
 }
 
-/// Signs a read of `[start_offset, size_bytes)` of the object. The object
-/// can be longer than the reference, and the signed range keeps a reader of
-/// this revision from the bytes an append adds after it.
-async fn presigned_access(
+async fn presigned_ranges(
     issuer: &dyn DirectGetIssuer,
-    object_key: &str,
-    start_offset: u64,
-    content_ref: &ContentRef,
-) -> Result<ObjectTransferAccess, ApiResponseError> {
-    let signed = issuer
-        .presign_get(
-            PresignedGetRequest {
-                object_key,
-                range: ByteRange {
-                    start_inclusive: start_offset,
-                    end_exclusive: content_ref.size_bytes,
+    ranges: &[loonfs::downloads::GrantedRange],
+    mut start_offset: u64,
+) -> Result<Vec<DownloadRange>, ApiResponseError> {
+    let mut granted = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        let signed = issuer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: &range.object_key,
+                    range: ByteRange {
+                        start_inclusive: range.object_start,
+                        end_exclusive: range.object_start + range.length,
+                    },
+                    expires_in: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
                 },
-                expires_in: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
+                presign_time(),
+            )
+            .await
+            .map_err(presign_issuer_error)?;
+        granted.push(DownloadRange {
+            start_offset,
+            length: range.length,
+            access: ObjectTransferAccess::PresignedUrl {
+                method: signed.method,
+                url: signed.url,
+                headers: signed.headers,
+                expires_at_ms: signed.expires_at_ms,
             },
-            presign_time(),
-        )
-        .await
-        .map_err(presign_issuer_error)?;
-    Ok(ObjectTransferAccess::PresignedUrl {
-        method: signed.method,
-        url: signed.url,
-        headers: signed.headers,
-        expires_at_ms: signed.expires_at_ms,
-    })
+        });
+        start_offset += range.length;
+    }
+    Ok(granted)
 }

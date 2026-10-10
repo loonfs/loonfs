@@ -1,6 +1,6 @@
 {
   "name": "append",
-  "intent": "Checks that an append adds bytes to a file as its next revision in the same content object, that the previous revision still reads its own bytes through the proxied read and through a direct download whose signed range leaves out the appended bytes, that a download grant from an offset names the rest of the file, that an empty file downloads directly and an append to it starts a new content object, and that an append of empty content is refused.",
+  "intent": "Checks an appended revision across two immutable objects, its previous revision, a resumed download inside the second range, empty downloads, and refused empty appends.",
   "request": {
     "namespace_id": "conf-append",
     "path": "/logs/app.log",
@@ -14,22 +14,24 @@
       "empty_append": "conf-append-empty-content",
       "empty_put": "conf-append-empty-file",
       "append_to_empty": "conf-append-to-empty-file"
-    }
+    },
+    "content_repetitions": 7000
   },
   "expected": {
     "put_committed_seq": 1,
     "append_committed_seq": 2,
     "previous_revision_no": 1,
-    "previous_size_bytes": 11,
-    "previous_range": "bytes=0-10",
+    "previous_size_bytes": 77000,
+    "previous_range": "bytes=0-76999",
     "appended_revision_no": 2,
-    "appended_size_bytes": 23,
-    "resumed_range": "bytes=11-22",
+    "appended_size_bytes": 77012,
+    "resumed_range": "bytes=3-11",
     "empty_append": {
       "status": 400,
       "code": "invalid_request"
     },
     "empty_put_committed_seq": 3,
-    "append_to_empty_committed_seq": 4
+    "append_to_empty_committed_seq": 4,
+    "resume_offset": 77003
   }
 }

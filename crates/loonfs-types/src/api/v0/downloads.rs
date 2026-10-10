@@ -33,10 +33,7 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
-/// A presigned URL for one revision's bytes of a content object.
-///
-/// The URL expires at `access.expires_at_ms`; later path changes and appends
-/// do not change the bytes it reads.
+/// Signed object ranges for one revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateDownloadResponse {
@@ -49,8 +46,8 @@ pub struct CreateDownloadResponse {
     pub revision_no: RevisionNo,
     /// The identity, byte length, and checksum of the revision's bytes.
     pub content_ref: ContentRef,
-    /// Short-lived read capability the client uses without learning the raw object key.
-    pub access: ObjectTransferAccess,
+    /// The revision's bytes from the requested offset, in order.
+    pub ranges: Vec<DownloadRange>,
 }
 
 /// A short-lived capability to read one inode revision.
@@ -66,14 +63,26 @@ pub struct CreateDownloadByInodeResponse {
     pub revision_no: RevisionNo,
     /// Content identity, size, and checksum.
     pub content_ref: ContentRef,
-    /// Short-lived provider access without the raw object key.
+    /// The revision's bytes from the requested offset, in order.
+    pub ranges: Vec<DownloadRange>,
+}
+
+/// One contiguous run of a revision's bytes, read from one object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DownloadRange {
+    /// Offset of the run's first byte in the revision.
+    pub start_offset: u64,
+    /// Bytes in the run.
+    pub length: u64,
+    /// Short-lived read capability for exactly those bytes.
     pub access: ObjectTransferAccess,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse};
-    use crate::api::v0::ObjectTransferAccess;
+    use crate::api::v0::{DownloadRange, ObjectTransferAccess};
     use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, PinId, RevisionNo};
     use std::collections::BTreeMap;
 
@@ -153,12 +162,16 @@ mod tests {
             path: absolute_path(),
             revision_no: RevisionNo(7),
             content_ref: content_ref(),
-            access: ObjectTransferAccess::PresignedUrl {
-                method: "GET".to_owned(),
-                url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
-                headers: BTreeMap::new(),
-                expires_at_ms: 1,
-            },
+            ranges: vec![DownloadRange {
+                start_offset: 0,
+                length: 5,
+                access: ObjectTransferAccess::PresignedUrl {
+                    method: "GET".to_owned(),
+                    url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
+                    headers: BTreeMap::new(),
+                    expires_at_ms: 1,
+                },
+            }],
         };
 
         assert_eq!(
@@ -168,12 +181,16 @@ mod tests {
                 "path": "/docs/report.txt",
                 "revision_no": 7,
                 "content_ref": content_ref_json(),
-                "access": {
-                    "kind": "presigned_url",
-                    "method": "GET",
-                    "url": "https://bucket.example/object?X-Amz-Signature=abc",
-                    "expires_at_ms": 1
-                }
+                "ranges": [{
+                    "start_offset": 0,
+                    "length": 5,
+                    "access": {
+                        "kind": "presigned_url",
+                        "method": "GET",
+                        "url": "https://bucket.example/object?X-Amz-Signature=abc",
+                        "expires_at_ms": 1
+                    }
+                }]
             })
         );
     }
@@ -185,12 +202,16 @@ mod tests {
             inode_id: crate::InodeId(42),
             revision_no: RevisionNo(7),
             content_ref: content_ref(),
-            access: ObjectTransferAccess::PresignedUrl {
-                method: "GET".to_owned(),
-                url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
-                headers: BTreeMap::new(),
-                expires_at_ms: 1,
-            },
+            ranges: vec![DownloadRange {
+                start_offset: 0,
+                length: 5,
+                access: ObjectTransferAccess::PresignedUrl {
+                    method: "GET".to_owned(),
+                    url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
+                    headers: BTreeMap::new(),
+                    expires_at_ms: 1,
+                },
+            }],
         };
         assert_eq!(
             serde_json::to_value(&response).expect("serialize response"),
@@ -199,12 +220,16 @@ mod tests {
                 "inode_id": "ino_42",
                 "revision_no": 7,
                 "content_ref": content_ref_json(),
-                "access": {
-                    "kind": "presigned_url",
-                    "method": "GET",
-                    "url": "https://bucket.example/object?X-Amz-Signature=abc",
-                    "expires_at_ms": 1
-                }
+                "ranges": [{
+                    "start_offset": 0,
+                    "length": 5,
+                    "access": {
+                        "kind": "presigned_url",
+                        "method": "GET",
+                        "url": "https://bucket.example/object?X-Amz-Signature=abc",
+                        "expires_at_ms": 1
+                    }
+                }]
             })
         );
     }
