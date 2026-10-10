@@ -516,6 +516,9 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Streams objects under `prefix` strictly after `start_after` in ascending
     /// key order, including modification times when the provider reports them.
     ///
+    /// A listed modification time differs from HEAD for the same unchanged
+    /// object by less than one second. Collectors use the listed time.
+    ///
     /// `start_after` is a durable key rather than a provider continuation
     /// token. Invalid prefixes, invalid resume keys, and listing failures
     /// arrive as stream items.

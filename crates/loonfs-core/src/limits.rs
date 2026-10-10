@@ -82,9 +82,12 @@ pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
 pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 
 /// Combined allowance for age overstatement from host-to-provider or
-/// host-to-host clock error and scheduling delay around publication checks.
+/// host-to-host clock error, timestamp precision, and scheduling delay around
+/// publication checks.
 /// Direct expiry comparisons do not add this margin to stored deadlines.
 pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
+
+const _: () = assert!(GC_SAFETY_MARGIN_MS >= 1000);
 
 const fn max_u64(left: u64, right: u64) -> u64 {
     if left > right {

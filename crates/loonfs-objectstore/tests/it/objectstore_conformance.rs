@@ -7,7 +7,7 @@ use crate::provider_env::{
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::gcs::{gcp_gcs, GcpGcsStoreConfig};
-use loonfs_objectstore::keys::content_blob;
+use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeReport};
 use loonfs_objectstore::s3_compatible::{
@@ -125,6 +125,22 @@ async fn aws_s3_assembly() {
 #[tokio::test]
 #[ignore = "requires real Cloudflare R2 credentials"]
 async fn cloudflare_r2_assembly() {
+    assert_r2_assembly(&[(64 * MIB, 64 * MIB)]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Cloudflare R2 credentials"]
+async fn cloudflare_r2_small_assembly() {
+    assert_r2_assembly(&[(1024, 30)]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Cloudflare R2 credentials"]
+async fn cloudflare_r2_assembly_spans_sources() {
+    assert_r2_assembly(&[(40 * MIB, 90 * MIB)]).await;
+}
+
+async fn assert_r2_assembly(cases: &[(usize, usize)]) {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
     let store = cloudflare_r2(CloudflareR2StoreConfig {
@@ -136,12 +152,7 @@ async fn cloudflare_r2_assembly() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
-    assert_assembly(
-        &store,
-        &[(1024, 30), (64 * MIB, 64 * MIB), (40 * MIB, 90 * MIB)],
-        ChecksumAlgorithm::Crc64nvme,
-    )
-    .await;
+    assert_assembly(&store, cases, ChecksumAlgorithm::Crc64nvme).await;
 }
 
 #[tokio::test]
@@ -532,11 +543,12 @@ async fn assert_start_after_contract(store: &dyn ObjectStore) {
             .await
             .expect("head listed object")
             .expect("listed object exists");
-        assert_eq!(
-            entry.last_modified_ms, metadata.last_modified_ms,
-            "{}",
-            entry.key
-        );
+        match (entry.last_modified_ms, metadata.last_modified_ms) {
+            (Some(listed), Some(head)) => {
+                assert!(listed.abs_diff(head) < 1000, "{}", entry.key);
+            }
+            (listed, head) => assert_eq!(listed, head, "{}", entry.key),
+        }
     }
 
     let after_exact = store
@@ -727,7 +739,12 @@ async fn assert_assembly<S: ObjectStore>(
                 checksum: Checksum::compute(crc, &bytes),
             });
         }
-        let key = content_blob(&namespace_id, &ContentId::generate());
+        let key = content_span(
+            &namespace_id,
+            &ContentId::generate(),
+            7,
+            7 + payload.len() as u64,
+        );
         let expected = Checksum::compute(crc, &payload);
         let written = store
             .assemble(
@@ -743,6 +760,28 @@ async fn assert_assembly<S: ObjectStore>(
             payload
         );
         assert_eq!(written.checksum, Some(expected.clone()));
+        let stored = store
+            .head(&key)
+            .await
+            .expect("head assembly")
+            .expect("assembly");
+        assert_eq!(stored.checksum, Some(expected.clone()));
+        assert_eq!(stored.size_bytes, payload.len() as u64);
+        let unchanged = store
+            .assemble(
+                &key,
+                &[AssemblySource {
+                    key: key.clone(),
+                    range: None,
+                    checksum: expected.clone(),
+                }],
+                Vec::new(),
+                &expected,
+            )
+            .await
+            .expect("reassemble an existing span");
+        assert_eq!(unchanged, stored);
+        assert_put_and_assembly_share_identity(store, &sources, &tail, &payload, &expected).await;
         assert_eq!(
             store
                 .assemble(
@@ -771,7 +810,8 @@ async fn assert_assembly<S: ObjectStore>(
                 ..
             })
         ));
-        assert!(store.head(&wrong_key).await.expect("absent").is_none());
+        // A provider that verifies after completion leaves the rejected object
+        // for collection; nothing names it, and no writer deletes it.
         let ranged = content_blob(&namespace_id, &ContentId::generate());
         sources[0].range = Some(ByteRange {
             start_inclusive: 1,
@@ -840,6 +880,46 @@ async fn assert_assembly<S: ObjectStore>(
         .await
         .expect("temporaries")
         .is_empty());
+}
+
+async fn assert_put_and_assembly_share_identity<S: ObjectStore>(
+    store: &S,
+    sources: &[AssemblySource],
+    tail: &Bytes,
+    payload: &[u8],
+    expected: &Checksum,
+) {
+    let put_key = content_blob(
+        &NamespaceId::parse("demo").expect("namespace"),
+        &ContentId::generate(),
+    );
+    store
+        .put_immutable_verified(&put_key, Bytes::copy_from_slice(payload))
+        .await
+        .expect("verified put before assembly");
+    let put_stored = store.head(&put_key).await.expect("head put").expect("put");
+    let assembled = store
+        .assemble(&put_key, sources, vec![tail.clone()], expected)
+        .await
+        .expect("put and assembly share the stored checksum");
+    assert_eq!(assembled, put_stored);
+    assert_eq!(assembled.checksum, Some(expected.clone()));
+    assert!(matches!(
+        store
+            .assemble(
+                &put_key,
+                sources,
+                vec![tail.clone(), Bytes::from_static(b"other")],
+                &Checksum::compute(expected.algorithm, &[payload, b"other"].concat())
+            )
+            .await,
+        Err(ImmutableWriteError::DifferentObject { .. })
+    ));
+    assert_eq!(
+        store.head(&put_key).await.expect("unchanged put"),
+        Some(put_stored)
+    );
+    store.delete(&put_key).await.expect("delete put");
 }
 
 async fn assert_chained_compose<S: ObjectStore>(store: &S) {

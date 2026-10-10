@@ -302,6 +302,22 @@ impl StoredChecksumReader for S3RequestSigner {
     }
 }
 
+struct UploadedPart {
+    part_number: u32,
+    etag: String,
+    checksum: Option<Checksum>,
+}
+
+impl From<&MultipartPart> for UploadedPart {
+    fn from(part: &MultipartPart) -> Self {
+        Self {
+            part_number: part.part_number,
+            etag: part.etag.clone(),
+            checksum: Some(part.checksum.clone()),
+        }
+    }
+}
+
 #[async_trait]
 impl MultipartController for S3RequestSigner {
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
@@ -315,10 +331,11 @@ impl MultipartController for S3RequestSigner {
         parts: &[MultipartPart],
         checksum: &Checksum,
     ) -> Result<()> {
+        let parts: Vec<_> = parts.iter().map(UploadedPart::from).collect();
         self.complete_upload(
             key,
             provider_upload_id,
-            parts,
+            &parts,
             Some(checksum),
             &PutMode::Overwrite,
         )
@@ -368,7 +385,7 @@ impl MultipartController for S3RequestSigner {
         // Parts are cut, counted, and checksummed in order, and the next one
         // is cut only while the window has room, so the window bounds the
         // parts held in memory.
-        let mut parts: Vec<MultipartPart> = payloads
+        let mut parts: Vec<UploadedPart> = payloads
             .enumerate()
             .map(|(index, payload)| {
                 let payload = payload?;
@@ -446,7 +463,7 @@ impl S3RequestSigner {
         upload_id: &str,
         part_number: u32,
         payload: Bytes,
-    ) -> Result<MultipartPart> {
+    ) -> Result<UploadedPart> {
         let checksum = Checksum::crc64nvme(&payload);
         let etag = retry_part(key, "put_part", payload.len() as u64, || async {
             let signed = self
@@ -473,10 +490,10 @@ impl S3RequestSigner {
                 .ok_or_else(|| ObjectStoreError::transport(key, "part upload returned no etag"))
         })
         .await?;
-        Ok(MultipartPart {
+        Ok(UploadedPart {
             part_number,
             etag,
-            checksum,
+            checksum: Some(checksum),
         })
     }
 
@@ -488,7 +505,7 @@ impl S3RequestSigner {
         source_key: &str,
         source: &ByteRange,
         source_etag: &str,
-    ) -> Result<MultipartPart> {
+    ) -> Result<UploadedPart> {
         let source_etag =
             (self.kind != ConfiguredObjectStoreKind::CloudflareR2).then_some(source_etag);
         let response = retry_part(key, "copy_part", 0, || async {
@@ -513,9 +530,14 @@ impl S3RequestSigner {
         let etag = xml_etag(&text)
             .ok_or_else(|| ObjectStoreError::transport(key, "part copy returned no etag"))?;
         let checksum = xml_element(&text, "ChecksumCRC64NVME")
-            .and_then(|value| base64_checksum(ChecksumAlgorithm::Crc64nvme, &value))
-            .ok_or_else(|| ObjectStoreError::transport(key, "part copy returned no crc64nvme"))?;
-        Ok(MultipartPart {
+            .and_then(|value| base64_checksum(ChecksumAlgorithm::Crc64nvme, &value));
+        if self.kind != ConfiguredObjectStoreKind::CloudflareR2 && checksum.is_none() {
+            return Err(ObjectStoreError::transport(
+                key,
+                "part copy returned no crc64nvme",
+            ));
+        }
+        Ok(UploadedPart {
             part_number,
             etag,
             checksum,
@@ -573,7 +595,7 @@ impl S3RequestSigner {
         &self,
         key: &str,
         upload_id: &str,
-        parts: &[MultipartPart],
+        parts: &[UploadedPart],
         checksum: Option<&Checksum>,
         mode: &PutMode,
     ) -> Result<Option<SignedResponse>> {
@@ -610,7 +632,7 @@ impl S3RequestSigner {
         &self,
         key: &str,
         upload_id: &str,
-        parts: &[MultipartPart],
+        parts: &[UploadedPart],
         checksum: Option<&Checksum>,
         mode: &PutMode,
     ) -> Result<String> {
@@ -739,7 +761,7 @@ fn xml_escape(value: &str) -> String {
 /// The parts are the client's bookkeeping: LoonFS never recorded them, so
 /// this document is the only place they exist on the server side, for
 /// exactly as long as one request.
-fn complete_multipart_body(parts: &[MultipartPart]) -> Result<String> {
+fn complete_multipart_body(parts: &[UploadedPart]) -> Result<String> {
     if parts.is_empty() {
         return Err(ObjectStoreError::InvalidContentRef(
             "a multipart upload completes with at least one part".to_owned(),
@@ -758,9 +780,13 @@ fn complete_multipart_body(parts: &[MultipartPart]) -> Result<String> {
         body.push_str(&part.part_number.to_string());
         body.push_str("</PartNumber><ETag>");
         body.push_str(&xml_escape(&part.etag));
-        body.push_str("</ETag><ChecksumCRC64NVME>");
-        body.push_str(&xml_escape(&base64_crc64nvme(&part.checksum)?));
-        body.push_str("</ChecksumCRC64NVME></Part>");
+        body.push_str("</ETag>");
+        if let Some(checksum) = &part.checksum {
+            body.push_str("<ChecksumCRC64NVME>");
+            body.push_str(&xml_escape(&base64_crc64nvme(checksum)?));
+            body.push_str("</ChecksumCRC64NVME>");
+        }
+        body.push_str("</Part>");
     }
     body.push_str("</CompleteMultipartUpload>");
     Ok(body)
@@ -817,10 +843,12 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct ScriptedProvider {
+        kind: ConfiguredObjectStoreKind,
         base: Arc<Vec<u8>>,
         operations: Arc<Mutex<Vec<&'static str>>>,
         aborted: Arc<Notify>,
         objects: Arc<Mutex<std::collections::HashMap<String, Bytes>>>,
+        parts: Arc<Mutex<Vec<Bytes>>>,
     }
 
     impl ScriptedProvider {
@@ -887,12 +915,19 @@ mod tests {
                             first..last + 1
                         })
                         .expect("copy range");
-                    let reported = base64_crc64nvme(&Checksum::crc64nvme(&self.base[range]))
+                    let bytes = Bytes::copy_from_slice(&self.base[range]);
+                    let reported = base64_crc64nvme(&Checksum::crc64nvme(&bytes))
                         .expect("crc64nvme");
+                    self.parts.lock().expect("parts").push(bytes);
+                    let checksum = if request.headers().contains_key("x-amz-copy-source-if-match") {
+                        format!("<ChecksumCRC64NVME>{reported}</ChecksumCRC64NVME>")
+                    } else {
+                        String::new()
+                    };
                     (
                         "copy",
                         response.body(Bytes::from(format!(
-                            "<CopyPartResult><ETag>\"copied\"</ETag><ChecksumCRC64NVME>{reported}</ChecksumCRC64NVME></CopyPartResult>"
+                            "<CopyPartResult><ETag>\"copied\"</ETag>{checksum}</CopyPartResult>"
                         ))),
                     )
                 }
@@ -915,18 +950,43 @@ mod tests {
                     };
                     ("put", response.body(Bytes::new()))
                 }
-                http::Method::PUT => (
-                    "upload",
-                    response
-                        .header(http::header::ETAG, "\"uploaded\"")
-                        .body(Bytes::new()),
-                ),
-                http::Method::POST => (
-                    "complete",
-                    response.body(Bytes::from_static(
-                        b"<CompleteMultipartUploadResult><ETag>\"assembled\"</ETag></CompleteMultipartUploadResult>",
-                    )),
-                ),
+                http::Method::PUT => {
+                    use http_body_util::BodyExt as _;
+                    let (parts, body) = request.into_parts();
+                    let bytes = body.collect().await?.to_bytes();
+                    let checksum = base64_crc64nvme(&Checksum::crc64nvme(&bytes)).expect("checksum");
+                    assert_eq!(parts.headers["x-amz-checksum-crc64nvme"], checksum);
+                    self.parts.lock().expect("parts").push(bytes);
+                    (
+                        "upload",
+                        response
+                            .header(http::header::ETAG, "\"uploaded\"")
+                            .body(Bytes::new()),
+                    )
+                }
+                http::Method::POST => {
+                    use http_body_util::BodyExt as _;
+                    let (parts, body) = request.into_parts();
+                    assert_eq!(parts.headers["if-none-match"], "*");
+                    let body = body.collect().await?.to_bytes();
+                    let xml = std::str::from_utf8(&body).expect("completion XML");
+                    let copied = xml.split("</Part>").next().expect("copied part");
+                    let r2 = self.kind == ConfiguredObjectStoreKind::CloudflareR2;
+                    assert_eq!(copied.contains("ChecksumCRC64NVME"), !r2);
+                    let bytes: Vec<u8> = self.parts.lock().expect("parts").iter()
+                        .flat_map(|part| part.iter().copied()).collect();
+                    self.objects.lock().expect("objects").insert(parts.uri.path().to_owned(), bytes.into());
+                    (
+                        "complete",
+                        response.body(Bytes::from_static(
+                            b"<CompleteMultipartUploadResult><ETag>\"assembled\"</ETag></CompleteMultipartUploadResult>",
+                        )),
+                    )
+                }
+                http::Method::DELETE if !query.contains("uploadId") => {
+                    assert!(self.objects.lock().expect("objects").remove(request.uri().path()).is_some());
+                    ("delete", response.status(http::StatusCode::NO_CONTENT).body(Bytes::new()))
+                }
                 http::Method::DELETE => {
                     self.aborted.notify_one();
                     (
@@ -987,10 +1047,12 @@ mod tests {
             ConfiguredObjectStoreKind::CloudflareR2,
         ] {
             let provider = ScriptedProvider {
+                kind,
                 base: Arc::new(b"source".to_vec()),
                 operations: Arc::default(),
                 aborted: Arc::default(),
                 objects: Arc::default(),
+                parts: Arc::default(),
             };
             let client = Arc::new(
                 object_store::aws::AmazonS3Builder::new()
@@ -1059,10 +1121,12 @@ mod tests {
                 let base = vec![b'a'; 3 * 1024 * 1024];
                 let checksum = Checksum::crc64nvme(&base);
                 let provider = ScriptedProvider {
+                    kind,
                     base: Arc::new(base),
                     operations: Arc::default(),
                     aborted: Arc::default(),
                     objects: Arc::default(),
+                    parts: Arc::default(),
                 };
                 let signer = scripted_signer(kind, &provider);
                 let sources = vec![
@@ -1099,7 +1163,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assembly_checks_copied_parts_before_completing() {
+    async fn assemblies_verify_copied_bytes_before_accepting_the_object() {
         for kind in [
             ConfiguredObjectStoreKind::AwsS3,
             ConfiguredObjectStoreKind::CloudflareR2,
@@ -1119,10 +1183,12 @@ mod tests {
                 .expect("combined");
             for correct in [true, false] {
                 let provider = ScriptedProvider {
+                    kind,
                     base: Arc::new(base.clone()),
                     operations: Arc::default(),
                     aborted: Arc::default(),
                     objects: Arc::default(),
+                    parts: Arc::default(),
                 };
                 let signer = scripted_signer(kind, &provider);
                 let sources = [
@@ -1155,19 +1221,31 @@ mod tests {
                     .await;
                 if correct {
                     assert_eq!(result.expect("assembly").checksum, Some(expected.clone()));
-                    assert_eq!(
-                        provider.operations(),
-                        ["head", "head", "create", "copy", "get", "upload", "complete"]
-                    );
+                    let mut operations = vec![
+                        "head", "head", "create", "copy", "get", "upload", "complete",
+                    ];
+                    if kind == ConfiguredObjectStoreKind::CloudflareR2 {
+                        operations.push("head");
+                    }
+                    assert_eq!(provider.operations(), operations);
                 } else {
                     assert!(matches!(
                         result,
                         Err(ObjectStoreError::ChecksumMismatch { .. })
                     ));
-                    provider.aborted.notified().await;
+                    let mut operations = vec!["head", "head", "create", "copy", "get", "upload"];
+                    if kind == ConfiguredObjectStoreKind::CloudflareR2 {
+                        // R2 verifies after completion and leaves the rejected
+                        // object for collection; no writer deletes it.
+                        operations.extend(["complete", "head"]);
+                    } else {
+                        provider.aborted.notified().await;
+                        operations.push("abort");
+                    }
+                    assert_eq!(provider.operations(), operations);
                     assert_eq!(
-                        provider.operations(),
-                        ["head", "head", "create", "copy", "get", "upload", "abort"]
+                        provider.objects.lock().expect("objects").is_empty(),
+                        kind != ConfiguredObjectStoreKind::CloudflareR2
                     );
                 }
             }
