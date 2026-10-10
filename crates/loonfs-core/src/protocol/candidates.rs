@@ -93,7 +93,13 @@ impl BatchDedup {
 }
 
 /// Prepares a request and resolves commit-ID reuse.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "publication carries the store and shared content merge memory"
+)]
 pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
     session: &PublishPlanningSession,
@@ -141,6 +147,8 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     let mut allocation = session.begin_candidate();
     match session
         .prepare_commit(
+            store,
+            merge_memory,
             candidate,
             semantic_identity,
             view.metadata_view(),

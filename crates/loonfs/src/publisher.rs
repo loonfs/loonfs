@@ -1309,11 +1309,18 @@ impl NamespacePublisher {
     /// only needs the runtime's cache views and the writer session.
     fn engine_for<'slot>(&self, slot: &'slot mut EngineSlot) -> &'slot mut NamespaceCommitEngine {
         slot.engine.get_or_insert_with(|| {
-            NamespaceCommitEngine::new(self.namespace_id.clone())
-                .monotonic_timer(Arc::clone(&self.timer))
-                .segment_cache(self.runtime_core.metadata_segment_cache())
-                .head_state(self.runtime_core.head_state())
-                .writer_session(Arc::clone(&slot.session))
+            NamespaceCommitEngine::new(
+                self.namespace_id.clone(),
+                self.runtime_core
+                    .inner
+                    .config
+                    .execution_budget
+                    .content_merge_memory(),
+            )
+            .monotonic_timer(Arc::clone(&self.timer))
+            .segment_cache(self.runtime_core.metadata_segment_cache())
+            .head_state(self.runtime_core.head_state())
+            .writer_session(Arc::clone(&slot.session))
         })
     }
 
@@ -1503,6 +1510,12 @@ impl NamespacePublisher {
             &self.namespace_id,
             input,
             &Deadline::start(Arc::clone(&self.timer)),
+            &self
+                .runtime_core
+                .inner
+                .config
+                .execution_budget
+                .content_merge_memory(),
         )
         .instrument(phase_span!(
             self.runtime_core,

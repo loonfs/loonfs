@@ -12,8 +12,9 @@ pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
 pub(super) enum RetentionRule {
     /// Retain every row in the group.
     KeepEveryRow,
-    /// Keeps the first row in each group, whose keys sort newest first.
-    NewestPerGroup,
+    /// Keeps the first row in each group; layout keys sort the longest layout first,
+    /// then the newest.
+    FirstPerGroup,
     /// A commit row or its receipt is decided by its own commit sequence against the floor.
     CommitHistory,
     /// Every revision above the floor, plus the newest at or below it, per
@@ -30,7 +31,7 @@ impl RetentionRule {
     pub(super) fn operator(self) -> RetentionOperator {
         match self {
             Self::KeepEveryRow => RetentionOperator::KeepEveryRow,
-            Self::NewestPerGroup => RetentionOperator::NewestPerGroup(false),
+            Self::FirstPerGroup => RetentionOperator::FirstPerGroup(false),
             Self::CommitHistory => RetentionOperator::CommitHistory,
             Self::WholeState => RetentionOperator::WholeState(WholeStateRetention::default()),
             Self::ActiveDeletions => {
@@ -45,7 +46,7 @@ impl RetentionRule {
 #[derive(Debug)]
 pub(super) enum RetentionOperator {
     KeepEveryRow,
-    NewestPerGroup(bool),
+    FirstPerGroup(bool),
     CommitHistory,
     WholeState(WholeStateRetention),
     ActiveDeletions(ActiveDeletionRetention),
@@ -63,7 +64,7 @@ impl RetentionOperator {
     ) -> Result<Option<KeptRow>> {
         let kept = match self {
             Self::KeepEveryRow => Some(row),
-            Self::NewestPerGroup(kept) => (!std::mem::replace(kept, true)).then_some(row),
+            Self::FirstPerGroup(kept) => (!std::mem::replace(kept, true)).then_some(row),
             Self::CommitHistory => keep_commit_history_row(row, floor_seq),
             Self::WholeState(state) => state.push(family, row, floor_seq)?,
             Self::ActiveDeletions(state) => state.push(row),
@@ -91,7 +92,7 @@ impl RetentionOperator {
     pub(super) fn close_group(&mut self, _floor_seq: ChangeSeq) -> Result<Option<KeptRow>> {
         match self {
             Self::KeepEveryRow | Self::CommitHistory => Ok(None),
-            Self::NewestPerGroup(kept) => {
+            Self::FirstPerGroup(kept) => {
                 *kept = false;
                 Ok(None)
             }
@@ -111,7 +112,7 @@ impl RetentionOperator {
     pub(super) fn held_rows(&self) -> usize {
         match self {
             Self::KeepEveryRow
-            | Self::NewestPerGroup(_)
+            | Self::FirstPerGroup(_)
             | Self::CommitHistory
             | Self::WholeState(_)
             | Self::ActiveDeletions(_) => 0,
@@ -323,7 +324,7 @@ mod tests {
     };
 
     #[test]
-    fn layout_compaction_keeps_the_newest_row_per_content_id() {
+    fn layout_compaction_keeps_the_first_row_per_content_id() {
         use super::super::compaction_merge::locality_of;
         use super::super::streaming_compaction::retention_clusters;
         use loonfs_types::format::manifest::{ContentLayoutRecord, MetadataFamilyGroup};

@@ -10,6 +10,10 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{AcquiredWriter, NamespaceStatus};
 use loonfs_types::{DeleteNamespaceResponse, NamespaceId};
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "deletion carries both shared memory pools through its fold"
+)]
 pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -18,6 +22,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     context: &crate::context::MutationContext,
     deadline: &Deadline,
     pool: std::sync::Arc<crate::cache::ReadWorkingMemory>,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<DeleteNamespaceResponse> {
     update_manifest(store, namespace_id, deadline, |mut payload| {
         let acquired_writer = &acquired_writer;
@@ -44,6 +49,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                     deadline,
                     crate::manifest::MetadataLsmPolicy::default(),
                     pool,
+                    merge_memory,
                 )
                 .await?;
                 return Ok(ManifestChange::Again);

@@ -61,7 +61,6 @@ fn commit_rows_reject_inline_content_and_decode_without_it() {
         content_id: ContentId::generate(),
         offset: 0,
         bytes: b"inline".to_vec(),
-        base: None,
     });
     let error = row_decode::commit_from_manifest_row(
         loonfs_types::format::manifest::MetadataRow::Commit(invalid),

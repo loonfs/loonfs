@@ -658,3 +658,30 @@ async fn one_namespace_id_in_two_stores_is_charged_separately() {
     first.runtime.shutdown().await.expect("shut down");
     second.runtime.shutdown().await.expect("shut down");
 }
+
+#[test]
+fn content_merges_share_the_configured_pool() {
+    let default = ExecutionBudget::default();
+    assert_eq!(
+        default.content_merge_memory().available_permits(),
+        128 * 1024 * 1024
+    );
+    let budget = ExecutionBudget::builder()
+        .max_content_merge_bytes(64 * 1024 * 1024)
+        .build();
+    let pool = budget.content_merge_memory();
+    let shared = budget.clone().content_merge_memory();
+    assert!(Arc::ptr_eq(&pool, &shared));
+    let permits = pool.try_acquire_many(32 * 1024 * 1024).expect("one merge");
+    assert_eq!(shared.available_permits(), 32 * 1024 * 1024);
+    drop(permits);
+    assert_eq!(shared.available_permits(), 64 * 1024 * 1024);
+    assert_eq!(
+        ExecutionBudget::builder()
+            .max_content_merge_bytes(1)
+            .build()
+            .content_merge_memory()
+            .available_permits(),
+        32 * 1024 * 1024
+    );
+}

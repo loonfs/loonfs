@@ -27,7 +27,10 @@
 //! let namespace = NamespaceId::parse("docs").expect("valid namespace id");
 //!
 //! let writer_id = WriterId::parse("example-writer").expect("valid writer id");
-//! let engine = NamespaceEngine::writer(store, namespace.clone(), writer_id.clone());
+//! let content_merge_memory = std::sync::Arc::new(tokio::sync::Semaphore::new(128 * 1024 * 1024));
+//! let engine = NamespaceEngine::writer(
+//!     store, namespace.clone(), writer_id.clone(), std::sync::Arc::clone(&content_merge_memory),
+//! );
 //! let actor_id = ActorId::parse("example-actor").expect("valid actor id");
 //! let _ = engine.bootstrap_namespace(&actor_id, &CreateNamespaceOptions::default());
 //!
@@ -37,7 +40,7 @@
 //!     writer_id,
 //!     now_ms: 0,
 //! };
-//! let mut publisher = NamespaceCommitEngine::new(namespace);
+//! let mut publisher = NamespaceCommitEngine::new(namespace, content_merge_memory);
 //! let _ = publisher.publish_batch(
 //!     &publish_store,
 //!     vec![CommitCandidate::new(CommitRequest::single(

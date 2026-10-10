@@ -241,7 +241,7 @@ impl MetadataState {
                             owner_namespace_id: content_ref.owner_namespace_id.clone(),
                             content_id: content_ref.content_id.clone(),
                             committed_seq,
-                            size_bytes: content_ref.size_bytes,
+                            size_bytes: layout.size_bytes(),
                             layout: layout.clone(),
                         });
                     }
@@ -365,7 +365,12 @@ impl MetadataState {
 
     pub fn content_layouts_in_key_order(&self) -> Vec<&ContentLayoutRecord> {
         let mut rows: Vec<_> = self.content_layouts.iter().collect();
-        rows.sort_by_key(|row| (&row.content_id, std::cmp::Reverse(row.committed_seq)));
+        rows.sort_by_key(|row| {
+            (
+                &row.content_id,
+                std::cmp::Reverse((row.size_bytes, row.committed_seq)),
+            )
+        });
         rows
     }
 
@@ -381,12 +386,14 @@ impl MetadataState {
                 )
             })
             .map(|row| row.content_ref.size_bytes)
-            .or_else(|| {
+            .into_iter()
+            .chain(
                 self.content_layouts_in_key_order()
                     .into_iter()
                     .find(|row| &row.content_id == content_id)
-                    .map(|row| row.size_bytes)
-            })
+                    .map(|row| row.size_bytes),
+            )
+            .max()
     }
 }
 

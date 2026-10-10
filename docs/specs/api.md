@@ -2291,25 +2291,27 @@ to one file apply in operation order, and an append after a `put_file` of the
 same file adds to the bytes that put writes.
 
 The new revision has an ordinary content reference whose size and checksum
-cover the whole file. Which content object it names depends on the current
-revision's reference, with owner `O`, content ID `C`, and size `S`:
+cover the whole file. It either continues the current chain or starts a new
+one, based on the current revision's content ID `C` and size `S`:
 
-- When this namespace owns `C` and no revision names more than `S` bytes of
-  `C`, the new reference keeps `C`. The appended bytes extend that object from
-  offset `S`.
+- When this namespace owns `C`, `S` is positive, and no revision or layout names
+  more than `S` bytes of `C`, the new reference keeps `C`. Its pieces start at
+  offset `S`. Its delta omits the layout, and validation writes no content object.
 - Otherwise the new reference names a new content ID owned by this namespace,
   whose first `S` bytes are those of `C`. This happens when another revision
   already extended `C`, for example after a restore of an older revision or an
   append to a copy of the file, and in a fork whose file still names the
-  source's content. An append to an empty file also starts a new content ID.
+  source's content. The new chain shares the base's objects through the layout
+  its delta carries. Validation writes the base's unfolded bytes as an extent
+  of the base chain before admitting the reference. The commit carries only
+  the appended bytes. An append to an empty file also starts a new content ID.
 
 Earlier revisions keep their references and still read their own bytes. The
 checksum continues from what was recorded about the first `S` bytes of `C`: a
 SHA-256 state, which gives a SHA-256 reference, or else a CRC-64/NVME, which
 gives a CRC-64/NVME reference. A direct upload on a provider with CRC-64/NVME
-records only that CRC, so appends to it give CRC-64/NVME references until a fold
-writes their bytes. The fold records the SHA-256 state of those bytes, and later
-appends give SHA-256 references. Content that recorded neither, which only a
+records only that CRC, so appends to it keep CRC-64/NVME references. The fold
+does not recompute either digest. Content that recorded neither, which only a
 direct upload on a provider without CRC-64/NVME produces, answers
 `not_supported` with a message that names the file and no `feature`, because the
 cause is the file's content, not the deployment. Write the whole file with

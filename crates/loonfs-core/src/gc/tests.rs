@@ -320,6 +320,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         &namespace_id,
         DeleteNamespaceOptions::default(),
         &setup,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
     )
     .await
     .expect("delete namespace");
@@ -453,12 +454,19 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("fork");
-    delete_namespace(&store, &source, DeleteNamespaceOptions::default(), &setup)
-        .await
-        .expect("delete source");
+    delete_namespace(
+        &store,
+        &source,
+        DeleteNamespaceOptions::default(),
+        &setup,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .await
+    .expect("delete source");
 
     // The deleted source keeps exactly what the living clone needs.
     let fork_record = read_fork_record(&store, &source).await;
@@ -487,9 +495,15 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .expect("clone reads after source collection");
     assert_eq!(bytes.bytes, b"body\n");
 
-    delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
-        .await
-        .expect("delete clone");
+    delete_namespace(
+        &store,
+        &clone,
+        DeleteNamespaceOptions::default(),
+        &setup,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .await
+    .expect("delete clone");
     let retired = gc_namespace(&store, None, &clone, &options(), &aged)
         .await
         .expect("retire clone");
@@ -886,35 +900,38 @@ async fn put_file_content<S: ObjectStore>(
         .await
         .expect("content");
     let content_ref = stored.content_ref().clone();
-    NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            vec![CommitCandidate::prepared(
-                CommitRequest::single(
-                    loonfs_types::CommitId::generate(),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::PutFile {
-                        path: loonfs_types::AbsolutePath::parse(path).expect("path"),
-                        content_ref: Some(content_ref.clone()),
-                        inline_content: None,
-                        behavior: loonfs_types::DestinationBehavior::Replace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-                vec![crate::storage::content::prepare_stored_content(
-                    &catalog, stored,
-                )],
+    NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .publish_batch(
+        store,
+        vec![CommitCandidate::prepared(
+            CommitRequest::single(
+                loonfs_types::CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::PutFile {
+                    path: loonfs_types::AbsolutePath::parse(path).expect("path"),
+                    content_ref: Some(content_ref.clone()),
+                    inline_content: None,
+                    behavior: loonfs_types::DestinationBehavior::Replace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+            ),
+            vec![crate::storage::content::prepare_stored_content(
+                &catalog, stored,
             )],
-            &context(1_000),
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("published");
+        )],
+        &context(1_000),
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("published");
     content_ref
 }
 
@@ -945,22 +962,25 @@ async fn publish_inline(
             expected_revision_no: None,
         },
     );
-    NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            [CommitCandidate::with_inline_content(
-                request,
-                Vec::new(),
-                vec![value],
-            )],
-            setup,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("result")
-        .expect("publish inline");
+    NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .publish_batch(
+        store,
+        [CommitCandidate::with_inline_content(
+            request,
+            Vec::new(),
+            vec![value],
+        )],
+        setup,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("result")
+    .expect("publish inline");
     key
 }
 
@@ -1117,10 +1137,14 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
         .await
         .expect("head")
         .is_some());
-    let error = crate::NamespaceEngine::reader(&store, namespace_id.clone())
-        .read_content_ref(&first, u64::MAX, &read_context(&store, &namespace_id).await)
-        .await
-        .expect_err("a reclaimed object reads as an unpublished one");
+    let error = crate::NamespaceEngine::reader(
+        &store,
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .read_content_ref(&first, u64::MAX, &read_context(&store, &namespace_id).await)
+    .await
+    .expect_err("a reclaimed object reads as an unpublished one");
     assert_eq!(error.code(), crate::error::ErrorCode::PathNotFound);
 }
 
@@ -1177,6 +1201,7 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_pin_exists() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("fork");
@@ -1212,15 +1237,19 @@ async fn the_wal_tail_roots_inline_content_a_direct_download_wrote_early() {
         .await
         .expect("bootstrap");
     let key = publish_inline(&store, &namespace_id, 0, &setup).await;
-    let target = crate::NamespaceEngine::reader(&store, namespace_id.clone())
-        .direct_download_target(
-            "/owned-0",
-            None,
-            0,
-            &read_context(&store, &namespace_id).await,
-        )
-        .await
-        .expect("download target");
+    let target = crate::NamespaceEngine::reader(
+        &store,
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .direct_download_target(
+        "/owned-0",
+        None,
+        0,
+        &read_context(&store, &namespace_id).await,
+    )
+    .await
+    .expect("download target");
     assert_eq!(target.object_key, key);
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -1686,6 +1715,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -1700,6 +1730,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -1834,6 +1865,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("fork");
@@ -1857,9 +1889,15 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         .expect("gc with live target");
     assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
 
-    delete_namespace(&store, &clone, DeleteNamespaceOptions::default(), &setup)
-        .await
-        .expect("terminal delete of the fork target");
+    delete_namespace(
+        &store,
+        &clone,
+        DeleteNamespaceOptions::default(),
+        &setup,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .await
+    .expect("terminal delete of the fork target");
     let aged = context(setup.now_ms + GRACE_MS - 1);
 
     let waiting = gc_namespace(&store, None, &source, &options(), &aged)
@@ -1949,6 +1987,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("fork");
@@ -1995,6 +2034,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("fork");
@@ -2063,6 +2103,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         &setup,
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -2078,6 +2119,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("fork retry after abandonment");
@@ -2378,9 +2420,15 @@ async fn retired_content_namespace<S: ObjectStore>(
         .await
         .expect("bootstrap");
     let keys = publish_owned_content(store, namespace_id, 3).await;
-    delete_namespace(store, namespace_id, Default::default(), &setup)
-        .await
-        .expect("delete");
+    delete_namespace(
+        store,
+        namespace_id,
+        Default::default(),
+        &setup,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .await
+    .expect("delete");
     let report = gc_namespace(store, None, namespace_id, &options(), &setup)
         .await
         .expect("retire");
@@ -2421,9 +2469,15 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             .expect("bootstrap");
         let (upload_id, content) =
             complete_upload_for_gc(&store, &namespace_id, b"content", &setup).await;
-        delete_namespace(&store, &namespace_id, Default::default(), &setup)
-            .await
-            .expect("delete");
+        delete_namespace(
+            &store,
+            &namespace_id,
+            Default::default(),
+            &setup,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        )
+        .await
+        .expect("delete");
         let report = gc_namespace(
             &store,
             None,
@@ -2733,6 +2787,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
                 &setup,
                 Default::default(),
                 None,
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
             )
             .await
             .map(crate::pin::checkpoint_summary)
@@ -2800,6 +2855,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         &namespace_id,
         Default::default(),
         &context(deleted_at),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
     )
     .await
     .expect("delete");
@@ -2847,6 +2903,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         &setup,
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -2904,6 +2961,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
             Arc::new(StdMonotonicTimer::default()),
             Default::default(),
             None,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("fork");

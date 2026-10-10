@@ -18,7 +18,10 @@ use crate::time::{Deadline, Observation};
 use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
-use loonfs_types::format::wal::WalCommitPayload;
+use loonfs_types::format::wal::{
+    WalCommitPayload, MAX_WAL_OBJECT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+    WAL_OBJECT_OVERHEAD_BYTES,
+};
 use loonfs_types::NamespaceId;
 use tracing::Instrument;
 
@@ -26,6 +29,7 @@ use tracing::Instrument;
 pub(crate) struct PublishBatchAgainstViewResult {
     pub(crate) results: Vec<Result<Commit>>,
     pub(crate) effect: PublishViewEffect,
+    pub(crate) unconfirmed_inline_bytes: usize,
 }
 
 /// What one batch did to the publish view it ran against — the whole of what
@@ -52,6 +56,7 @@ impl PublishBatchAgainstViewResult {
         Self {
             results,
             effect: PublishViewEffect::Unchanged,
+            unconfirmed_inline_bytes: 0,
         }
     }
 }
@@ -91,6 +96,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
         return PublishBatchAgainstViewResult::unchanged(Vec::new());
@@ -114,8 +120,10 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         ]);
     };
     let mut slots = Vec::with_capacity(candidates.len());
-    let mut session = PublishPlanningSession::new(&view.head);
+    let mut session = PublishPlanningSession::new(&view.head, view.wal_tail());
     let mut accepted_commits = Vec::new();
+    let mut wal_bytes = WAL_OBJECT_OVERHEAD_BYTES;
+    let mut wal_inline_bytes = 0_usize;
     let mut dedup = BatchDedup::default();
 
     let prepare_span = tracing::debug_span!(
@@ -127,6 +135,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     async {
         for (index, candidate) in candidates.iter().enumerate() {
             let admission = prepare_candidate_request(
+                store,
+                merge_memory,
                 namespace_id,
                 view,
                 &session,
@@ -151,6 +161,39 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 }
             };
             let validated = candidate_request.validated;
+            let record_bytes = crate::commit_wal_size::planned_wal_record_bytes(
+                candidate.request(),
+                candidate.inline_content(),
+                &validated.deltas,
+                &validated.appended,
+            );
+            let inline_bytes = candidate
+                .inline_content()
+                .iter()
+                .map(|value| value.bytes().len())
+                .chain(validated.appended.iter().map(|piece| piece.bytes.len()))
+                .fold(wal_inline_bytes, usize::saturating_add);
+            let estimated_bytes = wal_bytes.saturating_add(record_bytes);
+            let exceeded = if inline_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES {
+                Some((inline_bytes, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES))
+            } else if estimated_bytes > MAX_WAL_OBJECT_BYTES {
+                Some((estimated_bytes, MAX_WAL_OBJECT_BYTES))
+            } else {
+                None
+            };
+            if let Some((estimated_bytes, max_bytes)) = exceeded {
+                slots.push(settle_admission(
+                    BatchOutcomeSlot::Settled {
+                        outcome: Err(CoreError::CommitTooLarge {
+                            estimated_bytes,
+                            max_bytes,
+                        }),
+                        depends_on_batch: !accepted_commits.is_empty(),
+                    },
+                    !accepted_commits.is_empty(),
+                ));
+                continue;
+            }
             let allocation = candidate_request.allocation;
             let resulting_next_inode_id = match session.commit_candidate(allocation) {
                 Ok(resulting_next_inode_id) => resulting_next_inode_id,
@@ -187,6 +230,8 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 session.apply_accepted_commit(&preview, &prepared.commit);
             }
             slots.push(BatchOutcomeSlot::Accepted);
+            wal_bytes = estimated_bytes;
+            wal_inline_bytes = inline_bytes;
             accepted_commits.push(prepared);
         }
     }
@@ -237,7 +282,14 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         }
     }
     if let Err(error) = publish_wal_object(store, &wal, &clock.tip).await {
-        return abort_batch(slots, &error);
+        let mut result = abort_batch(slots, &error);
+        if matches!(
+            error,
+            CoreError::WalPublish(WalPublishError::OutcomeUnknown(_))
+        ) {
+            result.unconfirmed_inline_bytes = wal_inline_bytes;
+        }
+        return result;
     }
 
     let wal_records = wal.envelope().payload().records.clone();
@@ -263,6 +315,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
     PublishBatchAgainstViewResult {
         results: finish_batch_outcomes(&slots),
+        unconfirmed_inline_bytes: 0,
         effect: PublishViewEffect::Advanced {
             records: wal_records,
             head: resulting_head,
@@ -279,6 +332,7 @@ fn abort_batch(
     PublishBatchAgainstViewResult {
         results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Invalidated,
+        unconfirmed_inline_bytes: 0,
     }
 }
 
@@ -419,6 +473,7 @@ mod tests {
                 tip: attempt.clone(),
                 attempt,
             },
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await;
 
@@ -493,6 +548,7 @@ mod tests {
                 attempt: batch.observe(),
                 tip: batch.observe(),
             },
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await;
 

@@ -24,6 +24,7 @@ enum Rival {
 
 impl Rival {
     async fn publish(&self, store: &LocalFsStore, namespace_id: &NamespaceId) {
+        let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
         match self {
             Self::CompactorClaim => {
                 claim_compactor(store, namespace_id)
@@ -63,6 +64,7 @@ impl Rival {
                     namespace_id,
                     Some(WalFoldInput::clone(input)),
                     &deadline(),
+                    &merge_memory,
                 )
                 .await
                 .expect("rival fold");
@@ -167,6 +169,7 @@ impl Writer {
     /// for the next rival, and so on. The request log is cleared after each
     /// rival.
     async fn fold_against(&mut self, rivals: &[Rival]) -> FoldedWalTail {
+        let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
         let input = self.engine.begin_wal_fold().expect("tail");
         let basis = input.basis.manifest_no();
         let other = self.other_process();
@@ -187,7 +190,14 @@ impl Writer {
         }
         let deadline = deadline();
         let (folded, ()) = futures::join!(
-            fold_wal_tail(&*store, None, &self.namespace_id, Some(input), &deadline),
+            fold_wal_tail(
+                &*store,
+                None,
+                &self.namespace_id,
+                Some(input),
+                &deadline,
+                &merge_memory,
+            ),
             async {
                 for (gate, rival) in gates.iter().zip(rivals) {
                     gate.wait_until_blocked().await;
@@ -274,6 +284,7 @@ fn request_counts(store: &RecordingStore<LocalFsStore>) -> StoreCounts {
 
 #[tokio::test]
 async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     for rival in [Rival::Merge, Rival::CompactorClaim, Rival::RetentionAdvance] {
         let mut writer = Writer::open().await;
         writer
@@ -309,9 +320,16 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
         assert!(!after_park.iter().any(is_content), "{after_park:?}");
 
         rival.publish(&twin, &writer.namespace_id).await;
-        let cold = fold_wal_tail(&twin, None, &writer.namespace_id, None, &deadline())
-            .await
-            .expect("cold fold");
+        let cold = fold_wal_tail(
+            &twin,
+            None,
+            &writer.namespace_id,
+            None,
+            &deadline(),
+            &merge_memory,
+        )
+        .await
+        .expect("cold fold");
         assert_eq!(held.response.outcome, FoldWalOutcome::Published);
         assert_eq!(held.response, cold.response);
         let held = load_current_projection(&*writer.store, &writer.namespace_id)

@@ -26,12 +26,14 @@ pub const DEFAULT_MAX_CONCURRENT_READS: usize = 64;
 pub(crate) const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: usize = 8;
 /// Default bytes retained across read, publication, and fold memos.
 pub const DEFAULT_MAX_READ_WORKING_BYTES: usize = 256 * 1024 * 1024;
+/// Default memory for merging content extents across runtimes sharing a budget.
+pub const DEFAULT_MAX_CONTENT_MERGE_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_MAX_ADMITTED_REQUESTS: usize = 8192;
 const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Work in flight that one or more runtimes share: admitted
 /// publication requests, running reads and publications, WAL folds, metadata merges,
-/// the decoded input one merge may hold, and retained read working memory.
+/// the decoded input one merge may hold, content merge memory, and retained read working memory.
 ///
 /// Each [`LoonFs`](crate::LoonFs) built with the budget charges the
 /// publication requests it admits to the budget's totals, and takes its
@@ -58,6 +60,7 @@ struct ExecutionBudgetInner {
     folds: PermitPool,
     compactions: PermitPool,
     max_merge_input_bytes: NonZeroUsize,
+    content_merge_memory: Arc<Semaphore>,
 }
 
 impl fmt::Debug for ExecutionBudget {
@@ -97,6 +100,7 @@ impl ExecutionBudget {
                 )
                 .unwrap()
             },
+            max_content_merge_bytes: DEFAULT_MAX_CONTENT_MERGE_BYTES,
             metrics_recorder: None,
         }
     }
@@ -122,6 +126,10 @@ impl ExecutionBudget {
             compactions_running: compactions.running,
             compactions_waiting: compactions.waiting,
         }
+    }
+
+    pub(crate) fn content_merge_memory(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.inner.content_merge_memory)
     }
 
     pub(crate) fn read_working_memory(&self) -> Arc<ReadWorkingMemory> {
@@ -181,6 +189,7 @@ pub struct ExecutionBudgetBuilder {
     max_concurrent_folds: NonZeroUsize,
     max_concurrent_compactions: NonZeroUsize,
     max_merge_input_bytes: NonZeroUsize,
+    max_content_merge_bytes: usize,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
@@ -263,6 +272,14 @@ impl ExecutionBudgetBuilder {
         self
     }
 
+    /// Limits memory for merging content extents during publication, folds, and
+    /// direct downloads. Defaults to 128 MiB. Values below 32 MiB use 32 MiB,
+    /// which allows one merge to finish.
+    pub fn max_content_merge_bytes(mut self, bytes: usize) -> Self {
+        self.max_content_merge_bytes = bytes;
+        self
+    }
+
     /// Installs the metrics recorder the budget reports its admitted,
     /// running, and waiting work to (see [`crate::metrics`]). The budget
     /// registers its instruments once, when it is built. A budget built
@@ -300,6 +317,10 @@ impl ExecutionBudgetBuilder {
                 folds: PermitPool::new(self.max_concurrent_folds, folds),
                 compactions: PermitPool::new(self.max_concurrent_compactions, compactions),
                 max_merge_input_bytes: self.max_merge_input_bytes,
+                content_merge_memory: Arc::new(Semaphore::new(
+                    self.max_content_merge_bytes
+                        .clamp(32 * 1024 * 1024, Semaphore::MAX_PERMITS),
+                )),
             }),
         }
     }

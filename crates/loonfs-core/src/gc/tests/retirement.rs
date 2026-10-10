@@ -63,6 +63,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("fork target");
@@ -70,9 +71,15 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let upload = crate::protocol::begin_service_proxied_upload(&inner, &target, None, &setup)
         .await
         .expect("open upload");
-    delete_namespace(&inner, &target, Default::default(), &setup)
-        .await
-        .expect("delete target");
+    delete_namespace(
+        &inner,
+        &target,
+        Default::default(),
+        &setup,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .await
+    .expect("delete target");
     let tombstone = crate::namespace::control::load_current_manifest(&inner, &target)
         .await
         .expect("target tombstone");
@@ -206,6 +213,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &namespace_id,
         Default::default(),
         &context(clock.now_ms()),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
     )
     .await
     .expect("delete");
@@ -315,6 +323,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("fork");

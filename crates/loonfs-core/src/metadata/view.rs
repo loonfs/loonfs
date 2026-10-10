@@ -583,23 +583,24 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         Ok(self.content_layout(content_id).await?.is_some())
     }
 
-    /// Takes the newest visible tail layout, or the newest layout in the manifest.
     pub(crate) async fn content_layout(
         &self,
         content_id: &loonfs_types::ContentId,
     ) -> Result<Option<ContentLayoutRecord>, CoreError> {
-        if let Some(row) = self
+        let tail = self
             .row_states()
             .flat_map(|state| state.content_layouts())
             .filter(|row| &row.content_id == content_id && row.committed_seq <= self.visible_seq())
-            .max_by_key(|row| row.committed_seq)
-        {
-            return Ok(Some(row.clone()));
-        }
-        match self.manifest_segments() {
-            Some(segments) => manifest_index::content_layout(segments, content_id).await,
-            None => Ok(None),
-        }
+            .max_by_key(|row| (row.size_bytes, row.committed_seq));
+        let folded = match self.manifest_segments() {
+            Some(segments) => manifest_index::content_layout(segments, content_id).await?,
+            None => None,
+        };
+        Ok(tail
+            .cloned()
+            .into_iter()
+            .chain(folded)
+            .max_by_key(|row| (row.size_bytes, row.committed_seq)))
     }
 
     pub(crate) async fn find_commit_receipt(

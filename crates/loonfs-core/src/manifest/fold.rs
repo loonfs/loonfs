@@ -13,7 +13,7 @@ use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
-use crate::limits::{CONTENTION_RETRY_LIMIT, MAX_MERGED_EXTENT_BYTES};
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::CurrentManifest;
@@ -36,7 +36,6 @@ use loonfs_types::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::Semaphore;
 use tracing::Instrument;
 
 /// Manifest that covers the head after a fold attempt.
@@ -90,6 +89,7 @@ pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
         &deadline,
         MetadataLsmPolicy::default(),
         Arc::default(),
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
 }
@@ -100,8 +100,11 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
     pool: Arc<ReadWorkingMemory>,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<FoldWalResponse> {
-    let basis = fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool).await?;
+    let basis =
+        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool, merge_memory)
+            .await?;
     Ok(fold_wal_response(namespace_id, basis))
 }
 
@@ -111,6 +114,7 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
     pool: &Arc<ReadWorkingMemory>,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<FoldedBasis> {
     retry_while_contended(|| async move {
         // The fallback reloads after every lost race, so it never relies on
@@ -118,8 +122,15 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
         let mut projection = load_fold_projection(store, namespace_id, None).await?;
         projection.manifest_segments.block_memo = SessionBlockMemo::new(Arc::clone(pool));
         Result::Ok(
-            match try_fold_wal_projection(store, namespace_id, &projection, deadline, policy)
-                .await?
+            match try_fold_wal_projection(
+                store,
+                namespace_id,
+                &projection,
+                deadline,
+                policy,
+                merge_memory,
+            )
+            .await?
             {
                 TryFoldWal::Settled(basis) => CasAttempt::Settled(*basis),
                 TryFoldWal::RaceLost(_) => {
@@ -139,6 +150,7 @@ pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWal> {
     let projection = load_fold_projection(store, namespace_id, segment_cache).await?;
     fold_held_projection(
@@ -148,6 +160,7 @@ pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
         projection,
         deadline,
         policy,
+        merge_memory,
     )
     .await
 }
@@ -176,11 +189,12 @@ async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
     mut projection: ManifestProjection<'a, S>,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWal> {
     if let Some(current) = already_current(&projection) {
         return Ok(current);
     }
-    let layouts = materialize_tail_content(store, &projection).await?;
+    let layouts = materialize_tail_content(store, &projection, merge_memory).await?;
     let mut attempt =
         publish_fold(store, namespace_id, &projection, &layouts, deadline, policy).await?;
     for _retry in 0..CONTENTION_RETRY_LIMIT {
@@ -240,11 +254,12 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
     projection: &ManifestProjection<'_, S>,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWal> {
     if let Some(current) = already_current(projection) {
         return Ok(current);
     }
-    let layouts = materialize_tail_content(store, projection).await?;
+    let layouts = materialize_tail_content(store, projection, merge_memory).await?;
     publish_fold(store, namespace_id, projection, &layouts, deadline, policy).await
 }
 
@@ -321,6 +336,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
 async fn materialize_tail_content<S: ObjectStore + ?Sized>(
     store: &S,
     projection: &ManifestProjection<'_, S>,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<HashMap<ContentId, ContentLayoutRecord>> {
     let tail = projection.tail_state.as_ref();
     let assembled = tail
@@ -329,12 +345,10 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
         .map(|content| Ok((content, assemble_tail_content(content)?)))
         .collect::<Result<Vec<_>>>()?;
     let layouts = Mutex::new(HashMap::new());
-    let merge_memory = Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize);
     // In a live namespace, failed folds leave committed content for the next fold.
     stream::iter(assembled.into_iter().map(Ok))
         .try_for_each_concurrent(STORE_WRITE_WAVE, |(content, pieces)| {
             let layouts = &layouts;
-            let merge_memory = &merge_memory;
             async move {
                 let layout =
                     write_tail_content(store, projection, tail, content, pieces, merge_memory)
@@ -367,6 +381,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     input: Option<WalFoldInput>,
     deadline: &Deadline,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<FoldedWalTail> {
     let policy = MetadataLsmPolicy::default();
     let pool = read_working_memory(segment_cache);
@@ -386,16 +401,26 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
             manifest_projection,
             deadline,
             policy,
+            merge_memory,
         )
         .await?
         {
             TryFoldWal::Settled(basis) => *basis,
             TryFoldWal::RaceLost(_) => {
-                fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool).await?
+                fold_wal_basis_with_deadline(
+                    store,
+                    namespace_id,
+                    deadline,
+                    policy,
+                    &pool,
+                    merge_memory,
+                )
+                .await?
             }
         }
     } else {
-        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool).await?
+        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool, merge_memory)
+            .await?
     };
     Ok(FoldedWalTail {
         basis: MetadataBasis(folded.manifest.clone()),

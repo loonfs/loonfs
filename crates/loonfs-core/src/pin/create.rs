@@ -25,13 +25,22 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: MetadataLsmPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<PinPayload> {
     validate_pin_owner(&owner)?;
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let deadline = &deadline;
     let owner = &owner;
     let created = retry_while_contended(|| async move {
-        let basis = match try_fold_wal(store, namespace_id, deadline, policy, segment_cache).await?
+        let basis = match try_fold_wal(
+            store,
+            namespace_id,
+            deadline,
+            policy,
+            segment_cache,
+            merge_memory,
+        )
+        .await?
         {
             TryFoldWal::Settled(basis) => basis,
             TryFoldWal::RaceLost(_) => {

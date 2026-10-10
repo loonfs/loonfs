@@ -155,14 +155,10 @@ impl LiveSet {
             for revision in tail.rows.revisions() {
                 live.protect_content(&revision.content_ref)?;
             }
-            for content in tail.contents() {
-                for base in content
-                    .pieces
-                    .iter()
-                    .filter_map(|piece| piece.base.as_ref())
-                {
-                    if base.owner_namespace_id == live.content_roots.namespace_id {
-                        live.content_roots.insert(&base.content_id)?;
+            for row in tail.rows.content_layouts() {
+                for extent in &row.layout.extents {
+                    if extent.owner_namespace_id == live.content_roots.namespace_id {
+                        live.content_roots.insert(&extent.content_id)?;
                     }
                 }
             }

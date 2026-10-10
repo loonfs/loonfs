@@ -31,6 +31,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     timer: Arc<dyn MonotonicTimer>,
     fold_policy: MetadataLsmPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
+    merge_memory: &tokio::sync::Semaphore,
 ) -> Result<NamespaceMetadata> {
     let deadline = Deadline::start(timer);
     let target = super::control::load_current_manifest_if_present(store, new_namespace_id).await?;
@@ -66,6 +67,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             context,
             fold_policy,
             segment_cache,
+            merge_memory,
         )
         .await?
     };

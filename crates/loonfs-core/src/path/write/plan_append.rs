@@ -10,8 +10,9 @@ use crate::commit::{AppendedContent, CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
+use crate::storage::tail_content::materialize_content_layout;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::{ContentBase, WalInlineContent};
+use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, Checksum, ContentId, ContentRef, ContentRefKind,
     DestinationBehavior, DestinationPrecondition, InodeId, InodeKind, PreconditionFields,
@@ -23,6 +24,8 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     expected_inode_id: Option<InodeId>,
     expected_revision_no: Option<RevisionNo>,
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
@@ -55,6 +58,8 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
         .await?
         .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
     plan_append(
+        store,
+        merge_memory,
         view,
         absolute_path.as_str(),
         revision,
@@ -68,6 +73,8 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     bytes: &[u8],
     expected_revision_no: Option<RevisionNo>,
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
@@ -89,6 +96,8 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
         .await?
         .ok_or(CoreError::InodeNotFound(inode_id))?;
     plan_append(
+        store,
+        merge_memory,
         view,
         target.absolute_path.as_str(),
         revision,
@@ -102,6 +111,8 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
 /// `bytes`. The guard is checked first so that a stale caller hears about
 /// the revision, not about the content it would have extended.
 async fn plan_append<S: ObjectStore + ?Sized>(
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     target: &str,
     revision: RevisionRecord,
@@ -119,7 +130,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    let appended = append_to(view, target, &revision, bytes).await?;
+    let appended = append_to(store, merge_memory, view, target, &revision, bytes).await?;
     Ok(CompiledFilesystemOperation {
         ops: vec![CommitOp::ReplaceFile {
             inode_id: revision.inode_id,
@@ -132,6 +143,8 @@ async fn plan_append<S: ObjectStore + ?Sized>(
 }
 
 async fn append_to<S: ObjectStore + ?Sized>(
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     target: &str,
     base_row: &RevisionRecord,
@@ -184,6 +197,27 @@ async fn append_to<S: ObjectStore + ?Sized>(
     } else {
         ContentId::generate()
     };
+    let layout = if extends_base || base.size_bytes == 0 {
+        None
+    } else {
+        Some(
+            materialize_content_layout(
+                store,
+                view.view,
+                view.tail.ok_or_else(|| {
+                    CoreError::Internal("append planning requires the publish tail".to_owned())
+                })?,
+                base,
+                merge_memory,
+            )
+            .await?,
+        )
+    };
+    let pieces = vec![WalInlineContent {
+        content_id: content_id.clone(),
+        offset: base.size_bytes,
+        bytes: bytes.to_vec(),
+    }];
     Ok(AppendedContent {
         content_ref: ContentRef {
             kind: ContentRefKind::BlobV1,
@@ -194,14 +228,7 @@ async fn append_to<S: ObjectStore + ?Sized>(
         },
         hash_state,
         crc64nvme,
-        piece: WalInlineContent {
-            content_id,
-            offset: base.size_bytes,
-            bytes: bytes.to_vec(),
-            base: (!extends_base && base.size_bytes > 0).then(|| ContentBase {
-                owner_namespace_id: base.owner_namespace_id.clone(),
-                content_id: base.content_id.clone(),
-            }),
-        },
+        layout,
+        pieces,
     })
 }

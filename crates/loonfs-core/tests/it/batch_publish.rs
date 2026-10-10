@@ -1834,7 +1834,10 @@ async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     engine
         .publish_batch(
             &store,
@@ -1900,7 +1903,10 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     engine
         .publish_batch(
             &store,

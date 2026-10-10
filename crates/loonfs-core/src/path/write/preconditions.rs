@@ -27,6 +27,7 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
         access: &head.access,
         authorizer: &authorizer,
         view: pre_state,
+        tail: None,
     };
     for (index, precondition) in preconditions.iter().enumerate() {
         let precondition_index = u32::try_from(index).ok();

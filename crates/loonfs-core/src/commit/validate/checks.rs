@@ -204,16 +204,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 ..
             } = delta
             {
-                let (state, crc, uploaded_layout) = revision_content(content_ref);
-                // A reused upload receipt must not shadow a longer layout with a whole one.
-                if uploaded_layout.is_some()
-                    && !view
-                        .view()
-                        .content_published(&content_ref.content_id)
-                        .await?
-                {
-                    *layout = uploaded_layout;
-                }
+                let (state, crc, carried_layout) = revision_content(content_ref);
+                *layout = carried_layout.or_else(|| layout.take());
                 *hash_state = state.or_else(|| hash_state.take());
                 *crc64nvme = crc.or_else(|| crc64nvme.take()).or_else(|| {
                     (content_ref.checksum.algorithm == ChecksumAlgorithm::Crc64nvme)

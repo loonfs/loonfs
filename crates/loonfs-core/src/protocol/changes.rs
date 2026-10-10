@@ -342,7 +342,11 @@ mod tests {
             segment_cache: Arc::new(MetadataSegmentCache::unshared(usize::MAX)),
             head_state: Arc::new(HeadStateCache::unshared(usize::MAX)),
         };
-        let engine = NamespaceEngine::reader(&store, namespace_id);
+        let engine = NamespaceEngine::reader(
+            &store,
+            namespace_id,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
 
         let caught_up = engine
             .list_changes_after(ChangeSeq(0), limit, &context)
@@ -402,6 +406,7 @@ mod tests {
                 &namespace_id,
                 vec![CommitCandidate::new(request)],
                 &context,
+                std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
             )
             .await
             .pop()

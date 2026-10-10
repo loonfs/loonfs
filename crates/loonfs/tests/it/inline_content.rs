@@ -48,25 +48,28 @@ async fn publish_inline(
         },
     );
     request.subject = subject;
-    NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            [CommitCandidate::with_inline_content(
-                request,
-                Vec::new(),
-                vec![value.clone()],
-            )],
-            &MutationContext {
-                writer_id: WriterId::parse("inline-writer").expect("writer"),
-                now_ms: 1_000,
-            },
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("result")
-        .expect("publish inline");
+    NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .publish_batch(
+        store,
+        [CommitCandidate::with_inline_content(
+            request,
+            Vec::new(),
+            vec![value.clone()],
+        )],
+        &MutationContext {
+            writer_id: WriterId::parse("inline-writer").expect("writer"),
+            now_ms: 1_000,
+        },
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("result")
+    .expect("publish inline");
     value.content_ref().clone()
 }
 
@@ -195,6 +198,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
                 store.clone(),
                 source.clone(),
                 WriterId::parse("fold").expect("writer"),
+                std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
             )
             .fold_wal()
             .await

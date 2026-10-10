@@ -88,6 +88,7 @@ async fn two_creations_race_at_manifest_one() {
 
 #[tokio::test]
 async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let directory = tempdir().expect("directory");
     let source = NamespaceId::parse("source").expect("source");
     let target = NamespaceId::parse("target").expect("target");
@@ -132,6 +133,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &merge_memory,
     )
     .await
     .expect("fork source pin proves authorship from matching bytes");
@@ -142,6 +144,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
 
 #[tokio::test]
 async fn nested_forks_read_copied_runs_without_source_control_reads() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let source = NamespaceId::parse("source").expect("source");
@@ -149,7 +152,10 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     let nested = NamespaceId::parse("nested").expect("nested");
     create(&store, &source, &context()).await.expect("create");
     publish(
-        &mut NamespaceCommitEngine::new(source.clone()),
+        &mut NamespaceCommitEngine::new(
+            source.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        ),
         &store,
         "inherited",
     )
@@ -165,6 +171,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &merge_memory,
     )
     .await
     .expect("fork");
@@ -180,7 +187,10 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         .flat_map(|run| &run.segments)
         .all(|segment| segment.owner_namespace_id == source));
     publish(
-        &mut NamespaceCommitEngine::new(target.clone()),
+        &mut NamespaceCommitEngine::new(
+            target.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        ),
         &store,
         "child",
     )
@@ -196,6 +206,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &merge_memory,
     )
     .await
     .expect("nested fork");
@@ -279,7 +290,10 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         .await
         .expect("initial hint");
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     publish(&mut engine, &store, "seed").await.expect("seed");
     store.block_next();
     let (hint_result, ()) = futures::join!(
@@ -334,6 +348,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
 
 #[tokio::test]
 async fn fork_into_a_deleted_id_writes_no_source_pin() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -347,10 +362,13 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
             .await
             .expect("bootstrap");
     }
-    NamespaceCommitEngine::new(target.clone())
-        .delete_namespace(&store, Default::default(), &context)
-        .await
-        .expect("delete target");
+    NamespaceCommitEngine::new(
+        target.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .delete_namespace(&store, Default::default(), &context)
+    .await
+    .expect("delete target");
     store.reset();
     let error = fork_namespace(
         &store,
@@ -362,6 +380,7 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
+        &merge_memory,
     )
     .await
     .expect_err("deleted target");
@@ -378,6 +397,7 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
 
 #[tokio::test]
 async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     for deleted in [false, true] {
         let directory = tempdir().expect("directory");
         let source = NamespaceId::parse("source").expect("source");
@@ -402,6 +422,7 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
             Arc::new(StdMonotonicTimer::default()),
             Default::default(),
             None,
+            &merge_memory,
         );
         let competing_create = async {
             store.wait_until_blocked().await;
@@ -414,6 +435,7 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
                     &target,
                     Default::default(),
                     &setup,
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
                 )
                 .await
                 .expect("competing delete");

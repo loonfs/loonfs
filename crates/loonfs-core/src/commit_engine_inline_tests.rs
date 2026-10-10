@@ -16,9 +16,7 @@ use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
 use loonfs_types::api::v0::PathEntryKind;
-use loonfs_types::format::wal::{
-    decode_wal_object_envelope_zstd, ContentBase, WalDelta, WalInlineContent,
-};
+use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalDelta, WalInlineContent};
 use loonfs_types::{
     AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FoldWalOutcome, InodeId,
     RevisionNo, WriterId,
@@ -145,8 +143,29 @@ async fn commit_piece(
     content_id: &ContentId,
     whole: &[u8],
     offset: usize,
-    base: Option<ContentBase>,
+    layout: Option<loonfs_types::ContentLayout>,
 ) -> ContentRef {
+    let layout = if offset > 0 && layout.is_none() {
+        let view = load_current_metadata_view(store, namespace_id)
+            .await
+            .expect("base view");
+        let mut state = loonfs_types::Sha256State::new();
+        state.update(&whole[..offset]);
+        let base = ContentRef::blob_v1_streamed(namespace_id.clone(), content_id.clone(), &state);
+        Some(
+            crate::storage::tail_content::materialize_content_layout(
+                store,
+                &view.projected_metadata_view(),
+                view.wal_tail(),
+                &base,
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            )
+            .await
+            .expect("base layout"),
+        )
+    } else {
+        layout
+    };
     let mut hash_state = loonfs_types::Sha256State::new();
     hash_state.update(whole);
     let content_ref =
@@ -161,13 +180,12 @@ async fn commit_piece(
             content_ref: content_ref.clone(),
             hash_state: Some(hash_state),
             crc64nvme: Some(loonfs_types::Checksum::crc64nvme(whole)),
-            layout: None,
+            layout,
         }],
         vec![WalInlineContent {
             content_id: content_id.clone(),
             offset: offset as u64,
             bytes: whole[offset..].to_vec(),
-            base,
         }],
     )
     .await
@@ -237,7 +255,7 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
     assert_eq!(record.inline_content.len(), values.len());
     for (entry, value) in record.inline_content.iter().zip(values.iter().rev()) {
         assert_eq!(entry.content_id, value.content_ref().content_id);
-        assert_eq!((entry.offset, &entry.base), (0, &None));
+        assert_eq!(entry.offset, 0);
         assert_eq!(entry.bytes.as_slice(), value.bytes().as_ref());
         let expected_reference = value.content_ref();
         assert!(record.deltas.iter().any(|delta| {
@@ -474,6 +492,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             &engine.namespace_id,
             input,
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("fold inline content");

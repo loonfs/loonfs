@@ -36,6 +36,7 @@ impl VisibilityHarness {
             Arc::clone(&store),
             namespace_id,
             loonfs_types::WriterId::parse("visibility-equivalence").expect("writer id"),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         );
         engine
             .bootstrap_namespace(

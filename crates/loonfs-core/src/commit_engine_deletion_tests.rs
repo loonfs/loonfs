@@ -33,8 +33,11 @@ async fn deletion_budget_includes_writer_acquisition() {
         .await
         .expect("bootstrap");
     let clock = Arc::new(ManualClock::new(0));
-    let mut publisher =
-        NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(clock.clone());
+    let mut publisher = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .monotonic_timer(clock.clone());
     store.block_next();
     let delete = publisher.delete_namespace(&store, Default::default(), &context);
     let delay = async {
@@ -89,10 +92,13 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         .results
         .remove(0)
         .expect("publish before deletion");
-    NamespaceCommitEngine::new(namespace_id)
-        .delete_namespace(&store, Default::default(), &context)
-        .await
-        .expect("delete");
+    NamespaceCommitEngine::new(
+        namespace_id,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .delete_namespace(&store, Default::default(), &context)
+    .await
+    .expect("delete");
     let candidate = CommitCandidate::new(CommitRequest::single(
         CommitId::parse("after-delete").expect("commit"),
         loonfs_test_support::test_actor(),
@@ -141,8 +147,11 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .await
         .expect("bootstrap");
     let clock = Arc::new(ManualClock::new(0));
-    let mut engine =
-        NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(clock.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .monotonic_timer(clock.clone());
     let value = InlineContent::new(
         namespace_id.clone(),
         ContentId::generate(),
@@ -197,6 +206,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             &context,
             &deadline,
             Arc::default(),
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect_err("deletion rejected before folding");

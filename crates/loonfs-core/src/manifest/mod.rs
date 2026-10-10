@@ -7,6 +7,7 @@ mod block_fetch;
 mod block_load;
 mod build;
 pub(crate) mod cache;
+mod chain_filter;
 mod compaction_merge;
 mod compaction_retention;
 mod compaction_step;

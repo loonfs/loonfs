@@ -1010,7 +1010,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
 }
 
 #[tokio::test]
-async fn compaction_keeps_the_newest_revision_at_the_floor_and_every_publication() {
+async fn compaction_keeps_retained_revisions_and_their_layouts() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1078,8 +1078,21 @@ async fn compaction_keeps_the_newest_revision_at_the_floor_and_every_publication
         let after = group_rows_of_current_manifest(&store, &namespace_id, group).await;
 
         if group == MetadataFamilyGroup::ContentLayouts {
-            assert_eq!(after, before, "publication rows are never dropped");
-            assert_eq!(result.rows_read, result.rows_written);
+            let revisions = group_rows_of_current_manifest(
+                &store,
+                &namespace_id,
+                MetadataFamilyGroup::Revisions,
+            )
+            .await;
+            for revision in &revisions[&ApiMetadataRowFamily::Revisions] {
+                let MetadataRow::FileRevision(revision) = revision else {
+                    panic!("revision")
+                };
+                assert!(after[&ApiMetadataRowFamily::ContentLayouts].iter().any(|row| matches!(
+                    row, MetadataRow::ContentLayout(layout) if layout.content_id == revision.content_ref.content_id
+                )));
+            }
+            assert!(result.rows_written <= result.rows_read);
             continue;
         }
         let kept: Vec<(u64, u64)> = after[&ApiMetadataRowFamily::Revisions]
@@ -1227,10 +1240,8 @@ async fn a_repeated_revision_row_key_is_refused() {
     else {
         panic!("raised budgets must admit a bounded merge");
     };
-    drop(segments);
-
     let step_error = merge_group_in_step(
-        &store,
+        &segments,
         None,
         &namespace_id,
         group,
@@ -1632,7 +1643,6 @@ async fn a_step_contained_merge_reads_its_window_once() {
     else {
         panic!("raised budgets must admit a bounded merge");
     };
-    drop(segments);
     let window_segments = input
         .runs
         .iter()
@@ -1641,7 +1651,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
     let _ = store.take_reads();
 
     let merged = merge_group_in_step(
-        &store,
+        &segments,
         None,
         &namespace_id,
         group,
@@ -1981,8 +1991,10 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
         RecordingStore::metadata_segments(local),
         KeyPredicate::metadata_segment(),
     );
+    let cache = MetadataSegmentCache::unshared(8 * 1024 * 1024);
+    let segments = VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
     let result = merge_group_in_step(
-        &store,
+        &segments,
         None,
         &namespace_id,
         group,
@@ -2150,9 +2162,8 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     else {
         panic!("raised budgets must admit a bounded merge");
     };
-    drop(segments);
     let merged = merge_group_in_step(
-        &store,
+        &segments,
         None,
         &namespace_id,
         group,
@@ -3036,17 +3047,20 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     assert_eq!(store.counts().puts, 0);
 
     timer.0.store(0, Ordering::SeqCst);
-    crate::commit_engine::NamespaceCommitEngine::new(namespace.clone())
-        .delete_namespace(
-            store.inner(),
-            Default::default(),
-            &crate::MutationContext {
-                writer_id: loonfs_types::WriterId::parse("deleter").expect("writer"),
-                now_ms: 5_000,
-            },
-        )
-        .await
-        .expect("delete while the job runs");
+    crate::commit_engine::NamespaceCommitEngine::new(
+        namespace.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .delete_namespace(
+        store.inner(),
+        Default::default(),
+        &crate::MutationContext {
+            writer_id: loonfs_types::WriterId::parse("deleter").expect("writer"),
+            now_ms: 5_000,
+        },
+    )
+    .await
+    .expect("delete while the job runs");
     store.reset();
     let outcome = finalize_metadata_compaction(
         &store,
@@ -3304,6 +3318,172 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         }
         for key in &current_keys {
             assert!(store.head(key).await.expect("head").is_some());
+        }
+    }
+}
+
+#[tokio::test]
+async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_filter_cap() {
+    use crate::metadata::RevisionRecord;
+    use loonfs_types::format::manifest::ContentLayoutRecord;
+    use loonfs_types::{ContentExtent, ContentId, ContentLayout, ContentRef, ExtentObject};
+
+    let directory = tempdir().expect("directory");
+    let store =
+        RecordingStore::metadata_segments(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("layouts").expect("namespace");
+    let reference = ContentRef::blob_v1(
+        namespace_id.clone(),
+        ContentId::parse("con_00000000000000000000000000000000").expect("content"),
+        b"four",
+    );
+    let absent = ContentId::parse("con_00000000000000000000000000000001").expect("content");
+    let mut state = MetadataStateBuilder::default();
+    state.push_revision(RevisionRecord {
+        inode_id: InodeId(2),
+        revision_no: RevisionNo(1),
+        committed_seq: ChangeSeq(1),
+        commit_id: CommitId::parse("first").expect("commit"),
+        committed_at_ms: 0,
+        committed_by: loonfs_types::ActorId::loonfs(),
+        delta_index: 0,
+        content_ref: reference.clone(),
+        hash_state: None,
+        crc64nvme: None,
+    });
+    for (content_id, size_bytes, committed_seq) in [
+        (reference.content_id.clone(), 8, ChangeSeq(1)),
+        (reference.content_id.clone(), 4, ChangeSeq(2)),
+        (absent.clone(), 4, ChangeSeq(1)),
+    ] {
+        state.push_content_layout(ContentLayoutRecord {
+            owner_namespace_id: namespace_id.clone(),
+            content_id: content_id.clone(),
+            size_bytes,
+            committed_seq,
+            layout: ContentLayout {
+                extents: vec![ContentExtent {
+                    owner_namespace_id: namespace_id.clone(),
+                    content_id,
+                    object: ExtentObject::Whole,
+                    offset: 0,
+                    length: size_bytes,
+                }],
+            },
+        });
+    }
+    let state = state.finish();
+    let mut head =
+        NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_types::ActorId::loonfs());
+    head.seq = ChangeSeq(2);
+    head.next_inode_id = InodeId(3);
+    let policy = MetadataLsmPolicy::default();
+    let manifest = build_namespace_manifest_from_metadata_state(
+        &store,
+        &namespace_id,
+        ManifestMetadataSource {
+            head: &head,
+            basis_manifest_no: None,
+            retention_floor_seq: head.seq,
+            metadata_state: &state,
+        },
+        policy,
+        ManifestNo(1),
+    )
+    .await
+    .expect("manifest");
+    let cache = MetadataSegmentCache::unshared(8 * 1024 * 1024);
+    let runs = runs_newest_first(manifest.payload());
+    let mut basis = VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
+    basis.manifest = Some(Arc::new(manifest));
+    let revision_key = metadata_segment_object_key(
+        group_run_descriptors(&runs[0], MetadataFamilyGroup::Revisions)
+            .next()
+            .expect("revision segment"),
+    );
+    let group = MetadataFamilyGroup::ContentLayouts;
+    for (bottom, capped, expected) in [(true, false, 1), (false, false, 2), (true, true, 3)] {
+        if capped {
+            let mut counted_runs = runs.clone();
+            for run in &mut counted_runs {
+                for family in &mut run.segments {
+                    if family.family == ApiMetadataRowFamily::Revisions {
+                        family.segments[0].row_count =
+                            crate::limits::MAX_CHAIN_FILTER_BYTES as u64 * 8 / 10 + 1;
+                    }
+                }
+            }
+            basis.scan_runs = Arc::new(counted_runs);
+        }
+        let placement = if bottom {
+            compaction_step::MergePlacement::Base {
+                output_seq: head.seq,
+            }
+        } else {
+            compaction_step::MergePlacement::Delta {
+                output_seq: head.seq,
+            }
+        };
+        store.reset();
+        let bounded = merge_group_in_step(
+            &basis,
+            None,
+            &namespace_id,
+            group,
+            &runs,
+            placement,
+            head.seq,
+            policy,
+        )
+        .await
+        .expect("bounded merge");
+        let spec = MetadataCompactionSpec::new(group, vec![RunNo(0)], 3, placement, head.seq);
+        let streamed = run_metadata_compaction(
+            &basis,
+            &namespace_id,
+            &spec,
+            policy,
+            &MetadataCompactionCancellation::default(),
+        )
+        .await
+        .expect("streamed merge")
+        .expect("not cancelled");
+        assert_eq!(
+            store
+                .take_gets()
+                .iter()
+                .filter(|read| read.0 == revision_key)
+                .count(),
+            if bottom && !capped { 4 } else { 0 }
+        );
+        for result in [bounded, streamed] {
+            assert_eq!(result.rows_written, expected);
+            let mut layouts = Vec::new();
+            for descriptor in &result.output_segments {
+                let index =
+                    block_fetch::load_segment_index_for_compaction(&store, None, None, descriptor)
+                        .await
+                        .expect("index");
+                for entry in index.iter() {
+                    let block = data_block_load::load_segment_data_block(
+                        &store, None, None, descriptor, entry,
+                    )
+                    .await
+                    .expect("block");
+                    layouts.extend(block.rows.iter().cloned());
+                }
+            }
+            assert!(layouts
+                .iter()
+                .any(|row| matches!(row, MetadataRow::ContentLayout(layout)
+                if layout.content_id == reference.content_id && layout.size_bytes == 8)));
+            assert_eq!(
+                layouts
+                    .iter()
+                    .any(|row| matches!(row, MetadataRow::ContentLayout(layout)
+                if layout.content_id == absent)),
+                !bottom || capped
+            );
         }
     }
 }

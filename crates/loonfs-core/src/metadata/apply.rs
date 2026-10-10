@@ -139,7 +139,7 @@ impl MetadataState {
                         owner_namespace_id: content_ref.owner_namespace_id.clone(),
                         content_id: content_ref.content_id.clone(),
                         committed_seq,
-                        size_bytes: content_ref.size_bytes,
+                        size_bytes: layout.size_bytes(),
                         layout: layout.clone(),
                     });
                 }

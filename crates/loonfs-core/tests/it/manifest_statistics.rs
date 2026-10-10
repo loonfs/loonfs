@@ -83,8 +83,11 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
                 expected_revision_no: None,
             },
         ];
-        let mut engine = NamespaceCommitEngine::new(ns.clone())
-            .head_state(Arc::new(HeadStateCache::unshared(usize::MAX)));
+        let mut engine = NamespaceCommitEngine::new(
+            ns.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        )
+        .head_state(Arc::new(HeadStateCache::unshared(usize::MAX)));
         for (index, operation) in operations.into_iter().enumerate() {
             let request = CommitRequest::single(
                 CommitId::parse(format!("activity-{index}")).expect("id"),
@@ -132,6 +135,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             &ns,
             input.clone(),
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("fold");
@@ -153,6 +157,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             &ns,
             input,
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("repeat fold");

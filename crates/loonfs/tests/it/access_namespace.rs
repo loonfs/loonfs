@@ -87,7 +87,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
     let member_fork_namespace = member.namespace(&fork);
     assert_eq!(
         member
-            .fork_namespace(&namespace, &fork, &loonfs_test_support::test_actor())
+            .fork_namespace(&namespace, &fork, &loonfs_test_support::test_actor(),)
             .await
             .expect_err("member fork")
             .code(),

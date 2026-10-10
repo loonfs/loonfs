@@ -161,7 +161,7 @@ pub enum WalDelta {
         /// the bytes or the reference's own checksum is that CRC.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         crc64nvme: Option<Checksum>,
-        /// Whole object supplied by upload evidence in this commit.
+        /// Objects holding the bytes before this commit's pieces.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layout: Option<crate::ContentLayout>,
     },
@@ -292,20 +292,6 @@ pub struct WalInlineContent {
     /// The bytes, encoded as a CBOR byte string.
     #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
-    /// Content whose first `offset` bytes precede `bytes`, when this entry
-    /// starts a chain under a new content id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<ContentBase>,
-}
-
-/// Names the content object a chain copies its first bytes from.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContentBase {
-    /// Namespace that owns the base content.
-    pub owner_namespace_id: NamespaceId,
-    /// Identity of the base content.
-    pub content_id: ContentId,
 }
 
 /// Carries one accepted logical commit inside a WAL object.
@@ -567,24 +553,6 @@ fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), Envelop
         for (content_id, by_offset) in entries {
             let mut end = None;
             for (offset, entry) in by_offset {
-                match &entry.base {
-                    Some(_) if offset == 0 => {
-                        return Err(invalid(content_id, "an entry at offset 0 names a `base`"))
-                    }
-                    Some(_) if end.is_some() => {
-                        return Err(invalid(
-                            content_id,
-                            "an entry after the first names a `base`",
-                        ))
-                    }
-                    Some(base) if &base.content_id == content_id => {
-                        return Err(invalid(
-                            content_id,
-                            "an entry names its own content as its `base`",
-                        ))
-                    }
-                    _ => {}
-                }
                 if end.is_some_and(|end| end != offset) {
                     return Err(invalid(content_id, "entries are not contiguous"));
                 }
@@ -609,7 +577,7 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), Envel
         for delta in &record.deltas {
             let WalDelta::AppendFileRevision {
                 content_ref,
-                layout: Some(layout),
+                layout,
                 ..
             } = &delta.delta
             else {
@@ -620,15 +588,35 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), Envel
                 content_id: content_ref.content_id.clone(),
                 reason,
             };
+            let first_offset = record
+                .inline_content
+                .iter()
+                .filter(|piece| piece.content_id == content_ref.content_id)
+                .map(|piece| piece.offset)
+                .min();
+            if first_offset == Some(0) {
+                if layout.is_some() {
+                    return Err(invalid("a whole value carries no layout"));
+                }
+                continue;
+            }
+            let Some(layout) = layout else {
+                if first_offset.is_some() {
+                    continue;
+                }
+                return Err(invalid("a reference without pieces requires a layout"));
+            };
+            let size_bytes = layout
+                .extents
+                .iter()
+                .try_fold(0_u64, |size, extent| size.checked_add(extent.length))
+                .ok_or_else(|| invalid("layout length overflows"))?;
             layout
-                .validate(content_ref.size_bytes)
+                .validate(size_bytes)
                 .map_err(|error| invalid(error.reason))?;
-            if layout.extents.iter().any(|extent| {
-                extent.owner_namespace_id != content_ref.owner_namespace_id
-                    || extent.content_id != content_ref.content_id
-            }) {
+            if size_bytes != first_offset.unwrap_or(content_ref.size_bytes) {
                 return Err(invalid(
-                    "extent owner and content id must match the reference",
+                    "layout size must equal the first piece offset or the reference size",
                 ));
             }
         }
@@ -729,7 +717,6 @@ mod tests {
                         content_id,
                         offset: 0,
                         bytes,
-                        base: None,
                     }],
                 }
             })
@@ -859,6 +846,22 @@ mod tests {
         let record = &mut payload.records[0];
         let bytes = std::mem::take(&mut record.inline_content[0].bytes);
         let entry = record.inline_content[0].clone();
+        if let WalDelta::AppendFileRevision {
+            content_ref,
+            layout,
+            ..
+        } = &mut record.deltas[0].delta
+        {
+            *layout = Some(crate::ContentLayout {
+                extents: vec![crate::ContentExtent {
+                    owner_namespace_id: content_ref.owner_namespace_id.clone(),
+                    content_id: content_ref.content_id.clone(),
+                    object: crate::ExtentObject::Whole,
+                    offset: 0,
+                    length: 3,
+                }],
+            });
+        }
         record.inline_content = vec![
             WalInlineContent {
                 offset: 3,
@@ -875,36 +878,12 @@ mod tests {
     }
 
     #[test]
-    fn inline_entries_extend_contiguously_and_only_the_first_names_a_base() {
+    fn inline_entries_extend_contiguously() {
         assert_inline_content_accepted(appended_wal_object());
-        let base = ContentBase {
-            owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
-            content_id: ContentId::parse("con_fedcba9876543210fedcba9876543210")
-                .expect("content id"),
-        };
-        let mut chain = appended_wal_object();
-        chain.records[0].inline_content[0].base = Some(base.clone());
-        assert_inline_content_accepted(chain);
-
         let mut gap = appended_wal_object();
         gap.records[0].inline_content[1].offset = 6;
         gap.records[0].inline_content[1].bytes.pop();
         assert_inline_content_rejected(gap, 0, "entries are not contiguous");
-
-        let mut later_base = appended_wal_object();
-        later_base.records[0].inline_content[1].base = Some(base.clone());
-        assert_inline_content_rejected(later_base, 0, "an entry after the first names a `base`");
-
-        let mut own_base = appended_wal_object();
-        own_base.records[0].inline_content[0].base = Some(ContentBase {
-            content_id: own_base.records[0].inline_content[0].content_id.clone(),
-            ..base.clone()
-        });
-        assert_inline_content_rejected(own_base, 0, "an entry names its own content as its `base`");
-
-        let mut first = inline_wal_object(&[3]);
-        first.records[0].inline_content[0].base = Some(base);
-        assert_inline_content_rejected(first, 0, "an entry at offset 0 names a `base`");
     }
 
     #[test]
@@ -976,39 +955,59 @@ mod tests {
     }
 
     #[test]
-    fn revision_layouts_must_cover_and_name_the_reference() {
-        for invalid in 0..4 {
+    fn revision_layouts_equal_the_reference_size_or_first_piece_offset() {
+        for (piece_offset, layout_size, valid) in [
+            (None, Some(3), true),
+            (None, Some(5), false),
+            (None, Some(2), false),
+            (None, None, false),
+            (Some(2), Some(2), true),
+            (Some(2), Some(1), false),
+            (Some(2), Some(3), false),
+            (Some(2), None, true),
+            (Some(0), Some(1), false),
+            (Some(0), None, true),
+        ] {
             let mut payload = inline_wal_object(&[3]);
-            let WalDelta::AppendFileRevision {
-                content_ref,
-                layout,
-                ..
-            } = &mut payload.records[0].deltas[0].delta
+            if let Some(offset) = piece_offset {
+                let piece = &mut payload.records[0].inline_content[0];
+                piece.offset = offset;
+                piece.bytes.drain(..offset as usize);
+            } else {
+                payload.records[0].inline_content.clear();
+            }
+            let WalDelta::AppendFileRevision { layout, .. } =
+                &mut payload.records[0].deltas[0].delta
             else {
                 panic!("revision");
             };
-            let mut extent = crate::ContentExtent {
-                owner_namespace_id: content_ref.owner_namespace_id.clone(),
-                content_id: content_ref.content_id.clone(),
-                object: crate::ExtentObject::Whole,
-                offset: 0,
-                length: 3,
-            };
-            match invalid {
-                1 => extent.length = 2,
-                2 => extent.owner_namespace_id = NamespaceId::parse("other").expect("namespace"),
-                3 => extent.content_id = ContentId::generate(),
-                _ => {}
-            }
-            *layout = Some(crate::ContentLayout {
-                extents: vec![extent],
+            *layout = layout_size.map(|length| crate::ContentLayout {
+                extents: vec![crate::ContentExtent {
+                    owner_namespace_id: NamespaceId::parse("other").expect("namespace"),
+                    content_id: ContentId::parse("con_fedcba9876543210fedcba9876543210")
+                        .expect("content"),
+                    object: crate::ExtentObject::Whole,
+                    offset: 0,
+                    length,
+                }],
             });
             let decoded = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload));
             let encoded = encode_wal_object_envelope_zstd(payload);
-            if invalid == 0 {
-                assert!(decoded.is_ok());
+            if valid {
+                assert!(
+                    decoded.is_ok(),
+                    "{piece_offset:?}, {layout_size:?}: {decoded:?}"
+                );
                 assert!(encoded.is_ok());
             } else {
+                if piece_offset == Some(0) {
+                    for error in [decoded.as_ref().err(), encoded.as_ref().err()] {
+                        assert!(
+                            matches!(error, Some(EnvelopeCodecError::InvalidWalRevisionLayout { reason, .. })
+                            if *reason == "a whole value carries no layout")
+                        );
+                    }
+                }
                 assert!(matches!(
                     decoded,
                     Err(EnvelopeCodecError::InvalidWalRevisionLayout { .. })

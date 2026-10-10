@@ -23,9 +23,11 @@ use crate::commit::{
 };
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
-use crate::metadata::{MetadataState, MetadataView};
+use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
+use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
     next_public_ordinal, ChangeSeq, ContentId, DestinationPrecondition, NamespaceId,
     PreconditionFields, MAX_PUBLIC_INTEGER,
@@ -72,12 +74,18 @@ pub(crate) fn commit_fingerprint(
 /// the head is the validated source of the namespace and writer epoch
 /// (`load_publish_metadata_view` fences on epoch equality, and the batch
 /// rejects namespace mismatches before admission).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "planning carries the store and shared content merge memory"
+)]
 pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     candidate: &CommitCandidate,
     semantic_identity: CommitFingerprint,
     head: &NamespaceReadState,
     base_view: MetadataView<'_, '_, S>,
-    accepted_rows: &MetadataState,
+    tail: &ProjectedWalTail,
     committed_at_ms: u64,
     allocation: &mut CandidateAllocation,
 ) -> Result<ValidatedCommitPlan> {
@@ -92,10 +100,23 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
 
     let authorizer =
         Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
-    let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
+    let mut resolved = PublishValidationView::new(base_view, &tail.rows, committed_seq);
     let mut numbering = CommitNumbering::default();
     let mut deltas = Vec::new();
     let mut appended: Vec<AppendedContent> = Vec::new();
+    let mut pieces = tail.clone();
+    for value in candidate.inline_content() {
+        pieces.insert_piece(
+            value.content_ref(),
+            &Some(value.crc64nvme().clone()),
+            &WalInlineContent {
+                content_id: value.content_ref().content_id.clone(),
+                offset: 0,
+                bytes: value.bytes().to_vec(),
+            },
+            committed_seq,
+        );
+    }
     for (index, operation) in request.operations.iter().enumerate() {
         let unit = {
             let resolution_view = resolved.view();
@@ -104,11 +125,17 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                 access: &head.access,
                 authorizer: &authorizer,
                 view: &resolution_view,
+                tail: Some(&pieces),
             };
-            plan_operation(operation, &view, allocation)
+            plan_operation(store, merge_memory, operation, &view, allocation)
                 .await
                 .map_err(|error| error.at_operation(index))?
         };
+        if let Some(value) = &unit.appended {
+            for piece in &value.pieces {
+                pieces.insert_piece(&value.content_ref, &value.crc64nvme, piece, committed_seq);
+            }
+        }
         appended.extend(unit.appended);
         let unit_deltas = validate_ops(
             &unit.ops,
@@ -118,29 +145,41 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             &request.actor_id,
             committed_at_ms,
             |content_ref| {
-                appended
+                if let Some(value) = appended
                     .iter()
                     .find(|value| value.content_ref == *content_ref)
-                    .map_or_else(
-                        || {
-                            unit.source_revision
-                                .as_ref()
-                                .filter(|row| row.content_ref == *content_ref)
-                                .map_or_else(
-                                    || candidate.revision_content(content_ref),
-                                    |row| (row.hash_state.clone(), row.crc64nvme.clone(), None),
-                                )
-                        },
-                        |value| (value.hash_state.clone(), value.crc64nvme.clone(), None),
-                    )
+                {
+                    return (
+                        value.hash_state.clone(),
+                        value.crc64nvme.clone(),
+                        value.layout.clone(),
+                    );
+                }
+                if let Some(row) = unit
+                    .source_revision
+                    .as_ref()
+                    .filter(|row| row.content_ref == *content_ref)
+                {
+                    return (row.hash_state.clone(), row.crc64nvme.clone(), None);
+                }
+                candidate.revision_content(content_ref)
             },
         )
         .await
         .map_err(|error| error.at_operation(index))?;
+        for delta in &unit_deltas {
+            pieces.rows.apply_committed_wal_delta_mut(
+                committed_seq,
+                &request.commit_id,
+                &request.actor_id,
+                committed_at_ms,
+                &delta.delta,
+            );
+        }
         deltas.extend(unit_deltas);
     }
 
-    Ok(ValidatedCommitPlan {
+    let mut plan = ValidatedCommitPlan {
         namespace_id: head.namespace_id.clone(),
         commit_id: request.commit_id.clone(),
         actor_id: request.actor_id.clone(),
@@ -150,11 +189,100 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         apply_after_seq: head.seq,
         assigned_seq: committed_seq,
         deltas,
-        appended: appended.into_iter().map(|value| value.piece).collect(),
-    })
+        appended: appended
+            .into_iter()
+            .flat_map(|value| value.pieces)
+            .collect(),
+    };
+    carry_revision_layouts(
+        store,
+        merge_memory,
+        &resolved.view(),
+        &base_view.with_overlay(&tail.rows, &tail.rows, head.seq),
+        &pieces,
+        candidate,
+        &mut plan,
+    )
+    .await?;
+    Ok(plan)
+}
+
+async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
+    view: &MetadataView<'_, '_, S>,
+    before: &MetadataView<'_, '_, S>,
+    tail: &ProjectedWalTail,
+    candidate: &CommitCandidate,
+    plan: &mut ValidatedCommitPlan,
+) -> Result<()> {
+    let mut revision_content_ids = BTreeSet::new();
+    for delta in &mut plan.deltas {
+        let loonfs_types::format::wal::WalDelta::AppendFileRevision {
+            content_ref,
+            layout,
+            ..
+        } = &mut delta.delta
+        else {
+            continue;
+        };
+        let earlier_revision = !revision_content_ids.insert(content_ref.content_id.clone());
+        let first_offset = candidate
+            .inline_content()
+            .iter()
+            .filter(|value| value.content_ref().content_id == content_ref.content_id)
+            .map(|_| 0)
+            .chain(
+                plan.appended
+                    .iter()
+                    .filter(|piece| piece.content_id == content_ref.content_id)
+                    .map(|piece| piece.offset),
+            )
+            .min();
+        if first_offset == Some(0) {
+            *layout = None;
+            continue;
+        }
+        if first_offset.is_some()
+            && (earlier_revision || before.content_published(&content_ref.content_id).await?)
+        {
+            *layout = None;
+            continue;
+        }
+        let mut prefix = content_ref.clone();
+        prefix.size_bytes = first_offset.unwrap_or(content_ref.size_bytes);
+        if let Some(layout) = layout
+            .as_mut()
+            .filter(|layout| layout.size_bytes() >= prefix.size_bytes)
+        {
+            crate::storage::tail_content::cut_layout(layout, prefix.size_bytes);
+        } else if first_offset.is_some() {
+            return Err(CoreError::Internal(format!(
+                "fresh content `{}` requires a layout covering {} bytes",
+                content_ref.content_id, prefix.size_bytes
+            ))
+            .at_operation(delta.semantic_operation_index as usize));
+        } else {
+            *layout = Some(
+                crate::storage::tail_content::materialize_content_layout(
+                    store,
+                    view,
+                    tail,
+                    &prefix,
+                    merge_memory,
+                )
+                .await
+                .map_err(|error| error.at_operation(delta.semantic_operation_index as usize))?,
+            );
+        }
+    }
+
+    Ok(())
 }
 
 async fn plan_operation<S: ObjectStore + ?Sized>(
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     operation: &FilesystemOperation,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     allocation: &mut CandidateAllocation,
@@ -239,6 +367,8 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 inline_content,
                 *expected_inode_id,
                 *expected_revision_no,
+                store,
+                merge_memory,
                 view,
             )
             .await
@@ -248,7 +378,15 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             inline_content,
             expected_revision_no,
         } => {
-            plan_append_file_by_inode(*inode_id, inline_content, *expected_revision_no, view).await
+            plan_append_file_by_inode(
+                *inode_id,
+                inline_content,
+                *expected_revision_no,
+                store,
+                merge_memory,
+                view,
+            )
+            .await
         }
         FilesystemOperation::DeletePath {
             path,
@@ -598,15 +736,30 @@ mod tests {
         let view = load_current_metadata_view(store, namespace_id)
             .await
             .expect("metadata view");
-        let empty_overlay = MetadataState::default();
         let allocator = InodeAllocator::new(view.head().next_inode_id);
         let mut allocation = allocator.begin_candidate();
+        let content = request
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                FilesystemOperation::PutFile { content_ref, .. }
+                | FilesystemOperation::CreateFileByInode { content_ref, .. }
+                | FilesystemOperation::PutFileRevisionByInode { content_ref, .. } => {
+                    content_ref.as_ref()
+                }
+                _ => None,
+            })
+            .cloned()
+            .map(crate::storage::content_admission::PreparedContent::for_durable_content_write)
+            .collect();
         let validated = prepare_commit_against_publish_view(
-            &CommitCandidate::new(request.clone()),
+            store,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &CommitCandidate::prepared(request.clone(), content),
             serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
             view.head(),
             view.projected_metadata_view(),
-            &empty_overlay,
+            view.wal_tail(),
             1,
             &mut allocation,
         )
@@ -939,6 +1092,7 @@ mod tests {
                 set_owner("/docs/a.txt", "ada"),
             ))],
             &context,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         )
         .await
         .pop()

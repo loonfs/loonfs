@@ -199,7 +199,7 @@ impl MetadataIndexes {
             &mut self.owned_heap_bytes,
             record.content_id.clone(),
             record.clone(),
-            |row| row.committed_seq,
+            |row| (row.size_bytes, row.committed_seq),
         );
     }
 

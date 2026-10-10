@@ -146,6 +146,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         context,
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -173,33 +174,36 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
         .await
         .expect("load namespace catalog");
     let prepared = prepare_stored_content(&catalog, stored);
-    NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            vec![CommitCandidate::prepared(
-                CommitRequest::single(
-                    CommitId::parse(commit_id).expect("commit id"),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::PutFile {
-                        path: AbsolutePath::parse(path).expect("path"),
-                        content_ref: Some(content_ref),
-                        inline_content: None,
-                        behavior: DestinationBehavior::NoReplace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-                vec![prepared],
-            )],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("write file");
+    NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .publish_batch(
+        store,
+        vec![CommitCandidate::prepared(
+            CommitRequest::single(
+                CommitId::parse(commit_id).expect("commit id"),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::PutFile {
+                    path: AbsolutePath::parse(path).expect("path"),
+                    content_ref: Some(content_ref),
+                    inline_content: None,
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+            ),
+            vec![prepared],
+        )],
+        context,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("write file");
 }
 
 #[derive(Debug)]

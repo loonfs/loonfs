@@ -10,6 +10,7 @@ use crate::commit_engine::CommitCandidate;
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
+use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalCommitPayload;
 #[cfg(test)]
@@ -21,15 +22,12 @@ use loonfs_types::NamespaceId;
 
 /// Working view of one publish attempt.
 ///
-/// The session owns the batch's evolving head and only the rows accepted
-/// during this publish attempt. Durable base reads come from the loaded
-/// manifest-plus-tail view; accepted rows are a small overlay so later
-/// candidates observe earlier accepted candidates without cloning the whole
-/// namespace.
+/// The session keeps accepted rows and resident pieces so later candidates
+/// can resolve earlier candidates and materialize references to them.
 pub(crate) struct PublishPlanningSession {
     head: NamespaceReadState,
     inode_allocator: InodeAllocator,
-    accepted_rows: MetadataState,
+    tail: ProjectedWalTail,
     /// Durable-layer lookups memoized across the whole batch attempt; the
     /// accepted-rows overlay is the only layer that changes between
     /// candidates and is composed per lookup.
@@ -37,11 +35,11 @@ pub(crate) struct PublishPlanningSession {
 }
 
 impl PublishPlanningSession {
-    pub(crate) fn new(head: &NamespaceReadState) -> Self {
+    pub(crate) fn new(head: &NamespaceReadState, tail: &ProjectedWalTail) -> Self {
         Self {
             head: head.clone(),
             inode_allocator: InodeAllocator::new(head.next_inode_id),
-            accepted_rows: MetadataState::default(),
+            tail: tail.clone(),
             durable_cache: DurableVisibilityCache::default(),
         }
     }
@@ -57,8 +55,14 @@ impl PublishPlanningSession {
 
     /// Plans and validates a mutation request in one pass, producing the
     /// validated plan that only awaits the accepted allocation position.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "planning carries the store and shared content merge memory"
+    )]
     pub(crate) async fn prepare_commit<S: ObjectStore + ?Sized>(
         &self,
+        store: &S,
+        merge_memory: &tokio::sync::Semaphore,
         candidate: &CommitCandidate,
         semantic_identity: CommitFingerprint,
         base_view: MetadataView<'_, '_, S>,
@@ -67,7 +71,7 @@ impl PublishPlanningSession {
     ) -> Result<ValidatedCommitPlan> {
         let base_view = base_view.with_durable_cache(&self.durable_cache);
         let overlay = MetadataState::default();
-        let pre_state = base_view.with_overlay(&overlay, &self.accepted_rows, self.head.seq);
+        let pre_state = base_view.with_overlay(&overlay, &self.tail.rows, self.head.seq);
         evaluate_preconditions(
             &candidate.request().preconditions,
             candidate.authority(),
@@ -76,11 +80,13 @@ impl PublishPlanningSession {
         )
         .await?;
         prepare_commit_against_publish_view(
+            store,
+            merge_memory,
             candidate,
             semantic_identity,
             &self.head,
             base_view,
-            &self.accepted_rows,
+            &self.tail,
             committed_at_ms,
             allocation,
         )
@@ -99,7 +105,8 @@ impl PublishPlanningSession {
     /// Folds an accepted commit into the session so later candidates in the
     /// same batch plan and validate against it.
     pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
-        self.accepted_rows.apply_committed_wal_record_mut(preview);
+        self.tail.apply_pieces(&self.head.namespace_id, preview);
+        self.tail.rows.apply_committed_wal_record_mut(preview);
         self.head.seq = plan.assigned_seq;
         self.head.next_inode_id = plan.resulting_next_inode_id;
     }
@@ -243,10 +250,12 @@ mod tests {
             }],
         ] {
             let request = request.clone().preconditions(preconditions);
-            let mut session = PublishPlanningSession::new(view.head());
+            let mut session = PublishPlanningSession::new(view.head(), view.wal_tail());
             let mut allocation = session.begin_candidate();
             let plan = session
                 .prepare_commit(
+                    &store,
+                    &tokio::sync::Semaphore::new(32 * 1024 * 1024),
                     &CommitCandidate::new(request.clone()),
                     commit_fingerprint(&namespace_id, &request, &BTreeSet::new())
                         .expect("fingerprint"),
@@ -287,6 +296,7 @@ mod tests {
                 staged.content_ref().clone(),
             )],
             &context,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         )
         .await
         .remove(0)
@@ -295,7 +305,7 @@ mod tests {
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("load metadata view");
-        let session = PublishPlanningSession::new(view.head());
+        let session = PublishPlanningSession::new(view.head(), view.wal_tail());
 
         let first_request = CommitRequest::single(
             CommitId::parse("plan-a").expect("valid commit id"),
@@ -313,6 +323,8 @@ mod tests {
         let mut first_allocation = session.begin_candidate();
         session
             .prepare_commit(
+                &store,
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
                 &CommitCandidate::new(first_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),
@@ -339,6 +351,8 @@ mod tests {
         let mut second_allocation = session.begin_candidate();
         session
             .prepare_commit(
+                &store,
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
                 &CommitCandidate::new(second_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),
@@ -374,6 +388,7 @@ mod tests {
                 put_file_candidate("create-wide-b", "/wide/b.txt", staged.content_ref().clone()),
             ],
             &context,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         )
         .await;
 
@@ -411,6 +426,7 @@ mod tests {
                 candidate_that_allocates_then_fails("reject-second"),
             ],
             &context,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         )
         .await;
 
@@ -438,6 +454,7 @@ mod tests {
                 create_directory_candidate("accept-second", "/kept"),
             ],
             &context,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         )
         .await;
 
@@ -476,6 +493,7 @@ mod tests {
                 ),
             ],
             &context,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         )
         .await;
 
@@ -516,6 +534,7 @@ mod tests {
                 )),
             ],
             &context,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         )
         .await;
 

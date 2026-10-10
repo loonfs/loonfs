@@ -34,7 +34,7 @@ fn content_operations(store: &RecordingStore<LocalFsStore>) -> Vec<RecordedOpera
 }
 
 #[tokio::test]
-async fn upload_evidence_publishes_a_layout_only_for_a_new_chain() {
+async fn upload_evidence_carries_a_layout_on_every_reference() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let stored = store_bytes_as_content(&store, &namespace_id, b"uploaded")
@@ -74,7 +74,7 @@ async fn upload_evidence_publishes_a_layout_only_for_a_new_chain() {
         .expect("tail");
     assert_eq!(tail.rows.revisions().len(), 3);
     let rows = tail.rows.content_layouts();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].layout.extents[0].object, ExtentObject::Whole);
     assert_eq!(rows[0].size_bytes, 8);
     fold_wal(&store, &namespace_id)
@@ -334,10 +334,17 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     .expect("whole before manifest");
     let access = ReadAccess::live(Authorizer::Unrestricted);
     assert_eq!(
-        view.direct_download_target(&store, "/file-0", None, 0, &access)
-            .await
-            .expect("equal whole download")
-            .object_key,
+        view.direct_download_target(
+            &store,
+            "/file-0",
+            None,
+            0,
+            &access,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        )
+        .await
+        .expect("equal whole download")
+        .object_key,
         content_blob(&namespace_id, &original.content_ref().content_id)
     );
     let inode_id = tail.rows.revisions()[0].inode_id;
@@ -359,7 +366,14 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
         (RevisionNo(2), b"first+next".as_slice()),
     ] {
         let target = view
-            .direct_download_target(&store, "/file-0", Some(revision), 0, &access)
+            .direct_download_target(
+                &store,
+                "/file-0",
+                Some(revision),
+                0,
+                &access,
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            )
             .await
             .expect("download revision");
         let bytes = store
@@ -404,35 +418,79 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
     let namespace_id = engine.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
-    bytes.resize(110, b'b');
-    commit_piece(
-        &store,
-        &namespace_id,
-        (inode_id, RevisionNo(2)),
-        &original.content_id,
-        &bytes,
-        100,
-        None,
-    )
-    .await;
+    for (revision_no, size, offset) in [(2, 105, 100), (3, 110, 105)] {
+        bytes.resize(size, b'b');
+        commit_piece(
+            &store,
+            &namespace_id,
+            (inode_id, RevisionNo(revision_no)),
+            &original.content_id,
+            &bytes,
+            offset,
+            None,
+        )
+        .await;
+    }
     fold_wal(&store, &namespace_id)
         .await
         .expect("fold base span");
+    engine.invalidate_projection();
+    for (commit_id, operation) in [
+        (
+            "restore-prefix",
+            FilesystemOperation::RestoreRevision {
+                path: AbsolutePath::parse("/file-0").expect("path"),
+                source_revision_no: RevisionNo(2),
+            },
+        ),
+        (
+            "append-prefix",
+            FilesystemOperation::AppendFile {
+                path: AbsolutePath::parse("/file-0").expect("path"),
+                inline_content: vec![b'!'],
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+        ),
+    ] {
+        publish(
+            &mut engine,
+            &store,
+            &context,
+            CommitCandidate::new(CommitRequest::single(
+                CommitId::parse(commit_id).expect("commit"),
+                loonfs_test_support::test_actor(),
+                None,
+                operation,
+            )),
+        )
+        .await
+        .expect("publish");
+    }
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("view");
+    let revision = view
+        .projected_metadata_view()
+        .latest_revision_head(inode_id)
+        .await
+        .expect("revision")
+        .expect("file");
+    let fresh = revision.content_ref;
+    assert_ne!(fresh.content_id, original.content_id);
+    let carried = layout(&store, &fresh).await;
+    assert_eq!(carried.size_bytes, 105);
+    assert_eq!(
+        carried
+            .layout
+            .extents
+            .iter()
+            .map(|extent| extent.length)
+            .collect::<Vec<_>>(),
+        [100, 5]
+    );
     bytes.truncate(105);
     bytes.push(b'!');
-    let fresh = commit_piece(
-        &store,
-        &namespace_id,
-        (inode_id, RevisionNo(3)),
-        &ContentId::generate(),
-        &bytes,
-        105,
-        Some(ContentBase {
-            owner_namespace_id: namespace_id.clone(),
-            content_id: original.content_id.clone(),
-        }),
-    )
-    .await;
     store.reset();
     fold_wal(&store, &namespace_id)
         .await
@@ -448,7 +506,7 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
     let mut prefix = base.layout.extents[1].clone();
     prefix.length = 5;
     assert_eq!(row.layout.extents[1], prefix);
-    assert_eq!(read_file(&store, &namespace_id, RevisionNo(3)).await, bytes);
+    assert_eq!(read_file(&store, &namespace_id, RevisionNo(5)).await, bytes);
 }
 
 #[tokio::test]
@@ -461,7 +519,14 @@ async fn downloads_require_one_object_and_create_empty_whole_objects() {
         .await
         .expect("view");
     let target = view
-        .direct_download_target(&store, "/file-0", None, 0, &access)
+        .direct_download_target(
+            &store,
+            "/file-0",
+            None,
+            0,
+            &access,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        )
         .await
         .expect("one object");
     assert_eq!(
@@ -483,8 +548,15 @@ async fn downloads_require_one_object_and_create_empty_whole_objects() {
         .expect("view with pieces");
     store.reset();
     assert!(matches!(
-        view.direct_download_target(&store, "/file-0", None, 0, &access)
-            .await,
+        view.direct_download_target(
+            &store,
+            "/file-0",
+            None,
+            0,
+            &access,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        )
+        .await,
         Err(CoreError::ContentNotMaterialized { .. })
     ));
     assert!(content_operations(&store).is_empty());
@@ -493,8 +565,15 @@ async fn downloads_require_one_object_and_create_empty_whole_objects() {
         .await
         .expect("view");
     assert!(matches!(
-        view.direct_download_target(&store, "/file-0", None, 0, &access)
-            .await,
+        view.direct_download_target(
+            &store,
+            "/file-0",
+            None,
+            0,
+            &access,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        )
+        .await,
         Err(CoreError::ContentNotMaterialized { .. })
     ));
     let empty = inline(&namespace_id, Bytes::new());
@@ -511,7 +590,14 @@ async fn downloads_require_one_object_and_create_empty_whole_objects() {
         .await
         .expect("view");
     let target = view
-        .direct_download_target(&store, "/empty-0", None, 0, &access)
+        .direct_download_target(
+            &store,
+            "/empty-0",
+            None,
+            0,
+            &access,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        )
         .await
         .expect("empty download");
     assert_eq!(
@@ -542,10 +628,7 @@ async fn collection_keeps_shared_and_rooted_spans_and_deletes_an_unrooted_chain(
         &ContentId::generate(),
         b"hello!",
         5,
-        Some(ContentBase {
-            owner_namespace_id: namespace_id.clone(),
-            content_id: original.content_id.clone(),
-        }),
+        Some(layout(&store, &original).await.layout),
     )
     .await;
     fold_wal(&store, &namespace_id).await.expect("fold");
@@ -689,10 +772,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         &ContentId::generate(),
         b"hello!",
         5,
-        Some(ContentBase {
-            owner_namespace_id: namespace_id.clone(),
-            content_id: original.content_id.clone(),
-        }),
+        Some(layout(&store, &original).await.layout),
     )
     .await;
     fold_wal(&store, &namespace_id)
@@ -756,6 +836,18 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         row,
         MetadataRow::FileRevision(row) if row.content_ref.content_id != original.content_id && row.content_ref.content_id != shared.content_id
     )));
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("restored view");
+    assert_eq!(
+        view.projected_metadata_view()
+            .content_layout(&shared.content_id)
+            .await
+            .expect("layout")
+            .expect("carried layout")
+            .layout,
+        shared_layout.layout
+    );
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
     let options = GcOptions::default();
     let report = gc_namespace(
@@ -779,10 +871,15 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         read_file(&store, &namespace_id, RevisionNo(4)).await,
         b"hello!"
     );
+    fold_wal(&store, &namespace_id).await.expect("fold restore");
+    assert_eq!(
+        read_file(&store, &namespace_id, RevisionNo(4)).await,
+        b"hello!"
+    );
 }
 
 #[tokio::test]
-async fn tail_revision_downloads_serve_both_orders_from_the_heads_object() {
+async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
     for revisions in [
         [RevisionNo(2), RevisionNo(1)],
         [RevisionNo(1), RevisionNo(2)],
@@ -820,10 +917,17 @@ async fn tail_revision_downloads_serve_both_orders_from_the_heads_object() {
             .await
             .expect("view");
         let access = ReadAccess::live(Authorizer::Unrestricted);
-        let key = content_span(&namespace_id, &original.content_ref().content_id, 0, 10);
         for revision in revisions {
+            let key = content_span(&namespace_id, &original.content_ref().content_id, 0, 10);
             let target = view
-                .direct_download_target(&store, "/file-0", Some(revision), 0, &access)
+                .direct_download_target(
+                    &store,
+                    "/file-0",
+                    Some(revision),
+                    0,
+                    &access,
+                    &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                )
                 .await
                 .expect("download revision");
             assert_eq!(target.object_key, key);
@@ -849,6 +953,7 @@ async fn tail_revision_downloads_serve_both_orders_from_the_heads_object() {
                 .expect("object");
             assert_eq!(bytes, expected);
         }
+        let key = content_span(&namespace_id, &original.content_ref().content_id, 0, 10);
         let before = store.head(&key).await.expect("head").expect("span");
         fold_wal(&store, &namespace_id)
             .await
@@ -913,6 +1018,20 @@ async fn two_large_merges_share_one_folds_memory_budget() {
             hash_state.update(&bytes);
             let content_ref =
                 ContentRef::blob_v1_streamed(namespace_id.clone(), content_id.clone(), &hash_state);
+            let view = load_current_metadata_view(&store, &namespace_id)
+                .await
+                .expect("base view");
+            let mut base = content_ref.clone();
+            base.size_bytes = offset as u64;
+            let layout = crate::storage::tail_content::materialize_content_layout(
+                &store,
+                &view.projected_metadata_view(),
+                view.wal_tail(),
+                &base,
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            )
+            .await
+            .expect("base layout");
             crate::test_support::ops::append_wal_commit(
                 &store,
                 &namespace_id,
@@ -923,7 +1042,7 @@ async fn two_large_merges_share_one_folds_memory_budget() {
                     content_ref: content_ref.clone(),
                     hash_state: Some(hash_state),
                     crc64nvme: None,
-                    layout: None,
+                    layout: Some(layout),
                 }],
                 bytes[offset..]
                     .chunks(MAX_WAL_INLINE_CONTENT_BYTES)
@@ -932,7 +1051,6 @@ async fn two_large_merges_share_one_folds_memory_budget() {
                         content_id: content_id.clone(),
                         offset: (offset + index * MAX_WAL_INLINE_CONTENT_BYTES) as u64,
                         bytes: bytes.to_vec(),
-                        base: None,
                     })
                     .collect(),
             )
@@ -989,5 +1107,323 @@ async fn two_large_merges_share_one_folds_memory_budget() {
                 .len(),
             head_length
         );
+    }
+}
+
+#[tokio::test]
+async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
+    use crate::path::write::PublishPlanningSession;
+
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    engine.invalidate_projection();
+    let target = inline(&namespace_id, Bytes::from_static(b"target"));
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        candidate("target", vec![target]),
+    )
+    .await
+    .expect("target");
+    let stale_layout = layout(&store, &original).await.layout;
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("view");
+    let candidate = CommitCandidate::new(CommitRequest::single(
+        CommitId::parse("copy").expect("commit"),
+        loonfs_test_support::test_actor(),
+        None,
+        FilesystemOperation::CopyPath {
+            source_path: AbsolutePath::parse("/file-0").expect("path"),
+            destination_path: AbsolutePath::parse("/target-0").expect("path"),
+            precondition: loonfs_types::DestinationPrecondition {
+                behavior: loonfs_types::DestinationBehavior::Replace,
+                ..Default::default()
+            },
+        },
+    ));
+    let session = PublishPlanningSession::new(view.head(), view.wal_tail());
+    let plan = session
+        .prepare_commit(
+            &store,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &candidate,
+            candidate
+                .semantic_identity(&namespace_id)
+                .expect("identity"),
+            view.projected_metadata_view(),
+            context.now_ms,
+            &mut session.begin_candidate(),
+        )
+        .await
+        .expect("copy plan");
+    assert!(plan.deltas.iter().any(|delta| matches!(&delta.delta,
+        WalDelta::AppendFileRevision { layout: Some(layout), .. } if *layout == stale_layout)));
+    drop(view);
+    let extended = commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &original.content_id,
+        b"hello!",
+        5,
+        None,
+    )
+    .await;
+    fold_wal(&store, &namespace_id).await.expect("fold append");
+    let longer = layout(&store, &extended).await;
+    crate::test_support::ops::append_wal_commit(
+        &store,
+        &namespace_id,
+        plan.deltas.into_iter().map(|delta| delta.delta).collect(),
+        Vec::new(),
+    )
+    .await
+    .expect("stale copy");
+    for _ in 0..2 {
+        assert_eq!(layout(&store, &original).await, longer);
+        assert_eq!(
+            read_file(&store, &namespace_id, RevisionNo(2)).await,
+            b"hello!"
+        );
+        let view = load_current_metadata_view(&store, &namespace_id)
+            .await
+            .expect("view");
+        let read = view
+            .get_file_revision_bytes(
+                &store,
+                "/target-0",
+                RevisionNo(2),
+                None,
+                &ReadAccess::live(Authorizer::Unrestricted),
+            )
+            .await
+            .expect("copy bytes");
+        assert_eq!(read.bytes, b"hello");
+        fold_wal(&store, &namespace_id).await.expect("fold copy");
+    }
+}
+
+#[tokio::test]
+async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
+    use crate::gc::{gc_namespace, GcOptions};
+    use crate::manifest::{fold_wal_tail, metadata_basis_from_manifest};
+    use crate::namespace::control::load_current_manifest;
+    use crate::path::write::PublishPlanningSession;
+    use loonfs_types::format::manifest::MetadataRowFamily;
+
+    for restore in [true, false] {
+        let (_directory, store, mut engine, context) = setup().await;
+        let namespace_id = engine.namespace_id.clone();
+        publish(
+            &mut engine,
+            &store,
+            &context,
+            candidate(
+                "target",
+                vec![InlineContent::new(
+                    namespace_id.clone(),
+                    ContentId::parse("con_00000000000000000000000000000001").expect("content"),
+                    Bytes::from_static(b"target"),
+                )],
+            ),
+        )
+        .await
+        .expect("target");
+        fold_wal(&store, &namespace_id).await.expect("fold target");
+        engine.invalidate_projection();
+        let original = InlineContent::new(
+            namespace_id.clone(),
+            ContentId::parse("con_00000000000000000000000000000004").expect("content"),
+            Bytes::from_static(b"hello"),
+        );
+        publish(
+            &mut engine,
+            &store,
+            &context,
+            candidate("file", vec![original]),
+        )
+        .await
+        .expect("file");
+        publish(
+            &mut engine,
+            &store,
+            &context,
+            CommitCandidate::new(CommitRequest::single(
+                CommitId::parse("append").expect("commit"),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::AppendFile {
+                    path: AbsolutePath::parse("/file-0").expect("path"),
+                    inline_content: b"!".to_vec(),
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+            )),
+        )
+        .await
+        .expect("append");
+        let view = load_current_metadata_view(&store, &namespace_id)
+            .await
+            .expect("view");
+        let candidate = CommitCandidate::new(CommitRequest::single(
+            CommitId::parse("reference").expect("commit"),
+            loonfs_test_support::test_actor(),
+            None,
+            if restore {
+                FilesystemOperation::RestoreRevision {
+                    path: AbsolutePath::parse("/file-0").expect("path"),
+                    source_revision_no: RevisionNo(2),
+                }
+            } else {
+                FilesystemOperation::CopyPath {
+                    source_path: AbsolutePath::parse("/file-0").expect("path"),
+                    destination_path: AbsolutePath::parse("/target-0").expect("path"),
+                    precondition: loonfs_types::DestinationPrecondition {
+                        behavior: loonfs_types::DestinationBehavior::Replace,
+                        ..Default::default()
+                    },
+                }
+            },
+        ));
+        let session = PublishPlanningSession::new(view.head(), view.wal_tail());
+        let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+        let mut plan = session
+            .prepare_commit(
+                &store,
+                &merge_memory,
+                &candidate,
+                candidate
+                    .semantic_identity(&namespace_id)
+                    .expect("identity"),
+                view.projected_metadata_view(),
+                context.now_ms,
+                &mut session.begin_candidate(),
+            )
+            .await
+            .expect("reference plan");
+        let (content_ref, carried) = plan
+            .deltas
+            .iter()
+            .find_map(|delta| match &delta.delta {
+                WalDelta::AppendFileRevision {
+                    content_ref,
+                    layout: Some(layout),
+                    ..
+                } => Some((content_ref.clone(), layout.clone())),
+                _ => None,
+            })
+            .expect("reference carries a layout");
+        assert_eq!(carried.size_bytes(), 6);
+        assert!(plan.appended.is_empty());
+        drop(view);
+        let replacement = InlineContent::new(
+            namespace_id.clone(),
+            ContentId::parse("con_00000000000000000000000000000003").expect("content"),
+            Bytes::from_static(b"replacement"),
+        );
+        let replacement = CommitCandidate::with_inline_content(
+            CommitRequest::single(
+                CommitId::parse("replace").expect("commit"),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::PutFile {
+                    path: AbsolutePath::parse("/file-0").expect("path"),
+                    content_ref: Some(replacement.content_ref().clone()),
+                    inline_content: None,
+                    behavior: loonfs_types::DestinationBehavior::Replace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+            ),
+            Vec::new(),
+            vec![replacement],
+        );
+        publish(&mut engine, &store, &context, replacement)
+            .await
+            .expect("replace source");
+        let fold = engine.wal_fold_input().expect("fold input");
+        if restore {
+            for delta in &mut plan.deltas {
+                if let WalDelta::AppendFileRevision { revision_no, .. } = &mut delta.delta {
+                    *revision_no = RevisionNo(4);
+                }
+            }
+        }
+        crate::test_support::ops::append_wal_commit(
+            &store,
+            &namespace_id,
+            plan.deltas.into_iter().map(|delta| delta.delta).collect(),
+            Vec::new(),
+        )
+        .await
+        .expect("commit reference");
+        fold_wal_tail(
+            &store,
+            None,
+            &namespace_id,
+            Some(fold),
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &merge_memory,
+        )
+        .await
+        .expect("fold captured source");
+        prune_revisions(&store, &namespace_id).await;
+        let manifest = load_current_manifest(&store, &namespace_id)
+            .await
+            .expect("manifest");
+        let basis = metadata_basis_from_manifest(&store, None, &manifest);
+        let rows = basis
+            .segments
+            .scan_range_page_with_keys(
+                MetadataRowFamily::ContentLayouts,
+                &format!("content-layout-{}-", content_ref.content_id),
+                Some(&format!("content-layout-{}.", content_ref.content_id)),
+                32,
+            )
+            .await
+            .expect("layouts");
+        assert!(rows.is_empty(), "the basis no longer names this chain");
+        let options = GcOptions::default();
+        let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
+        gc_namespace(
+            &aged,
+            None,
+            &namespace_id,
+            &options,
+            &MutationContext {
+                now_ms: options.grace_window_ms + 1,
+                ..context
+            },
+        )
+        .await
+        .expect("collect");
+        for extent in &carried.extents {
+            let key = crate::storage::content_location::extent_object_key(extent);
+            assert!(store.head(&key).await.expect("head").is_some(), "{key}");
+        }
+        for folded in [false, true] {
+            if folded {
+                fold_wal(&store, &namespace_id)
+                    .await
+                    .expect("fold reference");
+            }
+            let view = load_current_metadata_view(&store, &namespace_id)
+                .await
+                .expect("view");
+            let bytes = view
+                .get_file_revision_bytes(
+                    &store,
+                    if restore { "/file-0" } else { "/target-0" },
+                    RevisionNo(if restore { 4 } else { 2 }),
+                    None,
+                    &ReadAccess::live(Authorizer::Unrestricted),
+                )
+                .await
+                .expect("read reference");
+            assert_eq!(bytes.bytes, b"hello!");
+        }
     }
 }

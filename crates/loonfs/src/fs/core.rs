@@ -232,7 +232,11 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> NamespaceReaderEngine<SharedObjectStore> {
-        let engine = NamespaceReaderEngine::reader(self.inner.store.clone(), namespace_id.clone());
+        let engine = NamespaceReaderEngine::reader(
+            self.inner.store.clone(),
+            namespace_id.clone(),
+            self.inner.config.execution_budget.content_merge_memory(),
+        );
         match &self.subject {
             Some(subject) => engine.with_subject(subject.clone()),
             None => engine,
@@ -249,6 +253,7 @@ impl RuntimeCore {
             self.inner.store.clone(),
             namespace_id.clone(),
             actor.writer_id.clone(),
+            self.inner.config.execution_budget.content_merge_memory(),
         )
         .with_wall_clock(self.inner.wall_clock.clone())
         .with_metadata_lsm_policy(self.inner.config.metadata_lsm_policy)

@@ -11,7 +11,7 @@ A base compaction keeps each file's revisions above the retention floor and its 
 A content object owned by namespace `N` stays while one of these names its content ID:
 
 1. A revision row in a manifest the pass already roots for its segments: `N`'s current manifest, a manifest a listed pin holds, or a manifest whose immediate successor is younger than `T`. The revision names a chain. The layout rows of the same views name the objects of the chains those revisions name.
-2. A revision delta or a piece's base in `N`'s unfolded WAL tail.
+2. A revision delta in `N`'s unfolded WAL tail, or an extent owned by `N` in the tail row state's layouts.
 3. An upload session record in `N`, whatever its status.
 
 The pass deletes every other object under `namespaces/N/content/` whose provider age is at least `T`. It keeps younger objects and keys the layout does not recognize.

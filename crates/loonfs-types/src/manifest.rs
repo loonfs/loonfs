@@ -683,9 +683,11 @@ impl MetadataRow {
                 lookup_keys::commit_receipt_row_key(record.commit_id.as_str(), record.committed_seq)
             }
             Self::Commit(record) => lookup_keys::commit_row_key(record.committed_seq),
-            Self::ContentLayout(record) => {
-                lookup_keys::content_layout_row_key(&record.content_id, record.committed_seq)
-            }
+            Self::ContentLayout(record) => lookup_keys::content_layout_row_key(
+                &record.content_id,
+                record.size_bytes,
+                record.committed_seq,
+            ),
             Self::AttributesRevision(record) => lookup_keys::attributes_row_key(
                 record.inode_id,
                 record.attributes_revision_no,
@@ -926,11 +928,16 @@ pub mod lookup_keys {
         format!("{}-", content_layout_probe(content_id))
     }
 
-    /// Orders a chain's layouts with the newest commit first.
-    pub fn content_layout_row_key(content_id: &ContentId, committed_seq: ChangeSeq) -> String {
+    /// Orders the longest layout first, then the newest commit.
+    pub fn content_layout_row_key(
+        content_id: &ContentId,
+        size_bytes: u64,
+        committed_seq: ChangeSeq,
+    ) -> String {
         format!(
-            "{}{:020}",
+            "{}{:020}-{:020}",
             content_layout_prefix(content_id),
+            u64::MAX - size_bytes,
             u64::MAX - committed_seq.0
         )
     }

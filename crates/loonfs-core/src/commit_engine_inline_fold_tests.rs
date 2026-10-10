@@ -33,6 +33,7 @@ fn content_puts(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
 
 #[tokio::test]
 async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
@@ -69,6 +70,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
         &engine.namespace_id,
         Some(input.clone()),
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        &merge_memory,
     )
     .await
     .expect("fold");
@@ -110,6 +112,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
 
 #[tokio::test]
 async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     // A receipt replay does not land a put, so it also tests that discovery
     // itself refreshes the tip and basis observations.
     for replay_receipt in [false, true] {
@@ -151,6 +154,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             &engine.namespace_id,
             Some(input.clone()),
             &Deadline::start(timer.clone()),
+            &merge_memory,
         )
         .await
         .expect("fold");
@@ -233,6 +237,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
 
 #[tokio::test]
 async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
@@ -249,21 +254,25 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
         &engine.namespace_id,
         Some(input),
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        &merge_memory,
     )
     .await
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     engine.record_wal_fold(Some(&folded));
-    NamespaceCommitEngine::new(engine.namespace_id.clone())
-        .session_writer_epoch(
-            &store,
-            &MutationContext {
-                writer_id: WriterId::parse("successor").expect("writer"),
-                now_ms: 1_000,
-            },
-        )
-        .await
-        .expect("claim and fence");
+    NamespaceCommitEngine::new(
+        engine.namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .session_writer_epoch(
+        &store,
+        &MutationContext {
+            writer_id: WriterId::parse("successor").expect("writer"),
+            now_ms: 1_000,
+        },
+    )
+    .await
+    .expect("claim and fence");
     let after = candidate(
         "after",
         vec![inline(&engine.namespace_id, Bytes::from_static(b"after"))],
@@ -310,6 +319,7 @@ impl MonotonicTimer for SteppingTimer {
 
 #[tokio::test]
 async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let (_directory, store, mut engine, context) = setup().await;
     let values = vec![
         inline(&engine.namespace_id, Bytes::from_static(b"retained")),
@@ -338,7 +348,8 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             None,
             &engine.namespace_id,
             Some(input.clone()),
-            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default()))
+            &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &merge_memory,
         )
         .await,
         Err(CoreError::Store {
@@ -376,7 +387,8 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             None,
             &engine.namespace_id,
             Some(input.clone()),
-            &crate::time::Deadline::start(timer.clone())
+            &crate::time::Deadline::start(timer.clone()),
+            &merge_memory,
         )
         .await,
         Err(CoreError::MetadataPublicationBudgetExceeded { .. })
@@ -399,6 +411,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         &engine.namespace_id,
         Some(input),
         &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        &merge_memory,
     )
     .await
     .expect("retry");
@@ -416,6 +429,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
 
 #[tokio::test]
 async fn competing_engines_materialize_identical_objects_and_publish_one_manifest() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let (_directory, store, mut first, context) = setup().await;
     let values = vec![inline(&first.namespace_id, Bytes::from_static(b"shared"))];
     let candidate = candidate("race", values);
@@ -444,6 +458,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         &first.namespace_id,
         Some(first_input),
         &deadline,
+        &merge_memory,
     );
     let second_fold = async {
         blocked.wait_until_blocked().await;
@@ -453,6 +468,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
             &second.namespace_id,
             Some(second_input),
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &merge_memory,
         )
         .await;
         blocked.release();
@@ -584,6 +600,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
 
 #[tokio::test]
 async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
@@ -633,6 +650,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         &engine.namespace_id,
         Some(input.clone()),
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        &merge_memory,
     )
     .await
     .expect("fold");
