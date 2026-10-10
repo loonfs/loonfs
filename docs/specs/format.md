@@ -907,7 +907,7 @@ The following rules apply only when the selected inputs include the group's olde
 
 An unbound binding version is a tombstone. It must remain while it hides older versions of its edge. Only a bottom-anchored compaction, which includes the group's oldest run, can drop it. That compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every history row, including unbound versions at or below the floor. It can drop superseded layout rows because the longest layout covers every shorter prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
 
-A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row of its basis names, judged by a filter that errs only toward keeping; a later compaction drops what the filter kept. Both streaming jobs and bounded steps scan the basis's revisions once before merging layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID. Its expected count is the sum of the revision segments' `row_count`. If it would exceed `MAX_CHAIN_FILTER_BYTES` (64 MiB), the merge keeps every layout and logs that choice.
+A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row of its basis names, judged by a filter that errs only toward keeping; a later compaction drops what the filter kept. Both streaming jobs and bounded steps scan the basis's revisions once before merging layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID. Its expected count is the sum of the revision segments' `row_count`. If it would exceed `MAX_BLOOM_FILTER_BYTES` (64 MiB), the merge keeps every layout and logs that choice.
 
 Each binding event appears in both indexes, and both indexes group their rows by edge. Compaction therefore keeps or removes each event in both indexes alike, and both keep the same events. Row counts and row digests verify that the two indexes agree. Every event above the floor remains.
 
@@ -947,9 +947,9 @@ Collection removes objects that no retained view needs, after the applicable age
 
 ### 11.1 One complete pass
 
-A call discovers the namespace's current manifest, lists its upload sessions, reads its WAL tail, lists all pin keys and manifest numbers, reads the age of each manifest's successor, and builds an in-memory set of protected manifests, segments, and content. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
+A call discovers the namespace's current manifest, lists its upload sessions, reads its WAL tail, lists all pin keys and manifest numbers, takes each manifest's successor age from that listing, and records the protected manifests and segments. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
 
-The call then lists each candidate family from the beginning to completion. It stores no durable run, phase, reference table, or cursor. The complete pin and session listings used to establish roots are separate from the later sweeps that decide which records can be deleted.
+The call then lists each swept candidate family from the beginning to completion. Unless its shared base filter would exceed the cap (section 11.9), it sweeps content one id shard at a time. A shard contains the content ids with a common hex prefix. Exact content-root sets use read working memory for one shard and the tail and session ids. Shared base keys use a Bloom filter with a separate 64 MiB byte cap. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin and session listings used to establish roots are separate from the later sweeps that decide which records can be deleted.
 
 Every age decision uses the call's fixed `now_ms`. A later call reads fresh roots and uses its own clock. Concurrent collectors can independently delete eligible objects; an already absent object needs no further cleanup. A failed pass can have deleted earlier candidates, but the next pass safely starts again.
 
@@ -966,7 +966,7 @@ Every age decision uses the call's fixed `now_ms`. A later call reads fresh root
 
 Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are normally read later for owner and expiry decisions. If a pin's manifest is absent, the collector reads the pin and applies the same owner and grace rules as pin cleanup. An absent or collectable pin does not require that missing basis; this permits recovery from failed installation cleanup and concurrent pin removal. A retained pin naming a missing manifest is corruption. Invalid or unreadable manifests still fail the pass. Each listed pin whose manifest is present protects its files for the whole pass, even if that pass deletes the pin.
 
-A manifest below the current one stays a root while its immediate successor is younger than `T`, whether it is above or below the observed hint. The successor's age is its provider age, and a successor without a provider timestamp counts as young. A reader or writer confirms its view with a successor check that finds the next manifest number absent, so that successor is created no earlier than the check. The view's manifest and every segment in its runs therefore stay for at least one grace after the check. A reader revalidates within `READ_REVALIDATION_BOUND_MS` of its previous check, and the writer confirms its basis at least once per `WAL_PUBLISH_BUDGET_MS` (sections 4.2 and 6.3). Both bounds are below the grace, and the clock allowance in section 11.4 is the margin.
+A manifest below the current one stays a root while its immediate successor is younger than `T`, whether it is above or below the observed hint. The successor's age comes from its modification time in the manifest listing. A successor listed without a time counts as young. A successor absent from the listing does not make the older manifest a root. A reader or writer confirms its view with a successor check that finds the next manifest number absent, so that successor is created no earlier than the check. The view's manifest and every segment in its runs therefore stay for at least one grace after the check. A reader revalidates within `READ_REVALIDATION_BOUND_MS` of its previous check, and the writer confirms its basis at least once per `WAL_PUBLISH_BUDGET_MS` (sections 4.2 and 6.3). Both bounds are below the grace, and the clock allowance in section 11.4 is the margin.
 
 The tombstone retains its runs so an import from a deleted owner can still be authorized against its final access state. Retirement does not read those segments. Retirement eligibility follows section 9.5.
 
@@ -976,7 +976,7 @@ A retention floor may pass a pinned manifest's head sequence. That does not remo
 
 ### 11.3 Candidate and age rules
 
-Being unreferenced makes an object a candidate; it does not make it immediately deletable. Let `T` be the configured ordinary grace, which must be at least `GC_MIN_GRACE_WINDOW_MS`.
+Being unreferenced makes an object a candidate; it does not make it immediately deletable. Provider age uses the modification time the listing reports. A candidate listed without a time is retained. Let `T` be the configured ordinary grace, which must be at least `GC_MIN_GRACE_WINDOW_MS`.
 
 | Family | Conditions for deletion |
 | --- | --- |
@@ -1088,15 +1088,17 @@ Content and source-pin cleanup are idempotent. With no new objects, a later cont
 
 ### 11.9 Content roots
 
-In an active namespace `N`, a content object that `N` owns stays while one of these roots names its content ID:
+In an active namespace `N`, a content object that `N` owns stays while a layout extent names that object or a tail or session root names its chain:
 
-| Root | Content IDs it names |
+| Root | Content it names |
 | --- | --- |
-| A manifest that section 11.2 roots: the current manifest, a manifest a listed pin holds, or a manifest whose immediate successor is younger than `T` | Every extent, owned by `N`, of every `content_layouts` row whose content ID a `revisions` row of a rooted manifest names. |
-| `N`'s unfolded WAL tail | Every `append_file_revision` delta owned by `N`, and every extent owned by `N` in the tail row state's layouts. |
+| A layout view: the current manifest, every pinned manifest, and every manifest whose immediate successor is younger than `T` under section 11.2 | The objects of every extent, owned by `N`, of every `content_layouts` row. |
+| `N`'s unfolded WAL tail | Every chain named by an `append_file_revision` delta, and every extent owned by `N` in the tail row state's layouts. |
 | An upload session record in `N`, whatever its status | The session's `content_id`. |
 
-Collection deletes every other content object under `namespaces/N/content/` whose provider age is at least `T`. It keeps an object younger than `T` and a key that does not parse as a content object key. A pass scans each of the `revisions` and `content_layouts` families once for each distinct rooted manifest. It consults layouts after every revision and tail reference. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (section 11.4).
+Collection considers every other content object under `namespaces/N/content/` for deletion once its provider age is at least `T`, subject to the conservative filter below. It keeps an object younger than `T` and a key that does not parse as a content object key. Layout views are considered in root order. A view whose layout segments are already covered by the views kept earlier adds no scan. Views with the same layout segment set are scanned only once per scan. A first scan finds extents whose content id differs from their row's. It inserts their object keys into a Bloom filter. A second scan reads disjoint id ranges, one shard at a time, and protects the exact extent object keys in that shard. Tail and session ids protect every object of their chains. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (section 11.4).
+
+The shared base filter has no false negatives. A false positive retains an unreferenced object for this pass. The pass's supplied `now_ms` seeds the filter, so a pass with a different clock uses a different seed. The filter uses xxh64 double hashing, seven probes, and ten bits per expected entry. Its expected entry count is four times the current manifest's layout row count. Its allocation is capped at 64 MiB, separate from read working memory. If that size would exceed the cap, collection logs the limit and skips the active namespace's content sweep, including its shared base scan and content listings. Other families still sweep.
 
 A tail revision delta may omit its layout only when its commit carries a piece at offset 0, or carries a piece that continues a chain with an existing revision. In the second case, the base remains the inode's head until the append folds, so retention keeps that revision and layout compaction keeps the chain's row.
 

@@ -12,6 +12,7 @@ use crate::keyspace::{
     unscope_listed_key, validate_segments,
 };
 use crate::object_store::Result;
+use crate::ListedObject;
 use crate::{
     ByteRange, ByteStream, ExtendBase, ExtendedObject, ObjectBody, ObjectMetadata, ObjectStore,
     ObjectStoreError, PutMode, StoredObjectChecksum,
@@ -156,16 +157,11 @@ impl LocalFsStore {
             ));
         }
 
-        let last_modified_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
         Ok(ObjectMetadata {
             etag: Some(etag(&sha256)),
             version: None,
             size_bytes: metadata.len(),
-            last_modified_ms,
+            last_modified_ms: last_modified_ms(metadata),
             sha256: Some(sha256),
         })
     }
@@ -610,11 +606,11 @@ impl ObjectStore for LocalFsStore {
         self.delete_object(&self.scoped(key)?).await
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String>> {
+    ) -> BoxStream<'static, Result<ListedObject>> {
         let scoped = match scope_list_prefix(self.key_prefix.as_deref(), prefix) {
             Ok(scoped) => scoped,
             Err(err) => return stream::once(async { Err(err) }).boxed(),
@@ -640,10 +636,12 @@ impl ObjectStore for LocalFsStore {
                 let key_prefix = key_prefix.clone();
                 async move {
                     match result {
-                        Ok(key) => match key_prefix.as_deref() {
-                            Some(prefix) => unscope_listed_key(Some(prefix), &key).map(Ok),
-                            None => Some(Ok(key)),
-                        },
+                        Ok(mut entry) => {
+                            if let Some(prefix) = key_prefix.as_deref() {
+                                entry.key = unscope_listed_key(Some(prefix), &entry.key)?;
+                            }
+                            Some(Ok(entry))
+                        }
                         Err(err) => Some(Err(err)),
                     }
                 }
@@ -708,7 +706,7 @@ async fn list_prefix_for_root(
     root: PathBuf,
     prefix: String,
     start_after: Option<&str>,
-) -> Result<Vec<String>> {
+) -> Result<Vec<ListedObject>> {
     validate_segments(&prefix, true)?;
 
     if !fs::try_exists(&root)
@@ -719,7 +717,7 @@ async fn list_prefix_for_root(
     }
 
     let mut keys = collect_keys(&prefix, start_after, root).await?;
-    keys.sort();
+    keys.sort_by(|left, right| left.key.cmp(&right.key));
     Ok(keys)
 }
 
@@ -795,7 +793,7 @@ async fn collect_keys(
     prefix: &str,
     start_after: Option<&str>,
     root: PathBuf,
-) -> Result<Vec<String>> {
+) -> Result<Vec<ListedObject>> {
     let mut keys = Vec::new();
     let mut dirs = vec![root.clone()];
 
@@ -851,14 +849,25 @@ async fn collect_keys(
                 if key.starts_with(prefix)
                     && start_after.is_none_or(|start_after| key.as_str() > start_after)
                 {
-                    keys.push(key);
+                    keys.push(ListedObject {
+                        key,
+                        last_modified_ms: last_modified_ms(&metadata),
+                    });
                 }
             }
         }
     }
 
-    keys.sort();
+    keys.sort_by(|left, right| left.key.cmp(&right.key));
     Ok(keys)
+}
+
+fn last_modified_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
 }
 
 /// Lists the entries of `directory` that are not scratch files. A directory

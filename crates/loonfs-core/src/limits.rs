@@ -13,8 +13,8 @@ use loonfs_objectstore::{
     PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE, PROVIDER_PUBLICATION_REQUEST_BOUND,
 };
 
-/// Caps the filter used to keep chains named by a compaction's revision rows.
-pub const MAX_CHAIN_FILTER_BYTES: usize = 64 * 1024 * 1024;
+/// Caps each Bloom filter used by compaction and content collection.
+pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum semantic operations in one explicit commit, bounding how long one
 /// request can occupy the serialized publisher during planning and
@@ -145,6 +145,9 @@ pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 =
 
 /// Default age of an unreachable object before garbage collection may remove it.
 pub const GC_DEFAULT_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
+
+/// Layout rows one content shard covers; bounds the keys a pass holds for a shard.
+pub const GC_CONTENT_SHARD_ROWS: usize = 65_536;
 
 const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 

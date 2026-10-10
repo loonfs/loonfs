@@ -1277,7 +1277,7 @@ A GC response includes `next_reclamation_at_ms` when a deleted namespace is insi
 
 `reclaimable_at_ms` is the deadline defined in [format section 9.5](format.md#95-retirement) when the current manifest is deleted, including when pins still block reclamation. It is absent for an active namespace.
 
-Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Every family lists from the beginning and sweeps to the end. Collection roots follow [format section 11.2](format.md#112-reference-roots), and content roots follow [section 11.9](format.md#119-content-roots). Manifest read failures fail the call before sweeping.
+Every call reads the current manifest and uses one fixed clock. It keeps its live set in memory and writes no collection progress. Each swept family lists from the beginning and sweeps to the end. The active content sweep is skipped if its shared base filter would exceed its byte cap. Collection roots follow [format section 11.2](format.md#112-reference-roots), and content roots follow [section 11.9](format.md#119-content-roots). Manifest read failures fail the call before sweeping.
 
 A GC response groups related counts. `deleted` contains `wal_objects`,
 `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`,
@@ -1302,7 +1302,7 @@ that reason, and the fields sum to the total:
 
 | Reason | Means |
 | --- | --- |
-| `referenced` | Protected by current roots or needed for forward manifest discovery. |
+| `referenced` | Protected by current roots or the shared base filter, or needed for forward manifest discovery. |
 | `within_grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it is treated as young. |
 | `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |

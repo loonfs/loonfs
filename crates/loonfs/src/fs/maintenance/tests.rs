@@ -1047,12 +1047,6 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .expect("cancellation is not completion"));
     assert_eq!(requests(store.counts()), [0; 4]);
 
-    // A read anchor costs five GETs and one HEAD, and a tombstone's costs two
-    // GETs. Collection of a live namespace lists upload sessions, pins, and
-    // manifests for its live set and reads the current manifest's revisions
-    // through the shared segment cache, which the metadata loop filled, then
-    // lists seven families. A deleted namespace skips the sessions, the
-    // revisions, and the content family, and a retired one lists its content.
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
         (&idle, [5, 1, 0, 0], None, [5, 1, 10, 0], None),
         (&claimed, [5, 1, 0, 0], None, [5, 1, 10, 0], None),

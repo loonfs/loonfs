@@ -19,6 +19,7 @@ use crate::store_waves::STORE_READ_WAVE;
 use crate::time::Deadline;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
+use loonfs_objectstore::ListedObject;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, KeyPredicate, OperationClass,
 };
@@ -1357,12 +1358,12 @@ impl ObjectStore for ReadRecorderStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
+    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
+        self.inner.list_entries_from_stream(prefix, start_after)
     }
 
     async fn list_child_prefixes(
@@ -3296,6 +3297,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     let store = MetadataMapStore::aged(failing, KeyPredicate::any());
     let options = crate::gc::GcOptions {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
+        ..Default::default()
     };
     for age_ms in [
         UNREFERENCED_SEGMENT_MIN_AGE_MS,
@@ -3409,7 +3411,7 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
                 for family in &mut run.segments {
                     if family.family == ApiMetadataRowFamily::Revisions {
                         family.segments[0].row_count =
-                            crate::limits::MAX_CHAIN_FILTER_BYTES as u64 * 8 / 10 + 1;
+                            crate::limits::MAX_BLOOM_FILTER_BYTES as u64 * 8 / 10 + 1;
                     }
                 }
             }

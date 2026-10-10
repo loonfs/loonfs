@@ -296,6 +296,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     &source,
                     &GcOptions {
                         grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
+                        ..Default::default()
                     },
                     &MutationContext {
                         writer_id: loonfs_types::WriterId::parse("retained-views-gc")

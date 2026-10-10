@@ -126,7 +126,10 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                     metadata
                 },
             );
-            let options = GcOptions { grace_window_ms };
+            let options = GcOptions {
+                grace_window_ms,
+                ..Default::default()
+            };
             let retained = gc_namespace(
                 &recent,
                 None,
@@ -203,10 +206,10 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
 async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_current() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("older-predecessor").expect("namespace");
-    let store = MetadataMapStore::aged(
+    let store = Arc::new(MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
-    );
+    ));
     let previous = seed_segments(&store, &namespace_id).await;
     let successor = compact_bindings(&store, &namespace_id).await;
     let dropped: BTreeSet<_> = segment_keys(&previous)
@@ -222,17 +225,34 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         .expect("current manifest");
     assert!(current.state.manifest().manifest_no > successor.state.manifest().manifest_no);
     let now_ms = UNREFERENCED_SEGMENT_MIN_AGE_MS + GRACE_MS + 1;
-    let recent = MetadataMapStore::new(
-        &store,
+    let recent = Arc::new(MetadataMapStore::new(
+        Arc::clone(&store),
         KeyPredicate::exact(&successor.object_key),
         move |mut metadata| {
             metadata.last_modified_ms = Some(now_ms);
             metadata
         },
+    ));
+    let recorded = RecordingStore::new(
+        Arc::clone(&recent),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
     );
-    gc_namespace(&recent, None, &namespace_id, &options(), &context(now_ms))
+    gc_namespace(&recorded, None, &namespace_id, &options(), &context(now_ms))
         .await
         .expect("root an older predecessor");
+    assert_eq!(recorded.counts().heads, 1);
+    let read: BTreeSet<_> = recorded
+        .take_get_keys()
+        .into_iter()
+        .filter(|key| {
+            loonfs_objectstore::layout::manifest_no_of(key)
+                .is_some_and(|number| number <= current.state.manifest().manifest_no)
+        })
+        .collect();
+    assert_eq!(
+        read,
+        BTreeSet::from([previous.object_key.clone(), current.object_key.clone()])
+    );
     assert_objects_exist(&store, &dropped, true).await;
     assert!(store
         .head(&previous.object_key)
@@ -240,7 +260,6 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         .expect("previous manifest")
         .is_some());
 
-    // A missing successor leaves the predecessor an ordinary candidate.
     store
         .delete(&successor.object_key)
         .await

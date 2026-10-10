@@ -60,6 +60,7 @@
 pub(crate) mod authorize;
 mod binding_version;
 mod block_cache;
+mod bloom_filter;
 mod commit_engine;
 mod commit_wal_size;
 mod context;
@@ -183,7 +184,7 @@ pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
     WriterFence,
 };
-pub use gc::{delete_if_aged, gc_namespace, grace_age, GcOptions, GraceAge};
+pub use gc::{gc_namespace, grace_age, GcOptions, GraceAge};
 pub use manifest::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
     CompactionStepOutcome, FoldedWalTail, MetadataCompactionCancellation,

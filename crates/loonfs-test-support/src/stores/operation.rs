@@ -220,7 +220,7 @@ pub enum OperationKind<'a> {
     },
     /// A `delete` call.
     Delete,
-    /// A prefix listing: a `list_prefix_from_stream` call or one
+    /// A prefix listing: a `list_entries_from_stream` call or one
     /// `list_child_prefixes` page.
     List,
 }

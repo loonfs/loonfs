@@ -325,6 +325,7 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
         &source,
         &loonfs_core::GcOptions {
             grace_window_ms: loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,
+            ..Default::default()
         },
         &loonfs_core::MutationContext {
             writer_id: loonfs_types::WriterId::parse("collector").expect("writer id"),

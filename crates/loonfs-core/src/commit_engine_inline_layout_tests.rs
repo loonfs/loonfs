@@ -616,22 +616,81 @@ async fn downloads_require_one_object_and_create_empty_whole_objects() {
 }
 
 #[tokio::test]
-async fn collection_keeps_shared_and_rooted_spans_and_deletes_an_unrooted_chain() {
+async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() {
     use crate::gc::{gc_namespace, GcOptions};
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
-    let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let value = InlineContent::new(
+        namespace_id.clone(),
+        ContentId::parse("con_10000000000000000000000000000000").expect("base id"),
+        Bytes::from_static(b"hello"),
+    );
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        candidate("file", vec![value.clone()]),
+    )
+    .await
+    .expect("base file");
+    fold_wal(&store, &namespace_id).await.expect("fold base");
+    let inode_id = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("view")
+        .resolve_path(
+            "/file-0",
+            AttributeInclusion::Omit,
+            &ReadAccess::live(Authorizer::Unrestricted),
+        )
+        .await
+        .expect("base entry")
+        .inode_id;
+    let original = value.content_ref().clone();
+    let fresh_id = ContentId::parse("con_00000000000000000000000000000000").expect("fresh id");
     let fresh = commit_piece(
         &store,
         &namespace_id,
         (inode_id, RevisionNo(2)),
-        &ContentId::generate(),
+        &fresh_id,
         b"hello!",
         5,
         Some(layout(&store, &original).await.layout),
     )
     .await;
     fold_wal(&store, &namespace_id).await.expect("fold");
+    let other = crate::storage::content::stage_bytes_under_content_id(
+        &store,
+        namespace_id.clone(),
+        ContentId::parse("con_80000000000000000000000000000000").expect("other id"),
+        b"other",
+    )
+    .await
+    .expect("other shard content");
+    let candidate = CommitCandidate::prepared(
+        CommitRequest::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            put("/other", other.content_ref()),
+        ),
+        vec![PreparedContent::for_durable_content_write(
+            other.content_ref().clone(),
+        )],
+    );
+    crate::commit_engine::publish_namespace_commits_batch(
+        &store,
+        &namespace_id,
+        vec![candidate],
+        &context,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .await
+    .pop()
+    .expect("one outcome")
+    .expect("other file");
+    fold_wal(&store, &namespace_id)
+        .await
+        .expect("fold other shard");
     prune_revisions(&store, &namespace_id).await;
     let rooted_span = content_span(&namespace_id, &fresh.content_id, 5, 6);
     let superseded_span = content_span(&namespace_id, &fresh.content_id, 1, 2);
@@ -639,7 +698,7 @@ async fn collection_keeps_shared_and_rooted_spans_and_deletes_an_unrooted_chain(
         .put_immutable_verified(&superseded_span, Bytes::from_static(b"x"))
         .await
         .expect("old span");
-    let unrooted = ContentId::generate();
+    let unrooted = ContentId::parse("con_f0000000000000000000000000000000").expect("unrooted id");
     let unrooted_keys = [
         content_blob(&namespace_id, &unrooted),
         content_span(&namespace_id, &unrooted, 1, 2),
@@ -651,8 +710,12 @@ async fn collection_keeps_shared_and_rooted_spans_and_deletes_an_unrooted_chain(
             .expect("unrooted object");
     }
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
-    let options = GcOptions::default();
-    gc_namespace(
+    let options = GcOptions {
+        content_shard_rows: 1,
+        ..Default::default()
+    };
+    store.reset();
+    let report = gc_namespace(
         &aged,
         None,
         &namespace_id,
@@ -664,10 +727,32 @@ async fn collection_keeps_shared_and_rooted_spans_and_deletes_an_unrooted_chain(
     )
     .await
     .expect("collect");
+    assert_eq!(report.deleted.content_objects, 3);
+    let prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
+    let listed: Vec<_> = store
+        .snapshot()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::List { prefix: listed } if listed.starts_with(&prefix) => {
+                Some(listed)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        (0..16)
+            .map(|shard| format!("{prefix}con_{shard:x}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(store
+        .head(&superseded_span)
+        .await
+        .expect("superseded span")
+        .is_none());
     let shared_keys = [
         content_blob(&namespace_id, &original.content_id),
         rooted_span,
-        superseded_span,
     ];
     for key in &shared_keys {
         assert!(store.head(key).await.expect("head").is_some(), "{key}");
@@ -683,7 +768,7 @@ async fn collection_keeps_shared_and_rooted_spans_and_deletes_an_unrooted_chain(
         &store,
         &namespace_id,
         (inode_id, RevisionNo(3)),
-        &ContentId::generate(),
+        &ContentId::parse("con_20000000000000000000000000000000").expect("replacement id"),
         b"replacement",
         0,
         None,

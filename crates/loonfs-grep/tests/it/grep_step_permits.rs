@@ -98,7 +98,7 @@ impl ObjectStore for ContentWatch {
         get_with_metadata,
         delete,
         list_prefix_stream,
-        list_prefix_from_stream,
+        list_entries_from_stream,
         list_prefix,
         list_child_prefixes,
     );

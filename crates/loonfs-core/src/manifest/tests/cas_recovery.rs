@@ -1,6 +1,7 @@
 //! Numbered publication, discovery, and retention contracts.
 
 use super::*;
+use loonfs_objectstore::ListedObject;
 use loonfs_types::format::control::{encode_control_state, ControlObjectKind, HintPayload};
 
 #[tokio::test]
@@ -698,12 +699,12 @@ impl ObjectStore for StaleObjectOnceStore {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
+    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
+        self.inner.list_entries_from_stream(prefix, start_after)
     }
 
     async fn list_child_prefixes(

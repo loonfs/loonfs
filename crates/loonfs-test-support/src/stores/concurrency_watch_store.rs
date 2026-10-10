@@ -16,6 +16,7 @@ use super::KeyPredicate;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
     ObjectStoreError, PutMode, StoredObjectChecksum,
@@ -190,12 +191,12 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
+    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
+        self.inner.list_entries_from_stream(prefix, start_after)
     }
     async fn list_child_prefixes(
         &self,

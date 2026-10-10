@@ -114,7 +114,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             metadata_segment_prefix(&namespace_id),
             pin_prefix(&namespace_id),
             upload_session_prefix(&namespace_id),
-            content_prefix(&namespace_id),
+            format!("{}con_", content_prefix(&namespace_id)),
             temporary_prefix(&namespace_id),
         ]
     );

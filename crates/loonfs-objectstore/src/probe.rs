@@ -769,7 +769,7 @@ async fn cleanup_leaves_prefix_empty(store: &dyn ObjectStore, run: &ProbeRun) ->
 mod tests {
     use super::*;
     use crate::local_fs_store::LocalFsStore;
-    use crate::{ObjectBody, ObjectMetadata, PutMode};
+    use crate::{ListedObject, ObjectBody, ObjectMetadata, PutMode};
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use loonfs_types::{EffectiveLimit, Page};
@@ -830,11 +830,11 @@ mod tests {
             Err(Self::denied(key))
         }
 
-        fn list_prefix_from_stream(
+        fn list_entries_from_stream(
             &self,
             prefix: &str,
             _start_after: Option<&str>,
-        ) -> BoxStream<'static, StoreResult<String>> {
+        ) -> BoxStream<'static, StoreResult<ListedObject>> {
             Box::pin(futures::stream::once(std::future::ready(Err(
                 Self::denied(prefix),
             ))))
@@ -995,12 +995,12 @@ mod tests {
             self.inner.delete(key).await
         }
 
-        fn list_prefix_from_stream(
+        fn list_entries_from_stream(
             &self,
             prefix: &str,
             start_after: Option<&str>,
-        ) -> BoxStream<'static, StoreResult<String>> {
-            self.inner.list_prefix_from_stream(prefix, start_after)
+        ) -> BoxStream<'static, StoreResult<ListedObject>> {
+            self.inner.list_entries_from_stream(prefix, start_after)
         }
 
         async fn list_child_prefixes(
@@ -1093,12 +1093,12 @@ mod tests {
             self.inner.delete(key).await
         }
 
-        fn list_prefix_from_stream(
+        fn list_entries_from_stream(
             &self,
             prefix: &str,
             start_after: Option<&str>,
-        ) -> BoxStream<'static, StoreResult<String>> {
-            self.inner.list_prefix_from_stream(prefix, start_after)
+        ) -> BoxStream<'static, StoreResult<ListedObject>> {
+            self.inner.list_entries_from_stream(prefix, start_after)
         }
 
         async fn list_child_prefixes(
@@ -1155,12 +1155,12 @@ mod tests {
             self.inner.delete(key).await
         }
 
-        fn list_prefix_from_stream(
+        fn list_entries_from_stream(
             &self,
             prefix: &str,
             start_after: Option<&str>,
-        ) -> BoxStream<'static, StoreResult<String>> {
-            self.inner.list_prefix_from_stream(prefix, start_after)
+        ) -> BoxStream<'static, StoreResult<ListedObject>> {
+            self.inner.list_entries_from_stream(prefix, start_after)
         }
 
         async fn list_child_prefixes(
@@ -1208,12 +1208,12 @@ mod tests {
             self.inner.delete(key).await
         }
 
-        fn list_prefix_from_stream(
+        fn list_entries_from_stream(
             &self,
             prefix: &str,
             start_after: Option<&str>,
-        ) -> BoxStream<'static, StoreResult<String>> {
-            self.inner.list_prefix_from_stream(prefix, start_after)
+        ) -> BoxStream<'static, StoreResult<ListedObject>> {
+            self.inner.list_entries_from_stream(prefix, start_after)
         }
 
         async fn list_child_prefixes(

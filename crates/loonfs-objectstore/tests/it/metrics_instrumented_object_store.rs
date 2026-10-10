@@ -11,6 +11,7 @@ use loonfs_objectstore::metrics::{
     ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
     VecObjectStoreMetricsRecorder,
 };
+use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     ByteRange, ExtendBase, ExtendedObject, ImmutableWriteError, ObjectBody, ObjectMetadata,
     ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode,
@@ -546,11 +547,11 @@ impl ObjectStore for DelegatingWriteStore {
         Ok(())
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         _prefix: &str,
         _start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
         Box::pin(stream::empty())
     }
 

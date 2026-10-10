@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::pin::list::list_checkpoints_page;
+use loonfs_objectstore::ListedObject;
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{CheckpointOwnerSummary, ErrorCode, ListCheckpointsResponse, PageRequest};
@@ -323,12 +324,12 @@ impl<S: ObjectStore> ObjectStore for DeleteOnCheckpointLoadStore<S> {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, std::result::Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
+    ) -> BoxStream<'static, std::result::Result<ListedObject, ObjectStoreError>> {
+        self.inner.list_entries_from_stream(prefix, start_after)
     }
 
     async fn list_child_prefixes(

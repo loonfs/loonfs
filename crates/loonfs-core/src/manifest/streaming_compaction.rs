@@ -12,7 +12,6 @@
 use super::block_fetch::segment_object_len;
 use super::block_load::SessionBlockMemo;
 use super::build::{MetadataSegmentPuts, MetadataSegmentWriter};
-use super::chain_filter::ChainFilter;
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping,
     MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
@@ -26,6 +25,7 @@ use super::load::load_manifest_segments;
 use super::publish::{publish_manifest, ManifestPublicationOutcome};
 use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
 use super::scan::VerifiedMetadataSegments;
+use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::load_current_manifest_if_present;
@@ -674,7 +674,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
     output_run_no: Option<RunNo>,
-    chain_filter: Option<ChainFilter>,
+    chain_filter: Option<BloomFilter>,
     keep_every_layout: bool,
     result: MetadataMergeResult,
     canonical_digest: RowDigest,
@@ -801,10 +801,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .fold(0_u64, |count, segment| {
                 count.saturating_add(segment.row_count)
             });
-        let Some(mut filter) = ChainFilter::new(
+        let Some(mut filter) = BloomFilter::new(
             expected_ids,
             self.output_run_no
-                .expect("a layout compaction should have a manifest basis"),
+                .expect("a layout compaction should have a manifest basis")
+                .0,
         ) else {
             self.keep_every_layout = true;
             tracing::info!(namespace_id = %self.namespace_id, expected_ids,
@@ -835,7 +836,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                     break;
                 }
                 if let MetadataRow::FileRevision(row) = iterator[0].take_head() {
-                    filter.insert(&row.content_ref.content_id);
+                    filter.insert(row.content_ref.content_id.as_str().as_bytes());
                 }
             }
         }
@@ -958,7 +959,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.result.rows_read += 1;
             self.report_progress();
             if let (Some(filter), MetadataRow::ContentLayout(layout)) = (&self.chain_filter, &row) {
-                if !filter.may_contain(&layout.content_id) {
+                if !filter.may_contain(layout.content_id.as_str().as_bytes()) {
                     continue;
                 }
             }
