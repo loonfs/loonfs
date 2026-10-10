@@ -669,7 +669,7 @@ The fold merges its own chain's last extent into the candidate while both condit
 | Last extent length | At most twice the candidate length. |
 | Combined length | At most `MAX_MERGED_EXTENT_BYTES`, 32 MiB (33,554,432 bytes). |
 
-Each merge reads the preceding extent in ranges of at most `CONTENT_READ_CHUNK_BYTES`, 8 MiB. One HEAD supplies the object's SHA-256 attestation. When present, the fold checks the bytes against it. Different bytes are `namespace_corrupt`. Direct uploads can lack this attestation. The fold reads those objects without this check. The merge limit bounds the bytes held for a merge. Provider-side assembly can lift it. A fresh chain shares its base's extents and writes only its own pieces.
+Each merge reads the preceding extent in ranges of at most `CONTENT_READ_CHUNK_BYTES`, 8 MiB. One HEAD supplies the object's SHA-256 attestation. When present, the fold checks the bytes against it. Different bytes are `namespace_corrupt`. Direct uploads can lack this attestation. The fold reads those objects without this check. The same 32 MiB limit bounds the extent bytes held for merges across the whole fold. A chain reserves all bytes its merge will read before reading any extent. It releases them after the write. Provider-side assembly can lift this limit. A fresh chain shares its base's extents and writes only its own pieces.
 
 A chain whose pieces start at offset 0 writes the whole object at its own key when the tail holds no shorter reference to it. Every other write is a span named by the candidate's start and the newest reference's size, including a span that starts at zero. A failed fold can leave the first whole object behind, so later bytes must use a different key. Every write uses an immutable verified put. An occupied key with the same attestation succeeds. A different or absent attestation is corruption naming the key. The fold never changes an existing object's bytes.
 
@@ -1094,7 +1094,7 @@ In an active namespace `N`, a content object that `N` owns stays while one of th
 | `N`'s unfolded WAL tail | Every `append_file_revision` delta and every piece's base owned by `N`. |
 | An upload session record in `N`, whatever its status | The session's `content_id`. |
 
-Collection deletes every other content object under `namespaces/N/content/` whose provider age is at least `T`. It keeps an object younger than `T` and a key that does not parse as a content object key. A pass scans each of the `revisions` and `content_layouts` families once for each distinct rooted manifest. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (section 11.4).
+Collection deletes every other content object under `namespaces/N/content/` whose provider age is at least `T`. It keeps an object younger than `T` and a key that does not parse as a content object key. A pass scans each of the `revisions` and `content_layouts` families once for each distinct rooted manifest. It consults layouts after every revision and tail reference. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (section 11.4).
 
 A fork's source pin roots the inherited revisions and layouts in the owner's namespace.
 

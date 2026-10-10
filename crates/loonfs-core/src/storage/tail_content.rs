@@ -11,6 +11,7 @@ use bytes::Bytes;
 use loonfs_objectstore::{ByteRange, ImmutableWriteError, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{ContentExtent, ContentLayout, ExtentObject, Sha256State};
+use tokio::sync::Semaphore;
 
 /// Joins the tail pieces and checks whole values before anything is written.
 pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Bytes> {
@@ -51,6 +52,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
     tail: &ProjectedWalTail,
     content: &ProjectedContent,
     pieces: Bytes,
+    merge_memory: &Semaphore,
 ) -> Result<ContentLayoutRecord> {
     let newest = &content.content_ref;
     let mut location = ContentLocation::resolve(lookup, Some(tail), newest).await?;
@@ -70,18 +72,34 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
                 || revision.content_ref.size_bytes == newest.size_bytes
         });
     let mut extents = location.extents;
-    while let Some(last) = extents.last().filter(|last| {
+    let mut retained = extents.len();
+    let mut candidate_length = candidate.len() as u64;
+    for located in extents.iter().rev() {
+        let extent = &located.extent;
         // A fresh chain keeps its base's extents shared.
-        last.extent.content_id == newest.content_id
-            && last.extent.owner_namespace_id == newest.owner_namespace_id
-            && last.extent.length <= 2 * candidate.len() as u64
-            && last.extent.length + candidate.len() as u64 <= MAX_MERGED_EXTENT_BYTES
-    }) {
-        let mut bytes = read_extent(store, last).await?;
-        start -= last.extent.length;
+        if extent.content_id != newest.content_id
+            || extent.owner_namespace_id != newest.owner_namespace_id
+            || extent.length > 2 * candidate_length
+            || extent.length + candidate_length > MAX_MERGED_EXTENT_BYTES
+        {
+            break;
+        }
+        candidate_length += extent.length;
+        retained -= 1;
+    }
+    let merged_length = candidate_length - candidate.len() as u64;
+    let _merge_permits = merge_memory
+        .acquire_many(merged_length as u32)
+        .await
+        .expect("merge semaphore should remain open");
+    if retained != extents.len() {
+        let mut bytes = Vec::with_capacity(candidate_length as usize);
+        for extent in extents.drain(retained..) {
+            read_extent(store, &extent, &mut bytes).await?;
+        }
+        start -= merged_length;
         bytes.extend_from_slice(&candidate);
         candidate = bytes.into();
-        extents.pop();
     }
     let object = if whole && start == 0 {
         ExtentObject::Whole
@@ -132,7 +150,8 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
 async fn read_extent<S: ObjectStore + ?Sized>(
     store: &S,
     located: &LocatedExtent,
-) -> Result<Vec<u8>> {
+    bytes: &mut Vec<u8>,
+) -> Result<()> {
     let key = &located.object_key;
     let corrupt = || {
         CoreError::NamespaceCorrupt(format!(
@@ -154,7 +173,6 @@ async fn read_extent<S: ObjectStore + ?Sized>(
         (extent.offset, extent.offset + extent.length)
     };
     let mut state = Sha256State::new();
-    let mut bytes = Vec::with_capacity(extent.length as usize);
     while offset < end {
         let chunk_end = end.min(offset + CONTENT_READ_CHUNK_BYTES);
         let chunk = store
@@ -185,5 +203,5 @@ async fn read_extent<S: ObjectStore + ?Sized>(
     {
         return Err(corrupt());
     }
-    Ok(bytes)
+    Ok(())
 }

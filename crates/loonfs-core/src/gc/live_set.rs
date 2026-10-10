@@ -51,6 +51,7 @@ pub(super) struct LiveSet {
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
     content_roots: ContentRoots,
+    manifests: Vec<LoadedManifest>,
     has_pins: bool,
     grace_window_ms: u64,
     now_ms: u64,
@@ -139,6 +140,7 @@ impl LiveSet {
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
             objects: BTreeSet::new(),
             content_roots,
+            manifests: Vec::new(),
             has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
             now_ms: context.now_ms,
@@ -238,6 +240,7 @@ impl LiveSet {
                 .await?;
             }
         }
+        live.protect_layouts(store, segment_cache).await?;
         Ok(live)
     }
 
@@ -295,11 +298,44 @@ impl LiveSet {
             return Ok(());
         }
         let segments = metadata_basis_from_manifest(store, segment_cache, manifest).segments;
-        for family in [
-            MetadataRowFamily::Revisions,
-            MetadataRowFamily::ContentLayouts,
-        ] {
-            let upper_bound = string_prefix_upper_bound(family.row_key_prefix());
+        self.manifests.push(manifest.clone());
+        let family = MetadataRowFamily::Revisions;
+        let upper_bound = string_prefix_upper_bound(family.row_key_prefix());
+        let mut lower_bound = family.row_key_prefix().to_owned();
+        loop {
+            let rows = segments
+                .scan_range_page_with_keys(
+                    family,
+                    &lower_bound,
+                    upper_bound.as_deref(),
+                    CONTENT_ROOT_PAGE_ROWS,
+                )
+                .await
+                .map_err(MetadataProjectionLoadError::from)?;
+            let Some((last_key, _)) = rows.last() else {
+                break;
+            };
+            lower_bound = lookup_keys::after_row_key(last_key);
+            let exhausted = rows.len() < CONTENT_ROOT_PAGE_ROWS;
+            for (_, row) in rows {
+                self.protect_content(&revision_from_manifest_row(row)?.content_ref)?;
+            }
+            if exhausted {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn protect_layouts<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        segment_cache: Option<&MetadataSegmentCache>,
+    ) -> Result<()> {
+        let family = MetadataRowFamily::ContentLayouts;
+        let upper_bound = string_prefix_upper_bound(family.row_key_prefix());
+        for manifest in &self.manifests {
+            let segments = metadata_basis_from_manifest(store, segment_cache, manifest).segments;
             let mut lower_bound = family.row_key_prefix().to_owned();
             loop {
                 let rows = segments
@@ -317,15 +353,11 @@ impl LiveSet {
                 lower_bound = lookup_keys::after_row_key(last_key);
                 let exhausted = rows.len() < CONTENT_ROOT_PAGE_ROWS;
                 for (_, row) in rows {
-                    if family == MetadataRowFamily::Revisions {
-                        self.protect_content(&revision_from_manifest_row(row)?.content_ref)?;
-                    } else {
-                        let row = content_layout_from_manifest_row(row)?;
-                        if self.content_roots.ids.contains(&row.content_id) {
-                            for extent in row.layout.extents {
-                                if extent.owner_namespace_id == self.content_roots.namespace_id {
-                                    self.content_roots.insert(&extent.content_id)?;
-                                }
+                    let row = content_layout_from_manifest_row(row)?;
+                    if self.content_roots.ids.contains(&row.content_id) {
+                        for extent in row.layout.extents {
+                            if extent.owner_namespace_id == self.content_roots.namespace_id {
+                                self.content_roots.insert(&extent.content_id)?;
                             }
                         }
                     }

@@ -3026,7 +3026,7 @@ mod direct_download {
                 )
             };
             recording.reset();
-            for (attempt, denied) in [true, false, false].into_iter().enumerate() {
+            for denied in [true, false, false] {
                 if denied {
                     failing.fail_all();
                 } else {
@@ -3105,7 +3105,7 @@ mod direct_download {
                     .await
                     .expect("object bytes");
                 assert_eq!(received, value.as_ref());
-                assert_eq!(recording.count(OperationClass::Put), attempt);
+                assert_eq!(recording.count(OperationClass::Put), 1);
             }
         }
     }

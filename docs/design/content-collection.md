@@ -26,7 +26,7 @@ A reader or writer works from a manifest that is current, pinned, or superseded 
 
 A fork's source pin roots its inherited revisions and layouts in the owner's namespace.
 
-The pass lists upload sessions before it reads the WAL tail. A session record is removed only after any admission evidence it could issue has expired. A session the pass does not list was either created after the listing or removed before it. Content of a session created later is younger than `T`. Every commit that names content of a removed session landed before the tail was read, so the tail or a rooted manifest names that content. In the other order, a commit of an upload's content could land after the tail read, and a concurrent collector could then remove the session record before the listing.
+The pass lists upload sessions before it reads the WAL tail and consults layout rows last. A session record is removed only after any admission evidence it could issue has expired. A session the pass does not list was either created after the listing or removed before it. Content of a session created later is younger than `T`. Every commit that names content of a removed session landed before the tail was read, so the tail or a rooted manifest names that content. In the other order, a commit of an upload's content could land after the tail read, and a concurrent collector could then remove the session record before the listing.
 
 ## Costs
 

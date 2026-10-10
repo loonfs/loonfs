@@ -186,7 +186,8 @@ pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
 pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS;
 
-/// Bounds the combined bytes of merged extents; provider-side assembly lifts this limit.
+/// Bounds the extent bytes one merge reads, and the bytes a whole fold holds
+/// for merges at once; provider-side assembly lifts it.
 pub(crate) const MAX_MERGED_EXTENT_BYTES: u64 = 32 * 1024 * 1024;
 
 #[cfg(test)]

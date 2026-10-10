@@ -7,6 +7,7 @@ use crate::authorize::{Absence, ReadAccess};
 #[cfg(test)]
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result, StoreFailureClass};
+use crate::limits::MAX_MERGED_EXTENT_BYTES;
 use crate::manifest::{
     load_basis_metadata_segments, HeadStateCache, MetadataSegmentCache, VerifiedMetadataSegments,
     WalTailProjectionCacheKey,
@@ -20,10 +21,12 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::mutation_path::parse_absolute_path_for_core;
-use crate::storage::content::{validate_loaded_content_bytes, ContentLocation};
+use crate::storage::content::ContentLocation;
+use crate::storage::content_location::extent_object_key;
+use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
 use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
-use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
+use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
@@ -33,6 +36,7 @@ use loonfs_types::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::Instrument;
 
 #[derive(Clone, Copy)]
@@ -393,8 +397,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         ContentLocation::resolve(&self.metadata_view(), Some(&self.wal_tail), content_ref).await
     }
 
-    /// Selects one object for a direct download, writing a chain's initial tail
-    /// value at its own key only when the reference names the chain head.
+    /// Serves any prefix of a chain that starts in the tail from its own object,
+    /// or writes the head value as a fold would before selecting its object.
     async fn download_object_key(
         &self,
         store: &S,
@@ -422,35 +426,45 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
             return Ok(key.to_owned());
         }
-        if location.is_resident()
-            && location.has_pieces()
-            && self
-                .metadata_view()
-                .content_head(&content_ref.content_id)
-                .await?
-                == Some(content_ref.size_bytes)
-        {
+        if location.is_resident() && location.has_pieces() {
             let key = location.object_key();
-            let pieces = location.joined_pieces();
-            validate_loaded_content_bytes(key.to_owned(), content_ref, &pieces)?;
-            store
-                .put_immutable_verified(key, pieces)
+            if store
+                .head(key)
                 .await
-                .map_err(|error| match error {
-                    ImmutableWriteError::DifferentObject { .. }
-                    | ImmutableWriteError::Unattested { .. } => CoreError::ContentNotMaterialized {
-                        content_id: content_ref.content_id.clone(),
-                    },
-                    ImmutableWriteError::Transport { ref source, .. }
-                        if StoreFailureClass::of(source) == StoreFailureClass::PermissionDenied =>
-                    {
-                        CoreError::ContentNotMaterialized {
-                            content_id: content_ref.content_id.clone(),
-                        }
-                    }
-                    error => CoreError::from(error),
-                })?;
-            return Ok(key.to_owned());
+                .map_err(|error| CoreError::store(key, &error))?
+                .is_some_and(|metadata| metadata.size_bytes >= content_ref.size_bytes)
+            {
+                return Ok(key.to_owned());
+            }
+            let content = self
+                .wal_tail
+                .content_by_id(&content_ref.owner_namespace_id, &content_ref.content_id)
+                .expect("resident pieces should name a projected chain");
+            let layout = write_tail_content(
+                store,
+                &self.metadata_view(),
+                &self.wal_tail,
+                content,
+                assemble_tail_content(content)?,
+                &Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize),
+            )
+            .await
+            .map_err(|error| match error {
+                CoreError::Store {
+                    class: StoreFailureClass::PermissionDenied,
+                    ..
+                } => CoreError::ContentNotMaterialized {
+                    content_id: content_ref.content_id.clone(),
+                },
+                error => error,
+            })?;
+            return Ok(extent_object_key(
+                layout
+                    .layout
+                    .extents
+                    .last()
+                    .expect("a tail write should produce an extent"),
+            ));
         }
         if let [extent] = location.extents.as_slice() {
             if !location.has_pieces() && extent.extent.offset == 0 {

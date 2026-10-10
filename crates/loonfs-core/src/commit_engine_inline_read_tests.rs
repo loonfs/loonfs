@@ -453,7 +453,9 @@ async fn inline_checksum_failures_match_object_validation() {
         .await
         .expect_err("corrupt download");
     assert_eq!(download_error.to_string(), error.to_string());
-    assert_no_content_requests(&store);
+    assert_no_writes(&store);
+    assert_eq!(store.counts().heads, 1);
+    assert_eq!(store.counts().gets, 0);
     let fold_error = fold_wal(&store, &publisher.namespace_id)
         .await
         .expect_err("corrupt tail");

@@ -13,7 +13,7 @@ use crate::control_update::{retry_while_contended, CasAttempt};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
-use crate::limits::CONTENTION_RETRY_LIMIT;
+use crate::limits::{CONTENTION_RETRY_LIMIT, MAX_MERGED_EXTENT_BYTES};
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::CurrentManifest;
@@ -36,6 +36,7 @@ use loonfs_types::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
 use tracing::Instrument;
 
 /// Manifest that covers the head after a fold attempt.
@@ -316,7 +317,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
 }
 
 /// Checks whole tail values before writing any object, then writes each chain's
-/// extents with bounded concurrency and returns the layouts.
+/// extents with shared merge memory and bounded concurrency, and returns the layouts.
 async fn materialize_tail_content<S: ObjectStore + ?Sized>(
     store: &S,
     projection: &ManifestProjection<'_, S>,
@@ -328,12 +329,16 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
         .map(|content| Ok((content, assemble_tail_content(content)?)))
         .collect::<Result<Vec<_>>>()?;
     let layouts = Mutex::new(HashMap::new());
+    let merge_memory = Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize);
     // In a live namespace, failed folds leave committed content for the next fold.
     stream::iter(assembled.into_iter().map(Ok))
         .try_for_each_concurrent(STORE_WRITE_WAVE, |(content, pieces)| {
             let layouts = &layouts;
+            let merge_memory = &merge_memory;
             async move {
-                let layout = write_tail_content(store, projection, tail, content, pieces).await?;
+                let layout =
+                    write_tail_content(store, projection, tail, content, pieces, merge_memory)
+                        .await?;
                 {
                     layouts
                         .lock()

@@ -2924,8 +2924,8 @@ any direct write — the read is not a separate decision, and a deployment
 that offers none of them cannot have created such a file in the first place.
 
 A direct download requires one object that holds the revision's bytes.
-A revision whose bytes are still WAL pieces and begin its chain is written to
-its whole object first, as a fold would. A revision whose bytes lie in
+A revision of a chain that starts in the tail is served from the chain's object,
+written first as a fold would when it is absent. A revision whose bytes lie in
 several objects, or follow an object the tail extends, returns
 `content_not_materialized`. The proxied content route reads both.
 A zero-byte reference writes its empty whole object when absent and signs it.
