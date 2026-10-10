@@ -124,6 +124,7 @@ pub struct NamespaceEngine<S, M> {
     store: S,
     namespace_id: NamespaceId,
     mode: M,
+    content_merge_memory: Arc<tokio::sync::Semaphore>,
     wall_clock: Arc<dyn crate::time::WallClock>,
     subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
@@ -350,10 +351,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
 impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
     /// Creates a read-only engine bound to `namespace_id`.
-    pub fn reader(store: S, namespace_id: NamespaceId) -> Self {
+    pub fn reader(
+        store: S,
+        namespace_id: NamespaceId,
+        content_merge_memory: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
         Self {
             store,
             namespace_id,
+            content_merge_memory,
             mode: ReadOnly,
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
@@ -370,10 +376,16 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates a writable engine bound to `namespace_id` and `writer_id`.
-    pub fn writer(store: S, namespace_id: NamespaceId, writer_id: WriterId) -> Self {
+    pub fn writer(
+        store: S,
+        namespace_id: NamespaceId,
+        writer_id: WriterId,
+        content_merge_memory: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
         Self {
             store,
             namespace_id,
+            content_merge_memory,
             mode: Writable { writer_id },
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
@@ -493,6 +505,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             Arc::new(crate::time::StdMonotonicTimer::default()),
             self.metadata_lsm_policy(),
             self.segment_cache.as_deref(),
+            &self.content_merge_memory,
         )
         .await
     }
@@ -508,6 +521,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             options,
             &self.mutation_context()?,
+            Arc::clone(&self.content_merge_memory),
         )
         .await
     }
@@ -688,6 +702,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             revision_no,
             start_offset,
             &access,
+            &self.content_merge_memory,
         )
         .await
     }
@@ -710,6 +725,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             revision_no,
             start_offset,
             &access,
+            &self.content_merge_memory,
         )
         .await
     }
@@ -953,6 +969,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             candidates,
             &context,
+            Arc::clone(&self.content_merge_memory),
         )
         .await)
     }
@@ -1292,6 +1309,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &context,
             self.metadata_lsm_policy(),
             self.segment_cache.as_deref(),
+            &self.content_merge_memory,
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -1310,6 +1328,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &context,
             self.metadata_lsm_policy(),
             self.segment_cache.as_deref(),
+            &self.content_merge_memory,
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -1379,6 +1398,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
             self.metadata_lsm_policy(),
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
+            &self.content_merge_memory,
         )
         .await
     }
@@ -1464,6 +1484,7 @@ mod tests {
             store,
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         );
 
         assert_eq!(engine.namespace_id(), &namespace_id);
@@ -1478,6 +1499,7 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         );
         crate::test_support::ops::create(
             &writer.store,
@@ -1490,6 +1512,7 @@ mod tests {
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         );
         let loaded = crate::namespace::read_anchor::load_read_anchor(&reader.store, &namespace_id)
             .await
@@ -1521,6 +1544,7 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("writer store"),
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         );
         crate::test_support::ops::create(
             &writer.store,
@@ -1534,6 +1558,7 @@ mod tests {
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("reader store"),
             namespace_id,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         );
         let crate::UploadSessionView {
             session: status,

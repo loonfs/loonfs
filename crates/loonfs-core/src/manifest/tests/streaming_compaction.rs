@@ -3047,17 +3047,20 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     assert_eq!(store.counts().puts, 0);
 
     timer.0.store(0, Ordering::SeqCst);
-    crate::commit_engine::NamespaceCommitEngine::new(namespace.clone())
-        .delete_namespace(
-            store.inner(),
-            Default::default(),
-            &crate::MutationContext {
-                writer_id: loonfs_types::WriterId::parse("deleter").expect("writer"),
-                now_ms: 5_000,
-            },
-        )
-        .await
-        .expect("delete while the job runs");
+    crate::commit_engine::NamespaceCommitEngine::new(
+        namespace.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .delete_namespace(
+        store.inner(),
+        Default::default(),
+        &crate::MutationContext {
+            writer_id: loonfs_types::WriterId::parse("deleter").expect("writer"),
+            now_ms: 5_000,
+        },
+    )
+    .await
+    .expect("delete while the job runs");
     store.reset();
     let outcome = finalize_metadata_compaction(
         &store,

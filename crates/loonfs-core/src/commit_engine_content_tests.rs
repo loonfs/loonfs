@@ -130,6 +130,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         &namespace_id,
         Default::default(),
         &context(clock.now_ms()),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
     )
     .await
     .expect("delete");
@@ -137,7 +138,11 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         .expect("token remains valid");
     let candidate =
         CommitCandidate::prepared(put_candidate(&completed).request().clone(), vec![prepared]);
-    let mut engine = NamespaceCommitEngine::new(namespace_id).monotonic_timer(clock.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .monotonic_timer(clock.clone());
     store.reset();
     let result = engine
         .publish_batch(
@@ -172,8 +177,11 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine =
-        NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .monotonic_timer(timer.clone());
     engine
         .session_writer_epoch(&store, &setup)
         .await
@@ -260,8 +268,11 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine =
-        NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .monotonic_timer(timer.clone());
     let replay = CommitCandidate::new(directory_request("original", "original"));
     let original = engine
         .publish_batch(
@@ -384,8 +395,11 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine =
-        NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .monotonic_timer(timer.clone());
     let replay = CommitCandidate::new(directory_request("original", "original"));
     let original = engine
         .publish_batch(
@@ -520,8 +534,11 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     );
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let timer = Arc::new(PublicationTimer::default());
-    let mut engine =
-        NamespaceCommitEngine::new(namespace_id.clone()).monotonic_timer(timer.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .monotonic_timer(timer.clone());
     store.reset();
     let result = engine
         .publish_batch(

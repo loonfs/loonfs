@@ -2296,16 +2296,15 @@ one, based on the current revision's content ID `C` and size `S`:
 
 - When this namespace owns `C`, `S` is positive, and no revision or layout names
   more than `S` bytes of `C`, the new reference keeps `C`. Its pieces start at
-  offset `S`.
+  offset `S`. Its delta omits the layout, and validation writes no content object.
 - Otherwise the new reference names a new content ID owned by this namespace,
   whose first `S` bytes are those of `C`. This happens when another revision
   already extended `C`, for example after a restore of an older revision or an
   append to a copy of the file, and in a fork whose file still names the
   source's content. The new chain shares the base's objects through the layout
-  its delta carries and copies the base's unfolded bytes into its own pieces.
-  It copies no bytes from objects. Copied bytes count toward the WAL limits;
-  exceeding them returns `content_too_large` before publication. An append to an
-  empty file also starts a new content ID.
+  its delta carries. Validation writes the base's unfolded bytes as an extent
+  of the base chain before admitting the reference. The commit carries only
+  the appended bytes. An append to an empty file also starts a new content ID.
 
 Earlier revisions keep their references and still read their own bytes. The
 checksum continues from what was recorded about the first `S` bytes of `C`: a

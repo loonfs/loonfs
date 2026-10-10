@@ -697,6 +697,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         &context,
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -714,6 +715,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             &later_context,
             Default::default(),
             None,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -776,6 +778,7 @@ async fn an_expired_pin_still_enumerates_its_files_until_deleted() {
         &context,
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -958,6 +961,7 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         &context,
         &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
         Arc::default(),
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("delete");
@@ -1034,7 +1038,10 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let boundary = usize::try_from(crate::limits::MAX_UNFOLDED_WAL_OBJECTS)
         .expect("the write-stop bound fits a WAL object count");
 
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     for round in 0..boundary - 2 {
         let request = CommitRequest::single(
             CommitId::generate(),
@@ -1869,6 +1876,7 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
         &overrun,
         MetadataLsmPolicy::default(),
         Arc::default(),
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect_err("over-budget publication must abort");

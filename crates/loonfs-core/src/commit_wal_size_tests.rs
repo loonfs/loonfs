@@ -42,6 +42,9 @@ fn full_attributes() -> Attributes {
 
 #[tokio::test]
 async fn maximum_requests_encode_within_the_admitted_estimate() {
+    let directory = tempfile::tempdir().expect("store directory");
+    let store =
+        loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("n".repeat(MAX_ID_BYTES)).expect("namespace");
     let actor = ActorId::parse("a".repeat(256)).expect("actor");
     let mut head =
@@ -242,6 +245,8 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         let mut allocation = session.begin_candidate();
         let plan = session
             .prepare_commit(
+                &store,
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
                 &candidate,
                 candidate
                     .semantic_identity(&namespace_id)

@@ -10,15 +10,13 @@ use crate::commit::{AppendedContent, CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
-use crate::storage::content_location::ContentLocation;
+use crate::storage::tail_content::materialize_content_layout;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::{
-    WalInlineContent, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
-};
+use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
-    AbsolutePath, AccessRight, AccessRights, Checksum, ContentId, ContentLayout, ContentRef,
-    ContentRefKind, DestinationBehavior, DestinationPrecondition, InodeId, InodeKind,
-    PreconditionFields, RevisionNo,
+    AbsolutePath, AccessRight, AccessRights, Checksum, ContentId, ContentRef, ContentRefKind,
+    DestinationBehavior, DestinationPrecondition, InodeId, InodeKind, PreconditionFields,
+    RevisionNo,
 };
 
 pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
@@ -26,6 +24,8 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     expected_inode_id: Option<InodeId>,
     expected_revision_no: Option<RevisionNo>,
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
@@ -58,6 +58,8 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
         .await?
         .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
     plan_append(
+        store,
+        merge_memory,
         view,
         absolute_path.as_str(),
         revision,
@@ -71,6 +73,8 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     bytes: &[u8],
     expected_revision_no: Option<RevisionNo>,
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
@@ -92,6 +96,8 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
         .await?
         .ok_or(CoreError::InodeNotFound(inode_id))?;
     plan_append(
+        store,
+        merge_memory,
         view,
         target.absolute_path.as_str(),
         revision,
@@ -105,6 +111,8 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
 /// `bytes`. The guard is checked first so that a stale caller hears about
 /// the revision, not about the content it would have extended.
 async fn plan_append<S: ObjectStore + ?Sized>(
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     target: &str,
     revision: RevisionRecord,
@@ -122,7 +130,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    let appended = append_to(view, target, &revision, bytes).await?;
+    let appended = append_to(store, merge_memory, view, target, &revision, bytes).await?;
     Ok(CompiledFilesystemOperation {
         ops: vec![CommitOp::ReplaceFile {
             inode_id: revision.inode_id,
@@ -135,6 +143,8 @@ async fn plan_append<S: ObjectStore + ?Sized>(
 }
 
 async fn append_to<S: ObjectStore + ?Sized>(
+    store: &S,
+    merge_memory: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     target: &str,
     base_row: &RevisionRecord,
@@ -187,18 +197,27 @@ async fn append_to<S: ObjectStore + ?Sized>(
     } else {
         ContentId::generate()
     };
-    let (layout, pieces) = if extends_base {
-        (
-            None,
-            vec![WalInlineContent {
-                content_id: content_id.clone(),
-                offset: base.size_bytes,
-                bytes: bytes.to_vec(),
-            }],
-        )
+    let layout = if extends_base || base.size_bytes == 0 {
+        None
     } else {
-        pieces_from_base(view, base, &content_id, bytes).await?
+        Some(
+            materialize_content_layout(
+                store,
+                view.view,
+                view.tail.ok_or_else(|| {
+                    CoreError::Internal("append planning requires the publish tail".to_owned())
+                })?,
+                base,
+                merge_memory,
+            )
+            .await?,
+        )
     };
+    let pieces = vec![WalInlineContent {
+        content_id: content_id.clone(),
+        offset: base.size_bytes,
+        bytes: bytes.to_vec(),
+    }];
     Ok(AppendedContent {
         content_ref: ContentRef {
             kind: ContentRefKind::BlobV1,
@@ -212,41 +231,4 @@ async fn append_to<S: ObjectStore + ?Sized>(
         layout,
         pieces,
     })
-}
-
-async fn pieces_from_base<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
-    base: &ContentRef,
-    content_id: &ContentId,
-    bytes: &[u8],
-) -> Result<(Option<ContentLayout>, Vec<WalInlineContent>)> {
-    let location = ContentLocation::resolve(view.view, view.tail, base).await?;
-    let offset = location.extents_length();
-    let resident_bytes = usize::try_from(base.size_bytes - offset).unwrap_or(usize::MAX);
-    let estimated_bytes = resident_bytes.saturating_add(bytes.len());
-    if estimated_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES {
-        return Err(CoreError::CommitTooLarge {
-            estimated_bytes,
-            max_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
-        });
-    }
-    let mut resident = location.joined_pieces().to_vec();
-    resident.extend_from_slice(bytes);
-    let pieces = resident
-        .chunks(MAX_WAL_INLINE_CONTENT_BYTES)
-        .enumerate()
-        .map(|(index, bytes)| WalInlineContent {
-            content_id: content_id.clone(),
-            offset: offset + (index * MAX_WAL_INLINE_CONTENT_BYTES) as u64,
-            bytes: bytes.to_vec(),
-        })
-        .collect();
-    let layout = (offset > 0).then(|| ContentLayout {
-        extents: location
-            .extents
-            .into_iter()
-            .map(|located| located.extent)
-            .collect(),
-    });
-    Ok((layout, pieces))
 }

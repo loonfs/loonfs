@@ -26,6 +26,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             Arc::new(StdMonotonicTimer::default()),
             Default::default(),
             None,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("fork");
@@ -75,9 +76,15 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         .source_pin_id
         .clone();
     for namespace in [&source, &target] {
-        delete_namespace(&inner, namespace, Default::default(), &setup)
-            .await
-            .expect("delete");
+        delete_namespace(
+            &inner,
+            namespace,
+            Default::default(),
+            &setup,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        )
+        .await
+        .expect("delete");
     }
     let deadline = context(setup.now_ms + retirement_ms());
     let gc_options = options();

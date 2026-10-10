@@ -229,26 +229,29 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
     operation: FilesystemOperation,
     context: &MutationContext,
 ) -> loonfs_types::Commit {
-    NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            vec![CommitCandidate::prepared(
-                CommitRequest::single(
-                    CommitId::parse(commit_id).expect("commit id"),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    operation,
-                ),
-                Vec::new(),
-            )],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("commit accepted")
+    NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .publish_batch(
+        store,
+        vec![CommitCandidate::prepared(
+            CommitRequest::single(
+                CommitId::parse(commit_id).expect("commit id"),
+                loonfs_test_support::test_actor(),
+                None,
+                operation,
+            ),
+            Vec::new(),
+        )],
+        context,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("commit accepted")
 }
 
 async fn undelete<S: ObjectStore + ?Sized>(
@@ -998,7 +1001,11 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
         )
         .await;
         let read_context = fresh_read_context(&store, &namespace_id).await;
-        let engine = NamespaceEngine::reader(&store, namespace_id);
+        let engine = NamespaceEngine::reader(
+            &store,
+            namespace_id,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
 
         store.reset();
         let page = engine
@@ -1062,7 +1069,11 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
         .await;
     }
     let read_context = fresh_read_context(&store, &namespace_id).await;
-    let engine = NamespaceEngine::reader(&store, namespace_id);
+    let engine = NamespaceEngine::reader(
+        &store,
+        namespace_id,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     let limit = EffectiveLimit::new(NonZeroU32::new(4).expect("nonzero"));
 
     let first = engine

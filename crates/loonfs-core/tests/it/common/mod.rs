@@ -21,7 +21,12 @@ pub(crate) fn namespace_engine<'a, S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> NamespaceWriterEngine<&'a S> {
-    NamespaceWriterEngine::writer(store, namespace_id.clone(), context.writer_id.clone())
+    NamespaceWriterEngine::writer(
+        store,
+        namespace_id.clone(),
+        context.writer_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
 }
 
 pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
@@ -190,7 +195,10 @@ pub(crate) mod commit_split_support {
         candidates: Vec<CommitCandidate>,
         context: &MutationContext,
     ) -> Vec<Result<loonfs_types::api::v0::Commit, CoreError>> {
-        let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut engine = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         engine
             .publish_batch(
                 store,

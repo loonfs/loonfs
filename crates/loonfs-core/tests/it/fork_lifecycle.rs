@@ -430,8 +430,8 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     let mut second = context.clone();
     second.writer_id = loonfs_types::WriterId::parse("writer-second").expect("writer id");
     let (left, right) = tokio::join!(
-        fork_namespace(store.as_ref(), &source, &target, &context),
-        fork_namespace(store.as_ref(), &source, &target, &second),
+        fork_namespace(store.as_ref(), &source, &target, &context,),
+        fork_namespace(store.as_ref(), &source, &target, &second,),
     );
     let outcomes = [left, right];
     assert_eq!(
@@ -453,7 +453,7 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     let contested = NamespaceId::parse("contested").expect("valid namespace id");
     let (created, forked) = tokio::join!(
         bootstrap_namespace(store.as_ref(), &contested, &context),
-        fork_namespace(store.as_ref(), &source, &contested, &second),
+        fork_namespace(store.as_ref(), &source, &contested, &second,),
     );
     assert_eq!(
         usize::from(created.is_ok()) + usize::from(forked.is_ok()),

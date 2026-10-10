@@ -1147,7 +1147,10 @@ async fn planned_appends_match_the_model() {
         vec![append("/copy", b"five")],
         vec![append("/log", b"six")],
     ];
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     for (index, operations) in requests.into_iter().enumerate() {
         let request = CommitRequest {
             commit_id: CommitId::generate(),
@@ -1256,7 +1259,10 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         append(b"+four"),
     ];
     let deadline = || Deadline::start(Arc::new(StdMonotonicTimer::default()));
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut engine = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     for operation in operations {
         let request = CommitRequest {
             commit_id: CommitId::generate(),
@@ -1276,9 +1282,16 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
             .pop()
             .expect("one result")
             .expect("commit");
-        loonfs_core::fold_wal_tail(&store, None, &namespace_id, None, &deadline())
-            .await
-            .expect("fold");
+        loonfs_core::fold_wal_tail(
+            &store,
+            None,
+            &namespace_id,
+            None,
+            &deadline(),
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        )
+        .await
+        .expect("fold");
         engine.invalidate_projection();
     }
 

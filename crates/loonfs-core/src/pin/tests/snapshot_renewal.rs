@@ -26,6 +26,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             &context,
             Default::default(),
             None,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("snapshot");
@@ -102,6 +103,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             &context,
             Default::default(),
             None,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("snapshot");
@@ -167,6 +169,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         &context,
         Default::default(),
         None,
+        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
     )
     .await
     .expect("snapshot");

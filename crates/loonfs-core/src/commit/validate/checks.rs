@@ -364,12 +364,6 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
             }
         })?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::RestoreTarget).await?;
-    let layout = view
-        .view()
-        .content_layout(&source_revision.content_ref.content_id)
-        .await?
-        .filter(|row| row.size_bytes >= source_revision.content_ref.size_bytes)
-        .map(|row| row.layout);
     Ok(vec![WalDelta::AppendFileRevision {
         delta_index: numbering.reserve_delta_index()?,
         inode_id,
@@ -377,7 +371,7 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
         content_ref: source_revision.content_ref,
         hash_state: source_revision.hash_state,
         crc64nvme: source_revision.crc64nvme,
-        layout,
+        layout: None,
     }])
 }
 

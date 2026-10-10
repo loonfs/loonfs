@@ -85,7 +85,10 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     assert_no_writes(&store);
 
     drop(engine);
-    let mut restarted = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut restarted = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     restarted
         .session_writer_epoch(&store, &context)
         .await

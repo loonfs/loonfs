@@ -60,6 +60,7 @@ async fn submit_operation<S: ObjectStore + ?Sized>(
         namespace_id,
         vec![candidate],
         context,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
     )
     .await;
     if results.len() != 1 {
@@ -154,6 +155,7 @@ pub(crate) async fn write_files_bytes<S: ObjectStore + ?Sized>(
         namespace_id,
         vec![CommitCandidate::prepared(request, prepared)],
         context,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
     )
     .await;
     results

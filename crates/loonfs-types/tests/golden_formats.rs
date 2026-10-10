@@ -340,7 +340,15 @@ fn sample_wal_payload() -> WalObjectPayload {
                 content_ref: sample_content_ref(),
                 hash_state: None,
                 crc64nvme: None,
-                layout: None,
+                layout: Some(loonfs_types::ContentLayout {
+                    extents: vec![loonfs_types::ContentExtent {
+                        owner_namespace_id: namespace_id(),
+                        content_id: sample_content_ref().content_id,
+                        object: loonfs_types::ExtentObject::Whole,
+                        offset: 0,
+                        length: sample_content_ref().size_bytes,
+                    }],
+                }),
             },
         },
     ];

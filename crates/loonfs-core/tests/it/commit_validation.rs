@@ -182,7 +182,10 @@ async fn valid_content_admission_skips_durable_content_validation() {
     )
     .expect("verify token");
 
-    let mut publisher = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone());
+    let mut publisher = loonfs_core::publish::NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     store.reset();
     let responses = publisher
         .publish_batch(

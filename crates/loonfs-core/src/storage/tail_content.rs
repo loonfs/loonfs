@@ -10,7 +10,7 @@ use crate::wal::{ProjectedContent, ProjectedWalTail};
 use bytes::Bytes;
 use loonfs_objectstore::{ByteRange, ImmutableWriteError, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::{ContentExtent, ContentLayout, ExtentObject, Sha256State};
+use loonfs_types::{ContentExtent, ContentLayout, ContentRef, ExtentObject, Sha256State};
 use tokio::sync::Semaphore;
 
 /// Joins the tail pieces and checks whole values before anything is written.
@@ -42,6 +42,54 @@ pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Bytes>
         validate_loaded_content_bytes(content_object_key_for_ref(newest)?, newest, &bytes)?;
     }
     Ok(bytes)
+}
+
+pub(crate) async fn materialize_content_layout<S: ObjectStore + ?Sized, L: LayoutLookup>(
+    store: &S,
+    lookup: &L,
+    tail: &ProjectedWalTail,
+    content_ref: &ContentRef,
+    merge_memory: &Semaphore,
+) -> Result<ContentLayout> {
+    let location = ContentLocation::resolve(lookup, Some(tail), content_ref).await?;
+    let mut layout =
+        if location.has_pieces() || (content_ref.size_bytes == 0 && location.is_resident()) {
+            let content = tail
+                .content_by_id(&content_ref.owner_namespace_id, &content_ref.content_id)
+                .expect("resident pieces should name a projected chain");
+            write_tail_content(
+                store,
+                lookup,
+                tail,
+                content,
+                assemble_tail_content(content)?,
+                merge_memory,
+            )
+            .await?
+            .layout
+        } else {
+            ContentLayout {
+                extents: location
+                    .extents
+                    .into_iter()
+                    .map(|located| located.extent)
+                    .collect(),
+            }
+        };
+    cut_layout(&mut layout, content_ref.size_bytes);
+    Ok(layout)
+}
+
+pub(crate) fn cut_layout(layout: &mut ContentLayout, size_bytes: u64) {
+    let mut remaining = size_bytes;
+    layout.extents.retain_mut(|extent| {
+        if remaining == 0 && size_bytes != 0 {
+            return false;
+        }
+        extent.length = extent.length.min(remaining);
+        remaining -= extent.length;
+        true
+    });
 }
 
 /// Writes the tail's bytes for a chain as one object, merging the chain's own small

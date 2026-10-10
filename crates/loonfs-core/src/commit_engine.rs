@@ -618,6 +618,7 @@ pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
 
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEngine {
+    content_merge_memory: Arc<tokio::sync::Semaphore>,
     namespace_id: NamespaceId,
     publish_tail: Option<PublishTailPosition>,
     projection_observed: Option<Observation>,
@@ -640,9 +641,13 @@ pub struct NamespaceCommitEngine {
 }
 
 impl NamespaceCommitEngine {
-    pub fn new(namespace_id: NamespaceId) -> Self {
+    pub fn new(
+        namespace_id: NamespaceId,
+        content_merge_memory: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
         Self {
             namespace_id,
+            content_merge_memory,
             publish_tail: None,
             projection_observed: None,
             acquired_anchor: None,
@@ -659,7 +664,11 @@ impl NamespaceCommitEngine {
     /// of its own, as a runtime's engine does in the shared one.
     #[cfg(test)]
     pub(crate) fn with_unshared_head_state(namespace_id: NamespaceId) -> Self {
-        Self::new(namespace_id).head_state(Arc::new(HeadStateCache::unshared(usize::MAX)))
+        Self::new(
+            namespace_id,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        )
+        .head_state(Arc::new(HeadStateCache::unshared(usize::MAX)))
     }
 
     /// Uses runtime-managed session state so the writer epoch and fenced status
@@ -881,6 +890,7 @@ impl NamespaceCommitEngine {
             context,
             &deadline,
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
+            &self.content_merge_memory,
         )
         .await;
         self.invalidate_projection();
@@ -1017,6 +1027,7 @@ impl NamespaceCommitEngine {
                 attempt: attempt.clone(),
                 tip: projection_observed.clone(),
             },
+            &self.content_merge_memory,
         )
         .await;
         self.projection_observed = Some(projection_observed);
@@ -1117,8 +1128,9 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidates: Vec<CommitCandidate>,
     context: &MutationContext,
+    content_merge_memory: Arc<tokio::sync::Semaphore>,
 ) -> Vec<Result<Commit>> {
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone(), content_merge_memory);
     let batch = Deadline::start(Arc::clone(&engine.timer));
     let mut results = vec![None; candidates.len()];
     let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
@@ -1147,8 +1159,9 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     options: DeleteNamespaceOptions,
     context: &MutationContext,
+    content_merge_memory: Arc<tokio::sync::Semaphore>,
 ) -> Result<DeleteNamespaceResponse> {
-    NamespaceCommitEngine::new(namespace_id.clone())
+    NamespaceCommitEngine::new(namespace_id.clone(), content_merge_memory)
         .delete_namespace(store, options, context)
         .await
 }
@@ -1446,7 +1459,10 @@ mod tests {
         // Writer B's session acquires the epoch; A's cached epoch is now
         // superseded.
         let writer_b = context("writer-b");
-        let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut engine_b = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         let takeover = engine_b
             .publish_batch(
                 &store,
@@ -1514,7 +1530,10 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        let mut engine_a = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut engine_a = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         engine_a
             .publish_batch(
                 store.inner(),
@@ -1549,7 +1568,10 @@ mod tests {
         // rechecks the etag.
         store.wait_until_blocked().await;
         let writer_b = context("writer-b");
-        let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut engine_b = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         engine_b
             .publish_batch(
                 store.inner(),
@@ -1593,7 +1615,10 @@ mod tests {
             .expect("writer a first commit");
 
         let writer_b = context("writer-b");
-        let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut engine_b = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         engine_b
             .publish_batch(
                 &store,
@@ -1632,8 +1657,11 @@ mod tests {
         // the session state, so the session stays terminally fenced and
         // never touches the head.
         drop(engine_a1);
-        let mut engine_a2 =
-            NamespaceCommitEngine::new(namespace_id.clone()).writer_session(session);
+        let mut engine_a2 = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        )
+        .writer_session(session);
         let still_fenced = engine_a2
             .publish_batch(
                 &store,
@@ -1768,6 +1796,7 @@ mod tests {
             &namespace_id,
             None,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("fold");
@@ -2016,6 +2045,7 @@ mod tests {
             &namespace_id,
             None,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("another process folds");
@@ -2066,6 +2096,7 @@ mod tests {
                 &namespace_id,
                 Some(input),
                 &Deadline::start(timer.clone()),
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
             )
             .await
             .expect("own fold");
@@ -2253,6 +2284,7 @@ mod tests {
                     &namespace_id,
                     None,
                     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                    &tokio::sync::Semaphore::new(32 * 1024 * 1024),
                 )
                 .await
                 .expect("another process folds");
@@ -2286,7 +2318,10 @@ mod tests {
         create(&store, &namespace_id, &writer)
             .await
             .expect("bootstrap");
-        let mut over_budget = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut over_budget = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         over_budget
             .session_writer_epoch(&store, &writer)
             .await
@@ -2325,7 +2360,10 @@ mod tests {
         assert_eq!(head_after.wal_no, head_before.wal_no);
         assert_eq!(wal_object_count(&store, &namespace_id).await, 1);
 
-        let mut healthy = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut healthy = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         let retried = healthy
             .publish_batch(
                 &store,
@@ -2356,7 +2394,10 @@ mod tests {
         create(&store, &namespace_id, &writer)
             .await
             .expect("bootstrap");
-        let mut seed = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut seed = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         seed.publish_batch(
             &store,
             vec![create_dir("seed-commit", "docs")],
@@ -2377,6 +2418,7 @@ mod tests {
             &writer,
             Default::default(),
             None,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -2384,7 +2426,10 @@ mod tests {
 
         // Without a cache, every publish view re-fetches the segment blocks
         // its validation walks need.
-        let mut uncached = NamespaceCommitEngine::new(namespace_id.clone());
+        let mut uncached = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         store.reset();
         uncached
             .publish_batch(
@@ -2419,7 +2464,11 @@ mod tests {
         );
 
         let cache = Arc::new(MetadataSegmentCache::unshared(usize::MAX));
-        let mut cached = NamespaceCommitEngine::new(namespace_id.clone()).segment_cache(cache);
+        let mut cached = NamespaceCommitEngine::new(
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        )
+        .segment_cache(cache);
         store.reset();
         cached
             .publish_batch(

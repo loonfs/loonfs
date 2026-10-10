@@ -171,13 +171,18 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     let store: loonfs::SharedObjectStore = log.clone();
     let namespace_id = NamespaceId::parse("inline-reads").expect("namespace");
     let writer_id = WriterId::parse("inline-writer").expect("writer");
-    NamespaceEngine::writer(store.clone(), namespace_id.clone(), writer_id.clone())
-        .bootstrap_namespace(
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions::default(),
-        )
-        .await
-        .expect("bootstrap");
+    NamespaceEngine::writer(
+        store.clone(),
+        namespace_id.clone(),
+        writer_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .bootstrap_namespace(
+        &loonfs_test_support::test_actor(),
+        &CreateNamespaceOptions::default(),
+    )
+    .await
+    .expect("bootstrap");
     let values: Vec<_> = [
         Bytes::new(),
         Bytes::from_static(b"small inline file"),
@@ -209,17 +214,20 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
         Vec::new(),
         values.clone(),
     );
-    let result = NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            &store,
-            [candidate],
-            &MutationContext {
-                writer_id,
-                now_ms: 1_000,
-            },
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await;
+    let result = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .publish_batch(
+        &store,
+        [candidate],
+        &MutationContext {
+            writer_id,
+            now_ms: 1_000,
+        },
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await;
     assert!(result.results[0].is_ok());
     for head_state_bytes in [0, DEFAULT_MAX_HEAD_STATE_BYTES] {
         let reader = uncached_segment_reader(&store, head_state_bytes).await;

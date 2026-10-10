@@ -59,7 +59,11 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
     )
     .await
     .expect("publish");
-    let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
+    let engine = NamespaceEngine::reader(
+        &store,
+        publisher.namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     for (index, value) in values.iter().enumerate() {
         let path = format!("/read-{index}");
         let inode_id = load_current_metadata_view(&store, &publisher.namespace_id)
@@ -227,7 +231,11 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
             .bytes
             .as_ptr()
     );
-    let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
+    let engine = NamespaceEngine::reader(
+        &store,
+        publisher.namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     store.reset();
     assert_eq!(
         engine
@@ -263,7 +271,11 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     .await
     .expect("publish");
     let mut context = fresh_context(&store, &publisher.namespace_id).await;
-    let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
+    let engine = NamespaceEngine::reader(
+        &store,
+        publisher.namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     engine
         .get_file("/source-0", &context, None)
         .await
@@ -324,7 +336,11 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
     .await
     .expect("publish");
     let context = fresh_context(&store, &publisher.namespace_id).await;
-    let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
+    let engine = NamespaceEngine::reader(
+        &store,
+        publisher.namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     let foreign = ContentRef::blob_v1(
         NamespaceId::parse("foreign").expect("owner"),
         value.content_ref().content_id.clone(),
@@ -440,7 +456,11 @@ async fn inline_checksum_failures_match_object_validation() {
         .await
         .expect("next WAL");
     let context = fresh_context(&store, &publisher.namespace_id).await;
-    let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
+    let engine = NamespaceEngine::reader(
+        &store,
+        publisher.namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     store.reset();
     let error = engine
         .get_file("/valid-0", &context, None)
@@ -509,7 +529,11 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
             }
         }
         let context = fresh_context(&store, &publisher.namespace_id).await;
-        let engine = NamespaceEngine::reader(&store, publisher.namespace_id.clone());
+        let engine = NamespaceEngine::reader(
+            &store,
+            publisher.namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        );
         for (index, value) in values.iter().enumerate() {
             let path = format!("/fold-{index}");
             let target = engine
@@ -569,7 +593,11 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
     )
     .await;
     let key = content_blob(&namespace_id, &original.content_id);
-    let engine = NamespaceEngine::reader(&store, namespace_id.clone());
+    let engine = NamespaceEngine::reader(
+        &store,
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     let read_context = fresh_context(&store, &namespace_id).await;
 
     store.reset();

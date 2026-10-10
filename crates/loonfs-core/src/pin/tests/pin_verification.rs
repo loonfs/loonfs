@@ -212,6 +212,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
                 &context,
                 &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
                 Arc::default(),
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
             )
             .await
             .expect("delete namespace during verification");
@@ -335,6 +336,7 @@ async fn a_pin_id_answers_only_operations_of_its_owner_kind() {
             &setup,
             Default::default(),
             None,
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("pin");

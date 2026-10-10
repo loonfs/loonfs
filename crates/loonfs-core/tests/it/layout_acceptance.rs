@@ -38,33 +38,36 @@ async fn put_file<S: ObjectStore + ?Sized>(
         .await
         .expect("prepare existing content");
     let content_ref = prepared.content_ref().clone();
-    NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            vec![CommitCandidate::prepared(
-                CommitRequest::single(
-                    loonfs_types::CommitId::generate(),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::PutFile {
-                        path: AbsolutePath::parse(absolute_path).expect("path"),
-                        content_ref: Some(content_ref),
-                        inline_content: None,
-                        behavior: loonfs_types::DestinationBehavior::NoReplace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-                vec![prepared],
-            )],
-            context,
-            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("put file");
+    NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .publish_batch(
+        store,
+        vec![CommitCandidate::prepared(
+            CommitRequest::single(
+                loonfs_types::CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::PutFile {
+                    path: AbsolutePath::parse(absolute_path).expect("path"),
+                    content_ref: Some(content_ref),
+                    inline_content: None,
+                    behavior: loonfs_types::DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+            ),
+            vec![prepared],
+        )],
+        context,
+        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("put file");
 }
 
 #[tokio::test]

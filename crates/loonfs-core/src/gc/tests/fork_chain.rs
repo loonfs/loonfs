@@ -45,6 +45,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
                 Arc::new(StdMonotonicTimer::default()),
                 Default::default(),
                 None,
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
             )
             .await
             .expect("fork");
@@ -54,9 +55,15 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     let middle_pin = read_fork_record(&store, &namespaces[0]).await;
     let leaf_pin = read_fork_record(&store, &namespaces[1]).await;
     for namespace_id in &namespaces[..2] {
-        delete_namespace(&store, namespace_id, Default::default(), &setup)
-            .await
-            .expect("delete ancestor");
+        delete_namespace(
+            &store,
+            namespace_id,
+            Default::default(),
+            &setup,
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        )
+        .await
+        .expect("delete ancestor");
     }
     let mut aged_now = 0;
     for namespace_id in &namespaces {
@@ -81,9 +88,15 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         assert_leaf_reads_every_owner(&store, &namespaces).await;
     }
 
-    delete_namespace(&store, &namespaces[2], Default::default(), &setup)
-        .await
-        .expect("delete leaf");
+    delete_namespace(
+        &store,
+        &namespaces[2],
+        Default::default(),
+        &setup,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .await
+    .expect("delete leaf");
     // Deletion alone must not release either link in the protection chain.
     for index in [0, 1] {
         let report = gc_namespace(&store, None, &namespaces[index], &options(), &aged)

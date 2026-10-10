@@ -19,7 +19,7 @@ The inline sequence was faster in all 24 rounds. These timings cover store reque
 
 ## A reference names content, not a location
 
-An inline commit records the same `append_file_revision` delta as an uploaded commit, with an ordinary `blob_v1` reference. The reference names a prefix of a chain. Its revision delta carries the layout of its folded bytes. The WAL entry is a piece: the whole value at offset 0, or, for an append, the bytes after a prefix that is already durable. Until the fold, the WAL record holds the only copy of those bytes.
+An inline commit records the same `append_file_revision` delta as an uploaded commit, with an ordinary `blob_v1` reference. The reference names a prefix of a chain. A fresh chain's revision delta carries the layout of its base bytes. A same-chain append uses the chain's earlier revisions and carries no layout. The WAL entry is a piece: the whole value at offset 0, or, for an append, the bytes after a prefix that is already durable. The WAL holds those bytes until a fold covers the record. A copy, restore, fresh chain, or direct download can materialize them before the fold. A same-chain append leaves them in the WAL.
 
 This keeps one identity for one piece of content over its whole life. Revision rows, the change feed, retained receipts, and equality checks such as the speculative read's same-content test never see two different references for the same bytes. Readers resolve a reference through the read view and never build a content key directly, so no reader depends on the object existing as soon as the commit is visible.
 
@@ -42,7 +42,7 @@ Identity is fixed when content is prepared. Preparing content at or under the wr
 
 ## Where the writer chooses the path
 
-Every inline limit is a preference. When a limit is reached, the writer stages that content through an upload session under its own content ID, and no inline limit produces a write error. Content is never staged inside the publication loop. The writer decides at three points:
+Every inline limit is a preference. When a limit is reached, the writer stages that content through an upload session under its own content ID, and no inline limit produces a write error. Uploads are never staged inside the publication loop. Validation can materialize pending pieces for a copy, restore, or fresh chain. The writer decides at three points:
 
 - When it builds the commit candidate. A commit must fit in one WAL object, so a commit whose inline total would pass the per-object budget keeps values inline in operation order until the budget is reached and stages the rest. The commit stays atomic.
 - At admission, against the unfolded inline bytes that the publisher knows about. Self-hosting describes how that count is kept.
@@ -60,9 +60,9 @@ A direct download returns a presigned URL for the content object. Inline content
 
 ## Folding
 
-A fold writes every piece in its range into immutable content objects before it writes segments or publishes the manifest. The chain's own layout names the objects that hold its earlier bytes. A fresh chain's revision delta carries the base's folded extents cut to the base size. Its pieces copy the base's unfolded bytes and then add the appended bytes. The fold shares those extents and writes the new chain's pieces without reading or copying the base's objects.
+A fold writes every piece in its range into immutable content objects before it writes segments or publishes the manifest. The chain's own layout names the objects that hold its earlier bytes. A fresh chain's revision delta carries the base's extents cut to the base size. Validation first writes any pending base pieces through the fold's materialization. The fresh chain shares the returned extents and carries only its appended bytes as pieces. Copies and restores also carry complete layouts, so their reads survive removal of the source chain's layout row.
 
-The fold writes a whole object or a span according to the rules in format section 7.2. It may merge the chain's own last extent with its pieces within the read and memory limits there. A chain from a direct upload can have no SHA-256 state. Its appends continue the CRC-64/NVME the revision records, and the fold does not recompute revision digests. Content writes run with bounded concurrency after the fold's publication budget starts, and the fold checks the budget when they return.
+The fold writes a whole object or a span according to the rules in format section 7.2. It may merge the chain's own last extent with its pieces within the read and memory limits there. A chain from a direct upload can have no SHA-256 state. Its appends continue the CRC-64/NVME the revision records, and the fold does not recompute revision digests. Validation, folds, and direct downloads share the content merge memory pool in `ExecutionBudget`, which defaults to 128 MiB. One merge still holds at most 32 MiB. Content writes run with bounded concurrency after the fold's publication budget starts, and the fold checks the budget when they return.
 
 A fold's objects stay rooted while a fold can still need them. The unfolded tail names its pieces and the locally owned extents in its layout rows. A rooted manifest's revisions name the layouts whose extents keep those objects after folding ([format section 11.9](../specs/format.md#119-content-roots)). A fold that crashes, exceeds its budget, or loses the manifest race leaves objects that the next fold can reuse. An immutable write succeeds when an occupied key has the same attestation. Different bytes stop the fold without publishing.
 
@@ -72,15 +72,15 @@ A fold becomes due when the unfolded tail reaches 32 WAL objects, or when the by
 
 ## Collection
 
-Collection has no family for inline content. WAL objects are collected at or below `folded_wal_no`, and the fold writes inline bytes to content objects before it publishes that boundary. A content object that a fold or an early direct download wrote is collected like any other: the unfolded WAL tail names it until a manifest covers it, and a rooted manifest's revisions name it after that. Upload sessions are not involved in an inline write. Unpublished inline content cannot exist, so the ownership question that sessions answer does not arise.
+Collection has no family for inline content. WAL objects are collected at or below `folded_wal_no`, and the fold writes inline bytes to content objects before it publishes that boundary. A content object that a fold or an early direct download wrote is collected like any other: the unfolded WAL tail names it until a manifest covers it, and a rooted manifest's revisions name it after that. Upload sessions are not involved in an inline write. A rejected or interrupted publication can leave a materialized extent. Collection removes it after the grace when no root names it.
 
 ## Costs
 
 - A cold reader replays a tail that can hold MiB rather than tens of KiB. Metadata-only operations pay this too, because a cold stat or list replays the same tail. The byte trigger bounds it.
 - Commits share WAL objects. Inline bytes make an object larger and its PUT slower, and every commit in the batch waits, including commits with no content. The per-object budget is small for this reason.
-- A fold does more work: up to thousands of small writes, off the commit path. Request cost still falls, from four writes per small file to two.
+- A fold does more work: up to thousands of small writes. A copy, restore, or fresh chain that needs pending bytes moves their content write into validation.
 - A WAL object holds a second copy of small content until it is folded and collected. Inline bytes also make change-feed reads larger.
-- The first direct download of a small file written since the last fold costs one extra content write.
+- A direct download, copy, restore, or fresh chain can write pending bytes before the fold. Same-chain appends write only the WAL.
 - The fingerprint contract has a second content form, with its own pinned test vectors.
 - A deployment that must keep file bytes out of its metadata store turns inline writes off. Inlining is writer policy.
 

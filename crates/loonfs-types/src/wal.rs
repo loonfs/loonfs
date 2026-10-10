@@ -577,7 +577,7 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), Envel
         for delta in &record.deltas {
             let WalDelta::AppendFileRevision {
                 content_ref,
-                layout: Some(layout),
+                layout,
                 ..
             } = &delta.delta
             else {
@@ -588,6 +588,24 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), Envel
                 content_id: content_ref.content_id.clone(),
                 reason,
             };
+            let first_offset = record
+                .inline_content
+                .iter()
+                .filter(|piece| piece.content_id == content_ref.content_id)
+                .map(|piece| piece.offset)
+                .min();
+            if first_offset == Some(0) {
+                if layout.is_some() {
+                    return Err(invalid("a whole value carries no layout"));
+                }
+                continue;
+            }
+            let Some(layout) = layout else {
+                if first_offset.is_some() {
+                    continue;
+                }
+                return Err(invalid("a reference without pieces requires a layout"));
+            };
             let size_bytes = layout
                 .extents
                 .iter()
@@ -596,22 +614,10 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), Envel
             layout
                 .validate(size_bytes)
                 .map_err(|error| invalid(error.reason))?;
-            let first_offset = record
-                .inline_content
-                .iter()
-                .filter(|piece| piece.content_id == content_ref.content_id)
-                .map(|piece| piece.offset)
-                .min();
-            if first_offset == Some(0) {
-                return Err(invalid("a whole value carries no layout"));
-            }
-            if size_bytes < first_offset.unwrap_or(content_ref.size_bytes) {
+            if size_bytes != first_offset.unwrap_or(content_ref.size_bytes) {
                 return Err(invalid(
-                    "layout does not cover the bytes before the pieces or the reference size",
+                    "layout size must equal the first piece offset or the reference size",
                 ));
-            }
-            if first_offset.is_some_and(|offset| offset > 0 && size_bytes != offset) {
-                return Err(invalid("layout size must equal the first piece offset"));
             }
         }
     }
@@ -840,6 +846,22 @@ mod tests {
         let record = &mut payload.records[0];
         let bytes = std::mem::take(&mut record.inline_content[0].bytes);
         let entry = record.inline_content[0].clone();
+        if let WalDelta::AppendFileRevision {
+            content_ref,
+            layout,
+            ..
+        } = &mut record.deltas[0].delta
+        {
+            *layout = Some(crate::ContentLayout {
+                extents: vec![crate::ContentExtent {
+                    owner_namespace_id: content_ref.owner_namespace_id.clone(),
+                    content_id: content_ref.content_id.clone(),
+                    object: crate::ExtentObject::Whole,
+                    offset: 0,
+                    length: 3,
+                }],
+            });
+        }
         record.inline_content = vec![
             WalInlineContent {
                 offset: 3,
@@ -933,15 +955,18 @@ mod tests {
     }
 
     #[test]
-    fn revision_layouts_cover_references_or_end_at_the_first_piece() {
+    fn revision_layouts_equal_the_reference_size_or_first_piece_offset() {
         for (piece_offset, layout_size, valid) in [
-            (None, 3, true),
-            (None, 5, true),
-            (None, 2, false),
-            (Some(2), 2, true),
-            (Some(2), 1, false),
-            (Some(2), 3, false),
-            (Some(0), 1, false),
+            (None, Some(3), true),
+            (None, Some(5), false),
+            (None, Some(2), false),
+            (None, None, false),
+            (Some(2), Some(2), true),
+            (Some(2), Some(1), false),
+            (Some(2), Some(3), false),
+            (Some(2), None, true),
+            (Some(0), Some(1), false),
+            (Some(0), None, true),
         ] {
             let mut payload = inline_wal_object(&[3]);
             if let Some(offset) = piece_offset {
@@ -956,14 +981,14 @@ mod tests {
             else {
                 panic!("revision");
             };
-            *layout = Some(crate::ContentLayout {
+            *layout = layout_size.map(|length| crate::ContentLayout {
                 extents: vec![crate::ContentExtent {
                     owner_namespace_id: NamespaceId::parse("other").expect("namespace"),
                     content_id: ContentId::parse("con_fedcba9876543210fedcba9876543210")
                         .expect("content"),
                     object: crate::ExtentObject::Whole,
                     offset: 0,
-                    length: layout_size,
+                    length,
                 }],
             });
             let decoded = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload));
@@ -971,7 +996,7 @@ mod tests {
             if valid {
                 assert!(
                     decoded.is_ok(),
-                    "{piece_offset:?}, {layout_size}: {decoded:?}"
+                    "{piece_offset:?}, {layout_size:?}: {decoded:?}"
                 );
                 assert!(encoded.is_ok());
             } else {

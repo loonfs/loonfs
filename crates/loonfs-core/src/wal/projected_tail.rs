@@ -56,16 +56,6 @@ impl ProjectedWalTail {
         }
     }
 
-    pub(crate) fn content_snapshot(&self) -> Self {
-        Self {
-            contents: self.contents.clone(),
-            content_positions: self.content_positions.clone(),
-            inline_bytes: self.inline_bytes,
-            inline_entry_heap_bytes: self.inline_entry_heap_bytes,
-            ..Self::default()
-        }
-    }
-
     /// Applies one commit of `namespace_id`'s WAL: its pieces, then its rows.
     pub(crate) fn apply_commit(
         &mut self,

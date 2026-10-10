@@ -21,6 +21,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
         let directory = tempdir().expect("directory");
         let source = NamespaceId::parse("snapshot-source").expect("source");
         let target = NamespaceId::parse("snapshot-target").expect("target");
@@ -48,6 +49,7 @@ impl Fixture {
             &setup,
             Default::default(),
             None,
+            &merge_memory,
         )
         .await
         .expect("snapshot");
@@ -126,6 +128,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let fixture = Fixture::new().await;
     let gc_gate = BlockingStore::new(
         fixture.store.clone(),
@@ -165,6 +168,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
             Arc::new(StdMonotonicTimer::default()),
             Default::default(),
             None,
+            &merge_memory,
         )
         .await
         .expect("install historical fork")
@@ -205,6 +209,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
 
 #[tokio::test]
 async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let fixture = Fixture::new().await;
     let key = pin(&fixture.source, &fixture.snapshot.pin_id);
     let reads = AtomicUsize::new(0);
@@ -225,7 +230,8 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             &fixture.context,
             Arc::new(StdMonotonicTimer::default()),
             Default::default(),
-            None
+            None,
+            &merge_memory,
         ),
         async {
             gate.wait_until_blocked().await;
@@ -279,6 +285,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
 
 #[tokio::test]
 async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let fixture = Fixture::new().await;
     let writer = acquire_writer_epoch(fixture.store.as_ref(), &fixture.source, &fixture.context)
         .await
@@ -300,7 +307,8 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
             &fixture.context,
             Arc::new(StdMonotonicTimer::default()),
             Default::default(),
-            None
+            None,
+            &merge_memory,
         ),
         async {
             gate.wait_until_blocked().await;
@@ -312,6 +320,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
                 &fixture.context,
                 &Deadline::start(Arc::new(StdMonotonicTimer::default())),
                 Arc::default(),
+                &merge_memory,
             )
             .await
             .expect("delete source before the fork pin lands");
@@ -340,6 +349,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
 
 #[tokio::test]
 async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began() {
+    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
     let directory = tempdir().expect("directory");
     let source = NamespaceId::parse("snapshot-source").expect("source");
     let target = NamespaceId::parse("snapshot-target").expect("target");
@@ -358,6 +368,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         &context,
         Default::default(),
         None,
+        &merge_memory,
     )
     .await
     .expect("snapshot");
@@ -379,7 +390,8 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
             &context,
             clock.clone(),
             Default::default(),
-            None
+            None,
+            &merge_memory,
         ),
         async {
             store.wait_until_blocked().await;

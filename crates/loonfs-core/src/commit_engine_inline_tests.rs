@@ -145,6 +145,27 @@ async fn commit_piece(
     offset: usize,
     layout: Option<loonfs_types::ContentLayout>,
 ) -> ContentRef {
+    let layout = if offset > 0 && layout.is_none() {
+        let view = load_current_metadata_view(store, namespace_id)
+            .await
+            .expect("base view");
+        let mut state = loonfs_types::Sha256State::new();
+        state.update(&whole[..offset]);
+        let base = ContentRef::blob_v1_streamed(namespace_id.clone(), content_id.clone(), &state);
+        Some(
+            crate::storage::tail_content::materialize_content_layout(
+                store,
+                &view.projected_metadata_view(),
+                view.wal_tail(),
+                &base,
+                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            )
+            .await
+            .expect("base layout"),
+        )
+    } else {
+        layout
+    };
     let mut hash_state = loonfs_types::Sha256State::new();
     hash_state.update(whole);
     let content_ref =
@@ -471,6 +492,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             &engine.namespace_id,
             input,
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
         )
         .await
         .expect("fold inline content");

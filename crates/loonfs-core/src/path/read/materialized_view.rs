@@ -7,7 +7,6 @@ use crate::authorize::{Absence, ReadAccess};
 #[cfg(test)]
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result, StoreFailureClass};
-use crate::limits::MAX_MERGED_EXTENT_BYTES;
 use crate::manifest::{
     load_basis_metadata_segments, HeadStateCache, MetadataSegmentCache, VerifiedMetadataSegments,
     WalTailProjectionCacheKey,
@@ -409,6 +408,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &S,
         content_ref: &ContentRef,
         start_offset: u64,
+        merge_memory: &Semaphore,
     ) -> Result<String> {
         if start_offset != 0 && start_offset >= content_ref.size_bytes {
             return Err(CoreError::ResumeOffsetOutOfRange {
@@ -451,7 +451,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 &self.wal_tail,
                 content,
                 assemble_tail_content(content)?,
-                &Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize),
+                merge_memory,
             )
             .await
             .map_err(|error| match error {
@@ -488,6 +488,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
         start_offset: u64,
         access: &ReadAccess<'_, S>,
+        merge_memory: &Semaphore,
     ) -> Result<DirectDownloadTarget> {
         let (entry, content_ref) = self
             .resolve_file_content(absolute_path, revision_no, access)
@@ -499,7 +500,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             });
         };
         let object_key = self
-            .download_object_key(store, &content_ref, start_offset)
+            .download_object_key(store, &content_ref, start_offset, merge_memory)
             .await?;
 
         Ok(DirectDownloadTarget {
@@ -590,6 +591,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
         start_offset: u64,
         access: &ReadAccess<'_, S>,
+        merge_memory: &Semaphore,
     ) -> Result<DirectDownloadByInodeTarget> {
         let revision = match revision_no {
             Some(revision_no) => {
@@ -599,7 +601,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             None => self.current_revision_for_inode(inode_id, access).await?,
         };
         let object_key = self
-            .download_object_key(store, &revision.content_ref, start_offset)
+            .download_object_key(store, &revision.content_ref, start_offset, merge_memory)
             .await?;
         Ok(DirectDownloadByInodeTarget {
             inode_id,
@@ -1307,6 +1309,7 @@ mod tests {
                     operation,
                 ))],
                 &context,
+                std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
             )
             .await
             .into_iter()
@@ -1358,6 +1361,7 @@ mod tests {
                 },
             ))],
             &context(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
         )
         .await
         .into_iter()

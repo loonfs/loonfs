@@ -897,8 +897,12 @@ fn read_engine<'a>(
     namespace_id: &NamespaceId,
     principal: &str,
 ) -> loonfs_core::NamespaceReaderEngine<&'a LocalFsStore> {
-    loonfs_core::NamespaceReaderEngine::reader(store, namespace_id.clone())
-        .with_subject(subject(principal, &[principal]))
+    loonfs_core::NamespaceReaderEngine::reader(
+        store,
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    )
+    .with_subject(subject(principal, &[principal]))
 }
 
 async fn resolve_path(
@@ -1304,7 +1308,11 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
     );
     for engine in [
         read_engine(&store, &namespace_id, "prn_root"),
-        loonfs_core::NamespaceReaderEngine::reader(&store, namespace_id.clone()),
+        loonfs_core::NamespaceReaderEngine::reader(
+            &store,
+            namespace_id.clone(),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        ),
     ] {
         engine
             .require_administrator(&context)
@@ -1324,7 +1332,11 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
             b"body"
         );
     }
-    let engine = loonfs_core::NamespaceReaderEngine::reader(&store, namespace_id);
+    let engine = loonfs_core::NamespaceReaderEngine::reader(
+        &store,
+        namespace_id,
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+    );
     let error = engine
         .resolve_path("/team/file", StatOptions::default(), &context)
         .await
