@@ -683,6 +683,7 @@ mod tests {
             loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         )
     }
 
@@ -1081,7 +1082,7 @@ mod tests {
             mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
-                checksum_algorithm: None,
+                checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 part_size_bytes: None,
                 access: None,
                 content_ref: Some(test_content_ref(b"content")),
@@ -1143,7 +1144,7 @@ mod tests {
                 "open",
                 UploadSessionStatus::Open {
                     expires_at_ms: 1_000,
-                    checksum_algorithm: None,
+                    checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
                     part_size_bytes: None,
                     access: None,
                     content_ref: None,

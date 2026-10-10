@@ -9,6 +9,7 @@ mod fake_multipart_store;
 mod intercept_store;
 mod key_predicate;
 mod latency_store;
+mod memory_store;
 mod metadata_map_store;
 mod operation;
 mod recording_store;
@@ -22,6 +23,7 @@ pub use fake_multipart_store::{FakeMultipartStore, MultipartChecksumEnforcement}
 pub use intercept_store::{Intercept, InterceptStore, Interceptor, Outcome};
 pub use key_predicate::KeyPredicate;
 pub use latency_store::{LatencyInterceptor, LatencyStore};
+pub use memory_store::MemoryStore;
 pub use metadata_map_store::MetadataMapStore;
 pub use operation::{OperationClass, OperationContext, OperationKind, RecordedOperation};
 pub use recording_store::{RecordedGet, RecordingInterceptor, RecordingStore, StoreCounts};

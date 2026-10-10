@@ -403,11 +403,11 @@ where
 }
 
 /// Maximum body size for starting an upload or signing multipart parts.
-/// A request with 1,000 part claims is at most 131,011 bytes, so 1 MiB leaves
+/// A request with 1,000 part claims is at most 85,011 bytes, so 1 MiB leaves
 /// ample room for every valid request.
 pub(super) const MAX_UPLOAD_CONTROL_BODY_BYTES: usize = 1024 * 1024;
 
-const MAX_SERIALIZED_SIGNING_PART_BYTES: usize = 130;
+const MAX_SERIALIZED_SIGNING_PART_BYTES: usize = 84;
 const MAX_SIGNING_ENVELOPE_BYTES: usize = 12;
 const _: () = assert!(
     MAX_SIGNED_PARTS_PER_REQUEST * MAX_SERIALIZED_SIGNING_PART_BYTES
@@ -418,19 +418,19 @@ const _: () = assert!(
 
 /// The largest completion body accepted by the multipart completion route.
 ///
-/// A completion may contain 10,000 parts. The calculation allows 398 bytes
+/// A completion may contain 10,000 parts. The calculation allows 352 bytes
 /// per part: a five-digit part number, a 256-byte quoted ETag, and a full
-/// SHA-256 checksum. The remaining JSON fields use at most 167 bytes. This
+/// CRC-64/NVME checksum. The remaining JSON fields use at most 121 bytes. This
 /// puts the largest expected request at:
 ///
-/// `10_000 × 398 + 9_999 commas + 167 = 3_990_166 bytes`.
+/// `10_000 × 352 + 9_999 commas + 121 = 3_530_120 bytes`.
 ///
 /// The 8 MiB limit leaves room for future fields. Recalculate it if the part
 /// limit or expected ETag size changes.
 pub(super) const MAX_COMPLETION_BODY_BYTES: usize = 8 * 1024 * 1024;
 
-const MAX_SERIALIZED_COMPLETION_PART_BYTES: usize = 398;
-const MAX_COMPLETION_ENVELOPE_BYTES: usize = 167;
+const MAX_SERIALIZED_COMPLETION_PART_BYTES: usize = 352;
+const MAX_COMPLETION_ENVELOPE_BYTES: usize = 121;
 const _: () = assert!(
     (MAX_MULTIPART_PARTS as usize) * MAX_SERIALIZED_COMPLETION_PART_BYTES
         + (MAX_MULTIPART_PARTS as usize - 1)

@@ -21,8 +21,7 @@ use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalI
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,
     Checksum, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName, InodeId,
-    MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, Sha256State,
-    WriterId,
+    MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, WriterId,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
@@ -172,14 +171,6 @@ impl HeapBytes for Checksum {
     }
 }
 
-// The state keeps exactly its pending bytes, the length past the last
-// whole 64-byte block.
-impl HeapBytes for Sha256State {
-    fn heap_bytes(&self) -> usize {
-        (self.length() % 64) as usize
-    }
-}
-
 impl HeapBytes for ContentRef {
     fn heap_bytes(&self) -> usize {
         self.owner_namespace_id.heap_bytes()
@@ -285,11 +276,7 @@ impl HeapBytes for DirentryBindingRecord {
 
 impl HeapBytes for RevisionRecord {
     fn heap_bytes(&self) -> usize {
-        self.commit_id.heap_bytes()
-            + self.committed_by.heap_bytes()
-            + self.content_ref.heap_bytes()
-            + self.hash_state.heap_bytes()
-            + self.crc64nvme.heap_bytes()
+        self.commit_id.heap_bytes() + self.committed_by.heap_bytes() + self.content_ref.heap_bytes()
     }
 }
 
@@ -371,16 +358,9 @@ impl HeapBytes for WalCommitDelta {
             } => name_key.heap_bytes() + display_name.heap_bytes() + child_created_by.heap_bytes(),
             WalDelta::AppendFileRevision {
                 content_ref,
-                hash_state,
-                crc64nvme,
                 layout,
                 ..
-            } => {
-                content_ref.heap_bytes()
-                    + hash_state.heap_bytes()
-                    + crc64nvme.heap_bytes()
-                    + layout.heap_bytes()
-            }
+            } => content_ref.heap_bytes() + layout.heap_bytes(),
             WalDelta::TombstoneSubtree {
                 deleted_binding, ..
             } => deleted_binding.heap_bytes(),

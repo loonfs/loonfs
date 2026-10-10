@@ -91,13 +91,6 @@ pub enum CoreError {
     },
     #[error("an append carries {size_bytes} bytes; one append carries at most {max_bytes}")]
     AppendTooLarge { size_bytes: usize, max_bytes: usize },
-    /// The file's content records neither a SHA-256 state nor a CRC-64/NVME,
-    /// so the checksum of the appended content cannot follow from it.
-    #[error(
-        "cannot append to `{target}`: its content records no SHA-256 state or CRC-64/NVME; \
-         write the whole file instead"
-    )]
-    AppendNotSupported { target: String },
     /// The request contains more items than one batch may read. No items were
     /// read; split the request into smaller batches.
     #[error("asked for {requested} items, over the {max} one batch answers")]
@@ -420,7 +413,6 @@ impl CoreError {
             CoreError::ContentTooLarge { .. }
             | CoreError::CommitTooLarge { .. }
             | CoreError::AppendTooLarge { .. } => ErrorCode::ContentTooLarge,
-            CoreError::AppendNotSupported { .. } => ErrorCode::NotSupported,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespaceUnrestricted { .. } => ErrorCode::NamespaceUnrestricted,
@@ -511,7 +503,6 @@ impl CoreError {
             | CoreError::ContentTooLarge { .. }
             | CoreError::CommitTooLarge { .. }
             | CoreError::AppendTooLarge { .. }
-            | CoreError::AppendNotSupported { .. }
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }

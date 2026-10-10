@@ -342,7 +342,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     let upload_id = begin.upload_id;
     let (checksum_algorithm, access) = match begin.status {
         UploadSessionStatus::Open {
-            checksum_algorithm: Some(checksum_algorithm),
+            checksum_algorithm,
             access: Some(access),
             ..
         } => (checksum_algorithm, access),
@@ -470,7 +470,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     let (part_size_bytes, checksum_algorithm) = match begin.status {
         UploadSessionStatus::Open {
             part_size_bytes: Some(part_size_bytes),
-            checksum_algorithm: Some(checksum_algorithm),
+            checksum_algorithm,
             ..
         } => (part_size_bytes, checksum_algorithm),
         other => panic!("expected direct_multipart, found {other:?}"),

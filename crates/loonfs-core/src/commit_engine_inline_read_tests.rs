@@ -345,6 +345,7 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
         NamespaceId::parse("foreign").expect("owner"),
         value.content_ref().content_id.clone(),
         b"foreign",
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let key = content_blob(&foreign.owner_namespace_id, &foreign.content_id);
     store

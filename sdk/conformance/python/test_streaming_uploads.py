@@ -112,6 +112,7 @@ def test_streaming_uploads(fixture):
                     **session,
                     "status": "open",
                     "expires_at_ms": 2000000000000,
+                    "checksum_algorithm": fixture["algorithm"],
                     "content_ref": claim,
                 },
             )

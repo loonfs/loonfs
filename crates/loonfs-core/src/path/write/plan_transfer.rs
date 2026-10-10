@@ -361,7 +361,6 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
     Ok(CompiledFilesystemOperation {
         ops,
         appended: None,
-        source_revision: Some(revision),
     })
 }
 

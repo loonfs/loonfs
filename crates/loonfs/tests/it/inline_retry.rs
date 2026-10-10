@@ -70,6 +70,7 @@ fn inline(id: &str, who: &str, bytes: &'static [u8]) -> CommitCandidate {
         namespace(),
         ContentId::generate(),
         Bytes::from_static(bytes),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     CommitCandidate::with_inline_content(
         request(

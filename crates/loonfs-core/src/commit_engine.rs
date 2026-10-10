@@ -29,10 +29,10 @@ use loonfs_types::format::wal::{
 #[cfg(test)]
 use loonfs_types::ChangeSeq;
 use loonfs_types::{
-    Checksum, CommitId, ContentId, ContentRef, DeleteNamespaceResponse, ManifestNo, NamespaceId,
-    Sha256State,
+    CommitId, ContentId, ContentRef, DeleteNamespaceResponse, InlineContentIdentity, ManifestNo,
+    NamespaceId,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -44,7 +44,7 @@ pub struct CommitCandidate {
     content: ContentPreparation,
     maintenance: bool,
     inline_content: Vec<InlineContent>,
-    inline_identity_content_ids: HashSet<ContentId>,
+    inline_content_identities: BTreeMap<ContentId, InlineContentIdentity>,
 }
 
 /// The result of preparing external content referenced by a mutation.
@@ -97,7 +97,7 @@ impl CommitCandidate {
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: true,
             inline_content: Vec::new(),
-            inline_identity_content_ids: HashSet::new(),
+            inline_content_identities: BTreeMap::new(),
         }
     }
 
@@ -116,7 +116,7 @@ impl CommitCandidate {
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: false,
             inline_content: Vec::new(),
-            inline_identity_content_ids: HashSet::new(),
+            inline_content_identities: BTreeMap::new(),
         }
     }
 
@@ -141,11 +141,13 @@ impl CommitCandidate {
 
     /// Rejects new publication while preserving the identity needed for receipt replay.
     pub fn reject_content_preparation(mut self, error: ContentPreparationError) -> Self {
-        self.inline_identity_content_ids.extend(
-            self.inline_content
-                .drain(..)
-                .map(|value| value.content_ref().content_id.clone()),
-        );
+        self.inline_content_identities
+            .extend(self.inline_content.drain(..).map(|value| {
+                (
+                    value.content_ref().content_id.clone(),
+                    InlineContentIdentity::from_bytes(value.bytes()),
+                )
+            }));
         self.content = ContentPreparation::Rejected(error);
         self
     }
@@ -207,55 +209,41 @@ impl CommitCandidate {
                 _ => {}
             }
         }
+        if let Some(value) = self
+            .inline_content
+            .iter()
+            .find(|value| &value.content_ref().content_id == content_id)
+        {
+            self.inline_content_identities.insert(
+                reference.content_id.clone(),
+                InlineContentIdentity::from_bytes(value.bytes()),
+            );
+        }
         self.inline_content
             .retain(|value| &value.content_ref().content_id != content_id);
-        self.inline_identity_content_ids
-            .insert(reference.content_id.clone());
         if let ContentPreparation::Ready(proofs) = &mut self.content {
             proofs.push(proof);
         }
     }
 
-    /// Digest continuation and uploaded placement carried by this candidate.
-    pub(crate) fn revision_content(
+    pub(crate) fn revision_layout(
         &self,
         content_ref: &ContentRef,
-    ) -> (
-        Option<Sha256State>,
-        Option<Checksum>,
-        Option<loonfs_types::ContentLayout>,
-    ) {
-        if let Some(value) = self
-            .inline_content
-            .iter()
-            .find(|value| value.content_ref() == content_ref)
-        {
-            return (
-                Some(value.hash_state().clone()),
-                Some(value.crc64nvme().clone()),
-                None,
-            );
-        }
+    ) -> Option<loonfs_types::ContentLayout> {
         let ContentPreparation::Ready(proofs) = &self.content else {
-            return (None, None, None);
+            return None;
         };
         proofs
             .iter()
             .find(|proof| proof.content_ref() == content_ref)
-            .map_or((None, None, None), |proof| {
-                (
-                    proof.hash_state().cloned(),
-                    proof.crc64nvme().cloned(),
-                    Some(loonfs_types::ContentLayout {
-                        extents: vec![loonfs_types::ContentExtent {
-                            owner_namespace_id: content_ref.owner_namespace_id.clone(),
-                            content_id: content_ref.content_id.clone(),
-                            object: loonfs_types::ExtentObject::Whole,
-                            offset: 0,
-                            length: content_ref.size_bytes,
-                        }],
-                    }),
-                )
+            .map(|_| loonfs_types::ContentLayout {
+                extents: vec![loonfs_types::ContentExtent {
+                    owner_namespace_id: content_ref.owner_namespace_id.clone(),
+                    content_id: content_ref.content_id.clone(),
+                    object: loonfs_types::ExtentObject::Whole,
+                    offset: 0,
+                    length: content_ref.size_bytes,
+                }],
             })
     }
 
@@ -324,8 +312,17 @@ impl CommitCandidate {
             &self
                 .inline_content
                 .iter()
-                .map(|value| value.content_ref().content_id.clone())
-                .chain(self.inline_identity_content_ids.iter().cloned())
+                .map(|value| {
+                    (
+                        value.content_ref().content_id.clone(),
+                        InlineContentIdentity::from_bytes(value.bytes()),
+                    )
+                })
+                .chain(
+                    self.inline_content_identities
+                        .iter()
+                        .map(|(id, identity)| (id.clone(), identity.clone())),
+                )
                 .collect(),
         )
     }
@@ -360,6 +357,7 @@ impl CommitCandidate {
                         value,
                     ))
                     .saturating_add(std::mem::size_of::<ContentId>())
+                    .saturating_add(std::mem::size_of::<InlineContentIdentity>())
                     .saturating_add(value.content_ref().content_id.as_str().len());
             }
         }
@@ -431,10 +429,11 @@ impl CommitCandidate {
             serde_json::to_writer(&mut bytes, value.content_ref())
                 .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
         }
-        for content_id in &self.inline_identity_content_ids {
+        for content_id in self.inline_content_identities.keys() {
             bytes.0 = bytes
                 .0
                 .saturating_add(std::mem::size_of::<ContentId>())
+                .saturating_add(std::mem::size_of::<InlineContentIdentity>())
                 .saturating_add(content_id.as_str().len());
         }
         Ok(bytes.0)
@@ -1242,6 +1241,7 @@ mod tests {
             loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             b"proof",
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         ));
         let prepared = CommitCandidate::prepared(request.clone(), vec![proof; 100]);
         assert!(
@@ -1323,6 +1323,7 @@ mod tests {
             loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             b"proof",
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let prepared = PreparedContent::for_durable_content_write(content_ref);
         let oversized_proofs = CommitCandidate::prepared(

@@ -32,7 +32,7 @@ serde_bytes.workspace = true
 serde_json.workspace = true
 # `compress` exposes the block function, which continues a digest from a
 # recorded state.
-sha2 = { workspace = true, features = ["compress"] }
+sha2.workspace = true
 thiserror.workspace = true
 utoipa = { workspace = true, optional = true }
 xxhash-rust.workspace = true

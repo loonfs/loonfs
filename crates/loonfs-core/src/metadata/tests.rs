@@ -87,9 +87,8 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
                 loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                 ContentId::generate(),
                 b"revision",
+                loonfs_types::ChecksumAlgorithm::Crc64nvme,
             ),
-            hash_state: None,
-            crc64nvme: None,
             layout: None,
         },
         WalDelta::TombstoneSubtree {
@@ -593,11 +592,13 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         b"first revision bytes",
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let replacement_ref = ContentRef::blob_v1(
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         b"second revision bytes",
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
 
     let mut builder = MetadataStateBuilder::default();
@@ -618,8 +619,6 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
         committed_by: actor(),
         delta_index: 0,
         content_ref,
-        hash_state: None,
-        crc64nvme: None,
     });
     builder.push_revision(RevisionRecord {
         inode_id: InodeId(7),
@@ -630,8 +629,6 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
         committed_by: actor(),
         delta_index: 0,
         content_ref: replacement_ref,
-        hash_state: None,
-        crc64nvme: None,
     });
     builder.push_commit_receipt(CommitReceiptRecord {
         commit_id: CommitId::parse("indexed-commit").expect("valid commit id"),

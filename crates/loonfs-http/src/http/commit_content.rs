@@ -10,6 +10,7 @@ pub(super) fn prepare_inline_content(
     namespace_id: &NamespaceId,
     operations: &mut [FilesystemOperation],
     threshold: Option<usize>,
+    algorithm: loonfs_types::ChecksumAlgorithm,
 ) -> Result<Vec<InlineContent>, ApiResponseError> {
     let mut values = Vec::new();
     for (index, operation) in operations.iter_mut().enumerate() {
@@ -57,7 +58,12 @@ pub(super) fn prepare_inline_content(
             )
             .with_param(format!("/operations/{index}/inline_content")));
         }
-        let value = InlineContent::new(namespace_id.clone(), ContentId::generate(), bytes.into());
+        let value = InlineContent::new(
+            namespace_id.clone(),
+            ContentId::generate(),
+            bytes.into(),
+            algorithm,
+        );
         *content_ref = Some(value.content_ref().clone());
         values.push(value);
     }

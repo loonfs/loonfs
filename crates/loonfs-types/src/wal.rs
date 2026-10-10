@@ -5,9 +5,9 @@ use crate::digest::sha256_digest;
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::manifest::{DeletedBinding, DeltaPosition};
 use crate::{
-    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, Checksum,
-    ChecksumAlgorithm, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName, InodeId,
-    InodeKind, NameKey, NamespaceId, RevisionNo, Sha256State, WalNo, WriterEpoch,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitFingerprint,
+    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
+    RevisionNo, WalNo, WriterEpoch,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -153,14 +153,6 @@ pub enum WalDelta {
         /// publication; inline bytes travel in this commit's `inline_content`
         /// ([format section 1.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#15-file-contents-and-ownership)).
         content_ref: ContentRef,
-        /// SHA-256 state after the reference's bytes, recorded when the
-        /// reference is a SHA-256 and the writer had the bytes.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        hash_state: Option<Sha256State>,
-        /// CRC-64/NVME of the reference's bytes, recorded when the writer had
-        /// the bytes or the reference's own checksum is that CRC.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        crc64nvme: Option<Checksum>,
         /// Objects holding the bytes before this commit's pieces.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layout: Option<crate::ContentLayout>,
@@ -365,7 +357,6 @@ pub(crate) fn encode_wal_payload_cbor(
     payload: &WalObjectPayload,
 ) -> Result<Vec<u8>, EnvelopeCodecError> {
     validate_wal_inline_content(payload)?;
-    validate_wal_revision_digests(payload)?;
     validate_wal_revision_layouts(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
@@ -437,66 +428,12 @@ fn decode_wal_object_envelope_zstd_with_limit(
     let payload: WalObjectPayload = from_reader(document.payload.as_slice())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
     validate_wal_inline_content(&payload)?;
-    validate_wal_revision_digests(&payload)?;
     validate_wal_revision_layouts(&payload)?;
 
     Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
         payload,
     })
-}
-
-/// Checks what a revision delta records about its reference's bytes against
-/// the reference (A.5). A `hash_state` is the SHA-256 state after exactly
-/// the bytes a SHA-256 reference names, so its length and digest are the
-/// reference's. A `crc64nvme` is a CRC-64/NVME, and the reference's own
-/// checksum when that is one.
-fn validate_wal_revision_digests(payload: &WalObjectPayload) -> Result<(), EnvelopeCodecError> {
-    for record in &payload.records {
-        for delta in &record.deltas {
-            let WalDelta::AppendFileRevision {
-                content_ref,
-                hash_state,
-                crc64nvme,
-                ..
-            } = &delta.delta
-            else {
-                continue;
-            };
-            let invalid = |reason| EnvelopeCodecError::InvalidWalRevisionDigest {
-                seq: record.committed_seq,
-                content_id: content_ref.content_id.clone(),
-                reason,
-            };
-            let checksum = &content_ref.checksum;
-            if let Some(state) = hash_state {
-                if checksum.algorithm != ChecksumAlgorithm::Sha256 {
-                    return Err(invalid(
-                        "`hash_state` on a reference whose checksum is not a SHA-256",
-                    ));
-                }
-                if state.length() != content_ref.size_bytes {
-                    return Err(invalid(
-                        "`hash_state` length differs from the reference `size_bytes`",
-                    ));
-                }
-                if state.finish() != *checksum {
-                    return Err(invalid(
-                        "`hash_state` digest differs from the reference checksum",
-                    ));
-                }
-            }
-            if let Some(crc) = crc64nvme {
-                if crc.algorithm != ChecksumAlgorithm::Crc64nvme || crc.validate().is_err() {
-                    return Err(invalid("`crc64nvme` is not a CRC-64/NVME"));
-                }
-                if checksum.algorithm == ChecksumAlgorithm::Crc64nvme && crc != checksum {
-                    return Err(invalid("`crc64nvme` differs from the reference checksum"));
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), EnvelopeCodecError> {
@@ -707,9 +644,8 @@ mod tests {
                                 namespace_id.clone(),
                                 content_id.clone(),
                                 &bytes,
+                                crate::ChecksumAlgorithm::Crc64nvme,
                             ),
-                            hash_state: None,
-                            crc64nvme: None,
                             layout: None,
                         },
                     }],
@@ -1018,85 +954,5 @@ mod tests {
                 ));
             }
         }
-    }
-
-    fn assert_revision_digests_rejected(payload: WalObjectPayload, expected_reason: &str) {
-        let expected_seq = payload.records[0].committed_seq;
-        let expected_content_id = payload.records[0].inline_content[0].content_id.clone();
-        let decoded_error = decode_wal_object_envelope_zstd(&unchecked_wal_object_bytes(&payload))
-            .expect_err("invalid revision digests should not decode");
-        let encoded_error = encode_wal_object_envelope_zstd(payload)
-            .expect_err("invalid revision digests should not encode");
-        for error in [decoded_error, encoded_error] {
-            assert_eq!(
-                error.to_string(),
-                format!(
-                    "invalid wal revision digest in commit `{expected_seq}` for `content_id` `{expected_content_id}`: {expected_reason}"
-                ),
-            );
-            assert!(matches!(
-                error,
-                EnvelopeCodecError::InvalidWalRevisionDigest { seq, content_id, reason }
-                    if seq == expected_seq && content_id == expected_content_id && reason == expected_reason
-            ));
-        }
-    }
-
-    #[test]
-    fn revision_digests_must_describe_the_reference() {
-        let digests = |bytes: &[u8]| {
-            let mut state = Sha256State::new();
-            state.update(bytes);
-            (Some(state), Some(Checksum::crc64nvme(bytes)))
-        };
-        let with_digests =
-            |checksum: Option<Checksum>,
-             (hash_state, crc64nvme): (Option<Sha256State>, Option<Checksum>)| {
-                let mut payload = inline_wal_object(&[3]);
-                let WalDelta::AppendFileRevision {
-                    content_ref,
-                    hash_state: state,
-                    crc64nvme: crc,
-                    ..
-                } = &mut payload.records[0].deltas[0].delta
-                else {
-                    panic!("the fixture commits one revision");
-                };
-                if let Some(checksum) = checksum {
-                    content_ref.checksum = checksum;
-                }
-                *state = hash_state;
-                *crc = crc64nvme;
-                payload
-            };
-        let crc_reference = Some(Checksum::crc64nvme(&[42; 3]));
-
-        assert_inline_content_accepted(with_digests(None, digests(&[42; 3])));
-        assert_inline_content_accepted(with_digests(
-            crc_reference.clone(),
-            (None, Some(Checksum::crc64nvme(&[42; 3]))),
-        ));
-
-        let (state, _) = digests(&[42; 3]);
-        assert_revision_digests_rejected(
-            with_digests(crc_reference.clone(), (state, None)),
-            "`hash_state` on a reference whose checksum is not a SHA-256",
-        );
-        assert_revision_digests_rejected(
-            with_digests(None, digests(&[42; 4])),
-            "`hash_state` length differs from the reference `size_bytes`",
-        );
-        assert_revision_digests_rejected(
-            with_digests(None, digests(&[43; 3])),
-            "`hash_state` digest differs from the reference checksum",
-        );
-        assert_revision_digests_rejected(
-            with_digests(None, (None, Some(Checksum::sha256(&[42; 3])))),
-            "`crc64nvme` is not a CRC-64/NVME",
-        );
-        assert_revision_digests_rejected(
-            with_digests(crc_reference, (None, Some(Checksum::crc64nvme(&[43; 3])))),
-            "`crc64nvme` differs from the reference checksum",
-        );
     }
 }

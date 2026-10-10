@@ -3342,6 +3342,7 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
         namespace_id.clone(),
         ContentId::parse("con_00000000000000000000000000000000").expect("content"),
         b"four",
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let absent = ContentId::parse("con_00000000000000000000000000000001").expect("content");
     let mut state = MetadataStateBuilder::default();
@@ -3354,8 +3355,6 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
         committed_by: loonfs_types::ActorId::loonfs(),
         delta_index: 0,
         content_ref: reference.clone(),
-        hash_state: None,
-        crc64nvme: None,
     });
     for (content_id, size_bytes, committed_seq) in [
         (reference.content_id.clone(), 8, ChangeSeq(1)),

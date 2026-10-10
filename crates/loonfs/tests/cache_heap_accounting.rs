@@ -164,6 +164,7 @@ impl Shape {
                 namespace_id.clone(),
                 ContentId::generate(),
                 Bytes::from(vec![b'x'; bytes]),
+                loonfs_types::ChecksumAlgorithm::Crc64nvme,
             )
         };
         let shared = inline(64);

@@ -484,19 +484,7 @@ fn with_content_token(
     Ok(response)
 }
 
-/// Forwards a proxied upload's body straight into object storage.
-///
-/// The body is never held: it is hashed and written a piece at a time, so
-/// the server's memory cost tracks the transfer's part size rather than the
-/// object's length. The reference this produces is the same one the
-/// buffered path produced: its `checksum` is the SHA-256 this server
-/// computed over the complete payload.
-///
-/// A failure has two possible authors. The store may have refused the
-/// write, or the body may have ended early — past the byte cap, or with a
-/// broken connection — and only the second is the client's. The stream
-/// records which, so the client is told the truth rather than a blanket
-/// storage error.
+// The stream records body errors separately so they are not reported as store errors.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -869,7 +857,7 @@ mod completion_body_tests {
     #[test]
     fn maximum_multipart_completion_fits_the_completion_body_cap() {
         let checksum = Checksum {
-            algorithm: ChecksumAlgorithm::Sha256,
+            algorithm: ChecksumAlgorithm::Crc64nvme,
             value: "f".repeat(64),
         };
         let quoted_etag = format!("\"{}\"", "e".repeat(254));
@@ -903,7 +891,7 @@ mod completion_body_tests {
     #[test]
     fn maximum_part_signing_request_fits_the_control_body_cap() {
         let checksum = Checksum {
-            algorithm: ChecksumAlgorithm::Sha256,
+            algorithm: ChecksumAlgorithm::Crc64nvme,
             value: "f".repeat(64),
         };
         let request = SignUploadPartsRequest {

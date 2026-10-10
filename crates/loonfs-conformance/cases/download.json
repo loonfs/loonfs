@@ -10,7 +10,7 @@
   },
   "expected": {
     "size_bytes": 30,
-    "checksum_algorithm": "sha256",
+    "checksum_algorithm": "crc64nvme",
     "committed_seq": 1
   }
 }

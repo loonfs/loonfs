@@ -20,8 +20,8 @@
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
-          "algorithm": "sha256",
-          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+          "algorithm": "crc64nvme",
+          "value": "6f9464cad3b52574"
         }
       },
       "behavior": "no_replace"
@@ -53,8 +53,8 @@
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
-          "algorithm": "sha256",
-          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+          "algorithm": "crc64nvme",
+          "value": "6f9464cad3b52574"
         }
       }
     },
@@ -73,8 +73,8 @@
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
-          "algorithm": "sha256",
-          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+          "algorithm": "crc64nvme",
+          "value": "6f9464cad3b52574"
         }
       },
       "expected_revision_no": 3
@@ -210,8 +210,8 @@
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
-          "algorithm": "sha256",
-          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+          "algorithm": "crc64nvme",
+          "value": "6f9464cad3b52574"
         }
       },
       "behavior": "replace",
@@ -447,8 +447,8 @@
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
-          "algorithm": "sha256",
-          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+          "algorithm": "crc64nvme",
+          "value": "6f9464cad3b52574"
         }
       },
       "behavior": "no_replace"
@@ -495,8 +495,8 @@
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
-          "algorithm": "sha256",
-          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+          "algorithm": "crc64nvme",
+          "value": "6f9464cad3b52574"
         }
       },
       "behavior": "no_replace"
@@ -520,8 +520,8 @@
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
-          "algorithm": "sha256",
-          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+          "algorithm": "crc64nvme",
+          "value": "6f9464cad3b52574"
         }
       }
     },
@@ -543,8 +543,8 @@
         "content_id": "con_0123456789abcdef0123456789abcdef",
         "size_bytes": 16,
         "checksum": {
-          "algorithm": "sha256",
-          "value": "b5c5dd0bead81381b55289cceba3a219d6b21d5a1ea0fb4d6302a6de6a22d5b6"
+          "algorithm": "crc64nvme",
+          "value": "6f9464cad3b52574"
         }
       },
       "expected_revision_no": 3

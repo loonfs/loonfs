@@ -2,7 +2,6 @@ package files
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"hash"
@@ -156,8 +155,6 @@ func (c *Client) downloadProxiedStream(ctx context.Context, in DownloadInput) (*
 
 func newChecksum(algorithm loonfs.ChecksumAlgorithm) (hash.Hash, error) {
 	switch algorithm {
-	case loonfs.ChecksumAlgorithmSha256:
-		return sha256.New(), nil
 	case loonfs.ChecksumAlgorithmCrc32C:
 		return crc32.New(crc32CTable), nil
 	case loonfs.ChecksumAlgorithmCrc64Nvme:

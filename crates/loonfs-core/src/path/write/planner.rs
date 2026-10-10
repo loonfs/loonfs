@@ -29,10 +29,10 @@ use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
-    next_public_ordinal, ChangeSeq, ContentId, DestinationPrecondition, NamespaceId,
-    PreconditionFields, MAX_PUBLIC_INTEGER,
+    next_public_ordinal, ChangeSeq, ContentId, DestinationPrecondition, InlineContentIdentity,
+    NamespaceId, PreconditionFields, MAX_PUBLIC_INTEGER,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Computes the semantic fingerprint of a mutation request.
 ///
@@ -42,7 +42,7 @@ use std::collections::BTreeSet;
 pub(crate) fn commit_fingerprint(
     namespace_id: &NamespaceId,
     request: &CommitRequest,
-    inline_content_ids: &BTreeSet<ContentId>,
+    inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> Result<CommitFingerprint> {
     loonfs_types::semantic_commit_fingerprint(
         namespace_id,
@@ -51,11 +51,10 @@ pub(crate) fn commit_fingerprint(
         request.message.as_deref(),
         &request.operations,
         &request.preconditions,
-        inline_content_ids,
+        inline_content_identities,
     )
     .map_err(|error| match error {
-        loonfs_types::SemanticFingerprintError::InlineChecksumAlgorithm { .. }
-        | loonfs_types::SemanticFingerprintError::InvalidContentSource => {
+        loonfs_types::SemanticFingerprintError::InvalidContentSource => {
             CoreError::InvalidCommitRequest(error.to_string())
         }
         error => CoreError::Internal(format!("failed to fingerprint mutation: {error}")),
@@ -108,7 +107,6 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     for value in candidate.inline_content() {
         pieces.insert_piece(
             value.content_ref(),
-            &Some(value.crc64nvme().clone()),
             &WalInlineContent {
                 content_id: value.content_ref().content_id.clone(),
                 offset: 0,
@@ -133,7 +131,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         };
         if let Some(value) = &unit.appended {
             for piece in &value.pieces {
-                pieces.insert_piece(&value.content_ref, &value.crc64nvme, piece, committed_seq);
+                pieces.insert_piece(&value.content_ref, piece, committed_seq);
             }
         }
         appended.extend(unit.appended);
@@ -149,20 +147,9 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                     .iter()
                     .find(|value| value.content_ref == *content_ref)
                 {
-                    return (
-                        value.hash_state.clone(),
-                        value.crc64nvme.clone(),
-                        value.layout.clone(),
-                    );
+                    return value.layout.clone();
                 }
-                if let Some(row) = unit
-                    .source_revision
-                    .as_ref()
-                    .filter(|row| row.content_ref == *content_ref)
-                {
-                    return (row.hash_state.clone(), row.crc64nvme.clone(), None);
-                }
-                candidate.revision_content(content_ref)
+                candidate.revision_layout(content_ref)
             },
         )
         .await
@@ -580,7 +567,6 @@ mod tests {
         CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
         NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo, Subject, SubjectId,
     };
-    use std::collections::BTreeMap;
     use tempfile::tempdir;
 
     #[derive(Debug)]
@@ -668,7 +654,7 @@ mod tests {
                 None,
                 create_dir("/docs/a"),
             ),
-            &BTreeSet::new(),
+            &BTreeMap::new(),
         )
         .expect("left fingerprint");
         let right = commit_fingerprint(
@@ -679,7 +665,7 @@ mod tests {
                 None,
                 create_dir("/docs/a"),
             ),
-            &BTreeSet::new(),
+            &BTreeMap::new(),
         )
         .expect("right fingerprint");
 
@@ -706,9 +692,9 @@ mod tests {
         };
 
         assert_eq!(
-            commit_fingerprint(&namespace_id, &convenience, &BTreeSet::new())
+            commit_fingerprint(&namespace_id, &convenience, &BTreeMap::new())
                 .expect("convenience fingerprint"),
-            commit_fingerprint(&namespace_id, &batch, &BTreeSet::new()).expect("batch fingerprint")
+            commit_fingerprint(&namespace_id, &batch, &BTreeMap::new()).expect("batch fingerprint")
         );
     }
 
@@ -1123,6 +1109,7 @@ mod tests {
         let inline = crate::storage::content_admission::PreparedContent::inline(
             namespace_id.clone(),
             bytes::Bytes::from_static(b"inline"),
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         )
         .content_ref()
         .clone();

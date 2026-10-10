@@ -135,7 +135,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         .set("authorization", "Bearer test-token")
         .set("content-type", "application/json")
         .send_string(
-            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}},"parts":[]}"#,
+            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}},"parts":[]}"#,
         );
     let ureq::Error::Status(status, response) =
         result.expect_err("wrong completion shape should fail")
@@ -170,7 +170,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
     assert_eq!(content_ref.size_bytes, 5);
     assert_eq!(
         content_ref.checksum,
-        loonfs_types::Checksum::sha256(b"hello")
+        loonfs_types::Checksum::crc64nvme(b"hello")
     );
     let read = harness
         .client

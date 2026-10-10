@@ -422,9 +422,8 @@ mod tests {
                         loonfs_types::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                             .expect("content id"),
                         b"body",
+                        loonfs_types::ChecksumAlgorithm::Crc64nvme,
                     ),
-                    hash_state: None,
-                    crc64nvme: None,
                 })
             }
             _ => MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {

@@ -3,96 +3,111 @@
     "name": "empty",
     "bytes": 0,
     "size": 0,
-    "inline": true
+    "inline": true,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "binary",
     "bytes": 257,
     "size": 257,
-    "inline": true
+    "inline": true,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "boundary",
     "bytes": 65536,
     "size": 65536,
-    "inline": true
+    "inline": true,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "unknown_boundary",
     "bytes": 65536,
     "size": null,
-    "inline": true
+    "inline": true,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "overflow",
     "bytes": 65537,
     "size": 65537,
-    "inline": false
+    "inline": false,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "unknown_overflow",
     "bytes": 65537,
     "size": null,
-    "inline": false
+    "inline": false,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "overflow_multiple_chunks",
     "bytes": 131073,
     "size": null,
-    "inline": false
+    "inline": false,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "lower_limit",
     "bytes": 9,
     "size": null,
     "limit": 8,
-    "inline": false
+    "inline": false,
+    "algorithm": "crc32c"
   },
   {
     "name": "zero_limit_empty",
     "bytes": 0,
     "size": null,
     "limit": 0,
-    "inline": true
+    "inline": true,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "feature_absent",
     "bytes": 9,
     "size": 9,
     "feature": false,
-    "inline": false
+    "inline": false,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "limit_absent",
     "bytes": 9,
     "size": 9,
     "limit": null,
-    "inline": false
+    "inline": false,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "sdk_memory_bound",
     "bytes": 65537,
     "size": 65537,
     "limit": 1048576,
-    "inline": false
+    "inline": false,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "declared_too_short",
     "bytes": 9,
     "size": 8,
-    "error": true
+    "error": true,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "declared_too_long",
     "bytes": 9,
     "size": 10,
-    "error": true
+    "error": true,
+    "algorithm": "crc64nvme"
   },
   {
     "name": "source_error",
     "bytes": 9,
     "size": null,
     "error": true,
-    "fault": true
+    "fault": true,
+    "algorithm": "crc64nvme"
   }
 ]

@@ -1,5 +1,4 @@
 import * as assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,7 +13,7 @@ import {
 type Fixture = {
     name: string;
     content: string;
-    algorithm: "sha256" | "crc32c" | "crc64nvme";
+    algorithm: "crc32c" | "crc64nvme";
     checksum: string;
     size_bytes: number;
     range: string | null;
@@ -134,15 +133,14 @@ for (const browser of [false, true])
             });
         }
 
-test("incremental SHA-256 agrees with the native implementation across block boundaries", () => {
-    for (const length of [0, 1, 55, 56, 63, 64, 65, 127, 128, 129, 4096, 65537, 1000000]) {
-        const bytes = Uint8Array.from({ length }, (_, i) => (i * 29) % 251);
-        const expected = createHash("sha256").update(bytes).digest("hex");
-        for (const stride of [1, 7, 63, 64, 65536]) {
-            const digest = new IncrementalChecksum("sha256");
+test("incremental CRCs match the catalog values across chunks", () => {
+    const bytes = new TextEncoder().encode("123456789");
+    for (const [algorithm, expected] of [["crc32c", "e3069283"], ["crc64nvme", "ae8b14860a799888"]] as const) {
+        for (const stride of [1, 3, 7, 9]) {
+            const digest = new IncrementalChecksum(algorithm);
             for (let offset = 0; offset < bytes.length; offset += stride)
                 digest.update(bytes.subarray(offset, offset + stride));
-            assert.equal(digest.finish().value, expected, `length=${length} stride=${stride}`);
+            assert.equal(digest.finish().value, expected);
         }
     }
 });
@@ -199,7 +197,7 @@ for (const direct of [false, true]) {
 
 test("verified streams bound chunks and stop reading when the consumer closes", async () => {
     const bytes = new Uint8Array(3 * 65536);
-    const digest = new IncrementalChecksum("sha256");
+    const digest = new IncrementalChecksum("crc64nvme");
     digest.update(bytes);
     let reads = 0,
         cancelled = false;

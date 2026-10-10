@@ -12,7 +12,7 @@ use loonfs::{
 };
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use loonfs_types::semantic_commit_fingerprint;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use tempfile::tempdir;
 
 fn owner_changes() -> AttributeChanges {
@@ -177,7 +177,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
         explicit.message.as_deref(),
         &explicit.operations,
         &[],
-        &BTreeSet::new(),
+        &BTreeMap::new(),
     )
     .expect("explicit fingerprint");
 
@@ -221,7 +221,7 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
             different.message.as_deref(),
             &different.operations,
             &[],
-            &BTreeSet::new()
+            &BTreeMap::new()
         )
         .expect("different fingerprint"),
         explicit_fingerprint

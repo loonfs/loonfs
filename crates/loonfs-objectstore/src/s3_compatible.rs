@@ -687,7 +687,7 @@ fn assembled_crc64nvme<'a>(
 ) -> Option<Checksum> {
     let (first, _) = parts.next()?;
     parts.try_fold(first.clone(), |assembled, (next, next_bytes)| {
-        assembled.crc64nvme_combine(next, next_bytes)
+        assembled.crc_combine(next, next_bytes)
     })
 }
 
@@ -1053,7 +1053,7 @@ mod tests {
             let tail = Bytes::from_static(b"tail");
             let checksum = Checksum::crc64nvme(&base);
             let expected = checksum
-                .crc64nvme_combine(&Checksum::crc64nvme(&tail), tail.len() as u64)
+                .crc_combine(&Checksum::crc64nvme(&tail), tail.len() as u64)
                 .expect("combined");
             for correct in [true, false] {
                 let provider = ScriptedProvider {

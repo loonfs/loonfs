@@ -22,14 +22,15 @@ import (
 )
 
 type inlineCase struct {
-	Name    string          `json:"name"`
-	Bytes   int             `json:"bytes"`
-	Size    *int64          `json:"size"`
-	Limit   json.RawMessage `json:"limit"`
-	Feature *bool           `json:"feature"`
-	Inline  bool            `json:"inline"`
-	Error   bool            `json:"error"`
-	Fault   bool            `json:"fault"`
+	Algorithm loonfs.ChecksumAlgorithm `json:"algorithm"`
+	Name      string                   `json:"name"`
+	Bytes     int                      `json:"bytes"`
+	Size      *int64                   `json:"size"`
+	Limit     json.RawMessage          `json:"limit"`
+	Feature   *bool                    `json:"feature"`
+	Inline    bool                     `json:"inline"`
+	Error     bool                     `json:"error"`
+	Fault     bool                     `json:"fault"`
 }
 
 func TestInlinePreparationAndRetry(t *testing.T) {
@@ -59,8 +60,8 @@ func TestInlinePreparationAndRetry(t *testing.T) {
 				limits["commit.max_inline_content_bytes_per_operation"] = limit
 			}
 			feature := fixture.Feature == nil || *fixture.Feature
-			session := map[string]any{"namespace_id": "demo", "upload_id": "upl_test", "mode": "service_proxied"}
-			claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_test", "size_bytes": len(content), "checksum": map[string]any{"algorithm": "sha256", "value": strings.Repeat("0", 64)}}
+			session := map[string]any{"namespace_id": "demo", "upload_id": "upl_test", "mode": "service_proxied", "checksum_algorithm": fixture.Algorithm}
+			claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_test", "size_bytes": len(content), "checksum": mustChecksum(t, fixture.Algorithm, content)}
 			var mu sync.Mutex
 			var paths []string
 			var commits []map[string]any

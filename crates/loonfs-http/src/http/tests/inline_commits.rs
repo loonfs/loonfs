@@ -178,7 +178,10 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
     assert_eq!(harness.family_requests(DurableObjectFamily::ContentBlob), 0);
     let (_, reference) = created_content(&first);
     assert_eq!(reference.size_bytes, 4);
-    assert_eq!(reference.checksum, loonfs_types::Checksum::sha256(b"same"));
+    assert_eq!(
+        reference.checksum,
+        loonfs_types::Checksum::crc64nvme(b"same")
+    );
     assert_eq!(reference.owner_namespace_id, harness.namespace);
     harness.read("/file", b"same").await;
     harness.store.reset();

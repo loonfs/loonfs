@@ -208,7 +208,7 @@ fn create_direct_put_upload(checksum_algorithm: ChecksumAlgorithm) -> Outcome {
         mode: UploadMode::DirectPut,
         status: UploadSessionStatus::Open {
             expires_at_ms: 1000,
-            checksum_algorithm: Some(checksum_algorithm),
+            checksum_algorithm,
             part_size_bytes: None,
             content_ref: None,
             access: Some(ObjectTransferAccess::PresignedUrl {
@@ -228,7 +228,7 @@ fn begin_multipart() -> Outcome {
         mode: UploadMode::DirectMultipart,
         status: UploadSessionStatus::Open {
             expires_at_ms: 1000,
-            checksum_algorithm: Some(ChecksumAlgorithm::Crc64nvme),
+            checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             part_size_bytes: Some(TEST_PART_BYTES),
             access: None,
             content_ref: None,
@@ -243,7 +243,7 @@ fn begin_proxied() -> Outcome {
         mode: UploadMode::ServiceProxied,
         status: UploadSessionStatus::Open {
             expires_at_ms: 1000,
-            checksum_algorithm: None,
+            checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
             part_size_bytes: None,
             access: None,
             content_ref: None,
@@ -600,7 +600,7 @@ async fn a_proxied_put_streams_its_body() {
             mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
-                checksum_algorithm: None,
+                checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 part_size_bytes: None,
                 access: None,
                 content_ref: Some(uploaded.clone()),
@@ -644,7 +644,7 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
             mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
-                checksum_algorithm: None,
+                checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 part_size_bytes: None,
                 access: None,
                 content_ref: Some(uploaded.clone()),
@@ -683,7 +683,7 @@ async fn a_small_payload_past_the_proxy_cap_takes_direct_put() {
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
         }),
-        create_direct_put_upload(ChecksumAlgorithm::Sha256),
+        create_direct_put_upload(ChecksumAlgorithm::Crc64nvme),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -787,7 +787,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
         }),
-        create_direct_put_upload(ChecksumAlgorithm::Sha256),
+        create_direct_put_upload(ChecksumAlgorithm::Crc64nvme),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -851,7 +851,7 @@ async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
             direct_put_max_bytes: Some(5 * 1024 * 1024 * 1024),
             ..Advertised::default()
         }),
-        create_direct_put_upload(ChecksumAlgorithm::Sha256),
+        create_direct_put_upload(ChecksumAlgorithm::Crc64nvme),
         Outcome::Success(Vec::new()),
         completed(uploaded),
         commit_landed(),
@@ -1051,7 +1051,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
             mode: loonfs_types::api::v0::UploadMode::ServiceProxied,
             status: UploadSessionStatus::Open {
                 expires_at_ms: 1000,
-                checksum_algorithm: None,
+                checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 part_size_bytes: None,
                 access: None,
                 content_ref: Some(uploaded.clone()),

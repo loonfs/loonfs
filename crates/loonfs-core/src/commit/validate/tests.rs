@@ -134,8 +134,6 @@ fn wal_create_file(
             inode_id,
             revision_no: RevisionNo(1),
             content_ref,
-            hash_state: None,
-            crc64nvme: None,
             layout: None,
         },
     ]
@@ -152,8 +150,6 @@ fn wal_append_revision(
         inode_id,
         revision_no,
         content_ref,
-        hash_state: None,
-        crc64nvme: None,
         layout: None,
     }]
 }
@@ -260,7 +256,7 @@ async fn validate_planned_ops(
         &validated_commit_id(),
         &loonfs_test_support::test_actor(),
         committed_at_ms,
-        |_| (None, None, None),
+        |_| None,
     )
     .await
 }
@@ -920,8 +916,6 @@ async fn restore_revision_overflow_is_rejected() {
         inode_id: InodeId(2),
         revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         content_ref: content_ref("content-max"),
-        hash_state: None,
-        crc64nvme: None,
         layout: None,
     };
     let metadata_state = MetadataState::default()

@@ -67,8 +67,6 @@ fn metadata_states_equivalent_ignoring_content_identity(
                                 .expect("placeholder content id"),
                                 ..content_ref
                             },
-                            hash_state: None,
-                            crc64nvme: None,
                         }),
                         MetadataRow::Commit(mut record) => {
                             record.semantic_commit_fingerprint =

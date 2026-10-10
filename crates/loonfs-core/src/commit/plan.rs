@@ -6,8 +6,8 @@ use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::format::wal::{WalCommitDelta, WalInlineContent};
 use loonfs_types::{
-    ActorId, ChangeSeq, Checksum, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId,
-    Sha256State, WriterEpoch,
+    ActorId, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId,
+    WriterEpoch,
 };
 
 /// The bytes one append adds, the reference its revision names, and what
@@ -15,8 +15,6 @@ use loonfs_types::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AppendedContent {
     pub(crate) content_ref: ContentRef,
-    pub(crate) hash_state: Option<Sha256State>,
-    pub(crate) crc64nvme: Option<Checksum>,
     pub(crate) layout: Option<loonfs_types::ContentLayout>,
     pub(crate) pieces: Vec<WalInlineContent>,
 }

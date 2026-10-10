@@ -10,6 +10,7 @@ import httpx
 import pytest
 from loonfs.server import AsyncLoonFS, InlinePreparedContent, LoonFS, PreparedContent
 from loonfs.core.api_error import ApiError
+from loonfs.transfers import _checksum
 
 CASES = json.loads(
     (Path(__file__).parents[1] / "fixtures/inline_uploads.json").read_text()
@@ -40,10 +41,13 @@ class Endpoint:
             owner_namespace_id="demo",
             content_id="con_test",
             size_bytes=len(content),
-            checksum=dict(algorithm="sha256", value="0" * 64),
+            checksum=_checksum(fixture["algorithm"], content).model_dump(),
         )
         self.session = dict(
-            namespace_id="demo", upload_id="upl_test", mode="service_proxied"
+            namespace_id="demo",
+            upload_id="upl_test",
+            mode="service_proxied",
+            checksum_algorithm=fixture["algorithm"],
         )
 
     def handle(self, request):

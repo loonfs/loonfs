@@ -84,6 +84,7 @@ fn content_ref(seed: u8) -> ContentRef {
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &[seed; 12],
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     )
 }
 
@@ -152,8 +153,6 @@ fn create_file_overlay_rows_match_replayed_wal_deltas() {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(1),
                 content_ref: content_ref(1),
-                hash_state: None,
-                crc64nvme: None,
                 layout: None,
             },
         ],
@@ -169,8 +168,6 @@ fn replace_file_overlay_rows_match_replayed_wal_deltas() {
             inode_id: InodeId(4),
             revision_no: RevisionNo(5),
             content_ref: content_ref(2),
-            hash_state: None,
-            crc64nvme: None,
             layout: None,
         }],
     );
@@ -185,8 +182,6 @@ fn restore_revision_overlay_rows_match_replayed_wal_deltas() {
             inode_id: InodeId(4),
             revision_no: RevisionNo(6),
             content_ref: content_ref(3),
-            hash_state: None,
-            crc64nvme: None,
             layout: None,
         }],
     );
@@ -286,8 +281,6 @@ fn rename_of_same_commit_binding_overlay_rows_match_replayed_wal_deltas() {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(1),
                 content_ref: content_ref(4),
-                hash_state: None,
-                crc64nvme: None,
                 layout: None,
             },
             WalDelta::UnbindDirentry {
@@ -427,8 +420,6 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 inode_id: InodeId(3),
                 revision_no: RevisionNo(1),
                 content_ref: content_ref(5),
-                hash_state: None,
-                crc64nvme: None,
                 layout: None,
             },
             WalDelta::AppendFileRevision {
@@ -436,8 +427,6 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 inode_id: InodeId(3),
                 revision_no: RevisionNo(2),
                 content_ref: content_ref(6),
-                hash_state: None,
-                crc64nvme: None,
                 layout: None,
             },
             WalDelta::UnbindDirentry {
@@ -470,8 +459,6 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 inode_id: InodeId(3),
                 revision_no: RevisionNo(3),
                 content_ref: content_ref(5),
-                hash_state: None,
-                crc64nvme: None,
                 layout: None,
             },
             WalDelta::UnbindDirentry {
@@ -566,8 +553,6 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             inode_id: InodeId(3),
             revision_no: RevisionNo(1),
             content_ref: content_ref(7),
-            hash_state: None,
-            crc64nvme: None,
             layout: None,
         },
     ];
@@ -577,8 +562,6 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             inode_id: InodeId(3),
             revision_no: RevisionNo(2),
             content_ref: content_ref(8),
-            hash_state: None,
-            crc64nvme: None,
             layout: None,
         },
         WalDelta::UnbindDirentry {

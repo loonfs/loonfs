@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { LoonFSClient } from "../../../generated/typescript/transfers.js";
 import { LoonFSClient as BrowserClient } from "../../../generated/typescript-client/transfers.js";
-import { TransferScope, UploadSource } from "../../../generated/typescript/transfer-runtime.js";
+import { IncrementalChecksum, TransferScope, UploadSource } from "../../../generated/typescript/transfer-runtime.js";
 
 type Fixture = {
+    algorithm: "crc32c" | "crc64nvme";
     name: string;
     bytes: number;
     size: number | null;
@@ -50,13 +51,16 @@ for (const browser of [false, true])
                 namespace_alias: "demo",
                 upload_id: "upl_test",
                 mode: "service_proxied",
+                checksum_algorithm: fixture.algorithm,
             };
+            const digest = new IncrementalChecksum(fixture.algorithm);
+            digest.update(content);
             const claim = {
                 kind: "blob_v1",
                 owner_namespace_id: "demo",
                 content_id: "con_test",
                 size_bytes: content.length,
-                checksum: { algorithm: "sha256", value: "0".repeat(64) },
+                checksum: digest.finish(),
             };
             const send: typeof fetch = async (input, init) => {
                 const request = new Request(input, init);

@@ -58,8 +58,6 @@ struct NormalizedRevision {
     committed_by: ActorId,
     delta_index: u32,
     content_ref: ContentRef,
-    hash_state: Option<loonfs_types::Sha256State>,
-    crc64nvme: Option<Checksum>,
 }
 type NormalizedRevisions = Vec<NormalizedRevision>;
 type NormalizedTombstones = Vec<NormalizedTombstone>;
@@ -271,8 +269,6 @@ fn create_file(
             inode_id,
             revision_no: RevisionNo(1),
             content_ref,
-            hash_state: None,
-            crc64nvme: None,
             layout: None,
         },
     ]
@@ -289,8 +285,6 @@ fn append_revision(
         inode_id,
         revision_no,
         content_ref,
-        hash_state: None,
-        crc64nvme: None,
         layout: None,
     }]
 }
@@ -1056,21 +1050,20 @@ fn repeated_content_in_one_commit_emits_one_publication() {
 }
 
 #[test]
-fn appends_record_revision_digests_and_the_chain_head() {
+fn appends_record_revision_checksums_and_the_chain_head() {
     let content_id = ContentId::generate();
     let namespace_id = content_ref("unused").owner_namespace_id;
-    let appended = |delta_index, revision_no, bytes: &[u8]| {
-        let mut hash_state = loonfs_types::Sha256State::new();
-        hash_state.update(bytes);
-        WalDelta::AppendFileRevision {
-            delta_index,
-            inode_id: InodeId(2),
-            revision_no: RevisionNo(revision_no),
-            content_ref: ContentRef::blob_v1(namespace_id.clone(), content_id.clone(), bytes),
-            hash_state: Some(hash_state),
-            crc64nvme: Some(loonfs_types::Checksum::crc64nvme(bytes)),
-            layout: None,
-        }
+    let appended = |delta_index, revision_no, bytes: &[u8]| WalDelta::AppendFileRevision {
+        delta_index,
+        inode_id: InodeId(2),
+        revision_no: RevisionNo(revision_no),
+        content_ref: ContentRef::blob_v1(
+            namespace_id.clone(),
+            content_id.clone(),
+            bytes,
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+        ),
+        layout: None,
     };
     let mut first = create_file(
         CaseInsensitive,
@@ -1078,7 +1071,12 @@ fn appends_record_revision_digests_and_the_chain_head() {
         InodeId(2),
         InodeId(1),
         "log",
-        ContentRef::blob_v1(namespace_id.clone(), content_id.clone(), b"one"),
+        ContentRef::blob_v1(
+            namespace_id.clone(),
+            content_id.clone(),
+            b"one",
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+        ),
     );
     first.push(appended(3, 2, b"one two"));
     assert_core_matches_model(
@@ -1120,6 +1118,7 @@ async fn planned_appends_match_the_model() {
         namespace_id.clone(),
         ContentId::generate(),
         bytes::Bytes::from_static(b"one"),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let requests = [
         vec![
@@ -1315,27 +1314,21 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         .iter()
         .flatten()
         .filter_map(|delta| match delta {
-            WalDelta::AppendFileRevision {
-                content_ref,
-                hash_state,
-                ..
-            } => Some((
-                content_ref.size_bytes,
-                content_ref.checksum.clone(),
-                hash_state.is_some(),
-            )),
+            WalDelta::AppendFileRevision { content_ref, .. } => {
+                Some((content_ref.size_bytes, content_ref.checksum.clone()))
+            }
             _ => None,
         })
         .collect();
     assert_eq!(
         published,
         [
-            (6, Checksum::crc64nvme(b"direct"), false),
-            (10, Checksum::crc64nvme(b"direct+one"), false),
-            (14, Checksum::crc64nvme(b"direct+one+two"), false),
-            (6, Checksum::crc64nvme(b"direct"), false),
-            (12, Checksum::crc64nvme(b"direct+three"), false),
-            (17, Checksum::crc64nvme(b"direct+three+four"), false),
+            (6, Checksum::crc64nvme(b"direct")),
+            (10, Checksum::crc64nvme(b"direct+one")),
+            (14, Checksum::crc64nvme(b"direct+one+two")),
+            (6, Checksum::crc64nvme(b"direct")),
+            (12, Checksum::crc64nvme(b"direct+three")),
+            (17, Checksum::crc64nvme(b"direct+three+four")),
         ]
     );
     assert_core_matches_model(CaseInsensitive, &["/log"], &commits);
@@ -1666,8 +1659,6 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 committed_by: revision.committed_by.clone(),
                 delta_index: revision.delta_index,
                 content_ref: revision.content_ref.clone(),
-                hash_state: revision.hash_state.clone(),
-                crc64nvme: revision.crc64nvme.clone(),
             })
             .collect(),
         state
@@ -1768,8 +1759,6 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 committed_by: revision.committed_by.clone(),
                 delta_index: revision.revision_delta_index,
                 content_ref: revision.content_ref.clone(),
-                hash_state: revision.hash_state.clone(),
-                crc64nvme: revision.crc64nvme.clone(),
             })
             .collect(),
         subtree_tombstones

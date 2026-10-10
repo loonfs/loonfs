@@ -6,7 +6,7 @@ use crate::metadata::MetadataState;
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
 use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{Checksum, ContentId, ContentRef, NamespaceId};
+use loonfs_types::{ContentId, ContentRef, NamespaceId};
 use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
 
@@ -31,8 +31,6 @@ pub struct ProjectedWalTail {
 pub(crate) struct ProjectedContent {
     pub(crate) content_ref: ContentRef,
     pub(crate) committed_seq: loonfs_types::ChangeSeq,
-    /// The CRC-64/NVME the delta of `content_ref` recorded.
-    pub(crate) crc64nvme: Option<Checksum>,
     pub(crate) pieces: Vec<ProjectedPiece>,
 }
 
@@ -73,24 +71,21 @@ impl ProjectedWalTail {
 
     pub(crate) fn apply_pieces(&mut self, namespace_id: &NamespaceId, record: &WalCommitPayload) {
         for entry in &record.inline_content {
-            let (content_ref, crc64nvme) = record
+            let content_ref = record
                 .deltas
                 .iter()
                 .filter_map(|delta| match &delta.delta {
-                    WalDelta::AppendFileRevision {
-                        content_ref,
-                        crc64nvme,
-                        ..
-                    } if content_ref.content_id == entry.content_id
-                        && &content_ref.owner_namespace_id == namespace_id =>
+                    WalDelta::AppendFileRevision { content_ref, .. }
+                        if content_ref.content_id == entry.content_id
+                            && &content_ref.owner_namespace_id == namespace_id =>
                     {
-                        Some((content_ref, crc64nvme))
+                        Some(content_ref)
                     }
                     _ => None,
                 })
-                .max_by_key(|(content_ref, _)| content_ref.size_bytes)
+                .max_by_key(|content_ref| content_ref.size_bytes)
                 .expect("decoded inline content should have a same-commit reference");
-            self.insert_piece(content_ref, crc64nvme, entry, record.committed_seq);
+            self.insert_piece(content_ref, entry, record.committed_seq);
         }
     }
 
@@ -134,7 +129,6 @@ impl ProjectedWalTail {
     pub(crate) fn insert_piece(
         &mut self,
         content_ref: &ContentRef,
-        crc64nvme: &Option<Checksum>,
         entry: &WalInlineContent,
         committed_seq: loonfs_types::ChangeSeq,
     ) {
@@ -146,21 +140,18 @@ impl ProjectedWalTail {
                 self.contents.push(ProjectedContent {
                     content_ref: content_ref.clone(),
                     committed_seq,
-                    crc64nvme: crc64nvme.clone(),
                     pieces: Vec::new(),
                 });
-                self.inline_entry_heap_bytes += content_ref.heap_bytes() + crc64nvme.heap_bytes();
+                self.inline_entry_heap_bytes += content_ref.heap_bytes();
                 self.contents.len() - 1
             }
         };
         let content = &mut self.contents[position];
         if content_ref.size_bytes > content.content_ref.size_bytes {
-            self.inline_entry_heap_bytes -=
-                content.content_ref.heap_bytes() + content.crc64nvme.heap_bytes();
+            self.inline_entry_heap_bytes -= content.content_ref.heap_bytes();
             content.content_ref = content_ref.clone();
             content.committed_seq = committed_seq;
-            content.crc64nvme = crc64nvme.clone();
-            self.inline_entry_heap_bytes += content_ref.heap_bytes() + crc64nvme.heap_bytes();
+            self.inline_entry_heap_bytes += content_ref.heap_bytes();
         }
         let piece = ProjectedPiece {
             offset: entry.offset,
@@ -216,9 +207,8 @@ mod tests {
                         namespace_id.clone(),
                         content_id.clone(),
                         whole,
+                        loonfs_types::ChecksumAlgorithm::Crc64nvme,
                     ),
-                    hash_state: None,
-                    crc64nvme: None,
                     layout: None,
                 },
             }],

@@ -449,11 +449,11 @@ step permit.
 Every public checksum value uses one shape:
 
 ```json
-{ "algorithm": "sha256", "value": "<64 lowercase hex>" }
+{ "algorithm": "crc64nvme", "value": "<16 lowercase hex>" }
 ```
 
-The allowed algorithms are `sha256`, `crc64nvme`, and `crc32c`. Their values
-contain exactly 64, 16, and 8 lowercase hexadecimal characters respectively.
+The allowed algorithms are `crc64nvme` and `crc32c`. Their values
+contain exactly 16 and 8 lowercase hexadecimal characters respectively.
 Other algorithms and invalid values are rejected.
 
 The surrounding field defines what the checksum covers. Checksums in
@@ -461,10 +461,9 @@ The surrounding field defines what the checksum covers. Checksums in
 checksum covers one multipart upload part. A `checksum_algorithm` field selects
 an algorithm but does not contain a checksum value.
 
-Service-proxied uploads use `sha256`. Direct PUT and direct multipart use the
-`checksum_algorithm` returned when the session begins. Both begin responses use
-the store's checksum algorithm. Reads verify the algorithm stored in the content
-reference.
+Every content reference uses the store's checksum algorithm. Every upload begin
+response names it in `checksum_algorithm`, including `service_proxied`. Reads
+verify the checksum stored in the content reference.
 
 ## 5. Minimal upload, commit, and change-feed model
 
@@ -1384,9 +1383,9 @@ the client `PUT`s its bytes to `/uploads/{upload_id}/content` and the server
 writes them to object storage.
 
 The server streams the body to object storage without buffering the complete
-file. While streaming, it counts the bytes and computes SHA-256. A body larger
-than `upload.service_proxied.max_content_bytes` fails with `content_too_large`. The resulting
-content reference stores the server-computed SHA-256 in `checksum`.
+file. While streaming, it counts the bytes and computes the store's checksum.
+A body larger than `upload.service_proxied.max_content_bytes` fails with `content_too_large`. The resulting
+content reference stores that checksum in `checksum`.
 
 #### Direct single-PUT upload
 
@@ -1615,7 +1614,7 @@ window remains open. The separate `content_ref` remains available afterward.
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
-  "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
+  "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } }
 }
 ```
 
@@ -1634,7 +1633,7 @@ tokens naming other refs are ignored.
   "commit_id": "commit-a",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -1642,7 +1641,7 @@ tokens naming other refs are ignored.
     {
       "kind": "put_file",
       "path": "/docs/report.pdf",
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
       "behavior": "no_replace"
     }
   ]
@@ -1856,7 +1855,7 @@ the durable naming rules ([format: field conventions](format.md#121-field-conven
     "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 19482,
-    "checksum": { "algorithm": "sha256", "value": "42d..." }
+    "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
   },
   "revision_committed_at_ms": 1752624000000,
   "attributes_revision_no": 3,
@@ -1975,7 +1974,7 @@ An unrecognized cursor version is also rejected as `invalid_request`.
         "owner_namespace_id": "demo",
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
-        "checksum": { "algorithm": "sha256", "value": "42d..." }
+        "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
       }
     },
     {
@@ -2091,7 +2090,7 @@ not readable through that snapshot.
         "owner_namespace_id": "demo",
         "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
-        "checksum": { "algorithm": "sha256", "value": "42d..." }
+        "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
       }
     }
   ],
@@ -2155,7 +2154,7 @@ create a directory and write into it:
   "message": "import the January report",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
       "token": "opaque-server-token"
     }
   ],
@@ -2164,7 +2163,7 @@ create a directory and write into it:
     {
       "kind": "put_file",
       "path": "/reports/2026/january.pdf",
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } },
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } },
       "behavior": "no_replace"
     },
     {
@@ -2227,7 +2226,7 @@ string. No content token is needed. For example, this request writes
 ```
 
 An empty string writes an empty file. The content ID is assigned by the server,
-and the size and SHA-256 checksum are computed from the decoded bytes.
+and the size and content checksum are computed from the decoded bytes.
 
 Inline writes are enabled by default for files up to 64 KiB. The configured
 limit is advertised as `commit.max_inline_content_bytes_per_operation`, alongside
@@ -2307,15 +2306,9 @@ one, based on the current revision's content ID `C` and size `S`:
   the appended bytes. An append to an empty file also starts a new content ID.
 
 Earlier revisions keep their references and still read their own bytes. The
-checksum continues from what was recorded about the first `S` bytes of `C`: a
-SHA-256 state, which gives a SHA-256 reference, or else a CRC-64/NVME, which
-gives a CRC-64/NVME reference. A direct upload on a provider with CRC-64/NVME
-records only that CRC, so appends to it keep CRC-64/NVME references. The fold
-does not recompute either digest. Content that recorded neither, which only a
-direct upload on a provider without CRC-64/NVME produces, answers
-`not_supported` with a message that names the file and no `feature`, because the
-cause is the file's content, not the deployment. Write the whole file with
-`put_file` instead.
+checksum combines the base reference's CRC with the CRC of the appended bytes.
+The writer does not read earlier bytes to compute it. A base whose algorithm
+differs from the store's is `namespace_corrupt`.
 
 A retry under the same commit ID with the same bytes replays the original
 commit. Different bytes return `commit_id_reuse_conflict`.
@@ -2401,7 +2394,7 @@ Representative response:
       "parent_inode_id": "ino_12",
       "display_name": "january.pdf",
       "revision_no": 1,
-      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "..." } }
+      "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_9f2a...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "..." } }
     }
   ]
 }
@@ -2718,7 +2711,7 @@ additional fields. Unknown fields, missing fields, and mode mismatches return
 Every upload step (`create_upload`, `put_upload_content`, `get_upload`,
 `complete_upload`, and `abort_upload`) returns the session object. An open
 session carries its mode's fields beside `mode`, `status`, and `expires_at_ms`.
-Both `direct_put` and `direct_multipart` carry `checksum_algorithm`.
+Every open session carries `checksum_algorithm`.
 `direct_multipart` also carries `part_size_bytes`. `direct_put` carries `access`,
 a write capability minted fresh at creation and on every read of the open
 session. A `service_proxied` session carries `content_ref` after bytes have
@@ -2746,7 +2739,7 @@ final ([format: upload sessions](format.md#51-upload-sessions)). What that means
 
   ```json
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_multipart", "status": "open", "expires_at_ms": 1730000000000, "checksum_algorithm": "crc64nvme", "part_size_bytes": 8388608 }
-  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "sha256", "value": "<64 hex>" } }, "token": "<opaque>" } }
+  { "namespace_id": "demo", "upload_id": "upl_...", "mode": "direct_put", "status": "completed", "completed_at_ms": 1730000001000, "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "<16 hex>" } }, "content_token": { "content_ref": { "kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_...", "size_bytes": 1234, "checksum": { "algorithm": "crc64nvme", "value": "<16 hex>" } }, "token": "<opaque>" } }
   { "namespace_id": "demo", "upload_id": "upl_...", "mode": "service_proxied", "status": "aborted", "aborted_at_ms": 1730000002000 }
   ```
 
@@ -2856,7 +2849,8 @@ Representative begin-upload response:
   "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
   "mode": "service_proxied",
   "status": "open",
-  "expires_at_ms": 1730000000000
+  "expires_at_ms": 1730000000000,
+  "checksum_algorithm": "crc64nvme"
 }
 ```
 
@@ -2869,12 +2863,13 @@ Representative content-upload response:
   "mode": "service_proxied",
   "status": "open",
   "expires_at_ms": 1730000000000,
+  "checksum_algorithm": "crc64nvme",
   "content_ref": {
     "kind": "blob_v1",
     "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
-    "checksum": { "algorithm": "sha256", "value": "7ab..." }
+    "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
   }
 }
 ```
@@ -2899,7 +2894,7 @@ Representative complete-upload response:
     "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
-    "checksum": { "algorithm": "sha256", "value": "7ab..." }
+    "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
   },
   "content_token": {
     "content_ref": {
@@ -2907,7 +2902,7 @@ Representative complete-upload response:
       "owner_namespace_id": "demo",
       "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
       "size_bytes": 20591,
-      "checksum": { "algorithm": "sha256", "value": "7ab..." }
+      "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
     },
     "token": "opaque-server-token"
   }
@@ -2954,7 +2949,7 @@ checks the arriving bytes against:
     "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 314572800,
-    "checksum": { "algorithm": "sha256", "value": "42d..." }
+    "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
   },
   "ranges": [{
     "start_offset": 1048576,
@@ -2985,7 +2980,7 @@ parameter, and its response does not include a path:
     "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 314572800,
-    "checksum": { "algorithm": "sha256", "value": "42d..." }
+    "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
   },
   "ranges": [{
     "start_offset": 0,
@@ -3033,7 +3028,7 @@ revision. A client that holds every byte asks for nothing.
 
 **The client verifies the complete file across ranges.** It reads the ranges in
 order and checks the complete byte length and `content_ref.checksum`. This
-applies to SHA-256, CRC-64/NVME, and CRC-32C. A resumed download includes the held
+applies to CRC-64/NVME and CRC-32C. A resumed download includes the held
 prefix in the same checksum. A mismatch fails the download.
 
 **The raw object keys are never exposed.** Each range carries a URL that expires,
@@ -3083,7 +3078,7 @@ more than three events. The events stay in request order.
             "owner_namespace_id": "demo",
             "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
             "size_bytes": 20591,
-            "checksum": { "algorithm": "sha256", "value": "7ab..." }
+            "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
           }
         }
       ]
@@ -3129,7 +3124,7 @@ includes its first revision and content reference:
     "owner_namespace_id": "demo",
     "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
-    "checksum": { "algorithm": "sha256", "value": "7ab..." }
+    "checksum": { "algorithm": "crc64nvme", "value": "7ab..." }
   }
 }
 ```

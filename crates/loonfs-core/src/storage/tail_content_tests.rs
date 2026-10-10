@@ -76,7 +76,6 @@ async fn fixture<S: ObjectStore>(
     let mut tail = ProjectedWalTail::default();
     tail.insert_piece(
         &reference,
-        &None,
         &WalInlineContent {
             content_id,
             offset,
@@ -208,7 +207,13 @@ async fn whole_extent_reads_require_the_store_checksum_and_ranges_stay_unverifie
         for expected in [
             Some(Checksum::compute(algorithm, b"whole object")),
             Some(Checksum::compute(algorithm, b"wrong object")),
-            Some(Checksum::sha256(b"whole object")),
+            Some(Checksum::compute(
+                match algorithm {
+                    ChecksumAlgorithm::Crc64nvme => ChecksumAlgorithm::Crc32c,
+                    ChecksumAlgorithm::Crc32c => ChecksumAlgorithm::Crc64nvme,
+                },
+                b"whole object",
+            )),
             None,
         ] {
             let correct = expected == Some(Checksum::compute(algorithm, b"whole object"));
@@ -260,7 +265,6 @@ async fn local_large_tail_streams_pieces_without_merge_permits() {
             .expect("combine");
         tail.insert_piece(
             &reference,
-            &None,
             &WalInlineContent {
                 content_id: reference.content_id.clone(),
                 offset,

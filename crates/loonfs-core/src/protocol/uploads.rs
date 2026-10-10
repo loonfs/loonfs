@@ -46,36 +46,9 @@ use loonfs_types::format::control::{
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, NamespaceAccess,
-    NamespaceId, Sha256State, Subject, SubjectId, UploadId,
+    NamespaceId, Subject, SubjectId, UploadId,
 };
 use std::num::NonZeroU64;
-
-/// A reference a completion records, with the SHA-256 state and CRC-64/NVME
-/// of its bytes when this process wrote them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VerifiedContent {
-    content_ref: ContentRef,
-    hash_state: Option<Sha256State>,
-    crc64nvme: Option<Checksum>,
-}
-
-impl VerifiedContent {
-    fn written(content_ref: ContentRef, hash_state: Sha256State, crc64nvme: Checksum) -> Self {
-        Self {
-            content_ref,
-            hash_state: Some(hash_state),
-            crc64nvme: Some(crc64nvme),
-        }
-    }
-
-    fn uploaded(content_ref: ContentRef) -> Self {
-        Self {
-            content_ref,
-            hash_state: None,
-            crc64nvme: None,
-        }
-    }
-}
 
 /// Internal target for a new direct_put session, used by the server before
 /// signing its URL.
@@ -440,7 +413,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
 ) -> Result<UploadSession> {
     let (state, _) =
         create_upload_session_with_state(store, catalog, subject_id, session, context).await?;
-    Ok(session_response(&state))
+    Ok(session_response(&state, store.checksum_algorithm()))
 }
 
 async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
@@ -740,12 +713,14 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
                     loaded.namespace_id.clone(),
                     loaded.content_id.clone(),
                     bytes,
+                    store.checksum_algorithm(),
                 ),
                 ProxiedPayload::Stream(body) => {
                     identify_streamed_payload(
                         loaded.namespace_id.clone(),
                         loaded.content_id.clone(),
                         body,
+                        store.checksum_algorithm(),
                     )
                     .await?
                 }
@@ -757,7 +732,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
                 });
             }
             loaded.mode = UploadSessionMode::ServiceProxied { staging };
-            return Ok(session_response(&loaded));
+            return Ok(session_response(&loaded, store.checksum_algorithm()));
         }
         StagingSlot::Claimed => {}
     }
@@ -774,8 +749,6 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
         .map(|stored| {
             let staging = ProxiedStaging::Staged {
                 content_ref: stored.content_ref,
-                hash_state: stored.hash_state,
-                crc64nvme: stored.crc64nvme,
             };
             (staging, false)
         }),
@@ -802,8 +775,6 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
         .map(|staged| {
             let staging = ProxiedStaging::Staged {
                 content_ref: staged.content_ref,
-                hash_state: staged.hash_state,
-                crc64nvme: staged.crc64nvme,
             };
             (staging, staged.already_present)
         }),
@@ -862,7 +833,10 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
             }
             match staging {
                 ProxiedStaging::Staged { .. } if *staging == staged => {
-                    return Ok(UploadSessionUpdate::Noop(session_response(&state)));
+                    return Ok(UploadSessionUpdate::Noop(session_response(
+                        &state,
+                        store.checksum_algorithm(),
+                    )));
                 }
                 ProxiedStaging::Staged { .. } => {
                     return Err(CoreError::UploadContentConflict { upload_id });
@@ -870,7 +844,7 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
                 ProxiedStaging::Idle | ProxiedStaging::Claimed => {}
             }
             *staging = staged;
-            let response = session_response(&state);
+            let response = session_response(&state, store.checksum_algorithm());
             Ok(UploadSessionUpdate::Replace {
                 next: Box::new(state),
                 outcome: response,
@@ -953,7 +927,7 @@ async fn freeze_completed_session<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     upload_id: &UploadId,
-    verified: &VerifiedContent,
+    verified: &ContentRef,
     now_ms: u64,
 ) -> Result<CompletedUpload> {
     freeze_completed_session_from_initial(store, catalog, upload_id, verified, now_ms, None).await
@@ -963,7 +937,7 @@ async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     upload_id: &UploadId,
-    verified: &VerifiedContent,
+    verified: &ContentRef,
     now_ms: u64,
     initial: Option<LoadedControl<UploadSessionPayload>>,
 ) -> Result<CompletedUpload> {
@@ -981,7 +955,7 @@ async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
                     &state.status,
                     &namespace_id,
                     &upload_id,
-                    Some(&verified.content_ref),
+                    Some(&verified),
                     upload_mode(&state.mode),
                     now_ms,
                 )? {
@@ -990,9 +964,7 @@ async fn freeze_completed_session_from_initial<S: ObjectStore + ?Sized>(
 
                 state.status = UploadSessionRecordStatus::Completed {
                     completed_at_ms: now_ms,
-                    content_ref: verified.content_ref.clone(),
-                    hash_state: verified.hash_state.clone(),
-                    crc64nvme: verified.crc64nvme.clone(),
+                    content_ref: verified.clone(),
                 };
                 let outcome = completed_upload(
                     &namespace_id,
@@ -1045,7 +1017,7 @@ pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
         store,
         catalog,
         &session.upload_id,
-        VerifiedContent::written(stored.content_ref, stored.hash_state, stored.crc64nvme),
+        stored.content_ref,
         context,
         session.initial,
     )
@@ -1098,7 +1070,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         store,
         catalog,
         &session.upload_id,
-        VerifiedContent::written(staged.content_ref, staged.hash_state, staged.crc64nvme),
+        staged.content_ref,
         context,
         session.initial,
     )
@@ -1150,7 +1122,7 @@ async fn complete_owned_staging<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
     upload_id: &UploadId,
-    written: VerifiedContent,
+    written: ContentRef,
     context: &MutationContext,
     initial: Option<LoadedControl<UploadSessionPayload>>,
 ) -> Result<PreparedContent> {
@@ -1311,17 +1283,7 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
         UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
-            hash_state,
-            crc64nvme,
-        } => evidence_within_window(
-            &VerifiedContent {
-                content_ref: content_ref.clone(),
-                hash_state: hash_state.clone(),
-                crc64nvme: crc64nvme.clone(),
-            },
-            *completed_at_ms,
-            now_ms,
-        ),
+        } => evidence_within_window(content_ref, *completed_at_ms, now_ms),
         UploadSessionRecordStatus::Open { .. } | UploadSessionRecordStatus::Aborted { .. } => None,
     };
     let direct_put_object_key = if matches!(loaded.status, UploadSessionRecordStatus::Open { .. })
@@ -1332,17 +1294,17 @@ pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
         None
     };
     Ok(UploadSessionView {
-        session: session_response(&loaded),
+        session: session_response(&loaded, store.checksum_algorithm()),
         evidence,
         direct_put_object_key,
     })
 }
 
-fn session_response(state: &UploadSessionPayload) -> UploadSession {
+fn session_response(state: &UploadSessionPayload, algorithm: ChecksumAlgorithm) -> UploadSession {
     let status = match &state.status {
         UploadSessionRecordStatus::Open { expires_at_ms } => UploadSessionStatus::Open {
             expires_at_ms: *expires_at_ms,
-            checksum_algorithm: state.mode.checksum_algorithm(),
+            checksum_algorithm: algorithm,
             part_size_bytes: match &state.mode {
                 UploadSessionMode::DirectMultipart {
                     part_size_bytes, ..
@@ -1392,7 +1354,7 @@ pub struct CompletedUpload {
 fn completed_upload(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    content: &VerifiedContent,
+    content: &ContentRef,
     mode: UploadMode,
     completed_at_ms: u64,
     now_ms: u64,
@@ -1402,12 +1364,10 @@ fn completed_upload(
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
             mode,
-            status: completed_status(&content.content_ref, completed_at_ms),
+            status: completed_status(content, completed_at_ms),
         },
         prepared: PreparedContent::for_completed_upload(
-            content.content_ref.clone(),
-            content.hash_state.clone(),
-            content.crc64nvme.clone(),
+            content.clone(),
             completed_at_ms.saturating_add(COMPLETED_UPLOAD_ADMISSION_WINDOW_MS),
             Some(upload_id.clone()),
         ),
@@ -1430,18 +1390,12 @@ fn completed_status(content_ref: &ContentRef, completed_at_ms: u64) -> UploadSes
 /// evidence exists, so no new metadata reference to this content can appear
 /// (`limits::CONTENT_RECLAMATION_GRACE_MS`).
 fn evidence_within_window(
-    content: &VerifiedContent,
+    content: &ContentRef,
     completed_at_ms: u64,
     now_ms: u64,
 ) -> Option<CompletedUploadEvidence> {
-    (now_ms.saturating_sub(completed_at_ms) < COMPLETED_UPLOAD_RECEIPT_WINDOW_MS).then(|| {
-        CompletedUploadEvidence::for_completed_session(
-            content.content_ref.clone(),
-            content.hash_state.clone(),
-            content.crc64nvme.clone(),
-            completed_at_ms,
-        )
-    })
+    (now_ms.saturating_sub(completed_at_ms) < COMPLETED_UPLOAD_RECEIPT_WINDOW_MS)
+        .then(|| CompletedUploadEvidence::for_completed_session(content.clone(), completed_at_ms))
 }
 
 /// Answers a completion against a session that has already reached a
@@ -1463,8 +1417,6 @@ fn replay_terminal_completion(
         UploadSessionRecordStatus::Completed {
             completed_at_ms,
             content_ref,
-            hash_state,
-            crc64nvme,
         } => {
             if expected.is_some_and(|expected| expected != content_ref) {
                 return Err(CoreError::UploadAlreadyCompleted {
@@ -1474,11 +1426,7 @@ fn replay_terminal_completion(
             Ok(Some(completed_upload(
                 namespace_id,
                 upload_id,
-                &VerifiedContent {
-                    content_ref: content_ref.clone(),
-                    hash_state: hash_state.clone(),
-                    crc64nvme: crc64nvme.clone(),
-                },
+                content_ref,
                 mode,
                 *completed_at_ms,
                 now_ms,
@@ -1586,20 +1534,11 @@ fn completion_plan<'a>(
 async fn verify_completion<S: ObjectStore + ?Sized>(
     store: &S,
     plan: CompletionPlan<'_>,
-) -> Result<VerifiedContent> {
+) -> Result<ContentRef> {
     match plan {
         CompletionPlan::Proxied {
-            staging:
-                ProxiedStaging::Staged {
-                    content_ref,
-                    hash_state,
-                    crc64nvme,
-                },
-        } => Ok(VerifiedContent::written(
-            content_ref.clone(),
-            hash_state.clone(),
-            crc64nvme.clone(),
-        )),
+            staging: ProxiedStaging::Staged { content_ref },
+        } => Ok(content_ref.clone()),
         CompletionPlan::Proxied { .. } => Err(CoreError::InvalidUploadContent(
             "upload content has not been staged".to_owned(),
         )),
@@ -1607,7 +1546,7 @@ async fn verify_completion<S: ObjectStore + ?Sized>(
             verify_durable_content_checksum(store, &requested)
                 .await
                 .map_err(content_failure)?;
-            Ok(VerifiedContent::uploaded(requested))
+            Ok(requested)
         }
         CompletionPlan::DirectMultipart {
             requested,
@@ -1623,7 +1562,7 @@ async fn verify_completion<S: ObjectStore + ?Sized>(
                 &requested,
             )
             .await?;
-            Ok(VerifiedContent::uploaded(requested))
+            Ok(requested)
         }
     }
 }
@@ -2014,15 +1953,11 @@ mod tests {
                 staging: ProxiedStaging::Idle,
             }
         );
-        let mut hash_state = Sha256State::new();
-        hash_state.update(BYTES);
         assert_eq!(
             state.status,
             UploadSessionRecordStatus::Completed {
                 completed_at_ms: 2_000,
                 content_ref: content_ref.clone(),
-                hash_state: Some(hash_state),
-                crc64nvme: Some(Checksum::crc64nvme(BYTES)),
             }
         );
 
@@ -2088,7 +2023,7 @@ mod tests {
                 &store,
                 &catalog,
                 &upload_id,
-                &VerifiedContent::uploaded(content_ref.clone()),
+                &content_ref,
                 3_000,
                 Some(initial),
             )
@@ -2166,19 +2101,19 @@ mod tests {
         let wrong_part = CompletedUploadPart {
             part_number: 1,
             etag: "etag".to_owned(),
-            checksum: Checksum::sha256(b"payload"),
+            checksum: Checksum::crc64nvme(b"payload"),
         };
         assert!(multipart_parts(&[wrong_part], required_algorithm).is_err());
         let wrong_signing_claim = UploadPartChecksumClaim {
             part_number: 1,
-            checksum: Checksum::sha256(b"payload"),
+            checksum: Checksum::crc64nvme(b"payload"),
         };
         assert!(
             validate_upload_checksum(&wrong_signing_claim.checksum, required_algorithm).is_err()
         );
         let wrong_content = UploadContentClaim {
             size_bytes: 7,
-            checksum: Checksum::sha256(b"payload"),
+            checksum: Checksum::crc64nvme(b"payload"),
         };
         assert!(claimed_content_ref(
             session.namespace_id.clone(),

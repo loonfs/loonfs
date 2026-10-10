@@ -127,7 +127,6 @@ mod tests {
     use crate::test_support::ops::create;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId};
-    use std::collections::BTreeSet;
     use tempfile::tempdir;
 
     fn test_context() -> MutationContext {
@@ -257,7 +256,7 @@ mod tests {
                     &store,
                     &tokio::sync::Semaphore::new(32 * 1024 * 1024),
                     &CommitCandidate::new(request.clone()),
-                    commit_fingerprint(&namespace_id, &request, &BTreeSet::new())
+                    commit_fingerprint(&namespace_id, &request, &std::collections::BTreeMap::new())
                         .expect("fingerprint"),
                     view.projected_metadata_view(),
                     1,

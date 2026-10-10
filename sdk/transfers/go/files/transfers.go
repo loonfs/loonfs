@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -364,9 +363,6 @@ func responseStatusError(response *http.Response) error {
 func computeChecksum(algorithm loonfs.ChecksumAlgorithm, payload []byte) (*loonfs.Checksum, error) {
 	var value string
 	switch algorithm {
-	case loonfs.ChecksumAlgorithmSha256:
-		digest := sha256.Sum256(payload)
-		value = hex.EncodeToString(digest[:])
 	case loonfs.ChecksumAlgorithmCrc64Nvme:
 		value = fmt.Sprintf("%016x", crc64.Checksum(payload, crc64NVMeTable))
 	case loonfs.ChecksumAlgorithmCrc32C:

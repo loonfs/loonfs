@@ -200,6 +200,7 @@ mod tests {
                 loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                 ContentId::generate(),
                 bytes,
+                loonfs_types::ChecksumAlgorithm::Crc64nvme,
             ),
             None,
         )

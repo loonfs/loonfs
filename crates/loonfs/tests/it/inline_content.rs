@@ -33,6 +33,7 @@ async fn publish_inline(
         namespace_id.clone(),
         ContentId::generate(),
         Bytes::from_static(b"inline content"),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let mut request = CommitRequest::single(
         CommitId::generate(),

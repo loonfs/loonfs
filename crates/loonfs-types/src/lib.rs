@@ -112,11 +112,11 @@ pub use capability::{
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
 };
 pub use commit_identity::{
-    semantic_commit_fingerprint, CommitFingerprint, SemanticFingerprintError,
+    semantic_commit_fingerprint, CommitFingerprint, InlineContentIdentity, SemanticFingerprintError,
 };
 pub use content::{
     Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentRef, ContentRefKind,
-    ContentRefValidationError, Crc32c, Crc64Nvme, Sha256State, StreamingChecksum,
+    ContentRefValidationError, Crc32c, Crc64Nvme, StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};

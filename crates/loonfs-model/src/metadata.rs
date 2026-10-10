@@ -10,9 +10,7 @@
 
 use crate::Result;
 use loonfs_types::format::wal::WalDelta;
-use loonfs_types::{
-    ActorId, ChangeSeq, Checksum, CommitId, ContentRef, InodeId, InodeKind, RevisionNo, Sha256State,
-};
+use loonfs_types::{ActorId, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetadataState {
@@ -73,8 +71,6 @@ pub struct RevisionRecord {
     pub committed_by: ActorId,
     pub revision_delta_index: u32,
     pub content_ref: ContentRef,
-    pub hash_state: Option<Sha256State>,
-    pub crc64nvme: Option<Checksum>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,8 +228,6 @@ impl MetadataState {
                     inode_id,
                     revision_no,
                     content_ref,
-                    hash_state,
-                    crc64nvme,
                     layout,
                 } => {
                     if let Some(layout) = layout {
@@ -254,8 +248,6 @@ impl MetadataState {
                         committed_by: actor.clone(),
                         revision_delta_index: *delta_index,
                         content_ref: content_ref.clone(),
-                        hash_state: hash_state.clone(),
-                        crc64nvme: crc64nvme.clone(),
                     });
                 }
                 WalDelta::TombstoneSubtree {

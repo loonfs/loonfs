@@ -232,10 +232,8 @@ pub enum UploadSessionStatus {
     Open {
         /// The Unix-millisecond time after which cleanup may abort the session.
         expires_at_ms: u64,
-        /// Present for `direct_put` and `direct_multipart` sessions.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        checksum_algorithm: Option<ChecksumAlgorithm>,
+        /// The store's content checksum algorithm.
+        checksum_algorithm: ChecksumAlgorithm,
         /// Present for `direct_multipart` sessions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -326,9 +324,9 @@ mod tests {
     fn a_create_upload_body_carrying_another_modes_fields_does_not_decode() {
         for body in [
             r#"{"mode":"service_proxied","part_size_bytes":8388608}"#,
-            r#"{"mode":"service_proxied","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
-            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
-            r#"{"mode":"direct_put","content":{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
+            r#"{"mode":"service_proxied","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}}}"#,
+            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}}}"#,
+            r#"{"mode":"direct_put","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}}}"#,
             r#"{"mode":"direct_put","part_size_bytes":8388608}"#,
             r#"{"mode":"direct_multipart","size_bytes":5}"#,
         ] {
@@ -431,11 +429,12 @@ mod tests {
     }
 
     #[test]
-    fn open_sessions_carry_only_their_modes_fields() {
+    fn open_sessions_name_the_store_algorithm_and_their_modes_fields() {
         let content_ref = ContentRef::blob_v1(
             NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         let access = ObjectTransferAccess::PresignedUrl {
             method: "PUT".to_owned(),
@@ -446,7 +445,7 @@ mod tests {
         for (mode, checksum_algorithm, part_size_bytes, access, content_ref, fields) in [
             (
                 UploadMode::DirectPut,
-                Some(ChecksumAlgorithm::Crc64nvme),
+                ChecksumAlgorithm::Crc64nvme,
                 None,
                 Some(access.clone()),
                 None,
@@ -454,7 +453,7 @@ mod tests {
             ),
             (
                 UploadMode::DirectMultipart,
-                Some(ChecksumAlgorithm::Crc64nvme),
+                ChecksumAlgorithm::Crc64nvme,
                 Some(8388608),
                 None,
                 None,
@@ -462,19 +461,19 @@ mod tests {
             ),
             (
                 UploadMode::ServiceProxied,
-                None,
+                ChecksumAlgorithm::Crc64nvme,
                 None,
                 None,
                 Some(content_ref.clone()),
-                serde_json::json!({"content_ref": content_ref}),
+                serde_json::json!({"checksum_algorithm": "crc64nvme", "content_ref": content_ref}),
             ),
             (
                 UploadMode::ServiceProxied,
+                ChecksumAlgorithm::Crc64nvme,
                 None,
                 None,
                 None,
-                None,
-                serde_json::json!({}),
+                serde_json::json!({"checksum_algorithm": "crc64nvme"}),
             ),
         ] {
             let session = UploadSession {
@@ -531,7 +530,7 @@ mod tests {
 
         assert!(
             serde_json::from_str::<UploadContentClaim>(
-                r#"{"size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},"content_id":"con_0123456789abcdef0123456789abcdef"}"#
+                r#"{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"},"content_id":"con_0123456789abcdef0123456789abcdef"}"#
             )
             .is_err(),
             "a client must not be able to name the content object"
@@ -566,6 +565,7 @@ mod tests {
                     crate::NamespaceId::parse("demo").expect("namespace id"),
                     ContentId::generate(),
                     b"hello",
+                    crate::ChecksumAlgorithm::Crc64nvme,
                 ),
                 content_token: None,
             },
@@ -589,6 +589,7 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         let content_token = ContentToken {
             content_ref: content_ref.clone(),
@@ -624,8 +625,8 @@ mod tests {
                     "content_id": "con_0123456789abcdef0123456789abcdef",
                     "size_bytes": 5,
                     "checksum": {
-                        "algorithm": "sha256",
-                        "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                        "algorithm": "crc64nvme",
+                        "value": "3377857006524257"
                     }
                 },
                 "token": "opaque-server-token"
@@ -657,8 +658,8 @@ mod tests {
                 "content_id": "con_0123456789abcdef0123456789abcdef",
                 "size_bytes": 5,
                 "checksum": {
-                    "algorithm": "sha256",
-                    "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                    "algorithm": "crc64nvme",
+                    "value": "3377857006524257"
                 }
             },
             "token": "opaque-server-token",

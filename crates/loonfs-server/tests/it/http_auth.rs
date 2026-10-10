@@ -356,6 +356,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
                     loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                     ContentId::generate(),
                     b"irrelevant",
+                    loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 ),
                 token: "irrelevant.garbage".to_owned(),
             },

@@ -197,7 +197,6 @@
       "ChecksumAlgorithm": {
         "description": "A supported checksum algorithm.",
         "enum": [
-          "sha256",
           "crc64nvme",
           "crc32c"
         ],
@@ -3144,7 +3143,7 @@
           },
           "checksum_algorithm": {
             "$ref": "#/components/schemas/ChecksumAlgorithm",
-            "description": "Present for `direct_put` and `direct_multipart` sessions."
+            "description": "The store's content checksum algorithm."
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
@@ -3184,6 +3183,7 @@
         },
         "required": [
           "expires_at_ms",
+          "checksum_algorithm",
           "status",
           "namespace_id",
           "upload_id",
