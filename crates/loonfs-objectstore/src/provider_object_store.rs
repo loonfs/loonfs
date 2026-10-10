@@ -1066,7 +1066,7 @@ impl ObjectStore for ProviderObjectStore {
         };
         match self.head(key).await {
             Ok(Some(existing)) => {
-                return crate::immutable_write::decide_attestation(key, expected, existing)
+                return crate::immutable_write::check_stored_checksum(key, expected, existing)
             }
             Err(source) => {
                 return Err(crate::ImmutableWriteError::Transport {
@@ -2394,21 +2394,21 @@ mod tests {
             .await
             .expect("overwrite");
 
-        let attested = Some(Checksum::crc64nvme(b"created"));
+        let expected_checksum = Some(Checksum::crc64nvme(b"created"));
         let head = store.head(created).await.expect("head").expect("created");
         let body = store
             .get_with_metadata(created)
             .await
             .expect("get")
             .expect("created");
-        assert_eq!(head.checksum, attested);
+        assert_eq!(head.checksum, expected_checksum);
         assert_eq!(body.bytes, b"created");
         let replaced = store.head(replaced).await.expect("head").expect("replaced");
         assert_eq!(replaced.checksum, Some(Checksum::crc64nvme(b"replaced")));
     }
 
     #[tokio::test]
-    async fn an_immutable_write_creates_at_every_size_and_attests_its_bytes() {
+    async fn an_immutable_write_creates_at_every_size_and_stores_its_checksum() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
         for (key, payload) in [
@@ -2432,13 +2432,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_occupied_key_is_decided_by_one_head_of_its_attestation() {
+    async fn an_occupied_key_is_checked_by_one_head_of_its_stored_checksum() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
         let ours = Bytes::from_static(b"ours");
         let identical = "namespaces/demo/segments/seg_1.sst.zst";
         let different = "namespaces/demo/segments/seg_2.sst.zst";
-        let unattested = "namespaces/demo/segments/seg_3.sst.zst";
+        let without_checksum = "namespaces/demo/segments/seg_3.sst.zst";
         store
             .put_if_absent(identical, ours.clone())
             .await
@@ -2447,22 +2447,22 @@ mod tests {
             .put_if_absent(different, Bytes::from_static(b"theirs"))
             .await
             .expect("seed different");
-        seed_scoped_object(&flaky, unattested, ours.clone()).await;
-        *flaky.missing_checksum.lock().expect("checksum fault") = Some(unattested.to_owned());
+        seed_scoped_object(&flaky, without_checksum, ours.clone()).await;
+        *flaky.missing_checksum.lock().expect("checksum fault") = Some(without_checksum.to_owned());
         flaky.puts.store(0, Ordering::SeqCst);
 
         let accepted = store
             .put_immutable_verified(identical, ours.clone())
             .await
-            .expect("an equal attestation is this object");
+            .expect("an equal stored checksum identifies this object");
         assert_eq!(accepted.checksum, Some(Checksum::crc64nvme(&ours)));
         assert!(matches!(
             store.put_immutable_verified(different, ours.clone()).await,
             Err(crate::ImmutableWriteError::DifferentObject { object_key }) if object_key == different
         ));
         assert!(matches!(
-            store.put_immutable_verified(unattested, ours).await,
-            Err(crate::ImmutableWriteError::StoredChecksumMissing { object_key }) if object_key == unattested
+            store.put_immutable_verified(without_checksum, ours).await,
+            Err(crate::ImmutableWriteError::StoredChecksumMissing { object_key }) if object_key == without_checksum
         ));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
         assert_eq!(flaky.heads.load(Ordering::SeqCst), 3);
@@ -2474,7 +2474,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_landed_write_whose_answer_was_lost_resolves_through_its_attestation() {
+    async fn a_landed_write_whose_answer_was_lost_resolves_through_its_stored_checksum() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
         script_puts(&flaky, [WriteScript::LandThenFail]);
