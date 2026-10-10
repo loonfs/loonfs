@@ -14,13 +14,13 @@ use crate::keyspace::{
 use crate::object_store::Result;
 use crate::ListedObject;
 use crate::{
-    ByteRange, ByteStream, ExtendBase, ExtendedObject, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, StoredObjectChecksum,
+    AssemblySource, ByteRange, ByteStream, ImmutableWriteError, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{self, BoxStream, StreamExt};
-use loonfs_types::{Checksum, EffectiveLimit, Page};
+use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
+use loonfs_types::{Checksum, ChecksumAlgorithm, EffectiveLimit, Page, StreamingChecksum};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -124,24 +124,45 @@ impl LocalFsStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_error(key, err)),
         };
-        let Some(content_bytes) = Self::read_for_digest(key, path).await? else {
+        let Some(stored) = Self::file_checksum(key, path, ChecksumAlgorithm::Sha256).await? else {
             return Ok(None);
         };
-        Self::metadata_from_fs_metadata(key, &metadata, Checksum::sha256(&content_bytes), path)
-            .map(Some)
+        Self::metadata_from_fs_metadata(key, &metadata, stored.checksum, path).map(Some)
     }
 
-    /// Reads the object's bytes for the digest, answering `None` when the
-    /// object is gone. The stat above and this read are separate syscalls,
-    /// so a concurrent delete can land between them; a head that races a
-    /// delete reports "gone" — the answer a provider's head gives — never
-    /// a transport error.
-    async fn read_for_digest(key: &str, path: &Path) -> Result<Option<Vec<u8>>> {
-        match fs::read(path).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(io_error(key, err)),
+    async fn file_checksum(
+        key: &str,
+        path: &Path,
+        algorithm: ChecksumAlgorithm,
+    ) -> Result<Option<StoredObjectChecksum>> {
+        let mut file = match File::open(path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_error(key, err)),
+        };
+        let mut state = StreamingChecksum::for_algorithm(algorithm);
+        let size = file
+            .metadata()
+            .await
+            .map_err(|err| io_error(key, err))?
+            .len();
+        let mut buffer = vec![0; size.clamp(1, crate::assembly::READ_BYTES) as usize];
+        let mut size_bytes = 0;
+        loop {
+            let length = file
+                .read(&mut buffer)
+                .await
+                .map_err(|err| io_error(key, err))?;
+            if length == 0 {
+                break;
+            }
+            state.update(&buffer[..length]);
+            size_bytes += length as u64;
         }
+        Ok(Some(StoredObjectChecksum {
+            size_bytes,
+            checksum: state.finish(),
+        }))
     }
 
     fn metadata_from_fs_metadata(
@@ -162,7 +183,7 @@ impl LocalFsStore {
             version: None,
             size_bytes: metadata.len(),
             last_modified_ms: last_modified_ms(metadata),
-            sha256: Some(sha256),
+            attestation: Some(sha256),
         })
     }
 
@@ -217,6 +238,7 @@ impl LocalFsStore {
         key: &str,
         mut body: BoxStream<'_, Result<Bytes>>,
         mode: PutMode,
+        expected: Option<&Checksum>,
     ) -> Result<u64> {
         let path = self.resolve_key(key)?;
         let created_dirs = ensure_parent_dir(key, &path).await?;
@@ -230,12 +252,20 @@ impl LocalFsStore {
 
         let staged: Result<u64> = async {
             let mut size_bytes = 0u64;
+            let mut checksum =
+                expected.map(|expected| StreamingChecksum::for_algorithm(expected.algorithm));
             while let Some(chunk) = body.next().await {
                 let chunk = chunk?;
+                if let Some(checksum) = &mut checksum {
+                    checksum.update(&chunk);
+                }
                 file.write_all(&chunk)
                     .await
                     .map_err(|err| io_error(key, err))?;
                 size_bytes += chunk.len() as u64;
+            }
+            if let (Some(expected), Some(checksum)) = (expected, checksum) {
+                crate::assembly::check_expected(key, expected, &checksum.finish())?;
             }
             file.sync_all().await.map_err(|err| io_error(key, err))?;
             Ok(size_bytes)
@@ -455,55 +485,6 @@ impl LocalFsStore {
         Self::metadata_from_fs_metadata(key, &metadata, Checksum::sha256(bytes), &path)
     }
 
-    /// Appends in place, so the base's bytes never move and a concurrent
-    /// reader of the whole object can observe a partial append.
-    async fn extend_file(
-        &self,
-        key: &str,
-        base: &ExtendBase,
-        pieces: &[u8],
-        result: &ExtendedObject,
-    ) -> Result<ObjectMetadata> {
-        let path = self.resolve_key(key)?;
-        let _guard = self.write_lock.lock().await;
-        let _cross_process_guard = self.acquire_cross_process_write_lock(key).await?;
-        let precondition_failed = || ObjectStoreError::PreconditionFailed {
-            object_key: key.to_owned(),
-        };
-        let mut bytes = Self::read_for_digest(key, &path)
-            .await?
-            .ok_or_else(precondition_failed)?;
-        if bytes.len() as u64 != base.length || etag(&Checksum::sha256(&bytes)) != base.etag {
-            return Err(precondition_failed());
-        }
-        bytes.extend_from_slice(pieces);
-        let sha256 = Checksum::sha256(&bytes);
-        if sha256 != result.sha256 || result.crc.as_ref().is_some_and(|crc| !crc.matches(&bytes)) {
-            return Err(ObjectStoreError::ChecksumMismatch {
-                object_key: key.to_owned(),
-            });
-        }
-
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(|err| io_error(key, err))?;
-        let appended: Result<()> = async {
-            file.write_all(pieces)
-                .await
-                .map_err(|err| io_error(key, err))?;
-            file.sync_all().await.map_err(|err| io_error(key, err))
-        }
-        .await;
-        if let Err(error) = appended {
-            let _ = file.set_len(base.length).await;
-            return Err(error);
-        }
-        let metadata = file.metadata().await.map_err(|err| io_error(key, err))?;
-        Self::metadata_from_fs_metadata(key, &metadata, sha256, &path)
-    }
-
     async fn delete_object(&self, key: &str) -> Result<()> {
         let path = self.resolve_key(key)?;
         let _guard = self.write_lock.lock().await;
@@ -534,19 +515,19 @@ impl ObjectStore for LocalFsStore {
         self.head_object(&self.scoped(key)?).await
     }
 
-    /// The reference provider stores no checksum beside an object, so it
-    /// computes one from the object it holds. That is the same guarantee a
-    /// cloud provider's stored checksum gives — the provider attesting to
-    /// the bytes it actually has — and it never crosses a network.
+    /// The reference provider stores no checksum, so it computes one from
+    /// the bytes it holds. It reports CRC-64/NVME, the S3-family shape, because
+    /// the fold's assembly combines source checksums and SHA-256 cannot be
+    /// combined. This provides the same guarantee as a cloud provider's
+    /// stored checksum: the provider attests to the bytes it actually holds.
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         let scoped = self.scoped(key)?;
-        let Some(bytes) = self.get_object(&scoped, None).await? else {
-            return Ok(None);
-        };
-        Ok(Some(StoredObjectChecksum {
-            size_bytes: bytes.len() as u64,
-            checksum: Checksum::sha256(&bytes),
-        }))
+        Self::file_checksum(
+            &scoped,
+            &self.resolve_key(&scoped)?,
+            ChecksumAlgorithm::Crc64nvme,
+        )
+        .await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
@@ -564,7 +545,7 @@ impl ObjectStore for LocalFsStore {
     }
 
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
-        self.put_streamed_object(&self.scoped(key)?, body, mode)
+        self.put_streamed_object(&self.scoped(key)?, body, mode, None)
             .await
     }
 
@@ -581,7 +562,7 @@ impl ObjectStore for LocalFsStore {
         let _ = size_bytes;
         let created = async {
             let scoped = self.scoped(key)?;
-            self.put_streamed_object(&scoped, body, PutMode::CreateIfAbsent)
+            self.put_streamed_object(&scoped, body, PutMode::CreateIfAbsent, None)
                 .await?;
             self.head_object(&scoped)
                 .await?
@@ -591,15 +572,38 @@ impl ObjectStore for LocalFsStore {
         crate::immutable_write::decide_created(self, key, sha256, created).await
     }
 
-    async fn extend_object(
+    async fn assemble(
         &self,
         key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<ObjectMetadata> {
-        self.extend_file(&self.scoped(key)?, base, &pieces, result)
-            .await
+        sources: &[AssemblySource],
+        tail: Vec<Bytes>,
+        expected: &Checksum,
+    ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
+        let mut sha256 = StreamingChecksum::for_algorithm(ChecksumAlgorithm::Sha256);
+        let mut complete = false;
+        let created = async {
+            let scoped = self.scoped(key)?;
+            let body = crate::assembly::stream_sources(self, sources, tail)
+                .inspect_ok(|chunk| sha256.update(chunk))
+                .chain(stream::once(async {
+                    complete = true;
+                    Ok(Bytes::new())
+                }))
+                .boxed();
+            self.put_streamed_object(&scoped, body, PutMode::CreateIfAbsent, Some(expected))
+                .await?;
+            self.head_object(&scoped)
+                .await?
+                .ok_or_else(|| ObjectStoreError::transport(key, "object disappeared after write"))
+        }
+        .await;
+        if !complete {
+            return created.map_err(|source| ImmutableWriteError::Transport {
+                object_key: key.to_owned(),
+                source,
+            });
+        }
+        crate::immutable_write::decide_created(self, key, Some(&sha256.finish()), created).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
@@ -1026,11 +1030,10 @@ mod tests {
     // Tests panic in unexpected match arms for precise diagnostics.
 
     use super::LocalFsStore;
-    use super::{ByteRange, ExtendBase, ExtendedObject, ObjectStore, ObjectStoreError, PutMode};
+    use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
     use crate::keys::{hint, upload_session};
     use bytes::Bytes;
     use futures::{stream, StreamExt};
-    use loonfs_types::Checksum;
     use std::fs;
     use std::sync::Arc;
     use tokio::sync::Barrier;
@@ -1118,9 +1121,13 @@ mod tests {
         let temp_dir = test_dir("digest-vanished");
         let vanished = temp_dir.path().join("vanished.json");
 
-        let answer = LocalFsStore::read_for_digest("namespaces/ns-1/hint.json", &vanished)
-            .await
-            .expect("a vanished object is an answer, not an error");
+        let answer = LocalFsStore::file_checksum(
+            "namespaces/ns-1/hint.json",
+            &vanished,
+            loonfs_types::ChecksumAlgorithm::Sha256,
+        )
+        .await
+        .expect("a vanished object is an answer, not an error");
         assert!(answer.is_none());
     }
 
@@ -1130,9 +1137,13 @@ mod tests {
         let directory = temp_dir.path().join("dir");
         fs::create_dir(&directory).expect("create directory");
 
-        let error = LocalFsStore::read_for_digest("namespaces/ns-1/hint.json", &directory)
-            .await
-            .expect_err("reading a directory is not a missing object");
+        let error = LocalFsStore::file_checksum(
+            "namespaces/ns-1/hint.json",
+            &directory,
+            loonfs_types::ChecksumAlgorithm::Sha256,
+        )
+        .await
+        .expect_err("reading a directory is not a missing object");
         assert!(matches!(error, ObjectStoreError::Transport { .. }));
     }
 
@@ -1333,84 +1344,6 @@ mod tests {
             .expect("read final counter")
             .expect("counter exists");
         assert_eq!(std::str::from_utf8(&bytes).expect("utf8"), "40");
-    }
-
-    #[tokio::test]
-    async fn an_extension_appends_only_to_the_base_it_names_and_only_with_true_checksums() {
-        let temp_dir = test_dir("extend");
-        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = "namespaces/ns-1/content/con_00000000000000000000000000000001";
-        let pieces = Bytes::from_static(b" and pieces");
-        let written = store
-            .put_if_absent(key, Bytes::from_static(b"base"))
-            .await
-            .expect("write base");
-        assert_eq!(written.sha256, Some(Checksum::sha256(b"base")));
-        let base = ExtendBase {
-            length: 4,
-            etag: written.etag.expect("etag"),
-        };
-        let extended_bytes = b"base and pieces";
-        let result = ExtendedObject {
-            sha256: Checksum::sha256(extended_bytes),
-            crc: Some(Checksum::crc64nvme(extended_bytes)),
-        };
-
-        for stale in [
-            ExtendBase {
-                length: 3,
-                ..base.clone()
-            },
-            ExtendBase {
-                etag: "local-fs-v1:sha256:0".to_owned(),
-                ..base.clone()
-            },
-        ] {
-            assert!(matches!(
-                store
-                    .extend_object(key, &stale, pieces.clone(), &result)
-                    .await,
-                Err(ObjectStoreError::PreconditionFailed { .. })
-            ));
-        }
-        for wrong in [
-            ExtendedObject {
-                crc: Some(Checksum::crc64nvme(b"other bytes")),
-                ..result.clone()
-            },
-            ExtendedObject {
-                sha256: Checksum::sha256(b"other bytes"),
-                ..result.clone()
-            },
-        ] {
-            assert!(matches!(
-                store
-                    .extend_object(key, &base, pieces.clone(), &wrong)
-                    .await,
-                Err(ObjectStoreError::ChecksumMismatch { .. })
-            ));
-        }
-        assert_eq!(
-            store.get(key, None).await.expect("get"),
-            Some(Bytes::from_static(b"base")),
-            "a refused extension leaves the base as it was"
-        );
-
-        let extended = store
-            .extend_object(key, &base, pieces, &result)
-            .await
-            .expect("extend");
-        assert_eq!(extended.sha256, Some(result.sha256));
-        assert_eq!(extended.size_bytes, extended_bytes.len() as u64);
-        assert_eq!(
-            store.head(key).await.expect("head"),
-            Some(extended),
-            "the new version is the file's own digest"
-        );
-        assert_eq!(
-            store.get(key, None).await.expect("get"),
-            Some(Bytes::from_static(extended_bytes))
-        );
     }
 
     #[tokio::test]

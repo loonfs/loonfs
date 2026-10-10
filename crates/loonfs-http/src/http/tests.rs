@@ -3199,7 +3199,7 @@ mod direct_download {
         object_base_url: String,
         /// The whole-object checksum this stand-in provider enforces.
         ///
-        /// Providers do not agree on one -- the S3 family verifies SHA-256
+        /// Providers do not agree on one -- the S3 family verifies CRC-64/NVME
         /// and GCS verifies CRC-32C -- so the shape is a parameter here for
         /// the same reason it is a trait method in the real issuers: the
         /// client folds whichever the deployment names.
@@ -3207,9 +3207,9 @@ mod direct_download {
     }
 
     impl LoopbackIssuer {
-        /// The S3-compatible shape: a whole-object SHA-256.
+        /// The S3-compatible shape: a whole-object CRC-64/NVME.
         fn at(object_base_url: impl Into<String>) -> Arc<Self> {
-            Self::with_checksum(object_base_url, ChecksumAlgorithm::Sha256)
+            Self::with_checksum(object_base_url, ChecksumAlgorithm::Crc64nvme)
         }
 
         /// The GCS shape: a whole-object CRC-32C. Callers pair it with a

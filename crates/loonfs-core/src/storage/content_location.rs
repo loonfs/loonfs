@@ -148,13 +148,9 @@ impl ContentLocation {
     pub(crate) fn extents_length(&self) -> u64 {
         self.extents.iter().map(|extent| extent.extent.length).sum()
     }
-    pub(crate) fn joined_pieces(&self) -> Bytes {
-        match self.pieces.as_slice() {
-            [piece] => piece.clone(),
-            pieces => pieces.concat().into(),
-        }
+    pub(crate) fn pieces(&self) -> &[Bytes] {
+        &self.pieces
     }
-
     pub(crate) async fn read_range<S: ObjectStore + ?Sized>(
         &self,
         store: &S,

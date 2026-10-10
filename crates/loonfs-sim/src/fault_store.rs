@@ -9,8 +9,8 @@ use futures::stream::BoxStream;
 use futures::Stream;
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, ExtendBase, ExtendedObject, ImmutableWriteError, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    AssemblySource, ByteRange, ByteStream, ImmutableWriteError, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::collections::HashMap;
@@ -417,52 +417,27 @@ where
         result
     }
 
-    /// Traces extensions, a write conditional on the base's compare token,
-    /// without injecting scheduled write faults, like streamed writes.
-    async fn extend_object(
+    async fn assemble(
         &self,
         key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let op = self.next_object_op(ObjectOperationKind::CompareAndSwap, key);
-        let extended = self.inner.extend_object(key, base, pieces, result).await;
-        if extended.is_ok() {
-            self.remember_successful_write(key);
-        }
-        self.push_trace(op, "extend_object", None, result_class(&extended));
-        extended
-    }
-
-    /// Traces creates from a copied base without injecting scheduled write
-    /// faults, like streamed writes. A store that cannot copy the base
-    /// writes nothing, so the event is traced as skipped.
-    async fn put_immutable_extended(
-        &self,
-        key: &str,
-        base_key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        sources: &[AssemblySource],
+        tail: Vec<Bytes>,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata, ImmutableWriteError> {
         let op = self.next_object_op(ObjectOperationKind::PutIfAbsent, key);
-        let created = self
-            .inner
-            .put_immutable_extended(key, base_key, base, pieces, result)
-            .await;
-        let class = match &created {
-            Ok(Some(_)) => {
+        let result = self.inner.assemble(key, sources, tail, expected).await;
+        let class = match &result {
+            Ok(_) => {
                 self.remember_successful_write(key);
                 SimEventResult::Ok
             }
-            Ok(None) => SimEventResult::Skipped {
-                reason: "store_cannot_copy_base".to_owned(),
+            Err(ImmutableWriteError::Transport { source, .. }) => error_result_class(source),
+            Err(_) => SimEventResult::Error {
+                class: "precondition_failed".to_owned(),
             },
-            Err(error) => error_result_class(error),
         };
-        self.push_trace(op, "put_immutable_extended", None, class);
-        created
+        self.push_trace(op, "assemble", None, class);
+        result
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {

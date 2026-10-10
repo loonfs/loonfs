@@ -215,8 +215,10 @@ impl DirectGetIssuer for LoopbackIssuer {
 
 #[async_trait]
 impl DirectPutIssuer for LoopbackIssuer {
+    /// The reference store reports CRC-64/NVME, the S3-compatible shape.
+    /// Direct PUT clients claim that algorithm, as they do against S3 or R2.
     fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
-        ChecksumAlgorithm::Sha256
+        ChecksumAlgorithm::Crc64nvme
     }
 
     fn max_content_bytes(&self) -> u64 {

@@ -1,47 +1,61 @@
-//! Writes WAL pieces as immutable extents and merges small tail extents.
+//! Writes WAL pieces as immutable extents and merges the chain's own extents.
 
 use super::content::{
-    content_object_key_for_ref, validate_loaded_content_bytes, CONTENT_READ_CHUNK_BYTES,
+    content_object_key_for_ref, DurableContentValidationError, CONTENT_READ_CHUNK_BYTES,
 };
 use super::content_location::{extent_object_key, ContentLocation, LayoutLookup, LocatedExtent};
 use crate::error::{CoreError, Result};
-use crate::limits::MAX_MERGED_EXTENT_BYTES;
+use crate::limits::{MAX_LAYOUT_EXTENTS, MAX_MERGED_EXTENT_BYTES};
 use crate::wal::{ProjectedContent, ProjectedWalTail};
 use bytes::Bytes;
-use loonfs_objectstore::{ByteRange, ImmutableWriteError, ObjectStore, ObjectStoreError};
+use futures::stream::{self, StreamExt};
+use loonfs_objectstore::{
+    AssemblySource, ByteRange, ImmutableWriteError, ObjectStore, ObjectStoreError,
+};
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::{ContentExtent, ContentLayout, ContentRef, ExtentObject, Sha256State};
+use loonfs_types::{
+    Checksum, ChecksumAlgorithm, ContentExtent, ContentLayout, ContentRef, ExtentObject,
+    StreamingChecksum,
+};
 use tokio::sync::Semaphore;
 
-/// Joins the tail pieces and checks whole values before anything is written.
-pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Bytes> {
+/// Checks whole values before any chain writes its content.
+pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Vec<Bytes>> {
     let newest = &content.content_ref;
+    let corrupt = || {
+        CoreError::NamespaceCorrupt(format!(
+            "content `{}` has unfolded pieces that do not reach its newest reference",
+            newest.content_id
+        ))
+    };
     let mut end = content.pieces[0].offset;
     for piece in &content.pieces {
         if piece.offset != end {
-            break;
+            return Err(corrupt());
         }
         end = piece.end();
     }
     if end != newest.size_bytes {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "content `{}` has unfolded pieces that do not reach its newest reference",
-            newest.content_id
-        )));
+        return Err(corrupt());
     }
-    let bytes = match content.pieces.as_slice() {
-        [piece] => piece.bytes.clone(),
-        pieces => pieces
-            .iter()
-            .map(|piece| piece.bytes.as_ref())
-            .collect::<Vec<_>>()
-            .concat()
-            .into(),
-    };
+    let pieces: Vec<_> = content
+        .pieces
+        .iter()
+        .map(|piece| piece.bytes.clone())
+        .collect();
     if content.pieces[0].offset == 0 {
-        validate_loaded_content_bytes(content_object_key_for_ref(newest)?, newest, &bytes)?;
+        let object_key = content_object_key_for_ref(newest)?;
+        let actual = checksum_pieces(&pieces, newest.checksum.algorithm);
+        if actual != newest.checksum {
+            return Err(DurableContentValidationError::ContentChecksumMismatch {
+                object_key,
+                expected: format!("{}:{}", newest.checksum.algorithm, newest.checksum.value),
+                actual: format!("{}:{}", actual.algorithm, actual.value),
+            }
+            .into());
+        }
     }
-    Ok(bytes)
+    Ok(pieces)
 }
 
 pub(crate) async fn materialize_content_layout<S: ObjectStore + ?Sized, L: LayoutLookup>(
@@ -92,14 +106,12 @@ pub(crate) fn cut_layout(layout: &mut ContentLayout, size_bytes: u64) {
     });
 }
 
-/// Writes the tail's bytes for a chain as one object, merging the chain's own small
-/// last extents by the doubling rule, and returns the layout.
 pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>(
     store: &S,
     lookup: &L,
     tail: &ProjectedWalTail,
     content: &ProjectedContent,
-    pieces: Bytes,
+    pieces: Vec<Bytes>,
     merge_memory: &Semaphore,
 ) -> Result<ContentLayoutRecord> {
     let newest = &content.content_ref;
@@ -108,10 +120,10 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         location.extents.clear();
     }
     let mut start = location.extents_length();
-    let mut candidate = if content.pieces[0].offset == start {
+    let candidate = if content.pieces[0].offset == start {
         pieces
     } else {
-        location.joined_pieces()
+        location.pieces().to_vec()
     };
     // The whole key can already hold the first reference after a failed fold.
     let whole = location.extents.is_empty()
@@ -120,35 +132,24 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
                 || revision.content_ref.size_bytes == newest.size_bytes
         });
     let mut extents = location.extents;
-    let mut retained = extents.len();
-    let mut candidate_length = candidate.len() as u64;
-    for located in extents.iter().rev() {
-        let extent = &located.extent;
-        // A fresh chain keeps its base's extents shared.
-        if extent.content_id != newest.content_id
-            || extent.owner_namespace_id != newest.owner_namespace_id
-            || extent.length > 2 * candidate_length
-            || extent.length + candidate_length > MAX_MERGED_EXTENT_BYTES
-        {
-            break;
-        }
-        candidate_length += extent.length;
-        retained -= 1;
-    }
-    let merged_length = candidate_length - candidate.len() as u64;
-    let _merge_permits = merge_memory
-        .acquire_many(merged_length as u32)
-        .await
-        .expect("merge semaphore should remain open");
-    if retained != extents.len() {
-        let mut bytes = Vec::with_capacity(candidate_length as usize);
-        for extent in extents.drain(retained..) {
-            read_extent(store, &extent, &mut bytes).await?;
-        }
-        start -= merged_length;
-        bytes.extend_from_slice(&candidate);
-        candidate = bytes.into();
-    }
+    let tail_length = candidate.iter().map(|piece| piece.len() as u64).sum();
+    let MergePlan {
+        retained,
+        candidate_length,
+        assembly,
+    } = merge_plan(&extents, newest, tail_length);
+    let merged_length = candidate_length - tail_length;
+    let _merge_permits = if assembly || candidate_length > MAX_MERGED_EXTENT_BYTES {
+        None
+    } else {
+        Some(
+            merge_memory
+                .acquire_many(candidate_length as u32)
+                .await
+                .expect("merge semaphore should remain open"),
+        )
+    };
+    start -= merged_length;
     let object = if whole && start == 0 {
         ExtentObject::Whole
     } else {
@@ -162,26 +163,19 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         content_id: newest.content_id.clone(),
         object,
         offset: 0,
-        length: candidate.len() as u64,
+        length: candidate_length,
     };
     let object_key = extent_object_key(&extent);
-    if let Err(error) = store.put_immutable_verified(&object_key, candidate).await {
-        tracing::error!(object_key, %error, "content write failed");
-        return Err(match error {
-            ImmutableWriteError::DifferentObject { .. }
-            | ImmutableWriteError::Unattested { .. } => CoreError::NamespaceCorrupt(format!(
-                "content object `{object_key}` requires an equal SHA-256 attestation"
-            )),
-            ImmutableWriteError::Transport {
-                object_key,
-                source: ObjectStoreError::Transport { message, .. },
-            } => CoreError::store(
-                &object_key,
-                &ObjectStoreError::retryable_transport(&object_key, message),
-            ),
-            error => CoreError::from(error),
-        });
-    }
+    write_candidate(
+        store,
+        &object_key,
+        &extents[retained..],
+        candidate,
+        candidate_length,
+        assembly,
+    )
+    .await?;
+    extents.truncate(retained);
     let mut extents: Vec<_> = extents.into_iter().map(|located| located.extent).collect();
     extents.push(extent);
     Ok(ContentLayoutRecord {
@@ -193,8 +187,172 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
     })
 }
 
-/// Reads the whole object when attested because its SHA-256 covers every byte,
-/// including bytes outside a shared prefix.
+async fn write_candidate<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    extents: &[LocatedExtent],
+    pieces: Vec<Bytes>,
+    candidate_length: u64,
+    assembly: bool,
+) -> Result<()> {
+    let written = if assembly {
+        let (sources, expected) = assembly_sources(store, object_key, extents, &pieces).await?;
+        store
+            .assemble(object_key, &sources, pieces, &expected)
+            .await
+    } else if candidate_length > MAX_MERGED_EXTENT_BYTES {
+        let sha256 = checksum_pieces(&pieces, ChecksumAlgorithm::Sha256);
+        let body = stream::iter(pieces)
+            .flat_map(|piece| {
+                stream::iter(
+                    (0..piece.len())
+                        .step_by(CONTENT_READ_CHUNK_BYTES as usize)
+                        .map(move |start| {
+                            Ok(piece.slice(
+                                start..(start + CONTENT_READ_CHUNK_BYTES as usize).min(piece.len()),
+                            ))
+                        }),
+                )
+            })
+            .boxed();
+        store
+            .put_immutable_verified_stream(object_key, candidate_length, Some(&sha256), body)
+            .await
+    } else {
+        let mut bytes = Vec::with_capacity(candidate_length as usize);
+        for extent in extents {
+            read_extent(store, extent, &mut bytes).await?;
+        }
+        for piece in pieces {
+            bytes.extend_from_slice(&piece);
+        }
+        store.put_immutable_verified(object_key, bytes.into()).await
+    };
+    if let Err(error) = written {
+        tracing::error!(object_key, %error, "content write failed");
+        return Err(match error {
+            ImmutableWriteError::DifferentObject { .. }
+            | ImmutableWriteError::Unattested { .. } => CoreError::NamespaceCorrupt(format!(
+                "content object `{object_key}` requires an equal attestation"
+            )),
+            ImmutableWriteError::Transport {
+                object_key,
+                source: ObjectStoreError::Transport { message, .. },
+            } => CoreError::store(
+                &object_key,
+                &ObjectStoreError::retryable_transport(&object_key, message),
+            ),
+            error => CoreError::from(error),
+        });
+    }
+    Ok(())
+}
+
+fn checksum_pieces(pieces: &[Bytes], algorithm: ChecksumAlgorithm) -> Checksum {
+    let mut checksum = StreamingChecksum::for_algorithm(algorithm);
+    for piece in pieces {
+        checksum.update(piece);
+    }
+    checksum.finish()
+}
+
+struct MergePlan {
+    retained: usize,
+    candidate_length: u64,
+    assembly: bool,
+}
+
+fn merge_plan(extents: &[LocatedExtent], newest: &ContentRef, tail_length: u64) -> MergePlan {
+    let mut retained = extents.len();
+    let mut candidate_length = tail_length;
+    for located in extents.iter().rev() {
+        let extent = &located.extent;
+        // A fresh chain keeps its base's extents shared.
+        if extent.content_id != newest.content_id
+            || extent.owner_namespace_id != newest.owner_namespace_id
+            || extent.length > 2 * candidate_length
+        {
+            break;
+        }
+        candidate_length += extent.length;
+        retained -= 1;
+    }
+    let own = |located: &&LocatedExtent| {
+        located.extent.content_id == newest.content_id
+            && located.extent.owner_namespace_id == newest.owner_namespace_id
+    };
+    let mut assembly = candidate_length > MAX_MERGED_EXTENT_BYTES && retained < extents.len();
+    if extents[..retained].iter().filter(own).count() + 1 > MAX_LAYOUT_EXTENTS {
+        let largest = extents
+            .iter()
+            .enumerate()
+            .filter(|(_, extent)| own(extent))
+            .max_by_key(|(index, extent)| (extent.extent.length, std::cmp::Reverse(*index)))
+            .map(|(index, _)| index)
+            .expect("a chain over its extent bound should have own extents");
+        retained = retained.min(largest + 1);
+        candidate_length = tail_length
+            + extents[retained..]
+                .iter()
+                .map(|located| located.extent.length)
+                .sum::<u64>();
+        assembly = true;
+    }
+    MergePlan {
+        retained,
+        candidate_length,
+        assembly,
+    }
+}
+
+async fn assembly_sources<S: ObjectStore + ?Sized>(
+    store: &S,
+    key: &str,
+    extents: &[LocatedExtent],
+    tail: &[Bytes],
+) -> Result<(Vec<AssemblySource>, Checksum)> {
+    let mut sources = Vec::with_capacity(extents.len());
+    let mut expected: Option<Checksum> = None;
+    for located in extents {
+        let source_key = &located.object_key;
+        let corrupt = || {
+            CoreError::NamespaceCorrupt(format!(
+                "content object `{source_key}` does not hold its complete extent"
+            ))
+        };
+        let stored = store
+            .head_stored_checksum(source_key)
+            .await
+            .map_err(|error| CoreError::store(source_key, &error))?
+            .ok_or_else(corrupt)?;
+        if located.extent.offset != 0 || stored.size_bytes != located.extent.length {
+            return Err(corrupt());
+        }
+        expected = Some(match expected {
+            None => stored.checksum.clone(),
+            Some(checksum) => checksum
+                .crc_combine(&stored.checksum, stored.size_bytes)
+                .ok_or_else(corrupt)?,
+        });
+        sources.push(AssemblySource {
+            key: source_key.clone(),
+            range: None,
+            checksum: stored.checksum,
+        });
+    }
+    let expected = expected.expect("an assembly merge should have source extents");
+    let expected = expected
+        .crc_combine(
+            &checksum_pieces(tail, expected.algorithm),
+            tail.iter().map(|piece| piece.len() as u64).sum(),
+        )
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!("content object `{key}` has no combinable CRC"))
+        })?;
+    Ok((sources, expected))
+}
+
+// Attestations cover the whole object, including bytes outside a shared prefix.
 async fn read_extent<S: ObjectStore + ?Sized>(
     store: &S,
     located: &LocatedExtent,
@@ -215,12 +373,15 @@ async fn read_extent<S: ObjectStore + ?Sized>(
     if metadata.size_bytes < extent.offset + extent.length {
         return Err(corrupt());
     }
-    let (mut offset, end) = if metadata.sha256.is_some() {
+    let (mut offset, end) = if metadata.attestation.is_some() {
         (0, metadata.size_bytes)
     } else {
         (extent.offset, extent.offset + extent.length)
     };
-    let mut state = Sha256State::new();
+    let mut state = metadata
+        .attestation
+        .as_ref()
+        .map(|checksum| StreamingChecksum::for_algorithm(checksum.algorithm));
     while offset < end {
         let chunk_end = end.min(offset + CONTENT_READ_CHUNK_BYTES);
         let chunk = store
@@ -237,7 +398,9 @@ async fn read_extent<S: ObjectStore + ?Sized>(
         if chunk.len() as u64 != chunk_end - offset {
             return Err(corrupt());
         }
-        state.update(&chunk);
+        if let Some(state) = &mut state {
+            state.update(&chunk);
+        }
         let first = offset.max(extent.offset);
         let last = chunk_end.min(extent.offset + extent.length);
         if first < last {
@@ -245,11 +408,14 @@ async fn read_extent<S: ObjectStore + ?Sized>(
         }
         offset = chunk_end;
     }
-    if metadata
-        .sha256
-        .is_some_and(|expected| state.finish() != expected)
-    {
-        return Err(corrupt());
+    if let (Some(expected), Some(state)) = (metadata.attestation, state) {
+        if state.finish() != expected {
+            return Err(corrupt());
+        }
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tail_content_tests.rs"]
+mod tests;

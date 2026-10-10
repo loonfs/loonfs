@@ -1,9 +1,10 @@
 //! Google Cloud Storage provider.
 
+#[path = "gcs_assembly.rs"]
+mod assembly;
+
 use crate::configured::ConfiguredObjectStoreKind;
-use crate::keys::temporary_object;
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
-use crate::layout::parse_object_key;
 use crate::object_store::Result;
 use crate::presign::{
     percent_encode_segment, stored_crc32c, DirectTransferIssuers, GcsPresignerConfig,
@@ -18,14 +19,14 @@ use crate::signed_request::{
 };
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
-    ExtendBase, ExtendedObject, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
+    AssemblySource, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
     ProviderObjectStoreConfig, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::FutureExt;
 use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
-use loonfs_types::{Checksum, ChecksumAlgorithm, NamespaceId};
+use loonfs_types::Checksum;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use std::collections::BTreeMap;
@@ -49,6 +50,7 @@ pub struct GcpGcsStoreConfig {
     pub key_prefix: Option<String>,
 }
 
+#[derive(Clone)]
 struct GcsRequestSigner {
     request_signer: Arc<GcsV4Presigner>,
     http: HttpClient,
@@ -160,124 +162,30 @@ impl GcsRequestSigner {
         let request = request.header(AUTHORIZATION, format!("Bearer {}", credential.bearer));
         succeeded(key, send(&self.http, key, request, body).await?)
     }
-
-    /// The object resource of `key` at `generation`. A version the bucket
-    /// no longer holds answers `PreconditionFailed`.
-    async fn object_at(&self, key: &str, generation: u64) -> Result<ObjectMetadata> {
-        let url = format!(
-            "{GCS_JSON_OBJECTS}/{}/o/{}?generation={generation}",
-            percent_encode_segment(&self.bucket),
-            self.object_name(key)?,
-        );
-        self.send_authorized(key, http::Request::get(url), HttpRequestBody::empty())
-            .await
-            .and_then(|response| gcs_object(key, &response.body))
-            .map(|(metadata, _)| metadata)
-            .map_err(precondition_failed_when_missing)
-    }
-
-    /// A compose source naming `key`, taken only while it is at `generation`
-    /// when one is given.
-    fn compose_source(&self, key: &str, generation: Option<u64>) -> Result<serde_json::Value> {
-        let name = scope_object_key(self.key_prefix.as_deref(), key)?;
-        Ok(match generation {
-            Some(generation) => serde_json::json!({
-                "name": name,
-                "objectPreconditions": { "ifGenerationMatch": generation.to_string() },
-            }),
-            None => serde_json::json!({ "name": name }),
-        })
-    }
-
-    /// Writes `pieces` as a temporary object, composes `base` and the
-    /// temporary object onto `key` while `key` is at `generation`, where 0 is
-    /// absent, attesting `result.sha256` on the result, and deletes the
-    /// temporary object. A CRC-32C claim is compared with the CRC-32C the
-    /// compose returns; a claim in another algorithm cannot be checked here.
-    async fn compose_pieces(
-        &self,
-        key: &str,
-        generation: u64,
-        base: serde_json::Value,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<ObjectMetadata> {
-        let namespace_id = parse_object_key(key)
-            .and_then(|parsed| NamespaceId::parse(parsed.owner_namespace_id()).ok())
-            .ok_or_else(|| ObjectStoreError::InvalidKey {
-                object_key: key.to_owned(),
-                message: "an extended object must belong to a namespace".to_owned(),
-            })?;
-        let temporary = temporary_object(&namespace_id);
-        let url = format!(
-            "{GCS_JSON_UPLOADS}/{}/o?uploadType=media&ifGenerationMatch=0&name={}",
-            percent_encode_segment(&self.bucket),
-            self.object_name(&temporary)?,
-        );
-        let request = http::Request::post(url).header(CONTENT_TYPE, "application/octet-stream");
-        self.send_authorized(&temporary, request, pieces.into())
-            .await?;
-        let composed: Result<SignedResponse> = async {
-            let url = format!(
-                "{GCS_JSON_OBJECTS}/{}/o/{}/compose?ifGenerationMatch={generation}",
-                percent_encode_segment(&self.bucket),
-                self.object_name(key)?,
-            );
-            let body = serde_json::json!({
-                "sourceObjects": [base, self.compose_source(&temporary, None)?],
-                "destination": attested(Some(&result.sha256)),
-            });
-            let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
-            self.send_authorized(key, request, body.to_string().into())
-                .await
-        }
-        .await;
-        self.delete_temporary(&temporary).await;
-        let (metadata, crc32c) = composed
-            .and_then(|composed| gcs_object(key, &composed.body))
-            .map_err(precondition_failed_when_missing)?;
-        if result
-            .crc
-            .as_ref()
-            .filter(|expected| expected.algorithm == ChecksumAlgorithm::Crc32c)
-            .is_some_and(|expected| crc32c.as_ref() != Some(expected))
-        {
-            return Err(ObjectStoreError::ChecksumMismatch {
-                object_key: key.to_owned(),
-            });
-        }
-        Ok(metadata)
-    }
-
-    /// Deletes an extension's temporary object. Best effort: one left behind
-    /// waits for a sweep of the temporary family.
-    async fn delete_temporary(&self, temporary: &str) {
-        let deleted: Result<SignedResponse> = async {
-            let url = format!(
-                "{GCS_JSON_OBJECTS}/{}/o/{}",
-                percent_encode_segment(&self.bucket),
-                self.object_name(temporary)?,
-            );
-            self.send_authorized(
-                temporary,
-                http::Request::delete(url),
-                HttpRequestBody::empty(),
-            )
-            .await
-        }
-        .await;
-        if deleted.is_err() {
-            tracing::warn!(
-                object_key = temporary,
-                operation = "delete",
-                "failed to delete an extension's temporary object; it stays until a sweep collects it",
-            );
-        }
-    }
 }
 
 #[async_trait]
 impl StoredChecksumReader for GcsRequestSigner {
+    async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+        let signed = self.request_signer.presign_head_stored_checksum(
+            key,
+            CHECKSUM_HEAD_TTL,
+            Self::signing_time(),
+        )?;
+        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        let mut metadata = crate::signed_request::metadata_from_signed_head(
+            key,
+            &response,
+            "x-goog-meta-sha256",
+            "x-goog-generation",
+            stored_crc32c_from_headers,
+        )?;
+        if let Some(metadata) = &mut metadata {
+            metadata.etag.clone_from(&metadata.version);
+        }
+        Ok(metadata)
+    }
+
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         let signed = self.request_signer.presign_head_stored_checksum(
             key,
@@ -357,66 +265,15 @@ impl MultipartController for GcsRequestSigner {
         }
     }
 
-    /// Writes the pieces as a temporary object and composes the base and the
-    /// temporary object onto the base's own generation.
-    async fn extend_object(
+    async fn assemble(
         &self,
         key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>> {
-        let generation = base_generation(key, base)?;
-        // The compose names the base's generation, not its length, so a
-        // base longer than the caller believes would put the pieces after
-        // bytes the caller never saw.
-        if self.object_at(key, generation).await?.size_bytes != base.length {
-            return Err(ObjectStoreError::PreconditionFailed {
-                object_key: key.to_owned(),
-            });
-        }
-        let base = self.compose_source(key, None)?;
-        self.compose_pieces(key, generation, base, pieces, result)
-            .await
-            .map(Some)
+        sources: &[AssemblySource],
+        tail: Vec<Bytes>,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata> {
+        self.assemble_objects(key, sources, tail, expected).await
     }
-
-    /// Composes the base, held to its generation, and a temporary object
-    /// holding the pieces onto `key` while `key` is absent. A compose takes
-    /// whole objects, so a base longer than `base.length` answers `None`.
-    async fn put_immutable_extended(
-        &self,
-        key: &str,
-        base_key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>> {
-        let generation = base_generation(base_key, base)?;
-        let held = self.object_at(base_key, generation).await?.size_bytes;
-        if held < base.length {
-            return Err(ObjectStoreError::PreconditionFailed {
-                object_key: base_key.to_owned(),
-            });
-        }
-        if held > base.length {
-            return Ok(None);
-        }
-        let base = self.compose_source(base_key, Some(generation))?;
-        self.compose_pieces(key, 0, base, pieces, result)
-            .await
-            .map(Some)
-    }
-}
-
-/// The generation an extension's base names. Any other compare token names
-/// no version this bucket holds.
-fn base_generation(key: &str, base: &ExtendBase) -> Result<u64> {
-    base.etag
-        .parse()
-        .map_err(|_| ObjectStoreError::PreconditionFailed {
-            object_key: key.to_owned(),
-        })
 }
 
 /// A write conditioned on a version reads that version's absence as its
@@ -470,20 +327,22 @@ struct GcsObject {
 fn gcs_object(key: &str, body: &[u8]) -> Result<(ObjectMetadata, Option<Checksum>)> {
     let unreadable = || ObjectStoreError::transport(key, "unreadable object resource");
     let object: GcsObject = serde_json::from_slice(body).map_err(|_| unreadable())?;
+    let crc32c = object
+        .crc32c
+        .as_ref()
+        .and_then(|value| stored_crc32c(&format!("crc32c={value}")));
     let metadata = ObjectMetadata {
         size_bytes: object.size.parse().map_err(|_| unreadable())?,
         etag: Some(object.generation.clone()),
         version: Some(object.generation),
         last_modified_ms: None,
-        sha256: object
+        attestation: object
             .metadata
             .as_ref()
             .and_then(|metadata| metadata.get(SHA256_METADATA_KEY))
-            .and_then(|value| attested_sha256(value)),
+            .and_then(|value| attested_sha256(value))
+            .or_else(|| crc32c.clone()),
     };
-    let crc32c = object
-        .crc32c
-        .and_then(|value| stored_crc32c(&format!("crc32c={value}")));
     Ok((metadata, crc32c))
 }
 
@@ -513,7 +372,7 @@ mod tests {
     #[test]
     fn a_json_object_resource_reads_as_its_generation_attestation_and_crc32c() {
         let sha256 = Checksum::sha256(b"hello");
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "kind": "storage#object",
             "generation": "1700000000000001",
             "size": "5",
@@ -527,8 +386,12 @@ mod tests {
         assert_eq!(metadata.etag.as_deref(), Some("1700000000000001"));
         assert_eq!(metadata.version, metadata.etag);
         assert_eq!(metadata.size_bytes, 5);
-        assert_eq!(metadata.sha256, Some(sha256));
+        assert_eq!(metadata.attestation, Some(sha256));
         assert_eq!(crc32c, Some(Checksum::crc32c(b"hello")));
+        body.as_object_mut().expect("object").remove("metadata");
+        let (metadata, _) =
+            gcs_object("key", body.to_string().as_bytes()).expect("composed object");
+        assert_eq!(metadata.attestation, Some(Checksum::crc32c(b"hello")));
     }
 
     #[tokio::test]

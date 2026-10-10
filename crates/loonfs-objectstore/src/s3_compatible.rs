@@ -1,9 +1,11 @@
 //! S3-compatible provider constructors, and the requests this crate signs
 //! for them.
 //!
-//! AWS S3 and Cloudflare R2 differ by addressing, credentials, whether
-//! uploads carry a client-computed checksum, and how an extension cuts its
-//! parts -- not by behaviour worth a type each, so both are constructors here.
+//! AWS S3 and Cloudflare R2 differ by addressing, credentials,
+//! assembly part sizes, and copy preconditions.
+
+#[path = "s3_assembly.rs"]
+mod assembly;
 
 use crate::aws_credentials::{
     aws_credentials_source, static_aws_credentials_source, ObjectStoreAwsCredentialProvider,
@@ -20,7 +22,7 @@ use crate::presign::{
 };
 use crate::provider_object_store::{
     AbortUploadOnDrop, CompareToken, MultipartController, PartReader, StoredChecksumReader,
-    MAX_PROVIDER_MULTIPART_PARTS, PROVIDER_MIN_COPIED_PART_BYTES,
+    MAX_PROVIDER_MULTIPART_PARTS,
 };
 use crate::retry::{with_transport_retry, DEFAULT};
 use crate::signed_request::{
@@ -30,7 +32,7 @@ use crate::signed_request::{
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
 use crate::{
-    ByteRange, ExtendBase, ExtendedObject, MultipartPart, ObjectMetadata, ObjectStoreError,
+    AssemblySource, ByteRange, MultipartPart, ObjectMetadata, ObjectStoreError,
     ObjectStoreErrorClass, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
     StoredObjectChecksum,
 };
@@ -40,7 +42,7 @@ use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
 use loonfs_types::{format::hex::hex_encode_bytes, SecretString};
 use loonfs_types::{Checksum, ChecksumAlgorithm, OperationDeadline, StreamingChecksum};
-use object_store::aws::{AmazonS3Builder, Checksum as ProviderChecksum};
+use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::future::Future;
 use std::sync::Arc;
@@ -50,20 +52,11 @@ use std::time::{Duration, SystemTime};
 /// checksum head, each is issued immediately and never handed out.
 const MULTIPART_CONTROL_TTL: Duration = Duration::from_secs(60);
 
-/// Size of every copied part of a Cloudflare R2 extension of a base at least
-/// this long. R2 requires every part but the last to share one size, so the
-/// base's remainder below it travels with the pieces as the last part. A
-/// shorter base is copied whole as one part, which that rule allows.
-const R2_EXTEND_PART_BYTES: u64 = 64 * 1024 * 1024;
-
-/// The largest part AWS S3 accepts, copied or uploaded.
-const S3_MAX_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-
 /// Provider checksum headers this adapter understands, in the order it
 /// prefers them, paired with the durable algorithm each one names.
 const S3_CHECKSUM_HEADERS: &[(&str, ChecksumAlgorithm)] = &[
-    ("x-amz-checksum-sha256", ChecksumAlgorithm::Sha256),
     ("x-amz-checksum-crc64nvme", ChecksumAlgorithm::Crc64nvme),
+    ("x-amz-checksum-sha256", ChecksumAlgorithm::Sha256),
     ("x-amz-checksum-crc32c", ChecksumAlgorithm::Crc32c),
 ];
 
@@ -110,11 +103,6 @@ struct S3CompatibleConfig {
     credentials: SharedAwsCredentialsSource,
     key_prefix: Option<String>,
     force_path_style: bool,
-    /// Attach a client-computed SHA-256 to every upload so the provider
-    /// verifies the bytes on PUT (`x-amz-checksum-sha256`). Enabling it also
-    /// gives the provider a stored full-object checksum that
-    /// [`crate::ObjectStore::head_stored_checksum`] can read back.
-    sha256_upload_checksum: bool,
     /// This provider's documented maximum for a single PUT, carried through
     /// to the signer so a direct-put issuer can advertise it.
     direct_put_max_content_bytes: u64,
@@ -127,7 +115,7 @@ struct S3RequestSigner {
     kind: ConfiguredObjectStoreKind,
 }
 
-/// Builds an AWS S3 store with bounded retries and SHA-256 upload checksums.
+/// Builds an AWS S3 store with bounded retries and native CRC-64/NVME checksums.
 pub fn aws_s3(config: AwsS3StoreConfig) -> Result<ProviderObjectStore> {
     let credentials = aws_credentials_source(&config.credentials, &config.region)?;
     aws_s3_with_credentials(config, credentials).map(|(store, _)| store)
@@ -146,7 +134,6 @@ pub(crate) fn aws_s3_with_credentials(
         credentials,
         key_prefix: config.key_prefix,
         force_path_style: config.force_path_style,
-        sha256_upload_checksum: true,
         direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
     })
 }
@@ -177,18 +164,6 @@ pub(crate) fn cloudflare_r2_with_credentials(
         // style makes the client append the bucket. Virtual hosting would
         // use the endpoint verbatim and address keys as buckets.
         force_path_style: true,
-        // Measured live 2026-07-31: must stay off. With a checksum
-        // algorithm configured, the provider client signs multipart part
-        // uploads with the aws-chunked streaming-trailer encoding, and R2
-        // answers 501 Not Implemented to every part PUT. Plain PUTs with
-        // the header succeed (the first nine conformance assertions pass;
-        // the multipart-overwrite and streamed-write assertions fail), but
-        // one upstream knob configures both shapes, so it stays off
-        // wholesale. Nothing is lost: R2 stores its self-computed
-        // CRC-64/NVME, which `head_stored_checksum` reads back, and the
-        // presigned direct paths carry their own enforced checksum
-        // headers independent of this flag.
-        sha256_upload_checksum: false,
         direct_put_max_content_bytes: CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
     })
 }
@@ -235,9 +210,6 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         builder = builder
             .with_endpoint(endpoint_url)
             .with_allow_http(allow_http);
-    }
-    if config.sha256_upload_checksum {
-        builder = builder.with_checksum_algorithm(ProviderChecksum::SHA256);
     }
 
     let provider = Arc::new(
@@ -324,6 +296,21 @@ impl SignedResponse {
 
 #[async_trait]
 impl StoredChecksumReader for S3RequestSigner {
+    async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+        let signed = self
+            .request_signer
+            .presign_head_stored_checksum(key, CHECKSUM_HEAD_TTL, Self::signing_time())
+            .await?;
+        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+        crate::signed_request::metadata_from_signed_head(
+            key,
+            &response,
+            "x-amz-meta-sha256",
+            "x-amz-version-id",
+            s3_stored_checksum,
+        )
+    }
+
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         let signed = self
             .request_signer
@@ -422,12 +409,13 @@ impl MultipartController for S3RequestSigner {
             .try_collect()
             .await?;
         parts.sort_unstable_by_key(|part| part.part_number);
+        let crc = crc.finish();
         let etag = self
             .finish_upload(
                 key,
                 &upload_id,
                 &parts,
-                Some(&crc.finish()),
+                Some(&crc),
                 &PutMode::CreateIfAbsent,
             )
             .await?;
@@ -437,150 +425,28 @@ impl MultipartController for S3RequestSigner {
             version: None,
             size_bytes,
             last_modified_ms: None,
-            sha256: sha256.cloned(),
+            attestation: Some(sha256.cloned().unwrap_or(crc)),
         })
     }
 
-    /// Copies the base inside the provider and uploads the rest of the base
-    /// with the pieces as the last part, all under the base's ETag.
-    async fn extend_object(
+    async fn assemble(
         &self,
         key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>> {
-        let mode = PutMode::CompareAndSwap {
-            expected_etag: base.etag.clone(),
-        };
-        self.assemble_from_base(key, key, base, pieces, result, &mode)
-            .await
-    }
-
-    /// Copies the base's prefix inside the provider into a new upload at
-    /// `key`, with the pieces as the last part, and completes only while
-    /// `key` is absent.
-    async fn put_immutable_extended(
-        &self,
-        key: &str,
-        base_key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-    ) -> Result<Option<ObjectMetadata>> {
-        self.assemble_from_base(
-            key,
-            base_key,
-            base,
-            pieces,
-            result,
-            &PutMode::CreateIfAbsent,
-        )
-        .await
-    }
-}
-
-impl S3RequestSigner {
-    /// Writes `key` as the first `base.length` bytes of the object at
-    /// `base_key` followed by `pieces`, and completes under `mode`. The
-    /// base is copied inside the provider, and what the copied parts leave
-    /// of it travels with the pieces as the last part. A claimed `result.crc`
-    /// is compared with the checksum the parts assemble to before
-    /// completion, and a mismatch abandons the upload. Answers `None` for a
-    /// base too short to copy.
-    async fn assemble_from_base(
-        &self,
-        key: &str,
-        base_key: &str,
-        base: &ExtendBase,
-        pieces: Bytes,
-        result: &ExtendedObject,
-        mode: &PutMode,
-    ) -> Result<Option<ObjectMetadata>> {
-        let copied = copied_parts(self.kind, base.length);
-        let Some(copied_bytes) = copied.last().map(|range| range.end_exclusive) else {
-            return Ok(None);
-        };
-        let precondition_failed = || ObjectStoreError::PreconditionFailed {
-            object_key: key.to_owned(),
-        };
-        let (length, etag) = self
-            .head_object(base_key)
-            .await?
-            .ok_or_else(precondition_failed)?;
-        // The copies name the base's version, not its length. In place, a
-        // base longer than the caller believes would be copied short; a new
-        // key takes the first `base.length` bytes of a base that long or
-        // longer.
-        let holds_base = if matches!(mode, PutMode::CreateIfAbsent) {
-            length >= base.length
-        } else {
-            length == base.length
-        };
-        if !holds_base || etag != base.etag {
-            return Err(precondition_failed());
-        }
-        let upload_id = self.create_upload(key, Some(&result.sha256)).await?;
-        let mut abort_on_drop = self.abort_on_drop(key, &upload_id);
-        let assembled: Result<String> = async {
-            let mut parts = Vec::with_capacity(copied.len() + 1);
-            for range in &copied {
-                let part_number = parts.len() as u32 + 1;
-                parts.push(
-                    self.copy_part(key, &upload_id, part_number, base_key, range, &base.etag)
-                        .await?,
-                );
-            }
-            let mut last = Vec::new();
-            if copied_bytes < base.length {
-                let remainder = ByteRange {
-                    start_inclusive: copied_bytes,
-                    end_exclusive: base.length,
-                };
-                last.extend_from_slice(&self.get_range(base_key, &remainder, &base.etag).await?);
-            }
-            last.extend_from_slice(&pieces);
-            let last_bytes = last.len() as u64;
-            let part_number = parts.len() as u32 + 1;
-            parts.push(
-                self.upload_part(key, &upload_id, part_number, Bytes::from(last))
-                    .await?,
-            );
-            // R2 completes under a wrong claim and stores the true checksum,
-            // so the claim is held to the parts' own checksums here, and a
-            // mismatch abandons the upload before anything is written.
-            if let Some(claim) = &result.crc {
-                let lengths = copied
-                    .iter()
-                    .map(|range| range.end_exclusive - range.start_inclusive)
-                    .chain([last_bytes]);
-                let checksums = parts.iter().map(|part| &part.checksum);
-                if assembled_crc64nvme(checksums.zip(lengths)).as_ref() != Some(claim) {
-                    return Err(ObjectStoreError::ChecksumMismatch {
-                        object_key: key.to_owned(),
-                    });
-                }
-            }
-            self.finish_upload(key, &upload_id, &parts, result.crc.as_ref(), mode)
-                .await
-        }
-        .await;
-        let etag = assembled.map_err(|error| match error {
+        sources: &[AssemblySource],
+        tail: Vec<Bytes>,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata> {
+        let assembled = self.assemble_parts(key, sources, tail, expected).await;
+        assembled.map_err(|error| match error {
             ObjectStoreError::NotFound { object_key } => {
                 ObjectStoreError::PreconditionFailed { object_key }
             }
             error => error,
-        })?;
-        abort_on_drop.disarm();
-        Ok(Some(ObjectMetadata {
-            etag: Some(etag),
-            version: None,
-            size_bytes: base.length + pieces.len() as u64,
-            last_modified_ms: None,
-            sha256: Some(result.sha256.clone()),
-        }))
+        })
     }
+}
 
+impl S3RequestSigner {
     async fn create_upload(&self, key: &str, sha256: Option<&Checksum>) -> Result<String> {
         let signed = self
             .request_signer
@@ -643,9 +509,6 @@ impl S3RequestSigner {
         source: &ByteRange,
         source_etag: &str,
     ) -> Result<MultipartPart> {
-        // R2 lists `x-amz-copy-source-if-match` as unsupported. There the
-        // head before the copy checks the base's version, and only an
-        // extension's completion holds it, under `If-Match`.
         let source_etag =
             (self.kind != ConfiguredObjectStoreKind::CloudflareR2).then_some(source_etag);
         let response = retry_part(key, "copy_part", 0, || async {
@@ -836,32 +699,6 @@ where
     .await
 }
 
-/// The ranges of a base that an extension copies inside the provider; the
-/// base's remainder past them travels with the pieces as the last part.
-///
-/// AWS S3 copies a base of at least one part in equal parts of at most
-/// 5 GiB. Cloudflare R2 copies a base under [`R2_EXTEND_PART_BYTES`] the
-/// same way, which is one part, and a base of at least that length in whole
-/// parts of [`R2_EXTEND_PART_BYTES`].
-fn copied_parts(kind: ConfiguredObjectStoreKind, length: u64) -> Vec<ByteRange> {
-    if length < PROVIDER_MIN_COPIED_PART_BYTES {
-        return Vec::new();
-    }
-    let (part_bytes, copied_bytes) = match kind {
-        ConfiguredObjectStoreKind::CloudflareR2 if length >= R2_EXTEND_PART_BYTES => {
-            (R2_EXTEND_PART_BYTES, length - length % R2_EXTEND_PART_BYTES)
-        }
-        _ => (length.div_ceil(length.div_ceil(S3_MAX_PART_BYTES)), length),
-    };
-    (0..copied_bytes)
-        .step_by(part_bytes as usize)
-        .map(|start| ByteRange {
-            start_inclusive: start,
-            end_exclusive: (start + part_bytes).min(copied_bytes),
-        })
-        .collect()
-}
-
 /// The CRC-64/NVME of the object that parts assemble to, combined in part
 /// order from each part's own checksum and length. `None` when a part's
 /// checksum is not a CRC-64/NVME.
@@ -979,8 +816,8 @@ fn object_store_endpoint_url(
 #[cfg(test)]
 mod tests {
     use super::{
-        aws_s3, checked_data, copied_parts, object_store_endpoint_url,
-        static_aws_credentials_source, AwsS3StoreConfig, S3RequestSigner,
+        aws_s3, checked_data, object_store_endpoint_url, static_aws_credentials_source,
+        AwsS3StoreConfig, S3RequestSigner,
     };
     use crate::presign::{
         base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
@@ -989,7 +826,7 @@ mod tests {
     use crate::signed_request::{classify_signed_response, SignedResponse};
     use crate::test_support::{aws_environment_lock, isolated_aws_environment};
     use crate::{
-        AwsS3Credentials, ConfiguredObjectStoreKind, ExtendBase, ExtendedObject, ObjectStoreError,
+        AssemblySource, AwsS3Credentials, ConfiguredObjectStoreKind, ObjectStoreError,
         ObjectStoreErrorClass,
     };
     use async_trait::async_trait;
@@ -1123,100 +960,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_wrong_claim_abandons_the_upload_before_completion() {
-        let base: Vec<u8> = (0..PROVIDER_MIN_COPIED_PART_BYTES)
-            .map(|index| (index % 251) as u8)
-            .collect();
-        let pieces = Bytes::from_static(b"pieces");
-        let whole = [base.as_slice(), &pieces].concat();
-        let version = ExtendBase {
-            length: base.len() as u64,
-            etag: "\"base\"".to_owned(),
-        };
+    async fn assembly_checks_copied_parts_before_completing() {
         for kind in [
             ConfiguredObjectStoreKind::AwsS3,
             ConfiguredObjectStoreKind::CloudflareR2,
         ] {
-            for in_place in [false, true] {
-                for claim in [Checksum::crc64nvme(&whole), Checksum::crc64nvme(b"other")] {
-                    let right = claim == Checksum::crc64nvme(&whole);
-                    let provider = ScriptedProvider {
-                        base: Arc::new(base.clone()),
-                        operations: Arc::default(),
-                        aborted: Arc::default(),
-                    };
-                    let signer = scripted_signer(kind, &provider);
-                    let result = ExtendedObject {
-                        sha256: Checksum::sha256(&whole),
-                        crc: Some(claim),
-                    };
-                    let assembled = if in_place {
-                        signer
-                            .extend_object(KEY, &version, pieces.clone(), &result)
-                            .await
-                    } else {
-                        signer
-                            .put_immutable_extended(
-                                KEY,
-                                BASE_KEY,
-                                &version,
-                                pieces.clone(),
-                                &result,
-                            )
-                            .await
-                    };
-                    let case = format!("{kind:?}, in place {in_place}, right claim {right}");
-                    if right {
-                        assert!(matches!(assembled, Ok(Some(_))), "{case}: {assembled:?}");
-                        assert_eq!(
-                            provider.operations(),
-                            ["head", "create", "copy", "upload", "complete"],
-                            "{case}"
-                        );
-                    } else {
-                        assert!(
-                            matches!(assembled, Err(ObjectStoreError::ChecksumMismatch { .. })),
-                            "{case}: {assembled:?}"
-                        );
-                        provider.aborted.notified().await;
-                        assert_eq!(
-                            provider.operations(),
-                            ["head", "create", "copy", "upload", "abort"],
-                            "{case}: nothing is completed"
-                        );
-                    }
+            let length = if kind == ConfiguredObjectStoreKind::CloudflareR2 {
+                64 * 1024 * 1024
+            } else {
+                PROVIDER_MIN_COPIED_PART_BYTES as usize
+            };
+            let base = vec![b'a'; length];
+            let tail = Bytes::from_static(b"tail");
+            let checksum = Checksum::crc64nvme(&base);
+            let expected = checksum
+                .crc64nvme_combine(&Checksum::crc64nvme(&tail), tail.len() as u64)
+                .expect("combined");
+            for correct in [true, false] {
+                let provider = ScriptedProvider {
+                    base: Arc::new(base.clone()),
+                    operations: Arc::default(),
+                    aborted: Arc::default(),
+                };
+                let signer = scripted_signer(kind, &provider);
+                let sources = [AssemblySource {
+                    key: BASE_KEY.to_owned(),
+                    range: None,
+                    checksum: checksum.clone(),
+                }];
+                let claim = if correct {
+                    expected.clone()
+                } else {
+                    Checksum::crc64nvme(b"wrong")
+                };
+                let result = signer
+                    .assemble(
+                        KEY,
+                        &sources,
+                        vec![tail.slice(..2), tail.slice(2..)],
+                        &claim,
+                    )
+                    .await;
+                if correct {
+                    assert_eq!(
+                        result.expect("assembly").attestation,
+                        Some(expected.clone())
+                    );
+                    assert_eq!(
+                        provider.operations(),
+                        ["head", "create", "copy", "upload", "complete"]
+                    );
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(ObjectStoreError::ChecksumMismatch { .. })
+                    ));
+                    provider.aborted.notified().await;
+                    assert_eq!(
+                        provider.operations(),
+                        ["head", "create", "copy", "upload", "abort"]
+                    );
                 }
             }
         }
-    }
-
-    #[test]
-    fn an_extension_copies_only_parts_its_provider_accepts() {
-        const MIB: u64 = 1024 * 1024;
-        const GIB: u64 = 1024 * MIB;
-        let copied = |kind, length| -> Vec<(u64, u64)> {
-            copied_parts(kind, length)
-                .iter()
-                .map(|range| (range.start_inclusive, range.end_exclusive))
-                .collect()
-        };
-        let s3 = ConfiguredObjectStoreKind::AwsS3;
-        let r2 = ConfiguredObjectStoreKind::CloudflareR2;
-
-        assert_eq!(copied(s3, 5 * MIB - 1), []);
-        assert_eq!(copied(s3, 5 * MIB), [(0, 5 * MIB)]);
-        assert_eq!(
-            copied(s3, 12 * GIB),
-            [(0, 4 * GIB), (4 * GIB, 8 * GIB), (8 * GIB, 12 * GIB)]
-        );
-        assert_eq!(copied(r2, 5 * MIB - 1), []);
-        assert_eq!(copied(r2, 5 * MIB), [(0, 5 * MIB)]);
-        assert_eq!(copied(r2, 64 * MIB - 1), [(0, 64 * MIB - 1)]);
-        assert_eq!(copied(r2, 64 * MIB + 1), [(0, 64 * MIB)]);
-        assert_eq!(
-            copied(r2, 200 * MIB),
-            [(0, 64 * MIB), (64 * MIB, 128 * MIB), (128 * MIB, 192 * MIB)]
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]

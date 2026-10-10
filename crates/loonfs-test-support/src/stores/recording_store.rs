@@ -20,7 +20,7 @@ pub struct StoreCounts {
     pub gets: usize,
     /// Full-object `get_with_metadata` calls.
     pub gets_with_metadata: usize,
-    /// All put calls, including CAS-mode puts and extensions.
+    /// All put calls, including CAS-mode puts and assemblies.
     pub puts: usize,
     /// Overwrite puts.
     pub overwrite_puts: usize,
@@ -181,7 +181,7 @@ fn fold_count(mut counts: StoreCounts, operation: &RecordedOperation) -> StoreCo
             counts.written_bytes += bytes.unwrap_or(0);
             fold_put_mode(&mut counts, &PutMode::CreateIfAbsent);
         }
-        RecordedOperation::PutImmutableExtended { bytes, .. } => {
+        RecordedOperation::Assemble { bytes, .. } => {
             counts.puts += 1;
             counts.written_bytes +=
                 u64::try_from(*bytes).expect("buffered write length should fit in u64");
@@ -190,11 +190,6 @@ fn fold_count(mut counts: StoreCounts, operation: &RecordedOperation) -> StoreCo
         RecordedOperation::CompareAndSwap { bytes, .. } => {
             counts.puts += 1;
             counts.compare_and_swaps += 1;
-            counts.written_bytes +=
-                u64::try_from(*bytes).expect("buffered write length should fit in u64");
-        }
-        RecordedOperation::Extend { bytes, .. } => {
-            counts.puts += 1;
             counts.written_bytes +=
                 u64::try_from(*bytes).expect("buffered write length should fit in u64");
         }

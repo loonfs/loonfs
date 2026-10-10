@@ -122,20 +122,32 @@ impl Checksum {
     ///
     /// Returns `None` unless both checksums are valid CRC-64/NVME values.
     pub fn crc64nvme_combine(&self, next: &Checksum, next_len: u64) -> Option<Checksum> {
-        let value = |checksum: &Checksum| {
-            (checksum.algorithm == ChecksumAlgorithm::Crc64nvme && checksum.validate().is_ok())
-                .then(|| u64::from_str_radix(&checksum.value, 16).ok())
-                .flatten()
+        (self.algorithm == ChecksumAlgorithm::Crc64nvme)
+            .then(|| self.crc_combine(next, next_len))
+            .flatten()
+    }
+
+    /// Combines equal CRC algorithms without reading either payload.
+    pub fn crc_combine(&self, next: &Checksum, next_len: u64) -> Option<Checksum> {
+        if self.algorithm != next.algorithm || self.validate().is_err() || next.validate().is_err()
+        {
+            return None;
+        }
+        let algorithm = match self.algorithm {
+            ChecksumAlgorithm::Crc64nvme => crc_fast::CrcAlgorithm::Crc64Nvme,
+            ChecksumAlgorithm::Crc32c => crc_fast::CrcAlgorithm::Crc32Iscsi,
+            ChecksumAlgorithm::Sha256 => return None,
         };
         let combined = crc_fast::checksum_combine(
-            crc_fast::CrcAlgorithm::Crc64Nvme,
-            value(self)?,
-            value(next)?,
+            algorithm,
+            u64::from_str_radix(&self.value, 16).ok()?,
+            u64::from_str_radix(&next.value, 16).ok()?,
             next_len,
         );
+        let bytes = combined.to_be_bytes();
         Some(Checksum {
-            algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: hex_encode_bytes(&combined.to_be_bytes()),
+            algorithm: self.algorithm,
+            value: hex_encode_bytes(&bytes[8 - self.algorithm.value_bytes()..]),
         })
     }
 
@@ -484,6 +496,20 @@ mod tests {
 
     fn content_id() -> ContentId {
         ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id")
+    }
+
+    #[test]
+    fn combining_provider_crcs_matches_hashing_the_joined_bytes() {
+        for algorithm in [ChecksumAlgorithm::Crc32c, ChecksumAlgorithm::Crc64nvme] {
+            let first = vec![42; 1001];
+            let second = vec![71; 8193];
+            let actual = Checksum::compute(algorithm, &first)
+                .crc_combine(&Checksum::compute(algorithm, &second), second.len() as u64);
+            assert_eq!(
+                actual,
+                Some(Checksum::compute(algorithm, &[first, second].concat()))
+            );
+        }
     }
 
     #[test]
