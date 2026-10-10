@@ -17,7 +17,8 @@ pub(crate) struct AppendedContent {
     pub(crate) content_ref: ContentRef,
     pub(crate) hash_state: Option<Sha256State>,
     pub(crate) crc64nvme: Option<Checksum>,
-    pub(crate) piece: WalInlineContent,
+    pub(crate) layout: Option<loonfs_types::ContentLayout>,
+    pub(crate) pieces: Vec<WalInlineContent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

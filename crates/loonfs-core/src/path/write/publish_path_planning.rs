@@ -62,6 +62,7 @@ pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?S
     pub(super) access: &'a NamespaceAccess,
     pub(super) authorizer: &'a Authorizer<'a>,
     pub(super) view: &'a MetadataView<'view, 'store, S>,
+    pub(super) tail: Option<&'a crate::wal::ProjectedWalTail>,
 }
 
 /// Rejects the root, which only an access update may name as its target.

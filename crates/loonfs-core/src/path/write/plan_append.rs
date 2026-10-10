@@ -10,12 +10,15 @@ use crate::commit::{AppendedContent, CommitOp, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
+use crate::storage::content_location::ContentLocation;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::{ContentBase, WalInlineContent};
+use loonfs_types::format::wal::{
+    WalInlineContent, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+};
 use loonfs_types::{
-    AbsolutePath, AccessRight, AccessRights, Checksum, ContentId, ContentRef, ContentRefKind,
-    DestinationBehavior, DestinationPrecondition, InodeId, InodeKind, PreconditionFields,
-    RevisionNo,
+    AbsolutePath, AccessRight, AccessRights, Checksum, ContentId, ContentLayout, ContentRef,
+    ContentRefKind, DestinationBehavior, DestinationPrecondition, InodeId, InodeKind,
+    PreconditionFields, RevisionNo,
 };
 
 pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
@@ -184,6 +187,18 @@ async fn append_to<S: ObjectStore + ?Sized>(
     } else {
         ContentId::generate()
     };
+    let (layout, pieces) = if extends_base {
+        (
+            None,
+            vec![WalInlineContent {
+                content_id: content_id.clone(),
+                offset: base.size_bytes,
+                bytes: bytes.to_vec(),
+            }],
+        )
+    } else {
+        pieces_from_base(view, base, &content_id, bytes).await?
+    };
     Ok(AppendedContent {
         content_ref: ContentRef {
             kind: ContentRefKind::BlobV1,
@@ -194,14 +209,44 @@ async fn append_to<S: ObjectStore + ?Sized>(
         },
         hash_state,
         crc64nvme,
-        piece: WalInlineContent {
-            content_id,
-            offset: base.size_bytes,
-            bytes: bytes.to_vec(),
-            base: (!extends_base && base.size_bytes > 0).then(|| ContentBase {
-                owner_namespace_id: base.owner_namespace_id.clone(),
-                content_id: base.content_id.clone(),
-            }),
-        },
+        layout,
+        pieces,
     })
+}
+
+async fn pieces_from_base<S: ObjectStore + ?Sized>(
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+    base: &ContentRef,
+    content_id: &ContentId,
+    bytes: &[u8],
+) -> Result<(Option<ContentLayout>, Vec<WalInlineContent>)> {
+    let location = ContentLocation::resolve(view.view, view.tail, base).await?;
+    let offset = location.extents_length();
+    let resident_bytes = usize::try_from(base.size_bytes - offset).unwrap_or(usize::MAX);
+    let estimated_bytes = resident_bytes.saturating_add(bytes.len());
+    if estimated_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES {
+        return Err(CoreError::CommitTooLarge {
+            estimated_bytes,
+            max_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+        });
+    }
+    let mut resident = location.joined_pieces().to_vec();
+    resident.extend_from_slice(bytes);
+    let pieces = resident
+        .chunks(MAX_WAL_INLINE_CONTENT_BYTES)
+        .enumerate()
+        .map(|(index, bytes)| WalInlineContent {
+            content_id: content_id.clone(),
+            offset: offset + (index * MAX_WAL_INLINE_CONTENT_BYTES) as u64,
+            bytes: bytes.to_vec(),
+        })
+        .collect();
+    let layout = (offset > 0).then(|| ContentLayout {
+        extents: location
+            .extents
+            .into_iter()
+            .map(|located| located.extent)
+            .collect(),
+    });
+    Ok((layout, pieces))
 }

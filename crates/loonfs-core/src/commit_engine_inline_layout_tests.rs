@@ -34,7 +34,7 @@ fn content_operations(store: &RecordingStore<LocalFsStore>) -> Vec<RecordedOpera
 }
 
 #[tokio::test]
-async fn upload_evidence_publishes_a_layout_only_for_a_new_chain() {
+async fn upload_evidence_carries_a_layout_on_every_reference() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let stored = store_bytes_as_content(&store, &namespace_id, b"uploaded")
@@ -74,7 +74,7 @@ async fn upload_evidence_publishes_a_layout_only_for_a_new_chain() {
         .expect("tail");
     assert_eq!(tail.rows.revisions().len(), 3);
     let rows = tail.rows.content_layouts();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].layout.extents[0].object, ExtentObject::Whole);
     assert_eq!(rows[0].size_bytes, 8);
     fold_wal(&store, &namespace_id)
@@ -404,35 +404,79 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
     let namespace_id = engine.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
-    bytes.resize(110, b'b');
-    commit_piece(
-        &store,
-        &namespace_id,
-        (inode_id, RevisionNo(2)),
-        &original.content_id,
-        &bytes,
-        100,
-        None,
-    )
-    .await;
+    for (revision_no, size, offset) in [(2, 105, 100), (3, 110, 105)] {
+        bytes.resize(size, b'b');
+        commit_piece(
+            &store,
+            &namespace_id,
+            (inode_id, RevisionNo(revision_no)),
+            &original.content_id,
+            &bytes,
+            offset,
+            None,
+        )
+        .await;
+    }
     fold_wal(&store, &namespace_id)
         .await
         .expect("fold base span");
+    engine.invalidate_projection();
+    for (commit_id, operation) in [
+        (
+            "restore-prefix",
+            FilesystemOperation::RestoreRevision {
+                path: AbsolutePath::parse("/file-0").expect("path"),
+                source_revision_no: RevisionNo(2),
+            },
+        ),
+        (
+            "append-prefix",
+            FilesystemOperation::AppendFile {
+                path: AbsolutePath::parse("/file-0").expect("path"),
+                inline_content: vec![b'!'],
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+        ),
+    ] {
+        publish(
+            &mut engine,
+            &store,
+            &context,
+            CommitCandidate::new(CommitRequest::single(
+                CommitId::parse(commit_id).expect("commit"),
+                loonfs_test_support::test_actor(),
+                None,
+                operation,
+            )),
+        )
+        .await
+        .expect("publish");
+    }
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("view");
+    let revision = view
+        .projected_metadata_view()
+        .latest_revision_head(inode_id)
+        .await
+        .expect("revision")
+        .expect("file");
+    let fresh = revision.content_ref;
+    assert_ne!(fresh.content_id, original.content_id);
+    let carried = layout(&store, &fresh).await;
+    assert_eq!(carried.size_bytes, 105);
+    assert_eq!(
+        carried
+            .layout
+            .extents
+            .iter()
+            .map(|extent| extent.length)
+            .collect::<Vec<_>>(),
+        [100, 5]
+    );
     bytes.truncate(105);
     bytes.push(b'!');
-    let fresh = commit_piece(
-        &store,
-        &namespace_id,
-        (inode_id, RevisionNo(3)),
-        &ContentId::generate(),
-        &bytes,
-        105,
-        Some(ContentBase {
-            owner_namespace_id: namespace_id.clone(),
-            content_id: original.content_id.clone(),
-        }),
-    )
-    .await;
     store.reset();
     fold_wal(&store, &namespace_id)
         .await
@@ -448,7 +492,7 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
     let mut prefix = base.layout.extents[1].clone();
     prefix.length = 5;
     assert_eq!(row.layout.extents[1], prefix);
-    assert_eq!(read_file(&store, &namespace_id, RevisionNo(3)).await, bytes);
+    assert_eq!(read_file(&store, &namespace_id, RevisionNo(5)).await, bytes);
 }
 
 #[tokio::test]
@@ -542,10 +586,7 @@ async fn collection_keeps_shared_and_rooted_spans_and_deletes_an_unrooted_chain(
         &ContentId::generate(),
         b"hello!",
         5,
-        Some(ContentBase {
-            owner_namespace_id: namespace_id.clone(),
-            content_id: original.content_id.clone(),
-        }),
+        Some(layout(&store, &original).await.layout),
     )
     .await;
     fold_wal(&store, &namespace_id).await.expect("fold");
@@ -689,10 +730,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         &ContentId::generate(),
         b"hello!",
         5,
-        Some(ContentBase {
-            owner_namespace_id: namespace_id.clone(),
-            content_id: original.content_id.clone(),
-        }),
+        Some(layout(&store, &original).await.layout),
     )
     .await;
     fold_wal(&store, &namespace_id)
@@ -756,6 +794,18 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         row,
         MetadataRow::FileRevision(row) if row.content_ref.content_id != original.content_id && row.content_ref.content_id != shared.content_id
     )));
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("restored view");
+    assert_eq!(
+        view.projected_metadata_view()
+            .content_layout(&shared.content_id)
+            .await
+            .expect("layout")
+            .expect("carried layout")
+            .layout,
+        shared_layout.layout
+    );
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
     let options = GcOptions::default();
     let report = gc_namespace(
@@ -775,6 +825,11 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         let key = crate::storage::content_location::extent_object_key(extent);
         assert!(store.head(&key).await.expect("head").is_some(), "{key}");
     }
+    assert_eq!(
+        read_file(&store, &namespace_id, RevisionNo(4)).await,
+        b"hello!"
+    );
+    fold_wal(&store, &namespace_id).await.expect("fold restore");
     assert_eq!(
         read_file(&store, &namespace_id, RevisionNo(4)).await,
         b"hello!"
@@ -932,7 +987,6 @@ async fn two_large_merges_share_one_folds_memory_budget() {
                         content_id: content_id.clone(),
                         offset: (offset + index * MAX_WAL_INLINE_CONTENT_BYTES) as u64,
                         bytes: bytes.to_vec(),
-                        base: None,
                     })
                     .collect(),
             )
@@ -989,5 +1043,99 @@ async fn two_large_merges_share_one_folds_memory_budget() {
                 .len(),
             head_length
         );
+    }
+}
+
+#[tokio::test]
+async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
+    use crate::path::write::PublishPlanningSession;
+
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    engine.invalidate_projection();
+    let target = inline(&namespace_id, Bytes::from_static(b"target"));
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        candidate("target", vec![target]),
+    )
+    .await
+    .expect("target");
+    let stale_layout = layout(&store, &original).await.layout;
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("view");
+    let candidate = CommitCandidate::new(CommitRequest::single(
+        CommitId::parse("copy").expect("commit"),
+        loonfs_test_support::test_actor(),
+        None,
+        FilesystemOperation::CopyPath {
+            source_path: AbsolutePath::parse("/file-0").expect("path"),
+            destination_path: AbsolutePath::parse("/target-0").expect("path"),
+            precondition: loonfs_types::DestinationPrecondition {
+                behavior: loonfs_types::DestinationBehavior::Replace,
+                ..Default::default()
+            },
+        },
+    ));
+    let session = PublishPlanningSession::new(view.head(), view.wal_tail());
+    let plan = session
+        .prepare_commit(
+            &candidate,
+            candidate
+                .semantic_identity(&namespace_id)
+                .expect("identity"),
+            view.projected_metadata_view(),
+            context.now_ms,
+            &mut session.begin_candidate(),
+        )
+        .await
+        .expect("copy plan");
+    assert!(plan.deltas.iter().any(|delta| matches!(&delta.delta,
+        WalDelta::AppendFileRevision { layout: Some(layout), .. } if *layout == stale_layout)));
+    drop(view);
+    let extended = commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &original.content_id,
+        b"hello!",
+        5,
+        None,
+    )
+    .await;
+    fold_wal(&store, &namespace_id).await.expect("fold append");
+    let longer = layout(&store, &extended).await;
+    crate::test_support::ops::append_wal_commit(
+        &store,
+        &namespace_id,
+        plan.deltas.into_iter().map(|delta| delta.delta).collect(),
+        Vec::new(),
+    )
+    .await
+    .expect("stale copy");
+    for _ in 0..2 {
+        assert_eq!(layout(&store, &original).await, longer);
+        assert_eq!(
+            read_file(&store, &namespace_id, RevisionNo(2)).await,
+            b"hello!"
+        );
+        let view = load_current_metadata_view(&store, &namespace_id)
+            .await
+            .expect("view");
+        let read = view
+            .get_file_revision_bytes(
+                &store,
+                "/target-0",
+                RevisionNo(2),
+                None,
+                &ReadAccess::live(Authorizer::Unrestricted),
+            )
+            .await
+            .expect("copy bytes");
+        assert_eq!(read.bytes, b"hello");
+        fold_wal(&store, &namespace_id).await.expect("fold copy");
     }
 }

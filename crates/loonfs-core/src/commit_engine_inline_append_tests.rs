@@ -42,7 +42,11 @@ async fn newest_pieces(
         .expect("a WAL object");
     let bytes = store.get(&key, None).await.expect("get").expect("WAL");
     let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
-    wal.payload().records[0].inline_content.clone()
+    wal.payload()
+        .records
+        .iter()
+        .flat_map(|record| record.inline_content.clone())
+        .collect()
 }
 
 async fn revision_bytes(
@@ -108,7 +112,6 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
             content_id: original.content_id.clone(),
             offset: 5,
             bytes: b" world".to_vec(),
-            base: None,
         }]
     );
     assert_eq!(
@@ -164,18 +167,12 @@ async fn appends_in_one_commit_chain_in_operation_order_after_a_put() {
     assert_eq!(
         pieces
             .iter()
-            .map(|piece| (
-                &piece.content_id,
-                piece.offset,
-                piece.bytes.as_slice(),
-                &piece.base
-            ))
+            .map(|piece| (&piece.content_id, piece.offset, piece.bytes.as_slice()))
             .collect::<Vec<_>>(),
         [(0, "ab"), (2, "cd"), (4, "ef"), (6, "g")].map(|(offset, bytes)| (
             content_id,
             offset,
-            bytes.as_bytes(),
-            &None
+            bytes.as_bytes()
         ))
     );
     for (revision_no, expected) in [(1, "ab"), (2, "abcd"), (3, "abcdef"), (4, "abcdefg")] {
@@ -218,16 +215,18 @@ async fn an_append_to_a_restored_revision_starts_a_new_chain_from_it() {
         panic!("expected one piece, got {pieces:?}");
     };
     assert_ne!(piece.content_id, original.content_id);
-    assert_eq!(
-        (piece.offset, &piece.base),
-        (
-            3,
-            &Some(ContentBase {
-                owner_namespace_id: namespace_id.clone(),
-                content_id: original.content_id.clone(),
-            })
-        )
-    );
+    assert_eq!(piece.offset, 3);
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("view");
+    let carried = view
+        .projected_metadata_view()
+        .content_layout(&piece.content_id)
+        .await
+        .expect("layout")
+        .expect("carried layout");
+    assert_eq!(carried.size_bytes, 3);
+    assert_eq!(carried.layout.extents[0].content_id, original.content_id);
     for _ in ["before the fold", "after the fold"] {
         assert_eq!(
             read_file(&store, &namespace_id, RevisionNo(4)).await,
@@ -578,4 +577,314 @@ async fn a_copy_appends_from_its_revision_digests_under_a_fresh_chain_id() {
     let reference = current_ref(&store, &namespace_id, "/copy").await;
     assert_ne!(reference.content_id, original.content_id);
     assert_eq!(reference.checksum, Checksum::sha256(b"hello?"));
+}
+
+fn copy(source: &str, destination: &str) -> FilesystemOperation {
+    FilesystemOperation::CopyPath {
+        source_path: AbsolutePath::parse(source).expect("source"),
+        destination_path: AbsolutePath::parse(destination).expect("destination"),
+        precondition: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_chain_shares_folded_extents_and_copies_resident_bytes() {
+    for folded in [false, true] {
+        for scope in ["commit", "batch", "tail"] {
+            let (_directory, store, mut engine, context) = setup().await;
+            let namespace_id = engine.namespace_id.clone();
+            let prefix = vec![b'a'; MAX_WAL_INLINE_CONTENT_BYTES / 2];
+            let resident = vec![b'b'; MAX_WAL_INLINE_CONTENT_BYTES / 2 + 10];
+            let suffix = vec![b'?'; MAX_WAL_INLINE_CONTENT_BYTES];
+            let value = inline(&namespace_id, Bytes::copy_from_slice(&prefix));
+            if folded {
+                publish(
+                    &mut engine,
+                    &store,
+                    &context,
+                    candidate("file", vec![value.clone()]),
+                )
+                .await
+                .expect("file");
+                fold_wal(&store, &namespace_id).await.expect("fold prefix");
+                engine.invalidate_projection();
+            }
+            let mut operations = Vec::new();
+            if !folded {
+                operations.push(put("/file-0", value.content_ref()));
+            }
+            operations.extend([
+                append("/file-0", &resident),
+                copy("/file-0", "/copy"),
+                append("/copy", b"!"),
+                append("/file-0", &suffix),
+            ]);
+            store.reset();
+            let mut candidates = if scope == "commit" {
+                vec![request("branches", operations)]
+            } else {
+                operations
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, operation)| request(&format!("branch-{index}"), vec![operation]))
+                    .collect::<Vec<_>>()
+            };
+            if !folded {
+                candidates[0].inline_content.push(value.clone());
+            }
+            if scope == "tail" {
+                for candidate in candidates {
+                    publish(&mut engine, &store, &context, candidate)
+                        .await
+                        .expect("branch");
+                }
+            } else {
+                let results = engine
+                    .publish_batch(
+                        &store,
+                        candidates,
+                        &context,
+                        &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+                    )
+                    .await
+                    .results;
+                for result in results {
+                    result.expect("branch");
+                }
+            }
+            assert!(store.snapshot().iter().all(|operation| {
+                loonfs_objectstore::layout::content_id_of(operation.key()).is_none()
+            }));
+            let fresh = current_ref(&store, &namespace_id, "/file-0").await;
+            let copied = current_ref(&store, &namespace_id, "/copy").await;
+            assert_ne!(fresh.content_id, value.content_ref().content_id);
+            assert_eq!(copied.content_id, value.content_ref().content_id);
+            let offset = if folded { prefix.len() as u64 } else { 0 };
+            let expected_pieces = if folded {
+                [resident.as_slice(), suffix.as_slice()].concat()
+            } else {
+                [prefix.as_slice(), resident.as_slice(), suffix.as_slice()].concat()
+            };
+            let pieces = newest_pieces(&store, &namespace_id)
+                .await
+                .into_iter()
+                .filter(|piece| piece.content_id == fresh.content_id)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                pieces.len(),
+                expected_pieces.len().div_ceil(MAX_WAL_INLINE_CONTENT_BYTES)
+            );
+            for (index, piece) in pieces.iter().enumerate() {
+                assert_eq!(
+                    piece.offset,
+                    offset + (index * MAX_WAL_INLINE_CONTENT_BYTES) as u64
+                );
+                assert!(piece.bytes.len() <= MAX_WAL_INLINE_CONTENT_BYTES);
+            }
+            assert_eq!(
+                pieces
+                    .iter()
+                    .flat_map(|piece| piece.bytes.iter().copied())
+                    .collect::<Vec<_>>(),
+                expected_pieces
+            );
+            let expected_prefix = loonfs_types::ContentExtent {
+                owner_namespace_id: namespace_id.clone(),
+                content_id: value.content_ref().content_id.clone(),
+                object: loonfs_types::ExtentObject::Whole,
+                offset: 0,
+                length: prefix.len() as u64,
+            };
+            let view = load_current_metadata_view(&store, &namespace_id)
+                .await
+                .expect("view");
+            let carried = view
+                .projected_metadata_view()
+                .content_layout(&fresh.content_id)
+                .await
+                .expect("layout");
+            if folded {
+                assert_eq!(
+                    carried.expect("prefix").layout.extents,
+                    std::slice::from_ref(&expected_prefix)
+                );
+            } else {
+                assert!(carried.is_none());
+            }
+            let original_bytes =
+                [prefix.as_slice(), resident.as_slice(), suffix.as_slice()].concat();
+            let copied_bytes = [prefix.as_slice(), resident.as_slice(), b"!"].concat();
+            for after_fold in [false, true] {
+                if after_fold {
+                    fold_wal(&store, &namespace_id)
+                        .await
+                        .expect("fold both chains");
+                }
+                assert_eq!(
+                    revision_bytes(&store, &namespace_id, "/file-0", 3).await,
+                    original_bytes
+                );
+                assert_eq!(
+                    revision_bytes(&store, &namespace_id, "/copy", 2).await,
+                    copied_bytes
+                );
+            }
+            let view = load_current_metadata_view(&store, &namespace_id)
+                .await
+                .expect("folded view");
+            let row = view
+                .projected_metadata_view()
+                .content_layout(&fresh.content_id)
+                .await
+                .expect("layout")
+                .expect("folded layout");
+            if folded {
+                assert_eq!(row.layout.extents[0], expected_prefix);
+            }
+            let extent = row.layout.extents.last().expect("new extent");
+            assert_eq!(extent.content_id, fresh.content_id);
+            let key = crate::storage::content_location::extent_object_key(extent);
+            assert_eq!(
+                store.get(&key, None).await.expect("get").expect("object"),
+                expected_pieces
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn copied_pieces_count_toward_the_commit_and_batch_wal_limit() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let bytes = vec![b'x'; MAX_WAL_INLINE_CONTENT_BYTES];
+    let value = inline(&namespace_id, Bytes::copy_from_slice(&bytes));
+    let mut base = candidate("base", vec![value]);
+    base.request
+        .operations
+        .extend((0..7).map(|_| append("/base-0", &bytes)));
+    publish(&mut engine, &store, &context, base)
+        .await
+        .expect("base");
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        request(
+            "copies",
+            vec![
+                copy("/base-0", "/a"),
+                copy("/base-0", "/b"),
+                append("/base-0", b"!"),
+            ],
+        ),
+    )
+    .await
+    .expect("copies");
+    let original = current_ref(&store, &namespace_id, "/a").await;
+    store.reset();
+    let error = publish(
+        &mut engine,
+        &store,
+        &context,
+        request("too-large", vec![append("/a", b"a"), append("/b", b"b")]),
+    )
+    .await
+    .expect_err("copied bytes exceed the WAL limit");
+    assert!(matches!(error, CoreError::FailedOperation { source, .. }
+        if matches!(*source, CoreError::CommitTooLarge { estimated_bytes, max_bytes }
+            if estimated_bytes == MAX_WAL_OBJECT_INLINE_CONTENT_BYTES + 2
+                && max_bytes == MAX_WAL_OBJECT_INLINE_CONTENT_BYTES)));
+    assert_no_writes(&store);
+    let result = engine
+        .publish_batch(
+            &store,
+            [
+                request("fits", vec![append("/a", b"a")]),
+                request("does-not-fit", vec![append("/b", b"b")]),
+            ],
+            &context,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await;
+    assert!(result.results[0].is_ok());
+    assert!(matches!(&result.results[1], Err(CoreError::CommitTooLarge {
+        estimated_bytes, max_bytes,
+    }) if *estimated_bytes == MAX_WAL_OBJECT_INLINE_CONTENT_BYTES + 2
+        && *max_bytes == MAX_WAL_OBJECT_INLINE_CONTENT_BYTES));
+    assert_eq!(current_ref(&store, &namespace_id, "/b").await, original);
+    assert_eq!(
+        revision_bytes(&store, &namespace_id, "/a", 2).await,
+        [vec![b'x'; 8 * bytes.len()], vec![b'a']].concat()
+    );
+    assert_eq!(result.wal_tail_inline_bytes, 16 * bytes.len() + 2);
+}
+
+#[tokio::test]
+async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let value = inline(&namespace_id, Bytes::from_static(b"abc"));
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        candidate("file", vec![value.clone()]),
+    )
+    .await
+    .expect("file");
+    let view = load_current_metadata_view(&store, &namespace_id)
+        .await
+        .expect("view");
+    let inode_id = view
+        .resolve_path(
+            "/file-0",
+            AttributeInclusion::Omit,
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        )
+        .await
+        .expect("file")
+        .inode_id;
+    for (revision_no, whole, offset) in [
+        (2, b"abcdefghi".as_slice(), 6),
+        (3, b"abcdefghij".as_slice(), 9),
+    ] {
+        commit_piece(
+            &store,
+            &namespace_id,
+            (inode_id, RevisionNo(revision_no)),
+            &value.content_ref().content_id,
+            whole,
+            offset,
+            None,
+        )
+        .await;
+    }
+    engine.invalidate_projection();
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        request(
+            "restore",
+            vec![FilesystemOperation::RestoreRevision {
+                path: AbsolutePath::parse("/file-0").expect("path"),
+                source_revision_no: RevisionNo(2),
+            }],
+        ),
+    )
+    .await
+    .expect("restore");
+    store.reset();
+    let error = publish(
+        &mut engine,
+        &store,
+        &context,
+        request("missing", vec![append("/file-0", b"!")]),
+    )
+    .await
+    .expect_err("missing base bytes");
+    assert!(matches!(error, CoreError::FailedOperation { source, .. }
+        if matches!(*source, CoreError::NamespaceCorrupt(ref message)
+            if message.contains(value.content_ref().content_id.as_str()) && message.contains("offset 3"))));
+    assert_no_writes(&store);
 }

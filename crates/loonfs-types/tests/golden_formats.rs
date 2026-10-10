@@ -31,7 +31,7 @@ use loonfs_types::format::manifest::{
     METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::wal::{
-    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, ContentBase, WalCommitDelta,
+    decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, WalCommitDelta,
     WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
 };
 use loonfs_types::{
@@ -391,22 +391,16 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             content_id: sample_content_ref().content_id,
             offset: 0,
             bytes: b"golden bytes".to_vec(),
-            base: None,
         },
         WalInlineContent {
             content_id: content_id("con_fedcba9876543210fedcba9876543210"),
             offset: 0,
             bytes: Vec::new(),
-            base: None,
         },
         WalInlineContent {
             content_id: chain_id.clone(),
             offset: 6,
             bytes: b" chain".to_vec(),
-            base: Some(ContentBase {
-                owner_namespace_id: namespace_id(),
-                content_id: sample_content_ref().content_id,
-            }),
         },
     ];
     let empty_content_ref = ContentRef::blob_v1(
@@ -435,7 +429,15 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             content_ref: ContentRef::blob_v1(namespace_id(), chain_id, b"golden chain"),
             hash_state: None,
             crc64nvme: None,
-            layout: None,
+            layout: Some(loonfs_types::ContentLayout {
+                extents: vec![loonfs_types::ContentExtent {
+                    owner_namespace_id: namespace_id(),
+                    content_id: sample_content_ref().content_id,
+                    object: loonfs_types::ExtentObject::Whole,
+                    offset: 0,
+                    length: 6,
+                }],
+            }),
         },
     });
     payload.head_seq = ChangeSeq(3);
@@ -2723,7 +2725,7 @@ fn sample_content_layout_row() -> MetadataRow {
 fn content_layout_rows_match_golden_bytes_and_lookup_grammar() {
     let row = sample_content_layout_row();
     let key = format!(
-        "content-layout-{}-18446744073709551613",
+        "content-layout-{}-18446744073709551603-18446744073709551613",
         sample_content_ref().content_id
     );
     assert_eq!(row.row_key(), key);

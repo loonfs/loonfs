@@ -13,6 +13,9 @@ use loonfs_objectstore::{
     PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE, PROVIDER_PUBLICATION_REQUEST_BOUND,
 };
 
+/// Caps the filter used to keep chains named by a compaction's revision rows.
+pub const MAX_CHAIN_FILTER_BYTES: usize = 64 * 1024 * 1024;
+
 /// Maximum semantic operations in one explicit commit, bounding how long one
 /// request can occupy the serialized publisher during planning and
 /// materialization.

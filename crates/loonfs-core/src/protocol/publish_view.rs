@@ -39,6 +39,10 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state.rows)
     }
 
+    pub(crate) fn wal_tail(&self) -> &ProjectedWalTail {
+        &self.tail_state
+    }
+
     pub(super) fn write_stop(&self) -> Option<u64> {
         self.write_stop
     }

@@ -2,6 +2,7 @@
 
 use crate::path::write::CommitRequest;
 use crate::storage::inline_content::InlineContent;
+use loonfs_types::format::wal::{WalCommitDelta, WalInlineContent};
 use loonfs_types::{
     AbsolutePath, AccessRight, FilesystemOperation, NamespaceNaming,
     MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ATTRIBUTES_TOTAL_BYTES,
@@ -81,22 +82,6 @@ const REVISION_BYTES: usize = delta_bytes(
         ("revision_no", INTEGER_BYTES),
         ("content_ref", CONTENT_REF_BYTES),
         (
-            "layout",
-            map_bytes(&[(
-                "extents",
-                9 + map_bytes(&[
-                    ("owner_namespace_id", string_bytes(MAX_ID_BYTES)),
-                    ("content_id", string_bytes(MAX_ID_BYTES)),
-                    (
-                        "object",
-                        map_bytes(&[("kind", string_bytes("whole".len()))]),
-                    ),
-                    ("offset", INTEGER_BYTES),
-                    ("length", INTEGER_BYTES),
-                ]),
-            )]),
-        ),
-        (
             "hash_state",
             map_bytes(&[
                 ("words", 9 + 8 * INDEX_BYTES),
@@ -113,20 +98,41 @@ const REVISION_BYTES: usize = delta_bytes(
         ),
     ],
 );
-/// One append's piece, apart from its bytes: the entry's fields and a base
-/// in another content object.
 const APPEND_PIECE_BYTES: usize = map_bytes(&[
     ("content_id", string_bytes(MAX_ID_BYTES)),
     ("offset", INTEGER_BYTES),
     ("bytes", string_bytes(0)),
+]);
+const EXTENT_BYTES: usize = map_bytes(&[
+    ("owner_namespace_id", string_bytes(MAX_ID_BYTES)),
+    ("content_id", string_bytes(MAX_ID_BYTES)),
     (
-        "base",
+        "object",
         map_bytes(&[
-            ("owner_namespace_id", string_bytes(MAX_ID_BYTES)),
-            ("content_id", string_bytes(MAX_ID_BYTES)),
+            ("kind", string_bytes("whole".len())),
+            ("start", INTEGER_BYTES),
+            ("end", INTEGER_BYTES),
         ]),
     ),
+    ("offset", INTEGER_BYTES),
+    ("length", INTEGER_BYTES),
 ]);
+
+fn carried_layout_bytes(deltas: &[WalCommitDelta]) -> usize {
+    deltas
+        .iter()
+        .fold(0_usize, |bytes, delta| match &delta.delta {
+            loonfs_types::format::wal::WalDelta::AppendFileRevision {
+                layout: Some(layout),
+                ..
+            } => bytes
+                .saturating_add(string_bytes("layout".len()))
+                .saturating_add(map_bytes(&[("extents", 9)]))
+                .saturating_add(layout.extents.len().saturating_mul(EXTENT_BYTES)),
+            _ => bytes,
+        })
+}
+
 const ATTRIBUTES_BYTES: usize = delta_bytes(
     "append_attributes_revision",
     &[
@@ -249,6 +255,28 @@ pub(crate) fn estimated_wal_record_bytes(
         fixed_bytes.saturating_add(inline_bytes),
         |bytes, operation| bytes.saturating_add(operation_bytes(operation)),
     )
+}
+
+pub(crate) fn planned_wal_record_bytes(
+    request: &CommitRequest,
+    inline_content: &[InlineContent],
+    deltas: &[WalCommitDelta],
+    appended: &[WalInlineContent],
+) -> usize {
+    let requested = request
+        .operations
+        .iter()
+        .filter_map(FilesystemOperation::appended_content)
+        .fold(0_usize, |total, bytes| {
+            total.saturating_add(APPEND_PIECE_BYTES + bytes.len())
+        });
+    let planned = appended.iter().fold(0_usize, |total, piece| {
+        total.saturating_add(APPEND_PIECE_BYTES + piece.bytes.len())
+    });
+    estimated_wal_record_bytes(request, inline_content)
+        .saturating_sub(requested)
+        .saturating_add(planned)
+        .saturating_add(carried_layout_bytes(deltas))
 }
 
 fn operation_bytes(operation: &FilesystemOperation) -> usize {

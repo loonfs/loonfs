@@ -3,7 +3,7 @@
 //! one result per candidate.
 
 use crate::authorize::CommitAuthority;
-use crate::commit::{settle_publish_attempt, CommitFingerprint, WalPublishError};
+use crate::commit::{settle_publish_attempt, CommitFingerprint};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::{HeadStateCache, MetadataSegmentCache};
@@ -259,8 +259,7 @@ impl CommitCandidate {
             })
     }
 
-    /// Bytes this candidate carries in its WAL record: its inline values and
-    /// the bytes its appends add.
+    /// Request bytes before planning adds any resident bytes a fresh chain copies.
     pub fn inline_content_bytes(&self) -> usize {
         self.inline_content
             .iter()
@@ -441,13 +440,13 @@ impl CommitCandidate {
         Ok(bytes.0)
     }
 
-    /// Bounds the bytes this request adds to an encoded WAL document, excluding
-    /// the document envelope.
+    /// Bounds the request's WAL bytes before planning adds carried layouts.
+    /// Publication adds their extent bounds before accepting the plan.
     pub fn wal_record_bytes_upper_bound(&self) -> usize {
         crate::commit_wal_size::estimated_wal_record_bytes(&self.request, &self.inline_content)
     }
 
-    /// Bounds the WAL record after selected values are retained inline.
+    /// Bounds the request after inline selection, before carried layouts.
     pub fn wal_record_bytes_upper_bound_with_inline_content(
         &self,
         inline_content: &[InlineContent],
@@ -1021,18 +1020,7 @@ impl NamespaceCommitEngine {
         )
         .await;
         self.projection_observed = Some(projection_observed);
-        // A put whose outcome is unknown counts as landed.
-        let unknown_inline_bytes: usize = candidates
-            .iter()
-            .zip(&published.results)
-            .filter(|(_, result)| {
-                matches!(
-                    result,
-                    Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(_)))
-                )
-            })
-            .map(|(candidate, _)| candidate.inline_content_bytes())
-            .sum();
+        let unknown_inline_bytes = published.unconfirmed_inline_bytes;
         let (wal_tail_objects, wal_tail_inline_bytes, resulting_read_state) =
             self.update_publish_tail_projection(projection, published.effect, wal_tail_discovered);
         // A put that landed is itself an observation of the tip it created, made no

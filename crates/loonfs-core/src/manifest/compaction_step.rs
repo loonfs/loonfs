@@ -176,7 +176,7 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
     // The manifest that first names a run allocates its number, and this
     // step publishes the manifest that names this merge's output.
     let merged = merge_group_in_step(
-        store,
+        &segments,
         Some(&segments.block_memo),
         namespace_id,
         group,

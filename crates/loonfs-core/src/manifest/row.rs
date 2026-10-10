@@ -89,6 +89,9 @@ pub(super) fn manifest_rows_for_family(
             .collect::<Vec<_>>(),
     };
     rows.sort_by_key(|row| row.row_key_for_family(family));
+    if family == MetadataRowFamily::ContentLayouts {
+        rows.dedup_by_key(|row| row.row_key_for_family(family));
+    }
     rows
 }
 

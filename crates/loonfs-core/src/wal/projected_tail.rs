@@ -5,9 +5,7 @@ use crate::heap_bytes::{arc_bytes, hash_map_table_bytes, HeapBytes};
 use crate::metadata::MetadataState;
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
-use loonfs_types::format::wal::{
-    committed_activity, ContentBase, WalCommitPayload, WalDelta, WalInlineContent,
-};
+use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_types::{Checksum, ContentId, ContentRef, NamespaceId};
 use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
@@ -23,7 +21,7 @@ pub struct ProjectedWalTail {
     content_positions: HashMap<ContentId, usize>,
     inline_bytes: usize,
     /// What the content entries own besides their bytes: content ids,
-    /// references, checksums, bases, and piece slots.
+    /// references, checksums, and piece slots.
     inline_entry_heap_bytes: usize,
 }
 
@@ -42,7 +40,6 @@ pub(crate) struct ProjectedContent {
 pub(crate) struct ProjectedPiece {
     pub(crate) offset: u64,
     pub(crate) bytes: Bytes,
-    pub(crate) base: Option<ContentBase>,
 }
 
 impl ProjectedPiece {
@@ -59,6 +56,16 @@ impl ProjectedWalTail {
         }
     }
 
+    pub(crate) fn content_snapshot(&self) -> Self {
+        Self {
+            contents: self.contents.clone(),
+            content_positions: self.content_positions.clone(),
+            inline_bytes: self.inline_bytes,
+            inline_entry_heap_bytes: self.inline_entry_heap_bytes,
+            ..Self::default()
+        }
+    }
+
     /// Applies one commit of `namespace_id`'s WAL: its pieces, then its rows.
     pub(crate) fn apply_commit(
         &mut self,
@@ -68,6 +75,13 @@ impl ProjectedWalTail {
         let activity = committed_activity(record)
             .and_then(|activity| self.activity.checked_add(activity))
             .ok_or(WalObjectError::ActivityOverflow)?;
+        self.apply_pieces(namespace_id, record);
+        self.rows.apply_committed_wal_record_mut(record);
+        self.activity = activity;
+        Ok(())
+    }
+
+    pub(crate) fn apply_pieces(&mut self, namespace_id: &NamespaceId, record: &WalCommitPayload) {
         for entry in &record.inline_content {
             let (content_ref, crc64nvme) = record
                 .deltas
@@ -88,9 +102,6 @@ impl ProjectedWalTail {
                 .expect("decoded inline content should have a same-commit reference");
             self.insert_piece(content_ref, crc64nvme, entry, record.committed_seq);
         }
-        self.rows.apply_committed_wal_record_mut(record);
-        self.activity = activity;
-        Ok(())
     }
 
     /// The unfolded pieces of the content `content_ref` names, when the
@@ -130,7 +141,7 @@ impl ProjectedWalTail {
             + self.inline_bytes()
     }
 
-    fn insert_piece(
+    pub(crate) fn insert_piece(
         &mut self,
         content_ref: &ContentRef,
         crc64nvme: &Option<Checksum>,
@@ -164,10 +175,8 @@ impl ProjectedWalTail {
         let piece = ProjectedPiece {
             offset: entry.offset,
             bytes: Bytes::copy_from_slice(&entry.bytes),
-            base: entry.base.clone(),
         };
         self.inline_bytes += piece.bytes.len();
-        self.inline_entry_heap_bytes += piece.base.heap_bytes();
         let slots = content.pieces.capacity();
         match content
             .pieces
@@ -176,7 +185,6 @@ impl ProjectedWalTail {
             Ok(index) => {
                 let previous = std::mem::replace(&mut content.pieces[index], piece);
                 self.inline_bytes -= previous.bytes.len();
-                self.inline_entry_heap_bytes -= previous.base.heap_bytes();
             }
             Err(index) => content.pieces.insert(index, piece),
         }
@@ -228,7 +236,6 @@ mod tests {
                 content_id: content_id.clone(),
                 offset: offset as u64,
                 bytes: whole[offset..].to_vec(),
-                base: None,
             }],
         }
     }

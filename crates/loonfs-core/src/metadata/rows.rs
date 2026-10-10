@@ -219,7 +219,9 @@ impl MetadataState {
                 )
             })
             .map(|row| row.content_ref.size_bytes)
-            .or_else(|| self.content_layout(content_id).map(|row| row.size_bytes))
+            .into_iter()
+            .chain(self.content_layout(content_id).map(|row| row.size_bytes))
+            .max()
     }
 
     pub fn content_layout(

@@ -12,6 +12,7 @@
 use super::block_fetch::segment_object_len;
 use super::block_load::SessionBlockMemo;
 use super::build::{MetadataSegmentPuts, MetadataSegmentWriter};
+use super::chain_filter::ChainFilter;
 use super::compaction_merge::{
     locality_of, refill_iterators, select_next_iterator, LocalityGrouping,
     MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
@@ -31,7 +32,7 @@ use crate::namespace::control::load_current_manifest_if_present;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
+use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_types::CompactorEpoch;
 use loonfs_types::{ChangeSeq, ManifestNo, MetadataCompactionId, NamespaceId, RunNo};
 use sha2::{Digest, Sha256};
@@ -206,7 +207,7 @@ pub(super) struct MetadataMergeResult {
     reason = "one merge's inputs, named rather than grouped into a second shape"
 )]
 pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
-    store: &S,
+    basis: &VerifiedMetadataSegments<'_, S>,
     index_memo: Option<&SessionBlockMemo>,
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
@@ -216,7 +217,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
 ) -> Result<MetadataMergeResult> {
     let merge = GroupMerge::new(
-        store,
+        basis,
         index_memo,
         namespace_id,
         group,
@@ -246,7 +247,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
     let merge = GroupMerge::new(
-        segments.store,
+        segments,
         None,
         namespace_id,
         spec.group,
@@ -609,7 +610,7 @@ const fn row_cluster(families: &'static [MetadataRowFamily]) -> RetentionCluster
 const LAYOUT_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     families: &[MetadataRowFamily::ContentLayouts],
     locality: LocalityGrouping::LeadingKeyComponents(1),
-    rule: RetentionRule::NewestPerGroup,
+    rule: RetentionRule::FirstPerGroup,
 }];
 const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Inodes])];
 const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Tombstones])];
@@ -671,6 +672,10 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     frozen_floor_seq: ChangeSeq,
     policy: MetadataLsmPolicy,
     input_runs: Vec<MetadataRunManifest>,
+    basis_runs: &'a [MetadataRunManifest],
+    output_run_no: Option<RunNo>,
+    chain_filter: Option<ChainFilter>,
+    keep_every_layout: bool,
     result: MetadataMergeResult,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
@@ -714,7 +719,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         reason = "construction keeps one merge's coordinated state explicit"
     )]
     fn new(
-        store: &'a S,
+        basis: &'a VerifiedMetadataSegments<'_, S>,
         index_memo: Option<&'a SessionBlockMemo>,
         namespace_id: &'a NamespaceId,
         group: MetadataFamilyGroup,
@@ -730,7 +735,14 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .map(segment_object_len)
             .sum();
         Self {
-            store,
+            store: basis.store,
+            basis_runs: &basis.scan_runs,
+            output_run_no: basis
+                .manifest
+                .as_ref()
+                .map(|manifest| manifest.payload().next_run_no),
+            chain_filter: None,
+            keep_every_layout: false,
             index_memo,
             namespace_id,
             group,
@@ -754,6 +766,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         mut self,
         control: &mut MergeControl<'_>,
     ) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
+        if let Some(stop) = self.load_chain_filter(control).await? {
+            return Ok(Err(stop));
+        }
         let mut puts = MetadataSegmentPuts::new(self.store);
         for cluster in retention_clusters(self.group) {
             if let Some(stopped) = self.run_cluster(cluster, control, &mut puts).await? {
@@ -768,6 +783,64 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             return Ok(Err(stop));
         }
         Ok(Ok(self.result))
+    }
+
+    async fn load_chain_filter(
+        &mut self,
+        control: &MergeControl<'_>,
+    ) -> Result<Option<MetadataCompactionJobOutcome>> {
+        if self.group != MetadataFamilyGroup::ContentLayouts
+            || !self.placement.may_drop_rows_below_the_retention_floor()
+        {
+            return Ok(None);
+        }
+        let expected_ids = self
+            .basis_runs
+            .iter()
+            .flat_map(|run| group_run_descriptors(run, MetadataFamilyGroup::Revisions))
+            .fold(0_u64, |count, segment| {
+                count.saturating_add(segment.row_count)
+            });
+        let Some(mut filter) = ChainFilter::new(
+            expected_ids,
+            self.output_run_no
+                .expect("a layout compaction should have a manifest basis"),
+        ) else {
+            self.keep_every_layout = true;
+            tracing::info!(namespace_id = %self.namespace_id, expected_ids,
+                "chain filter exceeded its byte limit; kept every layout");
+            return Ok(None);
+        };
+        let loader = MetadataSegmentBlockLoader::new(self.store, self.index_memo);
+        for run in self.basis_runs {
+            let segments = group_run_descriptors(run, MetadataFamilyGroup::Revisions)
+                .cloned()
+                .collect();
+            let mut iterator = [MetadataSegmentRowIterator::metadata(
+                MetadataRowFamily::Revisions,
+                run.run_seq,
+                segments,
+            )];
+            loop {
+                if let Some(stop) = control.cancellation() {
+                    return Ok(Some(stop));
+                }
+                refill_iterators(
+                    &loader,
+                    &mut iterator,
+                    self.policy.max_decoded_input_bytes_per_step.get(),
+                )
+                .await?;
+                if iterator[0].head().is_none() {
+                    break;
+                }
+                if let MetadataRow::FileRevision(row) = iterator[0].take_head() {
+                    filter.insert(&row.content_ref.content_id);
+                }
+            }
+        }
+        self.chain_filter = Some(filter);
+        Ok(None)
     }
 
     /// Rejects duplicate or out-of-order input keys within a family.
@@ -801,10 +874,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         Ok(())
     }
 
-    // A newer layout covers every prefix its older rows covered.
     fn rule_for(&self, cluster: &RetentionCluster) -> RetentionRule {
-        if self.placement.may_drop_rows_below_the_retention_floor()
-            || cluster.rule == RetentionRule::NewestPerGroup
+        if self.keep_every_layout {
+            RetentionRule::KeepEveryRow
+        } else if self.placement.may_drop_rows_below_the_retention_floor()
+            || cluster.rule == RetentionRule::FirstPerGroup
         {
             cluster.rule
         } else {
@@ -883,6 +957,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             let row = iterators[next].take_head();
             self.result.rows_read += 1;
             self.report_progress();
+            if let (Some(filter), MetadataRow::ContentLayout(layout)) = (&self.chain_filter, &row) {
+                if !filter.may_contain(&layout.content_id) {
+                    continue;
+                }
+            }
             if let Some(kept) = operator.take_floor_value_before(&row, floor_seq)? {
                 self.write_row(kept, &mut writers, puts).await?;
             }

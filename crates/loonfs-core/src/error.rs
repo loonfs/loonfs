@@ -84,7 +84,7 @@ pub enum CoreError {
          this deployment buffers for one read"
     )]
     ContentTooLarge { size_bytes: u64, max_bytes: u64 },
-    #[error("commit is too large for one WAL object: estimated {estimated_bytes} bytes exceeds `MAX_WAL_OBJECT_BYTES` ({max_bytes} bytes)")]
+    #[error("commit is too large for one WAL object: estimated {estimated_bytes} bytes exceeds the limit of {max_bytes} bytes")]
     CommitTooLarge {
         estimated_bytes: usize,
         max_bytes: usize,

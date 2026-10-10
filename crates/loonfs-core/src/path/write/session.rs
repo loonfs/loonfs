@@ -10,6 +10,7 @@ use crate::commit_engine::CommitCandidate;
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
+use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalCommitPayload;
 #[cfg(test)]
@@ -21,15 +22,12 @@ use loonfs_types::NamespaceId;
 
 /// Working view of one publish attempt.
 ///
-/// The session owns the batch's evolving head and only the rows accepted
-/// during this publish attempt. Durable base reads come from the loaded
-/// manifest-plus-tail view; accepted rows are a small overlay so later
-/// candidates observe earlier accepted candidates without cloning the whole
-/// namespace.
+/// The session keeps accepted rows and resident pieces so later candidates
+/// can read earlier candidates without writing or loading content objects.
 pub(crate) struct PublishPlanningSession {
     head: NamespaceReadState,
     inode_allocator: InodeAllocator,
-    accepted_rows: MetadataState,
+    tail: ProjectedWalTail,
     /// Durable-layer lookups memoized across the whole batch attempt; the
     /// accepted-rows overlay is the only layer that changes between
     /// candidates and is composed per lookup.
@@ -37,11 +35,11 @@ pub(crate) struct PublishPlanningSession {
 }
 
 impl PublishPlanningSession {
-    pub(crate) fn new(head: &NamespaceReadState) -> Self {
+    pub(crate) fn new(head: &NamespaceReadState, tail: &ProjectedWalTail) -> Self {
         Self {
             head: head.clone(),
             inode_allocator: InodeAllocator::new(head.next_inode_id),
-            accepted_rows: MetadataState::default(),
+            tail: tail.content_snapshot(),
             durable_cache: DurableVisibilityCache::default(),
         }
     }
@@ -67,7 +65,7 @@ impl PublishPlanningSession {
     ) -> Result<ValidatedCommitPlan> {
         let base_view = base_view.with_durable_cache(&self.durable_cache);
         let overlay = MetadataState::default();
-        let pre_state = base_view.with_overlay(&overlay, &self.accepted_rows, self.head.seq);
+        let pre_state = base_view.with_overlay(&overlay, &self.tail.rows, self.head.seq);
         evaluate_preconditions(
             &candidate.request().preconditions,
             candidate.authority(),
@@ -80,7 +78,7 @@ impl PublishPlanningSession {
             semantic_identity,
             &self.head,
             base_view,
-            &self.accepted_rows,
+            &self.tail,
             committed_at_ms,
             allocation,
         )
@@ -99,7 +97,8 @@ impl PublishPlanningSession {
     /// Folds an accepted commit into the session so later candidates in the
     /// same batch plan and validate against it.
     pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
-        self.accepted_rows.apply_committed_wal_record_mut(preview);
+        self.tail.apply_pieces(&self.head.namespace_id, preview);
+        self.tail.rows.apply_committed_wal_record_mut(preview);
         self.head.seq = plan.assigned_seq;
         self.head.next_inode_id = plan.resulting_next_inode_id;
     }
@@ -243,7 +242,7 @@ mod tests {
             }],
         ] {
             let request = request.clone().preconditions(preconditions);
-            let mut session = PublishPlanningSession::new(view.head());
+            let mut session = PublishPlanningSession::new(view.head(), view.wal_tail());
             let mut allocation = session.begin_candidate();
             let plan = session
                 .prepare_commit(
@@ -295,7 +294,7 @@ mod tests {
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("load metadata view");
-        let session = PublishPlanningSession::new(view.head());
+        let session = PublishPlanningSession::new(view.head(), view.wal_tail());
 
         let first_request = CommitRequest::single(
             CommitId::parse("plan-a").expect("valid commit id"),

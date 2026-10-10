@@ -98,7 +98,17 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 content_ref: content_ref.clone(),
                 hash_state: None,
                 crc64nvme: None,
-                layout: None,
+                layout: Some(loonfs_types::ContentLayout {
+                    extents: (0..16)
+                        .map(|index| loonfs_types::ContentExtent {
+                            owner_namespace_id: content_ref.owner_namespace_id.clone(),
+                            content_id: content_ref.content_id.clone(),
+                            object: loonfs_types::ExtentObject::Whole,
+                            offset: 0,
+                            length: if index == 0 { u64::MAX - 15 } else { 1 },
+                        })
+                        .collect(),
+                }),
             },
             WalDelta::AppendAttributesRevision {
                 delta_index: 4,
@@ -127,10 +137,18 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 delta_index: 7,
                 inode_id: InodeId(3),
                 revision_no: RevisionNo(MAX_PUBLIC_INTEGER - MAX_COMMIT_OPERATIONS as u64),
-                content_ref: log_ref,
+                content_ref: log_ref.clone(),
                 hash_state: Some(log_state),
                 crc64nvme: Some(Checksum::crc64nvme(b"log")),
-                layout: None,
+                layout: Some(loonfs_types::ContentLayout {
+                    extents: vec![loonfs_types::ContentExtent {
+                        owner_namespace_id: log_ref.owner_namespace_id.clone(),
+                        content_id: log_ref.content_id.clone(),
+                        object: loonfs_types::ExtentObject::Whole,
+                        offset: 0,
+                        length: log_ref.size_bytes,
+                    }],
+                }),
             },
         ],
     );
@@ -219,7 +237,8 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         candidate.validate_request_limits().expect("request limits");
         let estimate = candidate.wal_record_bytes_upper_bound() + WAL_OBJECT_OVERHEAD_BYTES;
         assert!(estimate <= MAX_WAL_OBJECT_BYTES, "{kind}");
-        let mut session = PublishPlanningSession::new(&head);
+        let mut session =
+            PublishPlanningSession::new(&head, &crate::wal::ProjectedWalTail::default());
         let mut allocation = session.begin_candidate();
         let plan = session
             .prepare_commit(
@@ -233,6 +252,12 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             )
             .await
             .expect("plan");
+        let estimate = super::planned_wal_record_bytes(
+            candidate.request(),
+            candidate.inline_content(),
+            &plan.deltas,
+            &plan.appended,
+        ) + WAL_OBJECT_OVERHEAD_BYTES;
         let next_inode_id = session.commit_candidate(allocation).expect("allocation");
         let prepared = PreparedCommit {
             commit: plan.finish(next_inode_id),

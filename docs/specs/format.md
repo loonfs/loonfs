@@ -108,7 +108,7 @@ Each file revision contains one `ContentRef`. The current kind, `blob_v1`, names
 
 A content object is immutable. A chain is the append-only bytes of one content ID. Its bytes may lie in several objects. A layout names those objects as ordered extents. Each extent records its owner namespace, content ID, object, offset in that object, and length.
 
-A reference contains the original owner namespace, a random content ID, the size of the prefix it names, and a checksum of that prefix. Two references with one content ID can name different prefixes of one chain. A reference contains no bucket address or object-store path.
+A reference contains the original owner namespace, a random content ID, the size of the prefix it names, and a checksum of that prefix. Two references with one content ID can name different prefixes of one chain. A reference contains no bucket address or object-store path. Its revision delta names the objects its bytes need, apart from bytes carried as WAL pieces. Copies and restores carry the layout their planning view holds.
 
 The whole object sits at the chain's own key. Span objects sit beside it and are named by the chain offsets they were written for:
 
@@ -403,11 +403,11 @@ A path-based revision read first resolves the current inode at that path, then l
 
 ### 4.5 Content verification
 
-A reference names a chain prefix and its checksum. A read takes the view's layout for that chain, then its visible WAL pieces. The projected tail indexes pieces by content ID and offset and keeps each piece's base.
+A reference names a chain prefix and its checksum. A read takes the view's layout for that chain, then its visible WAL pieces. The projected tail indexes pieces by content ID and offset. The read uses the longest visible layout for the reference's own chain, taking the newest among equal lengths. It consults tail rows and manifest segments.
 
 | Condition | Where to read |
 | --- | --- |
-| The tail holds pieces at or below the reference's size | Follow their bases to the chain whose folded bytes precede them. Take that chain's layout up to the lowest tail offset. Then take the pieces up to the reference's size. |
+| The tail holds pieces at or below the reference's size | Take the reference's own chain layout up to the lowest tail offset. Then take the pieces up to the reference's size. |
 | No pieces supply the reference | Take the view's layout up to the reference's size. |
 | Zero bytes and no pieces | Verify the empty value without a content request. |
 | Nonzero folded prefix without a layout | Report corruption naming the content ID. |
@@ -610,9 +610,9 @@ File revision history and commit idempotency have different retention rules. Kee
 
 Standard requests operate on paths or inode IDs. They create directories, write files, append to files, move or copy items, delete and undelete items, restore file revisions, and update attributes. Their exact parameters are listed in Appendix B because those parameters also determine retry identity.
 
-An append adds bytes as the file's next revision. Its commit carries a piece. The base revision supplies `hash_state` and `crc64nvme`. A SHA-256 state continues a SHA-256 reference. Otherwise CRC-64/NVME continues the CRC. Neither digest is recomputed. A base with neither digest returns `not_supported` before any write.
+An append adds bytes as the file's next revision. Its commit carries pieces. The base revision supplies `hash_state` and `crc64nvme`. A SHA-256 state continues a SHA-256 reference. Otherwise CRC-64/NVME continues the CRC. Neither digest is recomputed. A base with neither digest returns `not_supported` before any write.
 
-The piece keeps the same content ID only when the namespace owns it, the base size is positive, and the base names the chain's head. The visible tail and newest layout determine that size. A copy or restore of an older prefix cannot shorten the chain head. Otherwise the piece uses a fresh ID and names the base chain. Zero bytes start a fresh chain without a base. Earlier operations in the commit count when planning later appends.
+The piece keeps the same content ID only when the namespace owns it, the base size is positive, and the base names the chain's head. The visible tail and longest layout determine that size. A copy or restore of an older prefix cannot shorten the chain head. A same-ID append carries no layout because retention keeps its newest base revision. Otherwise the pieces use a fresh ID and the delta carries the base chain's layout cut to the bytes that are already in objects, up to the base size. The cut shortens the last extent and drops later extents. A fresh chain copies the base's unfolded bytes into its own pieces before the appended bytes. Those pieces start after the carried extents and each holds at most `MAX_WAL_INLINE_CONTENT_BYTES`. A base with no folded bytes carries no layout. Missing base bytes are corruption naming the base. Copied bytes count toward the WAL limits; a commit that exceeds them returns `content_too_large` before publication. Zero bytes start a fresh chain without a layout. Earlier operations in the commit count when planning later appends.
 
 The default destination behavior for puts, moves, and copies is `no_replace`. Deletes default to `non_recursive`, directory creation defaults to `parents: false`, and attribute `set` and `remove` collections default to empty. Optional preconditions have no implied value.
 
@@ -669,7 +669,7 @@ The fold merges its own chain's last extent into the candidate while both condit
 | Last extent length | At most twice the candidate length. |
 | Combined length | At most `MAX_MERGED_EXTENT_BYTES`, 32 MiB (33,554,432 bytes). |
 
-Each merge reads the preceding extent in ranges of at most `CONTENT_READ_CHUNK_BYTES`, 8 MiB. One HEAD supplies the object's SHA-256 attestation. When present, the fold checks the bytes against it. Different bytes are `namespace_corrupt`. Direct uploads can lack this attestation. The fold reads those objects without this check. The same 32 MiB limit bounds the extent bytes held for merges across the whole fold. A chain reserves all bytes its merge will read before reading any extent. It releases them after the write. Provider-side assembly can lift this limit. A fresh chain shares its base's extents and writes only its own pieces.
+Each merge reads the preceding extent in ranges of at most `CONTENT_READ_CHUNK_BYTES`, 8 MiB. One HEAD supplies the object's SHA-256 attestation. When present, the fold checks the bytes against it. Different bytes are `namespace_corrupt`. Direct uploads can lack this attestation. The fold reads those objects without this check. The same 32 MiB limit bounds the extent bytes held for merges across the whole fold. A chain reserves all bytes its merge will read before reading any extent. It releases them after the write. Provider-side assembly can lift this limit. A fresh chain shares the extents its delta carried and writes only its own pieces.
 
 A chain whose pieces start at offset 0 writes the whole object at its own key when the tail holds no shorter reference to it. Every other write is a span named by the candidate's start and the newest reference's size, including a span that starts at zero. A failed fold can leave the first whole object behind, so later bytes must use a different key. Every write uses an immutable verified put. An occupied key with the same attestation succeeds. A different or absent attestation is corruption naming the key. The fold never changes an existing object's bytes.
 
@@ -891,7 +891,7 @@ A delta-only compaction must merge at least two runs. Once a group has only one 
 
 ### 10.3 Row retention during a base compaction
 
-The following rules apply only when the selected inputs include the group's oldest run. A delta-only compaction retains all input rows.
+The following rules apply only when the selected inputs include the group's oldest run. A delta-only compaction retains all history rows and the first layout row per content ID.
 
 | Family | Rows retained or removed |
 | --- | --- |
@@ -901,11 +901,13 @@ The following rules apply only when the selected inputs include the group's olde
 | `tombstones` | Retain all set and revoke events. |
 | `active_deletions` | Retain listed deletions until revoked. Remove a cancelled `listed`/`removed` pair together. The floor does not expire a recoverable deletion. |
 | `commits`, `commit_receipts` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it; in a fork it is the source's commit at the fork point. |
-| `content_layouts` | Keep the newest row per content ID. Keep rows even when no retained revision names the ID. |
+| `content_layouts` | Keep the first row per content ID, ordered by longest layout then newest commit. Drop chains absent from the basis's revision filter. |
 | `attributes` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 | `access` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
 
-An unbound binding version is a tombstone. It must remain while it hides older versions of its edge. Only a bottom-anchored compaction, which includes the group's oldest run, can drop it. That compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every history row, including unbound versions at or below the floor. It can drop superseded layout rows because the newest layout covers every older prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
+An unbound binding version is a tombstone. It must remain while it hides older versions of its edge. Only a bottom-anchored compaction, which includes the group's oldest run, can drop it. That compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every history row, including unbound versions at or below the floor. It can drop superseded layout rows because the longest layout covers every shorter prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
+
+A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row of its basis names, judged by a filter that errs only toward keeping; a later compaction drops what the filter kept. Both streaming jobs and bounded steps scan the basis's revisions once before merging layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID. Its expected count is the sum of the revision segments' `row_count`. If it would exceed `MAX_CHAIN_FILTER_BYTES` (64 MiB), the merge keeps every layout and logs that choice.
 
 Each binding event appears in both indexes, and both indexes group their rows by edge. Compaction therefore keeps or removes each event in both indexes alike, and both keep the same events. Row counts and row digests verify that the two indexes agree. Every event above the floor remains.
 
@@ -1091,7 +1093,7 @@ In an active namespace `N`, a content object that `N` owns stays while one of th
 | Root | Content IDs it names |
 | --- | --- |
 | A manifest that section 11.2 roots: the current manifest, a manifest a listed pin holds, or a manifest whose immediate successor is younger than `T` | Every extent, owned by `N`, of every `content_layouts` row whose content ID a `revisions` row of a rooted manifest names. |
-| `N`'s unfolded WAL tail | Every `append_file_revision` delta and every piece's base owned by `N`. |
+| `N`'s unfolded WAL tail | Every `append_file_revision` delta owned by `N`, and every extent owned by `N` in the tail row state's layouts. |
 | An upload session record in `N`, whatever its status | The session's `content_id`. |
 
 Collection deletes every other content object under `namespaces/N/content/` whose provider age is at least `T`. It keeps an object younger than `T` and a key that does not parse as a content object key. A pass scans each of the `revisions` and `content_layouts` families once for each distinct rooted manifest. It consults layouts after every revision and tail reference. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (section 11.4).
@@ -1331,19 +1333,19 @@ A delta's own commit sequence is implicit in its containing commit. An unbind ta
 
 An `append_file_revision` delta's `hash_state` is the SHA-256 state after the reference's bytes (A.3). It is present exactly when the reference's checksum is a SHA-256 and the writer had the bytes. Its `crc64nvme` is the CRC-64/NVME of the reference's bytes, present when the writer had the bytes or when the reference's own checksum is that CRC. The writer derives both; replay copies them and never recomputes them. A decoder refuses a `hash_state` on a reference whose checksum is not a SHA-256, or whose length or digest differs from the reference, and a `crc64nvme` that is not a CRC-64/NVME or that differs from a reference checksum of that algorithm.
 
-A present revision `layout` validates against the reference's size. Every extent's owner and content ID equal the reference's. A failed check is `InvalidWalRevisionLayout`. Upload evidence supplies one whole extent. Pieces and established references carry no layout.
+A present revision `layout` validates against its own `size_bytes()`. Its extents may name other owners and content IDs. Its size is at least the lowest offset of the commit's pieces for the reference's content ID, or the reference's `size_bytes` if the commit carries no piece for it. A delta whose commit carries a piece at offset 0 for its content ID carries no layout. When pieces start past offset 0 and the delta carries a layout, its size equals that first offset. A failed check is `InvalidWalRevisionLayout`. Upload evidence supplies one whole extent. Copies and restores carry the chain's layout from the planning view. A chain with no layout row covering the reference carries none; its remaining bytes are tail pieces, and the fold that writes those pieces writes its layout.
 
-`inline_content` is a list of pieces `{content_id, offset, bytes, base?}`, where `bytes` is a CBOR byte string that the chain holds from `offset`, and `base` is `{owner_namespace_id, content_id}`. The field is omitted when empty and defaults to an empty list when absent. The reference a piece accompanies is an ordinary `blob_v1` reference. A whole value is the piece at offset 0 with no base. A piece past offset 0 with no base adds bytes after bytes that an earlier commit made durable under the same content ID. An append to a reference of zero bytes would be a piece at offset 0, which is a whole value, so it starts a new content ID: a chain of zero bytes is never appended to, which is what lets its download grant sign no range (see the [API specification][api-spec]). A first piece past offset 0 that names a base starts a new chain, whose first `offset` bytes are the first bytes of the base.
+`inline_content` is a list of pieces `{content_id, offset, bytes}`, where `bytes` is a CBOR byte string that the chain holds from `offset`. The field is omitted when empty and defaults to an empty list when absent. The reference a piece accompanies is an ordinary `blob_v1` reference. A whole value is a piece at offset 0. A piece past offset 0 continues an existing chain, or starts a fresh chain whose delta carries the layout of the first `offset` bytes. An append to zero bytes starts a fresh content ID with a whole value. A chain of zero bytes is never appended to, so its download grant can sign no range (see the [API specification][api-spec]).
 
 Encoding and decoding enforce these rules using only the WAL object:
 
 1. Every entry's `content_id` is named by an `append_file_revision` delta in the same commit whose `content_ref.owner_namespace_id` equals the WAL object's `namespace_id`.
 2. The entries for one content ID in one commit, ordered by offset, are contiguous, and the last one ends at the largest `size_bytes` of those references. A zero-length entry is valid.
-3. The first entry for a content ID is at offset 0 with no base, or past offset 0. Only that first entry may name a base, and a base never names the entry's own content ID.
+3. A fresh chain's first piece past offset 0 requires a delta layout covering exactly `[0, offset)`. A piece that continues an existing chain under the same ID carries no layout. The WAL object alone cannot tell whether an earlier commit started the chain.
 4. A commit holds at most one entry per content ID and offset.
 5. Each entry contains at most `MAX_WAL_INLINE_CONTENT_BYTES`: 256 KiB (262,144 bytes), and the sum of all entry lengths in one WAL object is at most `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`: 4 MiB (4,194,304 bytes).
 
-These are reader limits; writer thresholds are policy at or below them. `MAX_WAL_OBJECT_BYTES` still limits the complete decompressed document. A delta may name content with no inline entry. Replay does not hash pieces against the reference's checksum; the envelope's `payload_checksum` covers the stored payload bytes. Whether an earlier commit made the bytes before a piece durable, and whether a base holds the bytes a chain shares, are not decided from one WAL object; a read or a fold that finds them missing reports corruption.
+These are reader limits; writer thresholds are policy at or below them. `MAX_WAL_OBJECT_BYTES` still limits the complete decompressed document. A delta may name content with no inline entry. Replay does not hash pieces against the reference's checksum; the envelope's `payload_checksum` covers the stored payload bytes. Whether an earlier commit made the bytes before a piece durable is not decided from one WAL object; a read or a fold that finds them missing reports corruption.
 
 WAL replay applies these normalized records in sequence and delta order. It does not re-run the original request's preconditions or reinterpret the request under a newer planner.
 
@@ -1386,7 +1388,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id:020}-{sort_rank:010}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
 | `commits` | `commit-{committed_seq:020}` |
-| `content_layouts` | `content-layout-{content_id}-{u64::MAX - committed_seq:020}` |
+| `content_layouts` | `content-layout-{content_id}-{u64::MAX - size_bytes:020}-{u64::MAX - committed_seq:020}` |
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
@@ -1410,7 +1412,7 @@ Bloom filters use the following keys, which are not always full row keys:
 | `attributes` | `attribute-{inode_id:020}` |
 | `access` | `access-{inode_id:020}` |
 
-A revision row copies `hash_state` and `crc64nvme` from its delta. A layout row records the chain's objects as of the commit or fold that wrote its bytes. The first row under the content ID's prefix is the newest layout. Older rows are superseded. Compaction keeps the newest row per ID in its inputs. Layouts for chains with no retained revision remain until a later change adds pruning.
+A revision row copies `hash_state` and `crc64nvme` from its delta. A layout row records the chain's objects as of the commit or fold that wrote its bytes. The first row under a content id's prefix is the longest layout, and among equal lengths the newest. Shorter rows are superseded. Compaction keeps the first row per ID in its inputs, subject to the pruning rule in section 10.3. A layout row's `size_bytes` is the layout's size, which can differ from the reference's size.
 
 A `layout` contains `extents` in chain order. Each extent contains `owner_namespace_id`, `content_id`, `object`, `offset`, and `length`. The object is `{"kind":"whole"}` or `{"kind":"span","start":...,"end":...}`. Lengths sum to `size_bytes`. Each length is positive. Zero bytes require exactly one whole extent of length zero. Each owner namespace and content ID must be valid. Span bounds satisfy `start < end`. The extent's object range fits within `end - start`. A shared prefix can shorten the extent without changing the span key. Readers honor nonzero object offsets.
 

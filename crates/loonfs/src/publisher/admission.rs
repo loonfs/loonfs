@@ -251,7 +251,10 @@ mod tests {
             .expect("oversized commit");
         assert_eq!(error.code(), loonfs_types::ErrorCode::ContentTooLarge);
         assert!(error.to_string().contains("too large for one WAL object"));
-        assert!(error.to_string().contains("MAX_WAL_OBJECT_BYTES"));
+        assert!(
+            matches!(error, CoreError::CommitTooLarge { estimated_bytes, max_bytes }
+            if estimated_bytes == MAX_WAL_OBJECT_BYTES + 1 && max_bytes == MAX_WAL_OBJECT_BYTES)
+        );
         drop(permit);
         assert_eq!(admission.used_requests(), 0);
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());

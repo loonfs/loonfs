@@ -16,9 +16,7 @@ use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
 use loonfs_types::api::v0::PathEntryKind;
-use loonfs_types::format::wal::{
-    decode_wal_object_envelope_zstd, ContentBase, WalDelta, WalInlineContent,
-};
+use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalDelta, WalInlineContent};
 use loonfs_types::{
     AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FoldWalOutcome, InodeId,
     RevisionNo, WriterId,
@@ -145,7 +143,7 @@ async fn commit_piece(
     content_id: &ContentId,
     whole: &[u8],
     offset: usize,
-    base: Option<ContentBase>,
+    layout: Option<loonfs_types::ContentLayout>,
 ) -> ContentRef {
     let mut hash_state = loonfs_types::Sha256State::new();
     hash_state.update(whole);
@@ -161,13 +159,12 @@ async fn commit_piece(
             content_ref: content_ref.clone(),
             hash_state: Some(hash_state),
             crc64nvme: Some(loonfs_types::Checksum::crc64nvme(whole)),
-            layout: None,
+            layout,
         }],
         vec![WalInlineContent {
             content_id: content_id.clone(),
             offset: offset as u64,
             bytes: whole[offset..].to_vec(),
-            base,
         }],
     )
     .await
@@ -237,7 +234,7 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
     assert_eq!(record.inline_content.len(), values.len());
     for (entry, value) in record.inline_content.iter().zip(values.iter().rev()) {
         assert_eq!(entry.content_id, value.content_ref().content_id);
-        assert_eq!((entry.offset, &entry.base), (0, &None));
+        assert_eq!(entry.offset, 0);
         assert_eq!(entry.bytes.as_slice(), value.bytes().as_ref());
         let expected_reference = value.content_ref();
         assert!(record.deltas.iter().any(|delta| {

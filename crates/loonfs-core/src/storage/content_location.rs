@@ -46,55 +46,54 @@ impl ContentLocation {
         content_ref: &ContentRef,
     ) -> Result<Self> {
         let object_key = content_object_key_for_ref(content_ref)?;
-        let mut chain = (
-            content_ref.owner_namespace_id.clone(),
-            content_ref.content_id.clone(),
-        );
         let mut end = content_ref.size_bytes;
-        let mut runs = Vec::new();
-        for _ in 0..=tail.map_or(0, |tail| tail.contents().len()) {
-            let Some(content) = tail
-                .and_then(|tail| tail.content_by_id(&chain.0, &chain.1))
-                .filter(|content| content.pieces[0].offset <= end)
-            else {
-                break;
-            };
-            runs.push(
-                content
-                    .pieces
-                    .iter()
-                    .take_while(|piece| piece.offset < end)
-                    .map(|piece| {
-                        piece
-                            .bytes
-                            .slice(..(end - piece.offset).min(piece.bytes.len() as u64) as usize)
-                    })
-                    .collect::<Vec<_>>(),
-            );
-            let first = &content.pieces[0];
-            end = first.offset;
-            match &first.base {
-                Some(base) if end > 0 => {
-                    chain = (base.owner_namespace_id.clone(), base.content_id.clone())
+        let content = tail
+            .and_then(|tail| {
+                tail.content_by_id(&content_ref.owner_namespace_id, &content_ref.content_id)
+            })
+            .filter(|content| content.pieces[0].offset <= end);
+        let mut pieces = Vec::new();
+        if let Some(content) = content {
+            let mut offset = content.pieces[0].offset;
+            for piece in content.pieces.iter().take_while(|piece| piece.offset < end) {
+                if piece.offset != offset {
+                    return Err(CoreError::NamespaceCorrupt(format!(
+                        "content `{}` has no resident bytes at offset {offset}",
+                        content_ref.content_id
+                    )));
                 }
-                _ => break,
+                let bytes = piece
+                    .bytes
+                    .slice(..(end - offset).min(piece.bytes.len() as u64) as usize);
+                offset += bytes.len() as u64;
+                pieces.push(bytes);
             }
+            if offset != end {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "content `{}` has no resident bytes from offset {offset} to {end}",
+                    content_ref.content_id
+                )));
+            }
+            end = content.pieces[0].offset;
         }
         let mut extents = Vec::new();
         if end > 0 {
-            let row = lookup.content_layout(&chain.1).await?.ok_or_else(|| {
-                CoreError::NamespaceCorrupt(format!(
-                    "content `{}` has no layout for its first {end} bytes",
-                    chain.1
-                ))
-            })?;
-            if row.owner_namespace_id != chain.0
+            let row = lookup
+                .content_layout(&content_ref.content_id)
+                .await?
+                .ok_or_else(|| {
+                    CoreError::NamespaceCorrupt(format!(
+                        "content `{}` has no layout for its first {end} bytes",
+                        content_ref.content_id
+                    ))
+                })?;
+            if row.owner_namespace_id != content_ref.owner_namespace_id
                 || row.size_bytes < end
                 || row.layout.validate(row.size_bytes).is_err()
             {
                 return Err(CoreError::NamespaceCorrupt(format!(
                     "content `{}` requires a layout owned by `{}` covering {end} bytes",
-                    chain.1, chain.0
+                    content_ref.content_id, content_ref.owner_namespace_id
                 )));
             }
             let mut remaining = end;
@@ -107,13 +106,13 @@ impl ContentLocation {
                 remaining -= extent.length;
                 extents.push(LocatedExtent { object_key, extent });
             }
-        } else if content_ref.size_bytes == 0 && runs.is_empty() {
+        } else if content_ref.size_bytes == 0 && content.is_none() {
             return Self::whole(content_ref).map_err(Into::into);
         }
         Ok(Self {
             object_key,
             extents,
-            pieces: runs.into_iter().rev().flatten().collect(),
+            pieces,
         })
     }
 

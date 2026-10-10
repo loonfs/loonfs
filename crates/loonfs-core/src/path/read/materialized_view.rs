@@ -181,6 +181,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     #[cfg(test)]
+    pub(crate) fn wal_tail(&self) -> &ProjectedWalTail {
+        &self.wal_tail
+    }
+
+    #[cfg(test)]
     pub(crate) fn projected_metadata_view(&self) -> MetadataView<'_, '_, S> {
         self.metadata_view()
     }

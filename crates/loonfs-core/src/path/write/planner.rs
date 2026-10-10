@@ -23,9 +23,11 @@ use crate::commit::{
 };
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
-use crate::metadata::{MetadataState, MetadataView};
+use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
+use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::wal::{WalInlineContent, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES};
 use loonfs_types::{
     next_public_ordinal, ChangeSeq, ContentId, DestinationPrecondition, NamespaceId,
     PreconditionFields, MAX_PUBLIC_INTEGER,
@@ -77,7 +79,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     semantic_identity: CommitFingerprint,
     head: &NamespaceReadState,
     base_view: MetadataView<'_, '_, S>,
-    accepted_rows: &MetadataState,
+    tail: &ProjectedWalTail,
     committed_at_ms: u64,
     allocation: &mut CandidateAllocation,
 ) -> Result<ValidatedCommitPlan> {
@@ -92,10 +94,25 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
 
     let authorizer =
         Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
-    let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
+    let mut resolved = PublishValidationView::new(base_view, &tail.rows, committed_seq);
     let mut numbering = CommitNumbering::default();
     let mut deltas = Vec::new();
     let mut appended: Vec<AppendedContent> = Vec::new();
+    let mut pieces = tail.content_snapshot();
+    let mut inline_bytes = 0_usize;
+    for value in candidate.inline_content() {
+        inline_bytes += value.bytes().len();
+        pieces.insert_piece(
+            value.content_ref(),
+            &Some(value.crc64nvme().clone()),
+            &WalInlineContent {
+                content_id: value.content_ref().content_id.clone(),
+                offset: 0,
+                bytes: value.bytes().to_vec(),
+            },
+            committed_seq,
+        );
+    }
     for (index, operation) in request.operations.iter().enumerate() {
         let unit = {
             let resolution_view = resolved.view();
@@ -104,11 +121,37 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                 access: &head.access,
                 authorizer: &authorizer,
                 view: &resolution_view,
+                tail: Some(&pieces),
             };
             plan_operation(operation, &view, allocation)
                 .await
                 .map_err(|error| error.at_operation(index))?
         };
+        let source_layout = match &unit.source_revision {
+            Some(revision) => resolved
+                .view()
+                .content_layout(&revision.content_ref.content_id)
+                .await
+                .map_err(|error| error.at_operation(index))?
+                .filter(|row| row.size_bytes >= revision.content_ref.size_bytes)
+                .map(|row| row.layout),
+            None => None,
+        };
+        if let Some(value) = &unit.appended {
+            inline_bytes = value.pieces.iter().fold(inline_bytes, |total, piece| {
+                total.saturating_add(piece.bytes.len())
+            });
+            if inline_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES {
+                return Err(CoreError::CommitTooLarge {
+                    estimated_bytes: inline_bytes,
+                    max_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+                }
+                .at_operation(index));
+            }
+            for piece in &value.pieces {
+                pieces.insert_piece(&value.content_ref, &value.crc64nvme, piece, committed_seq);
+            }
+        }
         appended.extend(unit.appended);
         let unit_deltas = validate_ops(
             &unit.ops,
@@ -128,10 +171,22 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                                 .filter(|row| row.content_ref == *content_ref)
                                 .map_or_else(
                                     || candidate.revision_content(content_ref),
-                                    |row| (row.hash_state.clone(), row.crc64nvme.clone(), None),
+                                    |row| {
+                                        (
+                                            row.hash_state.clone(),
+                                            row.crc64nvme.clone(),
+                                            source_layout.clone(),
+                                        )
+                                    },
                                 )
                         },
-                        |value| (value.hash_state.clone(), value.crc64nvme.clone(), None),
+                        |value| {
+                            (
+                                value.hash_state.clone(),
+                                value.crc64nvme.clone(),
+                                value.layout.clone(),
+                            )
+                        },
                     )
             },
         )
@@ -150,7 +205,10 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         apply_after_seq: head.seq,
         assigned_seq: committed_seq,
         deltas,
-        appended: appended.into_iter().map(|value| value.piece).collect(),
+        appended: appended
+            .into_iter()
+            .flat_map(|value| value.pieces)
+            .collect(),
     })
 }
 
@@ -598,7 +656,6 @@ mod tests {
         let view = load_current_metadata_view(store, namespace_id)
             .await
             .expect("metadata view");
-        let empty_overlay = MetadataState::default();
         let allocator = InodeAllocator::new(view.head().next_inode_id);
         let mut allocation = allocator.begin_candidate();
         let validated = prepare_commit_against_publish_view(
@@ -606,7 +663,7 @@ mod tests {
             serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
             view.head(),
             view.projected_metadata_view(),
-            &empty_overlay,
+            &view.wal_tail().content_snapshot(),
             1,
             &mut allocation,
         )

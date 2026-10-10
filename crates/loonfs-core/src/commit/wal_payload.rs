@@ -19,7 +19,6 @@ pub(crate) fn wal_payload_from_prepared_commit(commit: &PreparedCommit) -> WalCo
                 content_id: value.content_ref().content_id.clone(),
                 offset: 0,
                 bytes: value.bytes().to_vec(),
-                base: None,
             })
             .chain(prepared.appended.iter().cloned())
             .collect(),

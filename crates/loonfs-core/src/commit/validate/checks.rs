@@ -204,16 +204,8 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 ..
             } = delta
             {
-                let (state, crc, uploaded_layout) = revision_content(content_ref);
-                // A reused upload receipt must not shadow a longer layout with a whole one.
-                if uploaded_layout.is_some()
-                    && !view
-                        .view()
-                        .content_published(&content_ref.content_id)
-                        .await?
-                {
-                    *layout = uploaded_layout;
-                }
+                let (state, crc, carried_layout) = revision_content(content_ref);
+                *layout = carried_layout.or_else(|| layout.take());
                 *hash_state = state.or_else(|| hash_state.take());
                 *crc64nvme = crc.or_else(|| crc64nvme.take()).or_else(|| {
                     (content_ref.checksum.algorithm == ChecksumAlgorithm::Crc64nvme)
@@ -372,6 +364,12 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
             }
         })?;
     validate_not_covered_by_tombstone(view, inode_id, CommitOperand::RestoreTarget).await?;
+    let layout = view
+        .view()
+        .content_layout(&source_revision.content_ref.content_id)
+        .await?
+        .filter(|row| row.size_bytes >= source_revision.content_ref.size_bytes)
+        .map(|row| row.layout);
     Ok(vec![WalDelta::AppendFileRevision {
         delta_index: numbering.reserve_delta_index()?,
         inode_id,
@@ -379,7 +377,7 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
         content_ref: source_revision.content_ref,
         hash_state: source_revision.hash_state,
         crc64nvme: source_revision.crc64nvme,
-        layout: None,
+        layout,
     }])
 }
 
