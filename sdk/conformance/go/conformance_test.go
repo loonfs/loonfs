@@ -48,6 +48,7 @@ var expectedCases = []string{
 	"snapshots",
 	"upload_abort",
 	"upload_direct_put",
+	"upload_modes",
 	"upload_multipart",
 }
 
@@ -112,6 +113,8 @@ func TestSDKConformance(t *testing.T) {
 				runChanges(t, h, testCase)
 			case "upload_direct_put":
 				runDirectPut(t, h, testCase)
+			case "upload_modes":
+				t.Skip("store shapes are checked by the Rust reference harness")
 			case "upload_multipart":
 				runMultipart(t, h, testCase)
 			case "upload_abort":

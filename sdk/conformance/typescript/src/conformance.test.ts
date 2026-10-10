@@ -35,6 +35,7 @@ const EXPECTED_CASES = [
     "snapshots",
     "upload_abort",
     "upload_direct_put",
+    "upload_modes",
     "upload_multipart",
 ] as const;
 const CRC64_NVME_TABLE = makeCrc64NvmeTable();

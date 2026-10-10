@@ -9,7 +9,7 @@ use loonfs_client::{
     NamespacePath, PutFileOptions, UndeleteDestination, UndeleteOptions,
     UpdateAttributesByInodeOptions,
 };
-use loonfs_conformance::server::{start_server, ConformanceServer, AUTH_TOKEN};
+use loonfs_conformance::server::{start_server, ConformanceServer, StoreShape, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
 use loonfs_test_support::ids::{first_page, page_limit};
 use loonfs_types::api::v0::{
@@ -22,20 +22,41 @@ use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::PageRequest;
 use loonfs_types::{
     AccessGrants, ActorId, ApiError, AttributeKey, AttributeValue, AttributesRevisionNo,
-    BindingVersion, ChangeSeq, Checksum, CommitId, CommitPrecondition, CommitRequest, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, DestinationPrecondition, DisplayName,
-    FilesystemOperation, NamespaceId, PathEntry, RevisionNo, ROOT_INODE_ID,
+    BindingVersion, ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitPrecondition,
+    CommitRequest, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+    DestinationPrecondition, DisplayName, FilesystemOperation, NamespaceId, PathEntry, RevisionNo,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::io::Write;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rust_client_matches_the_reference_corpus() {
+#[tokio::test]
+async fn rust_client_matches_the_reference_corpus_s3() {
+    run_reference_corpus(StoreShape::S3, ChecksumAlgorithm::Crc64nvme).await;
+}
+
+#[tokio::test]
+async fn rust_client_matches_the_reference_corpus_gcs() {
+    run_reference_corpus(StoreShape::Gcs, ChecksumAlgorithm::Crc32c).await;
+}
+
+async fn run_reference_corpus(shape: StoreShape, checksum_algorithm: ChecksumAlgorithm) {
+    assert_eq!(shape.checksum_algorithm(), checksum_algorithm);
     let cases = load_cases().expect("load cases");
-    let harness = Harness::start().await;
+    let harness = Harness::start(shape).await;
 
     for case in &cases {
+        if case.name == "upload_multipart" && shape == StoreShape::Gcs {
+            writeln!(
+                std::io::stderr(),
+                "skip gcs/{}: requires direct multipart; the GCS shape has no multipart issuer",
+                case.name
+            )
+            .expect("write skip reason");
+            continue;
+        }
         match case.name.as_str() {
             "append" => run_append(&harness, case).await,
             "children_by_inode" => run_children_by_inode(&harness, case).await,
@@ -44,6 +65,7 @@ async fn rust_client_matches_the_reference_corpus() {
             "error_contract" => run_error_contract(&harness, case).await,
             "commit_replay" => run_commit_replay(&harness, case).await,
             "upload_direct_put" => run_direct_put(&harness, case).await,
+            "upload_modes" => run_upload_modes(&harness, case).await,
             "upload_multipart" => run_multipart(&harness, case).await,
             "upload_abort" => run_abort(&harness, case).await,
             "download" => run_download(&harness, case).await,
@@ -59,6 +81,7 @@ async fn rust_client_matches_the_reference_corpus() {
 }
 
 struct Harness {
+    shape: StoreShape,
     client: Client,
     unauthenticated_client: Client,
     raw_client: reqwest::Client,
@@ -67,19 +90,25 @@ struct Harness {
 }
 
 impl Harness {
-    async fn start() -> Self {
-        let server = start_server().await.expect("start conformance server");
+    async fn start(shape: StoreShape) -> Self {
+        let server = start_server(shape).await.expect("start conformance server");
         let server_url = server.base_url.clone();
         let client = configured_client(&server_url, Some(AUTH_TOKEN));
         let unauthenticated_client = configured_client(&server_url, None);
 
         Self {
+            shape,
             client,
             unauthenticated_client,
             raw_client: reqwest::Client::new(),
             server_url,
             _server: server,
         }
+    }
+
+    fn assert_checksum_algorithm(&self, actual: ChecksumAlgorithm, fixture: ChecksumAlgorithm) {
+        assert_eq!(fixture, StoreShape::S3.checksum_algorithm());
+        assert_eq!(actual, self.shape.checksum_algorithm());
     }
 }
 
@@ -141,6 +170,95 @@ fn put_options(id: &str) -> PutFileOptions {
     PutFileOptions {
         commit: commit_options(id),
         ..Default::default()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UploadModesRequest {
+    namespace_id: NamespaceId,
+    actor_id: ActorId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UploadModesExpected {
+    checksum_algorithm: ChecksumAlgorithm,
+    s3: Vec<UploadMode>,
+    gcs: Vec<UploadMode>,
+    unsupported: ErrorStatusExpected,
+}
+
+async fn run_upload_modes(harness: &Harness, case: &Case) {
+    let (request, expected) = parse_values::<UploadModesRequest, UploadModesExpected>(case);
+    let expected_modes = match harness.shape {
+        StoreShape::S3 => &expected.s3,
+        StoreShape::Gcs => &expected.gcs,
+    };
+    let capabilities = harness
+        .client
+        .get_capabilities()
+        .await
+        .expect("capabilities");
+    let mut advertised_modes = vec![UploadMode::ServiceProxied];
+    for (feature, mode) in [
+        (FEATURE_UPLOADS_DIRECT_PUT, UploadMode::DirectPut),
+        (
+            FEATURE_UPLOADS_DIRECT_MULTIPART,
+            UploadMode::DirectMultipart,
+        ),
+    ] {
+        if capabilities.supports(feature) {
+            advertised_modes.push(mode);
+        }
+    }
+    assert_eq!(&advertised_modes, expected_modes);
+    harness
+        .client
+        .create_namespace(&request.namespace_id, &request.actor_id)
+        .await
+        .expect("create upload modes namespace");
+    for body in [
+        CreateUploadBody::ServiceProxied {},
+        CreateUploadBody::DirectPut { size_bytes: None },
+        CreateUploadBody::DirectMultipart {
+            part_size_bytes: None,
+        },
+    ] {
+        let begin = harness
+            .client
+            .create_upload(&request.namespace_id, &body)
+            .await;
+        if !expected_modes.contains(&body.mode()) {
+            assert_api_error(
+                &begin.expect_err("unsupported upload mode"),
+                &expected.unsupported,
+            );
+            continue;
+        }
+        let begin = begin.expect("begin supported upload mode");
+        assert_eq!(begin.mode, body.mode());
+        match begin.status {
+            UploadSessionStatus::Open {
+                checksum_algorithm,
+                access,
+                part_size_bytes,
+                ..
+            } => {
+                harness.assert_checksum_algorithm(checksum_algorithm, expected.checksum_algorithm);
+                assert_eq!(access.is_some(), begin.mode == UploadMode::DirectPut);
+                assert_eq!(
+                    part_size_bytes.is_some(),
+                    begin.mode == UploadMode::DirectMultipart
+                );
+            }
+            other => panic!("expected open upload, found {other:?}"),
+        }
+        harness
+            .client
+            .abort_upload(&request.namespace_id, &begin.upload_id)
+            .await
+            .expect("abort mode check upload");
     }
 }
 
@@ -316,7 +434,7 @@ struct DirectPutExpected {
     begin_status: String,
     mode: String,
     size_bytes: u64,
-    checksum_algorithm: String,
+    checksum_algorithm: ChecksumAlgorithm,
     committed_seq: u64,
 }
 
@@ -348,7 +466,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         } => (checksum_algorithm, access),
         other => panic!("expected direct_put, found {other:?}"),
     };
-    assert_eq!(checksum_algorithm.as_str(), expected.checksum_algorithm);
+    harness.assert_checksum_algorithm(checksum_algorithm, expected.checksum_algorithm);
 
     harness
         .client
@@ -375,10 +493,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .clone();
     let content_token = completed.content_token().cloned();
     assert_eq!(content_ref.size_bytes, expected.size_bytes);
-    assert_eq!(
-        content_ref.checksum.algorithm.as_str(),
-        expected.checksum_algorithm
-    );
+    harness.assert_checksum_algorithm(content_ref.checksum.algorithm, expected.checksum_algorithm);
     assert!(content_ref.checksum.matches(payload));
 
     let spec = namespace_path(&request.namespace_id, &request.path);
@@ -434,7 +549,7 @@ struct MultipartExpected {
     mode: String,
     part_count: usize,
     size_bytes: u64,
-    checksum_algorithm: String,
+    checksum_algorithm: ChecksumAlgorithm,
     committed_seq: u64,
 }
 
@@ -476,7 +591,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         other => panic!("expected direct_multipart, found {other:?}"),
     };
     assert_eq!(part_size_bytes, request.part_size_bytes);
-    assert_eq!(checksum_algorithm.as_str(), expected.checksum_algorithm);
+    harness.assert_checksum_algorithm(checksum_algorithm, expected.checksum_algorithm);
 
     let chunks = payload
         .chunks(usize::try_from(request.part_size_bytes).expect("part size fits usize"))
@@ -659,7 +774,7 @@ struct DownloadRequest {
 #[serde(deny_unknown_fields)]
 struct DownloadExpected {
     size_bytes: u64,
-    checksum_algorithm: String,
+    checksum_algorithm: ChecksumAlgorithm,
     committed_seq: u64,
 }
 
@@ -695,9 +810,9 @@ async fn run_download(harness: &Harness, case: &Case) {
         .expect("begin direct download");
     assert_eq!(stat.content_ref(), Some(&grant.content_ref));
     assert_eq!(grant.content_ref.size_bytes, expected.size_bytes);
-    assert_eq!(
-        grant.content_ref.checksum.algorithm.as_str(),
-        expected.checksum_algorithm
+    harness.assert_checksum_algorithm(
+        grant.content_ref.checksum.algorithm,
+        expected.checksum_algorithm,
     );
 
     let bytes = stream_grant(&harness.client, &grant).await;

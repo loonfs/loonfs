@@ -1,0 +1,17 @@
+{
+  "name": "upload_modes",
+  "intent": "Checks each shape's advertised upload modes, the checksum algorithm in every supported begin response, and rejection of unsupported modes.",
+  "request": {
+    "namespace_id": "conf-upload-modes",
+    "actor_id": "conformance"
+  },
+  "expected": {
+    "checksum_algorithm": "crc64nvme",
+    "s3": ["service_proxied", "direct_put", "direct_multipart"],
+    "gcs": ["service_proxied", "direct_put"],
+    "unsupported": {
+      "status": 501,
+      "code": "not_supported"
+    }
+  }
+}

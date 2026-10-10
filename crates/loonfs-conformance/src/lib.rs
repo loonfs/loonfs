@@ -40,6 +40,7 @@ const EXPECTED_CASES: &[&str] = &[
     "snapshots",
     "upload_abort",
     "upload_direct_put",
+    "upload_modes",
     "upload_multipart",
 ];
 

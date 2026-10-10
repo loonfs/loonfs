@@ -84,6 +84,7 @@ EXPECTED_CASES = [
     "snapshots",
     "upload_abort",
     "upload_direct_put",
+    "upload_modes",
     "upload_multipart",
 ]
 pytestmark = pytest.mark.skipif(
