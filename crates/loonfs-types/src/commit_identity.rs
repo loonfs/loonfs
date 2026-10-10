@@ -11,14 +11,15 @@
 
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
-    AttributeValue, AttributesRevisionNo, ChangeSeq, ChecksumAlgorithm, CommitPrecondition,
-    ContentId, ContentRef, ContentRefKind, DeleteDirectoryBehavior, DestinationBehavior,
-    FilesystemOperation, InodeId, NamespaceId, RevisionNo, SubjectId,
+    AttributeValue, AttributesRevisionNo, ChangeSeq, CommitPrecondition, ContentId, ContentRef,
+    ContentRefKind, DeleteDirectoryBehavior, DestinationBehavior, FilesystemOperation, InodeId,
+    NamespaceId, RevisionNo, SubjectId,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 /// Domain separator included in every mutation fingerprint input.
@@ -51,14 +52,6 @@ pub enum SemanticFingerprintError {
     /// Canonical JSON encoding failed.
     #[error("failed to encode the commit fingerprint preimage: {0}")]
     Encode(#[from] serde_json::Error),
-    /// Inline identity requires a SHA-256 checksum.
-    #[error("inline content `{content_id}` requires `sha256`, found `{actual_algorithm}`")]
-    InlineChecksumAlgorithm {
-        /// Content whose reference cannot supply the digest.
-        content_id: ContentId,
-        /// Algorithm present on the reference.
-        actual_algorithm: ChecksumAlgorithm,
-    },
 }
 
 fn fingerprint_bytes(bytes: &[u8]) -> CommitFingerprint {
@@ -332,7 +325,7 @@ enum ContentRefFingerprintInput<'a> {
         size_bytes: u64,
     },
     InlineV1 {
-        sha256: Cow<'a, str>,
+        sha256: String,
         size_bytes: u64,
     },
 }
@@ -348,33 +341,48 @@ enum AppendedContentFingerprintInput {
 impl AppendedContentFingerprintInput {
     fn of(bytes: &[u8]) -> Self {
         Self::AppendV1 {
-            sha256: crate::Checksum::sha256(bytes).value,
+            sha256: crate::hex::hex_encode_bytes(&Sha256::digest(bytes)),
             size_bytes: bytes.len() as u64,
+        }
+    }
+}
+
+/// Request-byte identity retained after inline content is staged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineContentIdentity {
+    sha256: [u8; 32],
+    size_bytes: u64,
+}
+
+impl InlineContentIdentity {
+    /// Hashes request bytes independently of the store's checksum algorithm.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            sha256: Sha256::digest(bytes).into(),
+            size_bytes: bytes.len() as u64,
+        }
+    }
+
+    fn preimage(&self) -> ContentRefFingerprintInput<'static> {
+        ContentRefFingerprintInput::InlineV1 {
+            sha256: crate::hex::hex_encode_bytes(&self.sha256),
+            size_bytes: self.size_bytes,
         }
     }
 }
 
 fn content_ref_fingerprint_input<'a>(
     content_ref: &'a ContentRef,
-    inline_content_ids: &BTreeSet<ContentId>,
-) -> Result<ContentRefFingerprintInput<'a>, SemanticFingerprintError> {
-    if inline_content_ids.contains(&content_ref.content_id) {
-        if content_ref.checksum.algorithm != ChecksumAlgorithm::Sha256 {
-            return Err(SemanticFingerprintError::InlineChecksumAlgorithm {
-                content_id: content_ref.content_id.clone(),
-                actual_algorithm: content_ref.checksum.algorithm,
-            });
-        }
-        Ok(ContentRefFingerprintInput::InlineV1 {
-            sha256: Cow::Borrowed(&content_ref.checksum.value),
-            size_bytes: content_ref.size_bytes,
-        })
+    inline_content: &BTreeMap<ContentId, InlineContentIdentity>,
+) -> ContentRefFingerprintInput<'a> {
+    if let Some(identity) = inline_content.get(&content_ref.content_id) {
+        identity.preimage()
     } else {
         match content_ref.kind {
-            ContentRefKind::BlobV1 => Ok(ContentRefFingerprintInput::BlobV1 {
+            ContentRefKind::BlobV1 => ContentRefFingerprintInput::BlobV1 {
                 content_id: content_ref.content_id.as_str(),
                 size_bytes: content_ref.size_bytes,
-            }),
+            },
         }
     }
 }
@@ -382,12 +390,15 @@ fn content_ref_fingerprint_input<'a>(
 fn content_fingerprint_input<'a>(
     content_ref: Option<&'a ContentRef>,
     inline_content: Option<&[u8]>,
-    inline_content_ids: &BTreeSet<ContentId>,
+    inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> Result<ContentRefFingerprintInput<'a>, SemanticFingerprintError> {
     match (content_ref, inline_content) {
-        (Some(reference), None) => content_ref_fingerprint_input(reference, inline_content_ids),
+        (Some(reference), None) => Ok(content_ref_fingerprint_input(
+            reference,
+            inline_content_identities,
+        )),
         (None, Some(bytes)) => Ok(ContentRefFingerprintInput::InlineV1 {
-            sha256: Cow::Owned(crate::Checksum::sha256(bytes).value),
+            sha256: crate::hex::hex_encode_bytes(&Sha256::digest(bytes)),
             size_bytes: bytes.len() as u64,
         }),
         _ => Err(SemanticFingerprintError::InvalidContentSource),
@@ -399,7 +410,7 @@ fn content_fingerprint_input<'a>(
 /// evidence and excluded from identity in the reference form.
 fn operation_fingerprint_input<'a>(
     operation: &'a FilesystemOperation,
-    inline_content_ids: &BTreeSet<ContentId>,
+    inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> Result<OperationFingerprintInput<'a>, SemanticFingerprintError> {
     Ok(match operation {
         FilesystemOperation::CreateDirectory { path, parents } => {
@@ -421,7 +432,7 @@ fn operation_fingerprint_input<'a>(
             content_ref: content_fingerprint_input(
                 content_ref.as_ref(),
                 inline_content.as_deref(),
-                inline_content_ids,
+                inline_content_identities,
             )?,
             expected_inode_id: *expected_inode_id,
             expected_revision_no: *expected_revision_no,
@@ -444,7 +455,7 @@ fn operation_fingerprint_input<'a>(
             content_ref: content_fingerprint_input(
                 content_ref.as_ref(),
                 inline_content.as_deref(),
-                inline_content_ids,
+                inline_content_identities,
             )?,
         },
         FilesystemOperation::PutFileRevisionByInode {
@@ -457,7 +468,7 @@ fn operation_fingerprint_input<'a>(
             content_ref: content_fingerprint_input(
                 content_ref.as_ref(),
                 inline_content.as_deref(),
-                inline_content_ids,
+                inline_content_identities,
             )?,
             expected_revision_no: *expected_revision_no,
         },
@@ -663,8 +674,8 @@ fn grants_fingerprint_input(grants: &AccessGrants) -> BTreeMap<&str, Vec<&'stati
 /// A single-operation helper and a one-item batch produce the same input and
 /// therefore the same fingerprint.
 ///
-/// IDs in `inline_content_ids` use the SHA-256 checksum from their reference
-/// as content identity. Other references keep their object identity.
+/// Inline identities hash the original request bytes. Other references keep
+/// their object identity.
 pub fn semantic_commit_fingerprint(
     namespace_id: &NamespaceId,
     actor: &ActorId,
@@ -672,7 +683,7 @@ pub fn semantic_commit_fingerprint(
     message: Option<&str>,
     operations: &[FilesystemOperation],
     preconditions: &[CommitPrecondition],
-    inline_content_ids: &BTreeSet<ContentId>,
+    inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> Result<CommitFingerprint, SemanticFingerprintError> {
     Ok(fingerprint_bytes(&canonical_commit_bytes(
         namespace_id,
@@ -681,7 +692,7 @@ pub fn semantic_commit_fingerprint(
         message,
         operations,
         preconditions,
-        inline_content_ids,
+        inline_content_identities,
     )?))
 }
 
@@ -692,7 +703,7 @@ fn canonical_commit_bytes(
     message: Option<&str>,
     operations: &[FilesystemOperation],
     preconditions: &[CommitPrecondition],
-    inline_content_ids: &BTreeSet<ContentId>,
+    inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> Result<Vec<u8>, SemanticFingerprintError> {
     #[derive(Serialize)]
     struct CanonicalCommit<'a> {
@@ -712,7 +723,7 @@ fn canonical_commit_bytes(
         subject_id: subject_id.map(SubjectId::as_str),
         operations: operations
             .iter()
-            .map(|operation| operation_fingerprint_input(operation, inline_content_ids))
+            .map(|operation| operation_fingerprint_input(operation, inline_content_identities))
             .collect::<Result<_, _>>()?,
         message,
         preconditions: preconditions
@@ -755,6 +766,16 @@ mod tests {
         for vector in &mut vectors {
             let namespace = NamespaceId::parse("demo").expect("namespace");
             let operations = [vector.operation.clone()];
+            let identities = vector
+                .inline_content_ids
+                .iter()
+                .map(|content_id| {
+                    (
+                        content_id.clone(),
+                        InlineContentIdentity::from_bytes(b"pinned put bytes"),
+                    )
+                })
+                .collect();
             let bytes = canonical_commit_bytes(
                 &namespace,
                 &test_actor(),
@@ -762,7 +783,7 @@ mod tests {
                 None,
                 &operations,
                 &vector.preconditions,
-                &vector.inline_content_ids,
+                &identities,
             )
             .expect("canonical bytes");
             if update {
@@ -782,7 +803,7 @@ mod tests {
                 None,
                 &operations,
                 &vector.preconditions,
-                &vector.inline_content_ids,
+                &identities,
             )
             .expect("fingerprint");
             assert_eq!(
@@ -800,39 +821,49 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::panic,
-        reason = "unexpected results need precise test diagnostics"
-    )]
-    fn inline_identity_rejects_other_checksum_algorithms() {
+    fn inline_fingerprints_keep_the_request_byte_digest_for_both_store_algorithms() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
-        let content_id = ContentId::generate();
-        let mut content_ref =
-            ContentRef::blob_v1(namespace_id.clone(), content_id.clone(), b"bytes");
-        content_ref.checksum = Checksum::crc32c(b"bytes");
-        let operation = FilesystemOperation::PutFileRevisionByInode {
-            inode_id: InodeId(2),
-            content_ref: Some(content_ref),
-            inline_content: None,
-            expected_revision_no: RevisionNo(1),
+        let fingerprint = |operation, identities: &BTreeMap<ContentId, InlineContentIdentity>| {
+            semantic_commit_fingerprint(
+                &namespace_id,
+                &test_actor(),
+                None,
+                None,
+                &[operation],
+                &[],
+                identities,
+            )
+            .expect("fingerprint")
         };
-        match semantic_commit_fingerprint(
-            &namespace_id,
-            &test_actor(),
-            None,
-            None,
-            &[operation],
-            &[],
-            &BTreeSet::from([content_id.clone()]),
-        ) {
-            Err(SemanticFingerprintError::InlineChecksumAlgorithm {
-                content_id: actual_content_id,
-                actual_algorithm,
-            }) => {
-                assert_eq!(actual_content_id, content_id);
-                assert_eq!(actual_algorithm, ChecksumAlgorithm::Crc32c);
-            }
-            other => panic!("expected InlineChecksumAlgorithm, got {other:?}"),
+        let inline = FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/file").expect("path"),
+            content_ref: None,
+            inline_content: Some(b"hello".to_vec()),
+            behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        };
+        assert_eq!(
+            fingerprint(inline, &BTreeMap::new()).as_str(),
+            "v1:sha256:bb5384d4f60948393e7cf5cb321de1d659157a2d83807a3c4c6ce8b96ff2d9d9"
+        );
+        for algorithm in [
+            crate::ChecksumAlgorithm::Crc64nvme,
+            crate::ChecksumAlgorithm::Crc32c,
+        ] {
+            let content_id = ContentId::generate();
+            let reference = ContentRef::blob_v1(
+                namespace_id.clone(),
+                content_id.clone(),
+                b"hello",
+                algorithm,
+            );
+            let identities =
+                BTreeMap::from([(content_id, InlineContentIdentity::from_bytes(b"hello"))]);
+            assert_eq!(
+                fingerprint(put("/file", reference), &identities).as_str(),
+                "v1:sha256:bb5384d4f60948393e7cf5cb321de1d659157a2d83807a3c4c6ce8b96ff2d9d9"
+            );
         }
     }
 
@@ -856,7 +887,7 @@ mod tests {
             None,
             &[operation],
             &[],
-            &BTreeSet::new(),
+            &BTreeMap::new(),
         )
         .expect("fingerprint")
         .as_str()
@@ -903,7 +934,7 @@ mod tests {
                 None,
                 &[forward],
                 &[],
-                &BTreeSet::new()
+                &BTreeMap::new()
             )
             .expect("forward"),
             semantic_commit_fingerprint(
@@ -913,7 +944,7 @@ mod tests {
                 None,
                 &[reversed],
                 &[],
-                &BTreeSet::new()
+                &BTreeMap::new()
             )
             .expect("reversed")
         );
@@ -929,7 +960,7 @@ mod tests {
             None,
             &[update_attributes([], ["a", "b"], None, None)],
             &[],
-            &BTreeSet::new(),
+            &BTreeMap::new(),
         )
         .expect("baseline");
 
@@ -942,7 +973,7 @@ mod tests {
                     None,
                     &[update_attributes([], spelling, None, None)],
                     &[],
-                    &BTreeSet::new()
+                    &BTreeMap::new()
                 )
                 .expect("variant"),
                 baseline
@@ -965,7 +996,7 @@ mod tests {
                 None,
             )],
             &[],
-            &BTreeSet::new(),
+            &BTreeMap::new(),
         )
         .expect("baseline");
 
@@ -1001,7 +1032,7 @@ mod tests {
                     None,
                     &[variant],
                     &[],
-                    &BTreeSet::new()
+                    &BTreeMap::new()
                 )
                 .expect("variant fingerprint"),
                 "a changed {label} must change the fingerprint"
@@ -1154,7 +1185,7 @@ mod tests {
                 None,
                 &[operation(version)],
                 &[],
-                &BTreeSet::new(),
+                &BTreeMap::new(),
             )
             .expect("fingerprint")
         };
@@ -1177,7 +1208,7 @@ mod tests {
                 None,
                 std::slice::from_ref(&operation),
                 &[],
-                &BTreeSet::new(),
+                &BTreeMap::new(),
             )
             .expect("fingerprint")
         };
@@ -1198,7 +1229,7 @@ mod tests {
                 None,
                 std::slice::from_ref(&operation),
                 &[],
-                &BTreeSet::new(),
+                &BTreeMap::new(),
             )
             .expect("fingerprint")
         };
@@ -1212,6 +1243,7 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"put bytes",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         let operation = |expected_inode_id, expected_revision_no| FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/report.txt").expect("path"),
@@ -1293,6 +1325,7 @@ mod tests {
                 crate::NamespaceId::parse("demo").expect("namespace id"),
                 content_id.clone(),
                 bytes,
+                crate::ChecksumAlgorithm::Crc64nvme,
             ),
             ContentRef {
                 kind: ContentRefKind::BlobV1,
@@ -1300,13 +1333,6 @@ mod tests {
                 content_id: content_id.clone(),
                 size_bytes: bytes.len() as u64,
                 checksum: Checksum::crc32c(bytes),
-            },
-            ContentRef {
-                kind: ContentRefKind::BlobV1,
-                owner_namespace_id: crate::NamespaceId::parse("demo").expect("namespace id"),
-                content_id: content_id.clone(),
-                size_bytes: bytes.len() as u64,
-                checksum: Checksum::crc64nvme(bytes),
             },
         ] {
             assert_eq!(
@@ -1317,7 +1343,7 @@ mod tests {
                     None,
                     &[put("/docs/report.txt", content_ref)],
                     &[],
-                    &BTreeSet::new()
+                    &BTreeMap::new()
                 )
                 .expect("retry fingerprint")
                 .as_str(),
@@ -1352,11 +1378,13 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         let second = ContentRef::blob_v1(
             crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
 
         assert_ne!(
@@ -1367,7 +1395,7 @@ mod tests {
                 None,
                 &[put("/docs/report.txt", first)],
                 &[],
-                &BTreeSet::new()
+                &BTreeMap::new()
             )
             .expect("fingerprint"),
             semantic_commit_fingerprint(
@@ -1377,7 +1405,7 @@ mod tests {
                 None,
                 &[put("/docs/report.txt", second)],
                 &[],
-                &BTreeSet::new()
+                &BTreeMap::new()
             )
             .expect("fingerprint")
         );
@@ -1396,7 +1424,7 @@ mod tests {
             None,
             &[create_dir("/docs")],
             &[],
-            &BTreeSet::new(),
+            &BTreeMap::new(),
         )
         .expect("fingerprint");
         let with = semantic_commit_fingerprint(
@@ -1406,7 +1434,7 @@ mod tests {
             Some("import batch"),
             &[create_dir("/docs")],
             &[],
-            &BTreeSet::new(),
+            &BTreeMap::new(),
         )
         .expect("fingerprint");
 
@@ -1425,7 +1453,7 @@ mod tests {
                 None,
                 &[create_dir("/a"), create_dir("/b")],
                 &[],
-                &BTreeSet::new()
+                &BTreeMap::new()
             )
             .expect("forward fingerprint"),
             semantic_commit_fingerprint(
@@ -1435,7 +1463,7 @@ mod tests {
                 None,
                 &[create_dir("/b"), create_dir("/a")],
                 &[],
-                &BTreeSet::new()
+                &BTreeMap::new()
             )
             .expect("reversed fingerprint")
         );
@@ -1449,6 +1477,7 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         let options = PutFileOptions {
             behavior: DestinationBehavior::Replace,
@@ -1470,7 +1499,7 @@ mod tests {
                         expected_revision_no: options.expected_revision_no,
                     }],
                     &[],
-                    &BTreeSet::new(),
+                    &BTreeMap::new(),
                 )
                 .expect("retry fingerprint")
             };

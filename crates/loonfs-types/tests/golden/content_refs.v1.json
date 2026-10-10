@@ -5,8 +5,8 @@
     "content_id": "con_0123456789abcdef0123456789abcdef",
     "size_bytes": 12,
     "checksum": {
-      "algorithm": "sha256",
-      "value": "d249b8beb7a58794c75abe3498bcc32d56040fafa42d79d570c13d1628ecc051"
+      "algorithm": "crc64nvme",
+      "value": "0329056b1c0b59a8"
     }
   },
   {

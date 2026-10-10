@@ -51,7 +51,12 @@ async fn setup() -> (
 }
 
 fn inline(namespace_id: &NamespaceId, bytes: Bytes) -> InlineContent {
-    InlineContent::new(namespace_id.clone(), ContentId::generate(), bytes)
+    InlineContent::new(
+        namespace_id.clone(),
+        ContentId::generate(),
+        bytes,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
+    )
 }
 
 fn put(path: &str, content_ref: &ContentRef) -> FilesystemOperation {
@@ -149,9 +154,12 @@ async fn commit_piece(
         let view = load_current_metadata_view(store, namespace_id)
             .await
             .expect("base view");
-        let mut state = loonfs_types::Sha256State::new();
-        state.update(&whole[..offset]);
-        let base = ContentRef::blob_v1_streamed(namespace_id.clone(), content_id.clone(), &state);
+        let base = ContentRef::blob_v1(
+            namespace_id.clone(),
+            content_id.clone(),
+            &whole[..offset],
+            store.checksum_algorithm(),
+        );
         Some(
             crate::storage::tail_content::materialize_content_layout(
                 store,
@@ -166,10 +174,12 @@ async fn commit_piece(
     } else {
         layout
     };
-    let mut hash_state = loonfs_types::Sha256State::new();
-    hash_state.update(whole);
-    let content_ref =
-        ContentRef::blob_v1_streamed(namespace_id.clone(), content_id.clone(), &hash_state);
+    let content_ref = ContentRef::blob_v1(
+        namespace_id.clone(),
+        content_id.clone(),
+        whole,
+        store.checksum_algorithm(),
+    );
     crate::test_support::ops::append_wal_commit(
         store,
         namespace_id,
@@ -178,8 +188,6 @@ async fn commit_piece(
             inode_id: file.0,
             revision_no: file.1,
             content_ref: content_ref.clone(),
-            hash_state: Some(hash_state),
-            crc64nvme: Some(loonfs_types::Checksum::crc64nvme(whole)),
             layout,
         }],
         vec![WalInlineContent {
@@ -261,10 +269,8 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
         assert!(record.deltas.iter().any(|delta| {
             matches!(
                 &delta.delta,
-                WalDelta::AppendFileRevision { content_ref, hash_state, crc64nvme, .. }
+                WalDelta::AppendFileRevision { content_ref, .. }
                     if content_ref == expected_reference
-                        && hash_state.as_ref() == Some(value.hash_state())
-                        && crc64nvme.as_ref() == Some(value.crc64nvme())
             )
         }));
     }
@@ -337,6 +343,7 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         engine.namespace_id.clone(),
         staged.content_ref().content_id.clone(),
         Bytes::from_static(b"hello"),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let inline_candidate = candidate("forms", vec![inline]);
     let staged_candidate = CommitCandidate::prepared(inline_candidate.request.clone(), vec![proof]);
@@ -392,6 +399,7 @@ async fn invalid_inline_candidates_write_nothing() {
         engine.namespace_id.clone(),
         staged.content_ref().content_id.clone(),
         Bytes::from_static(b"inline bytes"),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let mut mismatched = candidate("mismatched", vec![different]);
     mismatched

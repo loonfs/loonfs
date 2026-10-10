@@ -664,7 +664,7 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
 
     let payload_len = 3 * loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES as usize;
     let payload: Vec<u8> = (0..payload_len).map(|index| (index % 251) as u8).collect();
-    let expected = Checksum::sha256(&payload);
+    let expected = Checksum::crc64nvme(&payload);
 
     let size_bytes = store
         .put_streamed(
@@ -683,7 +683,7 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
         .expect("streamed object exists");
     assert_eq!(read_back.len(), payload_len);
     assert_eq!(
-        Checksum::sha256(&read_back),
+        Checksum::crc64nvme(&read_back),
         expected,
         "the assembled object must hash to what was streamed into it"
     );

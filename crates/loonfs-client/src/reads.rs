@@ -786,8 +786,7 @@ mod tests {
                     "content_ref": ContentRef::blob_v1(
                         namespace_id.clone(),
                         ContentId::generate(),
-                        b"hello",
-                    ),
+                        b"hello", loonfs_types::ChecksumAlgorithm::Crc64nvme),
                     "revision_committed_by": "render-worker",
                     "revision_committed_at_ms": 1_752_624_000_000_u64,
                     "head_seq": 418,
@@ -872,7 +871,12 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let content_id =
             ContentId::parse("con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41").expect("content id");
-        let content_ref = ContentRef::blob_v1(namespace_id.clone(), content_id, b"hello");
+        let content_ref = ContentRef::blob_v1(
+            namespace_id.clone(),
+            content_id,
+            b"hello",
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+        );
         let feed = serde_json::json!({
             "namespace_id": "demo",
             "after_seq": 418,

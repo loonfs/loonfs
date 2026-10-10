@@ -317,7 +317,7 @@ Readers determine committed state from verified manifests and numbered WAL objec
 
 An immutable object must not be replaced with different bytes. A collision at a newly generated content or segment key is an error; contention at the next manifest or WAL number follows its publication protocol. Where an operation retries the same object identity, it may reconcile an ambiguous write only using evidence that establishes the expected immutable contents. A mutable record created under a generated id (a pin or an upload session) is identified by the id alone: after a put with an unknown outcome, a record under that id is the creator's own, whatever its bytes now hold, because another caller can change the record as soon as it lands.
 
-An immutable object's identity is the full-object checksum its provider stores, including the algorithm. Each store declares one algorithm: S3, R2, S3-compatible endpoints, local storage, and in-memory test storage use CRC-64/NVME; GCS uses CRC-32C. A writer computes that checksum over its bytes and sends it for the provider to verify. An assembler combines verified source checksums. A provider may store a checksum it computes or a value the adapter combines from requests the provider verified. A provider that can do neither is unsupported. Writers and readers do not use writer SHA-256 metadata. Content references retain their own checksum algorithms.
+An immutable object's identity is the full-object checksum its provider stores, including the algorithm. Each store declares one algorithm: S3, R2, S3-compatible endpoints, local storage, and the reference in-memory store use CRC-64/NVME; GCS uses CRC-32C. A writer computes that checksum over its bytes and sends it for the provider to verify. An assembler combines verified source checksums. A provider may store a checksum it computes or a value the adapter combines from requests the provider verified. A provider that can do neither is unsupported. Writers and readers do not use writer SHA-256 metadata. Every content reference uses the store's algorithm, including inline writes, uploads, copies, restores, and appends.
 
 An immutable write creates its key with put-if-absent at every size. A large write sends parts and completes conditionally, so it can take longer than one publication request (C.1). An occupied key is checked with one HEAD. An equal stored checksum succeeds; a different or missing checksum fails. No bytes are read back. A retry whose earlier attempt landed succeeds by the same check.
 
@@ -482,7 +482,7 @@ A retry against already staged content compares the incoming content with the st
 
 Completion clears service-proxied staging to `idle` in the same CAS that records the terminal completed reference. Abort also clears staging to `idle`. A terminal record must not retain a second staged content description, even if the two references would agree.
 
-Service-proxied staging calculates SHA-256 and CRC-64/NVME while streaming the bytes, and records both with the SHA-256 state after the last byte (A.4). When the body ends, the request reads the session record again and lets the object store finish the write only if the session is still open and this request still owns staging. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
+Service-proxied staging computes the store's checksum while streaming and records it in the content reference (A.4). When the body ends, the request reads the session record again and lets the object store finish the write only if the session is still open and this request still owns staging. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
 
 ### 5.4 Direct uploads
 
@@ -616,7 +616,7 @@ File revision history and commit idempotency have different retention rules. Kee
 
 Standard requests operate on paths or inode IDs. They create directories, write files, append to files, move or copy items, delete and undelete items, restore file revisions, and update attributes. Their exact parameters are listed in Appendix B because those parameters also determine retry identity.
 
-An append adds bytes as the file's next revision. Its commit carries pieces. The base revision supplies `hash_state` and `crc64nvme`. A SHA-256 state continues a SHA-256 reference. Otherwise CRC-64/NVME continues the CRC. Neither digest is recomputed. A base with neither digest returns `not_supported` before any write.
+An append adds bytes as the file's next revision. Its commit carries pieces. The writer combines the base reference's checksum with the appended bytes' checksum in the store's algorithm. It does not read earlier bytes to compute the checksum. A base in another algorithm is `namespace_corrupt` before any write.
 
 The piece keeps the same content ID only when the namespace owns it, the base size is positive, and the base names the chain's head. The visible tail and longest layout determine that size. A copy or restore of an older prefix cannot shorten the chain head. A same-chain append carries no layout and writes no content object. Otherwise the piece uses a fresh ID. That delta carries the base chain's layout cut to the first piece's offset in the commit. The cut shortens the last extent and drops later extents. Before admitting a fresh chain from unfolded bytes, validation writes the base chain's pending pieces as its next extent through the same materialization as a fold. A fresh chain shares those extents and carries only the appended bytes as pieces. Missing base bytes are corruption naming the base. An append to an empty file starts a fresh chain with a piece at offset 0 and no layout. Earlier operations in the commit count when planning later appends.
 
@@ -1137,9 +1137,9 @@ JSON envelopes retain the payload as an inline raw JSON fragment. A WAL envelope
 
 Decoders identify the kind and supported version before interpreting the payload. They verify the exact payload checksum before decoding its fields. Unknown kinds, unsupported versions, malformed payloads, and checksum failures are errors; none is a reason to substitute another object.
 
-Envelope, manifest-reference, and whole-object digests are encoded as `sha256:<64 lowercase hex>`. A content or part checksum uses `{ "algorithm": ..., "value": ... }` because its algorithm is selected for the transfer. A block handle has a numeric `crc32c` field because that algorithm is fixed by its block format. Commit fingerprints additionally name their canonicalization scheme.
+Envelope and manifest-reference digests are encoded as `sha256:<64 lowercase hex>`. A content, object, or part checksum uses `{ "algorithm": ..., "value": ... }` because its algorithm is selected by the store. A block handle has a numeric `crc32c` field because that algorithm is fixed by its block format. Commit fingerprints additionally name their canonicalization scheme.
 
-Per-block CRC32C verifies ranged block reads against their handles. It is not the same operation as verifying a full-object SHA-256 digest, and neither an unauthenticated checksum nor an object name is an authorization mechanism.
+Per-block CRC32C verifies ranged block reads against their handles. Envelope digests verify complete payloads. Neither an unauthenticated checksum nor an object name is an authorization mechanism.
 
 ### 12.3 Strict decoding and evolution
 
@@ -1231,7 +1231,7 @@ A `blob_v1` reference contains all of the following fields:
 | `size_bytes` | Length of the file: the prefix of the content object the reference names. |
 | `checksum` | Algorithm and digest of those bytes. |
 
-For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single LF at the end, have this reference shape. The ID is illustrative, while the size and SHA-256 are calculated from those bytes:
+For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single LF at the end, have this reference shape. The ID is illustrative, while the size and CRC-64/NVME are calculated from those bytes:
 
 ```json
 {
@@ -1240,8 +1240,8 @@ For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single
   "content_id": "con_0123456789abcdef0123456789abcdef",
   "size_bytes": 15,
   "checksum": {
-    "algorithm": "sha256",
-    "value": "15ac23a641835390d4e417dbc382692c81fa08c237ffb61ca8ba24c042522a13"
+    "algorithm": "crc64nvme",
+    "value": "c569275606d1d1a0"
   }
 }
 ```
@@ -1252,13 +1252,10 @@ A checksum is `{ "algorithm": <name>, "value": <lowercase hex> }`:
 
 | Algorithm | Value width |
 | --- | --- |
-| `sha256` | 64 hexadecimal characters |
 | `crc64nvme` | 16 hexadecimal characters |
 | `crc32c` | 8 hexadecimal characters |
 
 Coverage is defined by the containing field. A content reference covers the prefix it names. An upload-content claim covers the complete object. A multipart part checksum covers one part. An algorithm selector without a value is not itself a checksum. Provider encodings are converted to this representation before constructing the stored value.
-
-A SHA-256 state, stored under `hash_state`, is the state of the digest after some bytes: `{words, tail, length}`, where `words` are the eight 32-bit state words, `tail` is the byte string of the bytes after the last whole 64-byte block, and `length` is the number of bytes. The tail holds exactly `length` modulo 64 bytes. Continuing the digest from a state over later bytes gives the digest of all the bytes, so a writer that records the state never reads the earlier bytes again. A CRC-64/NVME, stored under `crc64nvme`, is a `crc64nvme` checksum; CRCs combine, so the CRC of bytes followed by more bytes follows from the two CRCs and the second length.
 
 ### A.4 Control and manifest payloads
 
@@ -1275,9 +1272,7 @@ The following tables list the durable payload fields. Their transition rules are
 
 Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
-Pin owners have the fields in section 8.1. There is no status field on a pin. Upload status is `open` with `expires_at_ms`, `completed` with `completed_at_ms`, `content_ref`, `hash_state?`, and `crc64nvme?`, or `aborted` with `aborted_at_ms`. The mode remains present in every status. A service-proxied mode contains `staging`; direct PUT contains `checksum_algorithm`; direct multipart contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`. Staging is `idle`, `claimed`, or `staged` with `content_ref`, `hash_state`, and `crc64nvme`. All these variants use `kind` tags.
-
-`hash_state` and `crc64nvme` (A.3) describe the bytes of `content_ref`. LoonFS computes them while it writes the bytes, so a service-proxied session and a session the runtime stages for its own writes record both, and a direct upload records neither. A completion copies them from the staged state, and a publication carries them into the revision delta.
+Pin owners have the fields in section 8.1. There is no status field on a pin. Upload status is `open` with `expires_at_ms`, `completed` with `completed_at_ms`, `content_ref`, or `aborted` with `aborted_at_ms`. The mode remains present in every status. A service-proxied mode contains `staging`; direct PUT contains `checksum_algorithm`; direct multipart contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`. Staging is `idle`, `claimed`, or `staged` with `content_ref`. All these variants use `kind` tags.
 
 A namespace manifest contains:
 
@@ -1334,15 +1329,13 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 | `create_inode` | `delta_index`, `inode_id`, `inode_kind` |
 | `bind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms` |
 | `unbind_direntry` | `delta_index`, `parent_inode_id`, `name_key`, `display_name`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `target` |
-| `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref`, `hash_state?`, `crc64nvme?`, `layout?` |
+| `append_file_revision` | `delta_index`, `inode_id`, `revision_no`, `content_ref`, `layout?` |
 | `tombstone_subtree` | `delta_index`, `root_inode_id`, `deleted_binding` |
 | `revoke_subtree_tombstone` | `delta_index`, `root_inode_id`, `target` |
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
 | `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
 A delta's own commit sequence is implicit in its containing commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event the delta retires or revokes. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
-
-An `append_file_revision` delta's `hash_state` is the SHA-256 state after the reference's bytes (A.3). It is present exactly when the reference's checksum is a SHA-256 and the writer had the bytes. Its `crc64nvme` is the CRC-64/NVME of the reference's bytes, present when the writer had the bytes or when the reference's own checksum is that CRC. The writer derives both; replay copies them and never recomputes them. A decoder refuses a `hash_state` on a reference whose checksum is not a SHA-256, or whose length or digest differs from the reference, and a `crc64nvme` that is not a CRC-64/NVME or that differs from a reference checksum of that algorithm.
 
 A revision delta may omit `layout` only when the commit carries a piece at offset 0 for its content ID, or carries a piece for a chain that already has a revision in the planning view. The same-chain case is safe because the base remains the inode's head until the append folds, so retention keeps a revision that names the chain and layout compaction cannot prune its row. A piece at offset 0 forbids a layout. A present layout validates against its own `size_bytes()`. Its extents may name other owners and content IDs. Its size equals the lowest offset of the commit's pieces for that content ID, or the reference's `size_bytes` if the commit carries no piece for it. A failed check is `InvalidWalRevisionLayout`. Upload evidence supplies one whole extent. Copies, restores, and fresh chains carry the required prefix from the planning view. Validation writes any pending pieces needed by that prefix through the fold's content materialization before admitting the reference. The returned layout names those objects even if compaction later removes the source chain's row.
 
@@ -1368,7 +1361,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | --- | --- |
 | `inode` | `inode_id`, `inode_kind`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms` |
 | `direntry_binding` | `parent_inode_id`, `name_key`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `committed_seq`, `delta_index`, `state` |
-| `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms`, `delta_index`, `content_ref`, `hash_state?`, `crc64nvme?` |
+| `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms`, `delta_index`, `content_ref` |
 | `tombstone` | `root_inode_id`, `committed_seq`, `delta_index`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
 | `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_seq` |
@@ -1423,7 +1416,7 @@ Bloom filters use the following keys, which are not always full row keys:
 | `attributes` | `attribute-{inode_id:020}` |
 | `access` | `access-{inode_id:020}` |
 
-A revision row copies `hash_state` and `crc64nvme` from its delta. A layout row records the chain's objects as of the commit or fold that wrote its bytes. The first row under a content id's prefix is the longest layout, and among equal lengths the newest. Shorter rows are superseded. Compaction keeps the first row per ID in its inputs, subject to the pruning rule in section 10.3. A layout row's `size_bytes` is the layout's size, which can differ from the reference's size.
+A layout row records the chain's objects as of the commit or fold that wrote its bytes. The first row under a content id's prefix is the longest layout, and among equal lengths the newest. Shorter rows are superseded. Compaction keeps the first row per ID in its inputs, subject to the pruning rule in section 10.3. A layout row's `size_bytes` is the layout's size, which can differ from the reference's size.
 
 A `layout` contains `extents` in chain order. Each extent contains `owner_namespace_id`, `content_id`, `object`, `offset`, and `length`. The object is `{"kind":"whole"}` or `{"kind":"span","start":...,"end":...}`. Lengths sum to `size_bytes`. Each length is positive. Zero bytes require exactly one whole extent of length zero. Each owner namespace and content ID must be valid. Span bounds satisfy `start < end`. The extent's object range fits within `end - start`. A shared prefix can shorten the extent without changing the span key. Readers honor nonzero object offsets.
 
@@ -1600,7 +1593,7 @@ A content reference is represented by exactly these fields, in this order:
 {"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":15}
 ```
 
-The owner namespace and checksum are excluded from the preimage. The delta's `hash_state`, `crc64nvme`, and `layout` are also excluded. They record verification evidence and physical placement, not request identity. Every reference a commit can admit is owned by the committing namespace. The owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
+The owner namespace and checksum are excluded from the preimage. The delta's `layout` is also excluded. It records physical placement, not request identity. Every reference a commit can admit is owned by the committing namespace. The owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
 
 Two uploads of identical bytes have different IDs and different fingerprints. A retry reuses the original reference rather than repeating the upload and substituting a new one.
 
@@ -1610,7 +1603,7 @@ Content that a commit carries inline has no object to name, so it is identified 
 {"kind":"inline_v1","sha256":"<64 lowercase hex>","size_bytes":15}
 ```
 
-`sha256` is the lowercase hexadecimal SHA-256 of the complete content, and the fields appear in the order shown. A reference that accompanies inline content carries a SHA-256 checksum, which the writer computes from the bytes. The content ID and owner are excluded. The form follows how the request supplied the content, not where the bytes are stored: content supplied inline keeps this form if the writer stages it instead, and staged or uploaded content always keeps the reference form. The same bytes sent once inline and once as an uploaded object produce different fingerprints.
+`sha256` is the lowercase hexadecimal SHA-256 of the complete content, and the fields appear in the order shown. The fingerprint hashes the request bytes independently of the content reference's checksum. The content ID and owner are excluded. The form follows how the request supplied the content, not where the bytes are stored: content supplied inline keeps this form if the writer stages it instead, and staged or uploaded content always keeps the reference form. The same bytes sent once inline and once as an uploaded object produce different fingerprints.
 
 The bytes an append adds have no reference until the writer plans the commit, so the `inline_content` member of `append_file` and `append_file_by_inode` uses a third form:
 

@@ -212,6 +212,7 @@ impl Namespace<Writable> {
             return Ok(PreparedContent::inline(
                 self.namespace_id.clone(),
                 bytes::Bytes::copy_from_slice(bytes),
+                self.core.store().checksum_algorithm(),
             ));
         }
         let catalog = self
@@ -258,6 +259,7 @@ impl Namespace<Writable> {
                     return Ok(PreparedContent::inline(
                         self.namespace_id.clone(),
                         buffered.freeze(),
+                        self.core.store().checksum_algorithm(),
                     ));
                 };
                 let mut chunk = chunk.map_err(|error| crate::CoreError::Store {

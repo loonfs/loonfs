@@ -156,6 +156,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         namespace_id.clone(),
         ContentId::generate(),
         bytes::Bytes::from_static(b"unfolded content"),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let candidate = CommitCandidate::with_inline_content(
         CommitRequest::single(

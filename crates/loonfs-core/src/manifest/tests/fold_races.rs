@@ -128,6 +128,7 @@ impl Writer {
                 self.namespace_id.clone(),
                 ContentId::generate(),
                 Bytes::copy_from_slice(path.as_bytes()),
+                loonfs_types::ChecksumAlgorithm::Crc64nvme,
             );
             operations.push(FilesystemOperation::PutFile {
                 path: AbsolutePath::parse(*path).expect("path"),

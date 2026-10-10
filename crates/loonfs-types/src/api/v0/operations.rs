@@ -1843,6 +1843,7 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             crate::ContentId::generate(),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         let revision = FileRevision {
             inode_id: InodeId(2),
@@ -1880,6 +1881,7 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id"),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         )
     }
 
@@ -2151,8 +2153,8 @@ mod tests {
                 "content_id": "con_0123456789abcdef0123456789abcdef",
                 "size_bytes": 1,
                 "checksum": {
-                    "algorithm": "sha256",
-                    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    "algorithm": "crc64nvme",
+                    "value": "aaaaaaaaaaaaaaaa"
                 }
             }
         }))
@@ -2245,6 +2247,7 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         let cases = [
             (
@@ -2370,7 +2373,7 @@ mod tests {
             serde_json::json!({
                 "kind": "put_file",
                 "path": "relative",
-                "content_ref": ContentRef::blob_v1(crate::NamespaceId::parse("demo").expect("namespace id"), ContentId::generate(), b"hello")
+                "content_ref": ContentRef::blob_v1(crate::NamespaceId::parse("demo").expect("namespace id"), ContentId::generate(), b"hello", crate::ChecksumAlgorithm::Crc64nvme)
             }),
             serde_json::json!({"kind": "delete_path", "path": "relative"}),
             serde_json::json!({

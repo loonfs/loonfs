@@ -18,6 +18,7 @@ use loonfs_types::{
     ActorId, NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, Subject,
     SubjectId,
 };
+use sha2::Digest as _;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -293,11 +294,11 @@ impl ResolvedTarget {
             no_retry,
         )
         .await?;
-        target.journal_identity = loonfs_types::Checksum::sha256(
-            &serde_json::to_vec(store_config)
-                .map_err(|error| CliError::invalid_config(error.to_string()))?,
-        )
-        .value;
+        target.journal_identity =
+            loonfs_types::format::hex::hex_encode_bytes(&sha2::Sha256::digest(
+                &serde_json::to_vec(store_config)
+                    .map_err(|error| CliError::invalid_config(error.to_string()))?,
+            ));
         Ok(target)
     }
 

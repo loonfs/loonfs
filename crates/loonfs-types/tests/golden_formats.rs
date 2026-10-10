@@ -39,7 +39,7 @@ use loonfs_types::{
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
     CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
     MetadataSegmentId, NameKey, NamespaceId, NamespaceNaming, PinId, PrincipalId, PrincipalScope,
-    RevisionNo, RunNo, Sha256State, UploadId, WalNo, WriterEpoch,
+    RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -130,18 +130,10 @@ fn sample_content_ref() -> ContentRef {
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         content_id("con_0123456789abcdef0123456789abcdef"),
         b"golden bytes",
+        crate::ChecksumAlgorithm::Crc64nvme,
     )
 }
 
-/// The SHA-256 state a writer records after `golden bytes`.
-fn sample_hash_state() -> Sha256State {
-    let mut state = Sha256State::new();
-    state.update(b"golden bytes");
-    state
-}
-
-/// A reference whose only evidence is a provider-computed full-object CRC,
-/// as a direct upload records.
 fn sample_crc_content_ref() -> ContentRef {
     ContentRef {
         kind: ContentRefKind::BlobV1,
@@ -286,8 +278,6 @@ fn sample_wal_payload() -> WalObjectPayload {
                 inode_id: InodeId(5),
                 revision_no: RevisionNo(2),
                 content_ref: sample_content_ref(),
-                hash_state: None,
-                crc64nvme: None,
                 layout: Some(loonfs_types::ContentLayout {
                     extents: vec![loonfs_types::ContentExtent {
                         owner_namespace_id: sample_content_ref().owner_namespace_id,
@@ -338,8 +328,6 @@ fn sample_wal_payload() -> WalObjectPayload {
                 inode_id: InodeId(6),
                 revision_no: RevisionNo(1),
                 content_ref: sample_content_ref(),
-                hash_state: None,
-                crc64nvme: None,
                 layout: Some(loonfs_types::ContentLayout {
                     extents: vec![loonfs_types::ContentExtent {
                         owner_namespace_id: namespace_id(),
@@ -381,16 +369,8 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
     without_inline_content.commit_id =
         CommitId::parse("c_00000000000000000000000000000043").expect("valid commit id");
     for delta in &mut payload.records[0].deltas {
-        if let WalDelta::AppendFileRevision {
-            hash_state,
-            crc64nvme,
-            layout,
-            ..
-        } = &mut delta.delta
-        {
+        if let WalDelta::AppendFileRevision { layout, .. } = &mut delta.delta {
             *layout = None;
-            *hash_state = Some(sample_hash_state());
-            *crc64nvme = Some(Checksum::crc64nvme(b"golden bytes"));
         }
     }
     let chain_id = content_id("con_00112233445566778899aabbccddeeff");
@@ -415,6 +395,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
         namespace_id(),
         payload.records[0].inline_content[1].content_id.clone(),
         b"",
+        crate::ChecksumAlgorithm::Crc64nvme,
     );
     payload.records[0].deltas.push(WalCommitDelta {
         semantic_operation_index: 5,
@@ -423,8 +404,6 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             inode_id: InodeId(6),
             revision_no: RevisionNo(1),
             content_ref: empty_content_ref,
-            hash_state: None,
-            crc64nvme: None,
             layout: None,
         },
     });
@@ -434,9 +413,12 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             delta_index: 7,
             inode_id: InodeId(7),
             revision_no: RevisionNo(2),
-            content_ref: ContentRef::blob_v1(namespace_id(), chain_id, b"golden chain"),
-            hash_state: None,
-            crc64nvme: None,
+            content_ref: ContentRef::blob_v1(
+                namespace_id(),
+                chain_id,
+                b"golden chain",
+                crate::ChecksumAlgorithm::Crc64nvme,
+            ),
             layout: Some(loonfs_types::ContentLayout {
                 extents: vec![loonfs_types::ContentExtent {
                     owner_namespace_id: namespace_id(),
@@ -821,8 +803,6 @@ fn control_objects_match_golden_bytes() {
             status: UploadSessionRecordStatus::Completed {
                 completed_at_ms: 2_000,
                 content_ref: sample_content_ref(),
-                hash_state: Some(sample_hash_state()),
-                crc64nvme: Some(Checksum::crc64nvme(b"golden bytes")),
             },
         },
     );
@@ -836,7 +816,7 @@ fn control_objects_match_golden_bytes() {
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             subject_id: None,
             mode: UploadSessionMode::DirectPut {
-                checksum_algorithm: ChecksumAlgorithm::Sha256,
+                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             },
             status: UploadSessionRecordStatus::Open {
                 expires_at_ms: 87_400_000,
@@ -880,8 +860,6 @@ fn control_objects_match_golden_bytes() {
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged {
                     content_ref: sample_content_ref(),
-                    hash_state: sample_hash_state(),
-                    crc64nvme: Checksum::crc64nvme(b"golden bytes"),
                 },
             },
             status: UploadSessionRecordStatus::Open {
@@ -901,8 +879,6 @@ fn control_objects_match_golden_bytes() {
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged {
                     content_ref: sample_content_ref(),
-                    hash_state: sample_hash_state(),
-                    crc64nvme: Checksum::crc64nvme(b"golden bytes"),
                 },
             },
             status: UploadSessionRecordStatus::Open {
@@ -1194,7 +1170,7 @@ fn completed_direct_sessions_require_the_session_algorithm() {
             |payload| payload["mode"] = mode,
         );
         assert!(
-            message.contains("requires `crc32c` but its completed content uses `sha256`"),
+            message.contains("requires `crc32c` but its completed content uses `crc64nvme`"),
             "unexpected refusal: {message}"
         );
     }
@@ -1807,8 +1783,6 @@ fn wal_delta_wire_tags_match_spec_names() {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(1),
                 content_ref: sample_content_ref(),
-                hash_state: None,
-                crc64nvme: None,
                 layout: None,
             }),
             "append_file_revision",
@@ -2071,8 +2045,6 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             committed_by: actor(),
             delta_index: 0,
             content_ref: sample_crc_content_ref(),
-            hash_state: None,
-            crc64nvme: None,
         }),
         MetadataRow::FileRevision(loonfs_types::format::manifest::RevisionRecord {
             inode_id: InodeId(2),
@@ -2083,8 +2055,6 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             committed_by: actor(),
             delta_index: 0,
             content_ref: sample_content_ref(),
-            hash_state: Some(sample_hash_state()),
-            crc64nvme: Some(Checksum::crc64nvme(b"golden bytes")),
         }),
     ]
 }
@@ -2559,8 +2529,6 @@ fn provenance_rows_reject_every_missing_required_field() {
                 committed_by: actor(),
                 delta_index: 0,
                 content_ref: sample_content_ref(),
-                hash_state: None,
-                crc64nvme: None,
             }),
             &["commit_id", "committed_by"][..],
         ),
@@ -2789,22 +2757,23 @@ fn inline_commit_wire_bytes_match_golden() {
         request
     );
     let namespace = NamespaceId::parse("demo").expect("namespace");
-    let fingerprint = |operations: &[FilesystemOperation],
-                       ids: &std::collections::BTreeSet<ContentId>| {
-        loonfs_types::semantic_commit_fingerprint(
-            &namespace,
-            &loonfs_types::ActorId::loonfs(),
-            None,
-            None,
-            operations,
-            &[],
-            ids,
-        )
-        .expect("fingerprint")
-    };
+    let fingerprint =
+        |operations: &[FilesystemOperation],
+         ids: &std::collections::BTreeMap<ContentId, loonfs_types::InlineContentIdentity>| {
+            loonfs_types::semantic_commit_fingerprint(
+                &namespace,
+                &loonfs_types::ActorId::loonfs(),
+                None,
+                None,
+                operations,
+                &[],
+                ids,
+            )
+            .expect("fingerprint")
+        };
     let expected = fingerprint(&request.operations, &Default::default());
     let mut resolved = request.operations;
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids = std::collections::BTreeMap::new();
     for operation in &mut resolved {
         let (content_ref, inline_content) = match operation {
             FilesystemOperation::PutFile {
@@ -2825,11 +2794,16 @@ fn inline_commit_wire_bytes_match_golden() {
             _ => panic!("expected content operation"),
         };
         let id = ContentId::generate();
-        ids.insert(id.clone());
+        let bytes = inline_content.take().expect("inline bytes");
+        ids.insert(
+            id.clone(),
+            loonfs_types::InlineContentIdentity::from_bytes(&bytes),
+        );
         *content_ref = Some(ContentRef::blob_v1(
             namespace.clone(),
             id,
-            &inline_content.take().expect("inline bytes"),
+            &bytes,
+            crate::ChecksumAlgorithm::Crc64nvme,
         ));
     }
     assert_eq!(fingerprint(&resolved, &ids), expected);

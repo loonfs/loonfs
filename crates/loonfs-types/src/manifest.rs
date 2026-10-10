@@ -8,9 +8,9 @@ use crate::sst_blocks::BlockHandle;
 use crate::wal::WalCommitPayload;
 use crate::CompactorEpoch;
 use crate::{
-    AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo, ChangeSeq, Checksum,
-    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo,
-    MetadataSegmentId, NameKey, NamespaceId, RevisionNo, RunNo, Sha256State,
+    AccessGrants, AccessRevisionNo, ActorId, Attributes, AttributesRevisionNo, ChangeSeq, CommitId,
+    ContentId, ContentRef, DisplayName, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey,
+    NamespaceId, RevisionNo, RunNo,
 };
 use crate::{NamespaceNaming, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
@@ -355,12 +355,6 @@ pub struct RevisionRecord {
     pub delta_index: u32,
     /// Immutable bytes published by the revision.
     pub content_ref: ContentRef,
-    /// SHA-256 state after the reference's bytes, copied from the delta.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hash_state: Option<Sha256State>,
-    /// CRC-64/NVME of the reference's bytes, copied from the delta.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crc64nvme: Option<Checksum>,
 }
 
 /// One event that changes whether a root inode has an active subtree tombstone.
@@ -1750,9 +1744,8 @@ mod tests {
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("valid content id"),
                 b"row key sample",
+                crate::ChecksumAlgorithm::Crc64nvme,
             ),
-            hash_state: None,
-            crc64nvme: None,
         });
 
         assert_eq!(
@@ -1860,9 +1853,8 @@ mod tests {
                 crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("valid content id"),
                 b"row key prefix sample",
+                crate::ChecksumAlgorithm::Crc64nvme,
             ),
-            hash_state: None,
-            crc64nvme: None,
         });
         let rows: [(MetadataRowFamily, super::MetadataRow); 9] = [
             (
@@ -1992,9 +1984,8 @@ mod tests {
                             crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                                 .expect("content id"),
                             b"attribution key test",
+                            crate::ChecksumAlgorithm::Crc64nvme,
                         ),
-                        hash_state: None,
-                        crc64nvme: None,
                     }),
                 ),
                 (

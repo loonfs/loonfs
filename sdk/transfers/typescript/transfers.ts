@@ -433,8 +433,8 @@ async function stageStream(
             await response.body?.cancel();
             completion = { mode: "service_proxied" };
         } else if (begin.mode === "direct_put") {
-            if (!begin.access || !begin.checksum_algorithm)
-                throw new Error("direct_put session lacks access or checksum_algorithm");
+            if (!begin.access)
+                throw new Error("direct_put session lacks access");
             source.digest = new IncrementalChecksum(begin.checksum_algorithm);
             await putStream(send, begin.access, await uploadBody(source), scope);
             completion = {
@@ -442,8 +442,8 @@ async function stageStream(
                 content: { size_bytes: source.count, checksum: source.digest.finish() },
             };
         } else {
-            if (begin.part_size_bytes === undefined || !begin.checksum_algorithm)
-                throw new Error("direct_multipart session lacks part_size_bytes or checksum_algorithm");
+            if (begin.part_size_bytes === undefined)
+                throw new Error("direct_multipart session lacks part_size_bytes");
             const partSize = begin.part_size_bytes;
             if (!Number.isSafeInteger(partSize) || partSize <= 0)
                 throw new Error("invalid multipart part size");

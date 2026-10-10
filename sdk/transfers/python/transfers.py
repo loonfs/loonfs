@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextvars
-import hashlib
 import io
 import typing
 import uuid
@@ -115,7 +114,6 @@ _TRANSFER_CHUNK_BYTES = 64 * 1024
 class _IncrementalChecksum:
     def __init__(self, algorithm: str):
         self.algorithm = algorithm
-        self.sha = hashlib.sha256() if algorithm == "sha256" else None
         if algorithm == "crc32c":
             self.value, self.table, self.mask = (
                 _CRC32C_MASK,
@@ -128,23 +126,16 @@ class _IncrementalChecksum:
                 _CRC64_NVME_TABLE,
                 _CRC64_NVME_MASK,
             )
-        elif algorithm != "sha256":
+        else:
             raise ValueError(f"unsupported checksum algorithm {algorithm!r}")
 
     def update(self, content: bytes) -> None:
-        if self.sha is not None:
-            self.sha.update(content)
-        else:
-            for byte in content:
-                self.value = self.table[(self.value ^ byte) & 0xFF] ^ (self.value >> 8)
+        for byte in content:
+            self.value = self.table[(self.value ^ byte) & 0xFF] ^ (self.value >> 8)
 
     def finish(self) -> Checksum:
-        value = (
-            self.sha.hexdigest()
-            if self.sha is not None
-            else format(
-                self.value ^ self.mask, "08x" if self.algorithm == "crc32c" else "016x"
-            )
+        value = format(
+            self.value ^ self.mask, "08x" if self.algorithm == "crc32c" else "016x"
         )
         return Checksum(algorithm=self.algorithm, value=value)
 
@@ -364,8 +355,8 @@ class FilesClient(_GeneratedFilesClient):
                 )
                 completion = CompleteUploadBody_ServiceProxied()
             elif begin.mode == "direct_put":
-                if begin.access is None or begin.checksum_algorithm is None:
-                    raise RuntimeError("direct_put session lacks access or checksum_algorithm")
+                if begin.access is None:
+                    raise RuntimeError("direct_put session lacks access")
                 source.digest = _IncrementalChecksum(begin.checksum_algorithm)
                 _send_stream_presigned(
                     client, begin.access, source.chunks(), timeout, size_bytes
@@ -776,9 +767,9 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
                 )
                 completion = CompleteUploadBody_ServiceProxied()
             elif begin.mode == "direct_put":
-                if begin.access is None or begin.checksum_algorithm is None:
+                if begin.access is None:
                     raise RuntimeError(
-                        "direct_put session lacks access or checksum_algorithm"
+                        "direct_put session lacks access"
                     )
                 source.digest = _IncrementalChecksum(begin.checksum_algorithm)
                 await _async_send_stream_presigned(
@@ -1221,8 +1212,8 @@ def _stream_multipart(
     client, http, namespace_id, begin, source, timeout, request_options
 ):
     part_size = begin.part_size_bytes
-    if part_size is None or begin.checksum_algorithm is None:
-        raise RuntimeError("direct_multipart session lacks part_size_bytes or checksum_algorithm")
+    if part_size is None:
+        raise RuntimeError("direct_multipart session lacks part_size_bytes")
     if part_size <= 0:
         raise RuntimeError("multipart part size must be positive")
     source.digest = _IncrementalChecksum(begin.checksum_algorithm)
@@ -1404,8 +1395,8 @@ async def _async_stream_multipart(
     client, http, namespace_id, begin, source, timeout, request_options
 ):
     part_size = begin.part_size_bytes
-    if part_size is None or begin.checksum_algorithm is None:
-        raise RuntimeError("direct_multipart session lacks part_size_bytes or checksum_algorithm")
+    if part_size is None:
+        raise RuntimeError("direct_multipart session lacks part_size_bytes")
     if part_size <= 0:
         raise RuntimeError("multipart part size must be positive")
     source.digest = _IncrementalChecksum(begin.checksum_algorithm)

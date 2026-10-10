@@ -1,10 +1,10 @@
-import hashlib
 import json
 from pathlib import Path
 
 import httpx
 import pytest
 from loonfs.server import LoonFS
+from loonfs.transfers import _checksum
 
 CASES = json.loads(
     (Path(__file__).parents[1] / "fixtures/streaming_downloads.json").read_text()
@@ -162,8 +162,8 @@ def test_streaming_download_backpressure_and_early_close(direct):
     chunk = b"x" * 65536
     fixture = {
         "size_bytes": len(chunk) * 3,
-        "algorithm": "sha256",
-        "checksum": hashlib.sha256(chunk * 3).hexdigest(),
+        "algorithm": "crc64nvme",
+        "checksum": _checksum("crc64nvme", chunk * 3).value,
     }
     body = Chunks([chunk] * 3)
     client, http, _ = stream_client(fixture, direct, body)

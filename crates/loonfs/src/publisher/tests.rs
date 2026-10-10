@@ -689,6 +689,7 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
                         namespace_id.clone(),
                         loonfs_types::ContentId::generate(),
                         Bytes::from(vec![1; MAX_WAL_INLINE_CONTENT_BYTES]),
+                        loonfs_types::ChecksumAlgorithm::Crc64nvme,
                     )
                 })
                 .collect();
@@ -2245,6 +2246,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         namespace_id.clone(),
         loonfs_types::ContentId::generate(),
         Bytes::from_static(b"folded inline bytes"),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let candidate = CommitCandidate::with_inline_content(
         CommitRequest::single(

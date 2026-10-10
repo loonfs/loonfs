@@ -983,6 +983,7 @@ async fn publish_inline(
         namespace_id.clone(),
         loonfs_types::ContentId::generate(),
         Bytes::copy_from_slice(namespace_id.as_str().as_bytes()),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let key = loonfs_objectstore::keys::content_blob(namespace_id, &value.content_ref().content_id);
     let request = CommitRequest::single(

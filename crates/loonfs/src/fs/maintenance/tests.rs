@@ -517,7 +517,6 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
     use loonfs_objectstore::keys::metadata_segment;
     use loonfs_test_support::ids::{attribute_key, attribute_text};
     use loonfs_test_support::stores::RecordingStore;
-    use loonfs_types::Checksum;
 
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::metadata_segments(
@@ -552,8 +551,12 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                     .map(|(index, key)| {
                         let value: String = (0..64)
                             .map(|part| {
-                                Checksum::sha256(format!("{revision}/{index}/{part}").as_bytes())
-                                    .value
+                                loonfs_types::sha256_digest(
+                                    format!("{revision}/{index}/{part}").as_bytes(),
+                                )
+                                .strip_prefix("sha256:")
+                                .expect("digest prefix")
+                                .to_owned()
                             })
                             .collect();
                         (key.clone(), attribute_text(&value))

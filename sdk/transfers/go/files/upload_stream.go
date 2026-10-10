@@ -149,11 +149,11 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 			option.WithHTTPHeader(http.Header{"Content-Type": {"application/octet-stream"}}), option.WithMaxAttempts(1))
 		completion = &loonfs.CompleteUploadBody{ServiceProxied: &loonfs.CompleteUploadBodyServiceProxied{}}
 	case loonfs.UploadModeDirectPut:
-		if session.Access == nil || session.ChecksumAlgorithm == nil {
-			err = fmt.Errorf("transfers: direct_put session lacks access or checksum_algorithm")
+		if session.Access == nil {
+			err = fmt.Errorf("transfers: direct_put session lacks access")
 			break
 		}
-		reader.digest, err = newChecksum(*session.ChecksumAlgorithm)
+		reader.digest, err = newChecksum(session.ChecksumAlgorithm)
 		if err == nil {
 			length := int64(-1)
 			if sizeBytes != nil {
@@ -162,7 +162,7 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 			_, err = c.putStream(ctx, session.Access, reader, length)
 		}
 		if err == nil {
-			completion = &loonfs.CompleteUploadBody{DirectPut: &loonfs.CompleteUploadBodyDirectPut{Content: reader.claim(*session.ChecksumAlgorithm)}}
+			completion = &loonfs.CompleteUploadBody{DirectPut: &loonfs.CompleteUploadBodyDirectPut{Content: reader.claim(session.ChecksumAlgorithm)}}
 		}
 	case loonfs.UploadModeDirectMultipart:
 		completion, err = c.streamMultipart(ctx, uploadsClient, namespaceID, session, reader)
@@ -210,14 +210,14 @@ func (c *Client) putStream(ctx context.Context, access *loonfs.ObjectTransferAcc
 }
 
 func (c *Client) streamMultipart(ctx context.Context, client *uploads.Client, namespaceID loonfs.NamespaceID, begin *loonfs.UploadSessionStatusOpen, reader *uploadReader) (*loonfs.CompleteUploadBody, error) {
-	if begin.PartSizeBytes == nil || begin.ChecksumAlgorithm == nil {
-		return nil, fmt.Errorf("transfers: direct_multipart session lacks part_size_bytes or checksum_algorithm")
+	if begin.PartSizeBytes == nil {
+		return nil, fmt.Errorf("transfers: direct_multipart session lacks part_size_bytes")
 	}
 	partSize := int(*begin.PartSizeBytes)
 	if partSize <= 0 || int64(partSize) != *begin.PartSizeBytes {
 		return nil, fmt.Errorf("transfers: invalid multipart part size")
 	}
-	digest, err := newChecksum(*begin.ChecksumAlgorithm)
+	digest, err := newChecksum(begin.ChecksumAlgorithm)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +240,7 @@ func (c *Client) streamMultipart(ctx context.Context, client *uploads.Client, na
 		}
 		part := buffer[:n]
 		number := len(parts) + 1
-		checksum, err := computeChecksum(*begin.ChecksumAlgorithm, part)
+		checksum, err := computeChecksum(begin.ChecksumAlgorithm, part)
 		if err != nil {
 			return nil, err
 		}
@@ -260,7 +260,7 @@ func (c *Client) streamMultipart(ctx context.Context, client *uploads.Client, na
 		}
 		parts = append(parts, &loonfs.CompletedUploadPart{PartNumber: number, Checksum: checksum, Etag: etag})
 	}
-	return &loonfs.CompleteUploadBody{DirectMultipart: &loonfs.CompleteUploadBodyDirectMultipart{Content: reader.claim(*begin.ChecksumAlgorithm), Parts: parts}}, nil
+	return &loonfs.CompleteUploadBody{DirectMultipart: &loonfs.CompleteUploadBodyDirectMultipart{Content: reader.claim(begin.ChecksumAlgorithm), Parts: parts}}, nil
 }
 
 type uploadReader struct {

@@ -431,6 +431,7 @@ mod tests {
             let content_ref = PreparedContent::inline(
                 namespace_id.clone(),
                 bytes::Bytes::from_static(b"content"),
+                loonfs_types::ChecksumAlgorithm::Crc64nvme,
             )
             .content_ref()
             .clone();
@@ -450,8 +451,6 @@ mod tests {
                 ),
                 vec![PreparedContent::for_completed_upload(
                     content_ref,
-                    None,
-                    None,
                     expires_at_ms,
                     None,
                 )],

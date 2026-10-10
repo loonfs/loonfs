@@ -138,7 +138,6 @@ async fn plan_append<S: ObjectStore + ?Sized>(
             content_ref: appended.content_ref.clone(),
         }],
         appended: Some(appended),
-        source_revision: None,
     })
 }
 
@@ -166,32 +165,22 @@ async fn append_to<S: ObjectStore + ?Sized>(
             base.size_bytes
         ))
     })?;
-    let crc64nvme = base_row
-        .crc64nvme
-        .as_ref()
-        .map(|crc| {
-            crc.crc64nvme_combine(&Checksum::crc64nvme(bytes), added)
-                .ok_or_else(|| {
-                    CoreError::NamespaceCorrupt(format!(
-                        "the revision row of content `{}` records a malformed `crc64nvme`",
-                        base.content_id
-                    ))
-                })
-        })
-        .transpose()?;
-    let (hash_state, checksum) = match (base_row.hash_state.clone(), &crc64nvme) {
-        (Some(mut state), _) => {
-            state.update(bytes);
-            let checksum = state.finish();
-            (Some(state), checksum)
-        }
-        (None, Some(crc)) => (None, crc.clone()),
-        (None, None) => {
-            return Err(CoreError::AppendNotSupported {
-                target: target.to_owned(),
-            })
-        }
-    };
+    let algorithm = store.checksum_algorithm();
+    if base.checksum.algorithm != algorithm {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "content `{}` uses `{}`; the store requires `{algorithm}`",
+            base.content_id, base.checksum.algorithm
+        )));
+    }
+    let checksum = base
+        .checksum
+        .crc_combine(&Checksum::compute(algorithm, bytes), added)
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "content `{}` has an invalid checksum",
+                base.content_id
+            ))
+        })?;
     let content_id = if extends_base {
         base.content_id.clone()
     } else {
@@ -226,8 +215,6 @@ async fn append_to<S: ObjectStore + ?Sized>(
             size_bytes,
             checksum,
         },
-        hash_state,
-        crc64nvme,
         layout,
         pieces,
     })

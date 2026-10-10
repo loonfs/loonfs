@@ -4,8 +4,9 @@ use crate::config::absolute_env_path;
 use crate::error::CliError;
 use loonfs_client::{MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions};
 use loonfs_types::api::v0::{CommitRequest, CompletedUploadPart, FilesystemOperation};
-use loonfs_types::{ActorId, Checksum, ChecksumAlgorithm, Commit, CommitId, ErrorCode, UploadId};
+use loonfs_types::{ActorId, ChecksumAlgorithm, Commit, CommitId, ErrorCode, UploadId};
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -471,15 +472,16 @@ fn journal_key(
     commit_id: Option<&CommitId>,
 ) -> io::Result<String> {
     let local_path = local_path.canonicalize()?;
-    Ok(Checksum::sha256(&serde_json::to_vec(&(
-        profile,
-        target,
-        spec.namespace(),
-        spec.absolute_path(),
-        local_path.as_os_str().as_encoded_bytes(),
-        commit_id,
-    ))?)
-    .value)
+    Ok(loonfs_types::format::hex::hex_encode_bytes(
+        &sha2::Sha256::digest(&serde_json::to_vec(&(
+            profile,
+            target,
+            spec.namespace(),
+            spec.absolute_path(),
+            local_path.as_os_str().as_encoded_bytes(),
+            commit_id,
+        ))?),
+    ))
 }
 
 /// Where per-upload records live: `$XDG_STATE_HOME/loonfs/uploads` when that
@@ -500,6 +502,7 @@ fn uploads_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_types::Checksum;
 
     struct InterruptedUpload<'a>(&'a UploadJournal);
 

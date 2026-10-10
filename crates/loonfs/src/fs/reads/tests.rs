@@ -131,6 +131,7 @@ async fn create_compacted_directory(
             namespace_id.clone(),
             ContentId::generate(),
             bytes::Bytes::new(),
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let content_ref = content.content_ref();
         // Permuted names spread the first page across every batch, so the

@@ -1,5 +1,4 @@
 import * as assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename, extname, join } from "node:path";
@@ -1117,8 +1116,14 @@ function fileEntry(entry: LoonFS.PathEntry): FileEntry {
 
 function checksum(algorithm: LoonFS.ChecksumAlgorithm, bytes: Uint8Array): LoonFS.Checksum {
     switch (algorithm) {
-        case "sha256":
-            return { algorithm, value: createHash("sha256").update(bytes).digest("hex") };
+        case "crc32c": {
+            let value = 0xffffffff;
+            for (const byte of bytes) {
+                value ^= byte;
+                for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0x82f63b78 : 0);
+            }
+            return { algorithm, value: ((value ^ 0xffffffff) >>> 0).toString(16).padStart(8, "0") };
+        }
         case "crc64nvme":
             return { algorithm, value: crc64Nvme(bytes).toString(16).padStart(16, "0") };
         default:

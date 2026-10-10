@@ -4,8 +4,8 @@
 
 use crate::envelope::EnvelopeCodecError;
 use crate::{
-    ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo,
-    NamespaceId, PinId, Sha256State, SubjectId, UploadId,
+    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceId, PinId,
+    SubjectId, UploadId,
 };
 use crate::{WriterEpoch, WriterId};
 use serde::de::DeserializeOwned;
@@ -239,15 +239,10 @@ pub enum ProxiedStaging {
     Idle,
     /// One request owns the staging slot.
     Claimed,
-    /// Content that passed validation and was recorded by the session, with
-    /// the SHA-256 state and CRC-64/NVME the staging write computed over it.
+    /// Content that passed validation and was recorded by the session.
     Staged {
         /// Verified reference to the staged object.
         content_ref: ContentRef,
-        /// SHA-256 state after the staged bytes.
-        hash_state: Sha256State,
-        /// CRC-64/NVME of the staged bytes.
-        crc64nvme: Checksum,
     },
 }
 
@@ -261,26 +256,13 @@ impl Serialize for ProxiedStaging {
         enum Shape<'a> {
             Idle {},
             Claimed {},
-            Staged {
-                content_ref: &'a ContentRef,
-                hash_state: &'a Sha256State,
-                crc64nvme: &'a Checksum,
-            },
+            Staged { content_ref: &'a ContentRef },
         }
 
         match self {
             Self::Idle => Shape::Idle {}.serialize(serializer),
             Self::Claimed => Shape::Claimed {}.serialize(serializer),
-            Self::Staged {
-                content_ref,
-                hash_state,
-                crc64nvme,
-            } => Shape::Staged {
-                content_ref,
-                hash_state,
-                crc64nvme,
-            }
-            .serialize(serializer),
+            Self::Staged { content_ref } => Shape::Staged { content_ref }.serialize(serializer),
         }
     }
 }
@@ -380,12 +362,6 @@ pub enum UploadSessionRecordStatus {
         completed_at_ms: u64,
         /// Verified immutable content produced by this session.
         content_ref: ContentRef,
-        /// SHA-256 state after the content's bytes, when LoonFS wrote them.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        hash_state: Option<Sha256State>,
-        /// CRC-64/NVME of the content's bytes, when LoonFS wrote them.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        crc64nvme: Option<Checksum>,
     },
     /// The session cannot publish content. Its unreferenced object is deleted.
     Aborted {
@@ -556,11 +532,7 @@ impl From<StrictUploadSessionMode> for UploadSessionMode {
 enum StrictProxiedStaging {
     Idle {},
     Claimed {},
-    Staged {
-        content_ref: ContentRef,
-        hash_state: Sha256State,
-        crc64nvme: Checksum,
-    },
+    Staged { content_ref: ContentRef },
 }
 
 impl From<StrictProxiedStaging> for ProxiedStaging {
@@ -568,15 +540,7 @@ impl From<StrictProxiedStaging> for ProxiedStaging {
         match staging {
             StrictProxiedStaging::Idle {} => Self::Idle,
             StrictProxiedStaging::Claimed {} => Self::Claimed,
-            StrictProxiedStaging::Staged {
-                content_ref,
-                hash_state,
-                crc64nvme,
-            } => Self::Staged {
-                content_ref,
-                hash_state,
-                crc64nvme,
-            },
+            StrictProxiedStaging::Staged { content_ref } => Self::Staged { content_ref },
         }
     }
 }
@@ -590,10 +554,6 @@ enum StrictUploadSessionRecordStatus {
     Completed {
         completed_at_ms: u64,
         content_ref: ContentRef,
-        #[serde(default)]
-        hash_state: Option<Sha256State>,
-        #[serde(default)]
-        crc64nvme: Option<Checksum>,
     },
     Aborted {
         aborted_at_ms: u64,
@@ -607,13 +567,9 @@ impl From<StrictUploadSessionRecordStatus> for UploadSessionRecordStatus {
             StrictUploadSessionRecordStatus::Completed {
                 completed_at_ms,
                 content_ref,
-                hash_state,
-                crc64nvme,
             } => Self::Completed {
                 completed_at_ms,
                 content_ref,
-                hash_state,
-                crc64nvme,
             },
             StrictUploadSessionRecordStatus::Aborted { aborted_at_ms } => {
                 Self::Aborted { aborted_at_ms }
@@ -701,7 +657,7 @@ mod tests {
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             size_bytes: 5,
-            checksum: Checksum::sha256(b"hello"),
+            checksum: Checksum::crc64nvme(b"hello"),
         };
         let mut staged = content_ref.clone();
         staged.size_bytes += 1;
@@ -713,15 +669,11 @@ mod tests {
             mode: UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged {
                     content_ref: staged,
-                    hash_state: Sha256State::new(),
-                    crc64nvme: Checksum::crc64nvme(b""),
                 },
             },
             status: UploadSessionRecordStatus::Completed {
                 completed_at_ms: 2_000,
                 content_ref,
-                hash_state: None,
-                crc64nvme: None,
             },
         };
 
@@ -743,7 +695,7 @@ mod tests {
             content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             size_bytes: 5,
-            checksum: Checksum::sha256(b"hello"),
+            checksum: Checksum::crc64nvme(b"hello"),
         };
         let modes = [
             UploadSessionMode::ServiceProxied {
@@ -755,17 +707,15 @@ mod tests {
             UploadSessionMode::ServiceProxied {
                 staging: ProxiedStaging::Staged {
                     content_ref: content_ref.clone(),
-                    hash_state: Sha256State::new(),
-                    crc64nvme: Checksum::crc64nvme(b""),
                 },
             },
             UploadSessionMode::DirectPut {
-                checksum_algorithm: ChecksumAlgorithm::Sha256,
+                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             },
             UploadSessionMode::DirectMultipart {
                 provider_upload_id: "provider-upload".to_owned(),
                 part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
-                checksum_algorithm: ChecksumAlgorithm::Sha256,
+                checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             },
         ];
         for mode in modes {
@@ -773,8 +723,6 @@ mod tests {
                 UploadSessionRecordStatus::Completed {
                     completed_at_ms: 2_000,
                     content_ref: content_ref.clone(),
-                    hash_state: None,
-                    crc64nvme: None,
                 },
                 UploadSessionRecordStatus::Aborted {
                     aborted_at_ms: 2_000,

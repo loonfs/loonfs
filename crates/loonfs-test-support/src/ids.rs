@@ -47,6 +47,7 @@ pub fn content_ref(bytes: &[u8]) -> ContentRef {
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         bytes,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     )
 }
 

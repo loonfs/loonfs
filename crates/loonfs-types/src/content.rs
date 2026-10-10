@@ -3,8 +3,6 @@
 use crate::hex::{hex_encode_bytes, is_lower_hex_byte};
 use crate::ids::{ContentId, NamespaceId};
 use serde::{Deserialize, Serialize};
-use sha2::digest::block_buffer::{BlockBuffer, Eager};
-use sha2::digest::typenum::U64;
 use std::fmt;
 use thiserror::Error;
 
@@ -37,8 +35,6 @@ impl fmt::Display for ContentRefKind {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ChecksumAlgorithm {
-    /// SHA-256.
-    Sha256,
     /// CRC-64/NVME.
     Crc64nvme,
     /// CRC-32C.
@@ -49,7 +45,6 @@ impl ChecksumAlgorithm {
     /// Returns the frozen wire spelling.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Sha256 => "sha256",
             Self::Crc64nvme => "crc64nvme",
             Self::Crc32c => "crc32c",
         }
@@ -58,7 +53,6 @@ impl ChecksumAlgorithm {
     /// Returns the raw checksum width in bytes.
     pub fn value_bytes(self) -> usize {
         match self {
-            Self::Sha256 => 32,
             Self::Crc64nvme => 8,
             Self::Crc32c => 4,
         }
@@ -97,11 +91,6 @@ impl Checksum {
         digest.finish()
     }
 
-    /// Builds the SHA-256 checksum for these bytes.
-    pub fn sha256(bytes: &[u8]) -> Self {
-        Self::compute(ChecksumAlgorithm::Sha256, bytes)
-    }
-
     /// Builds the CRC-64/NVME checksum for these bytes.
     pub fn crc64nvme(bytes: &[u8]) -> Self {
         Self::compute(ChecksumAlgorithm::Crc64nvme, bytes)
@@ -117,16 +106,6 @@ impl Checksum {
         Self::compute(self.algorithm, bytes).value == self.value
     }
 
-    /// Builds the CRC-64/NVME of a payload followed by `next_len` more
-    /// bytes whose CRC-64/NVME is `next`, without reading either payload.
-    ///
-    /// Returns `None` unless both checksums are valid CRC-64/NVME values.
-    pub fn crc64nvme_combine(&self, next: &Checksum, next_len: u64) -> Option<Checksum> {
-        (self.algorithm == ChecksumAlgorithm::Crc64nvme)
-            .then(|| self.crc_combine(next, next_len))
-            .flatten()
-    }
-
     /// Combines equal CRC algorithms without reading either payload.
     pub fn crc_combine(&self, next: &Checksum, next_len: u64) -> Option<Checksum> {
         if self.algorithm != next.algorithm || self.validate().is_err() || next.validate().is_err()
@@ -136,7 +115,6 @@ impl Checksum {
         let algorithm = match self.algorithm {
             ChecksumAlgorithm::Crc64nvme => crc_fast::CrcAlgorithm::Crc64Nvme,
             ChecksumAlgorithm::Crc32c => crc_fast::CrcAlgorithm::Crc32Iscsi,
-            ChecksumAlgorithm::Sha256 => return None,
         };
         let combined = crc_fast::checksum_combine(
             algorithm,
@@ -196,8 +174,6 @@ pub enum ChecksumValidationError {
 /// An incremental checksum for streamed reads and writes.
 #[derive(Debug)]
 pub enum StreamingChecksum {
-    /// SHA-256 folded over the payload.
-    Sha256(Sha256State),
     /// CRC-64/NVME folded over the payload.
     Crc64nvme(Crc64Nvme),
     /// CRC-32C folded over the payload.
@@ -208,7 +184,6 @@ impl StreamingChecksum {
     /// Starts an empty digest for `algorithm`.
     pub fn for_algorithm(algorithm: ChecksumAlgorithm) -> Self {
         match algorithm {
-            ChecksumAlgorithm::Sha256 => Self::Sha256(Sha256State::new()),
             ChecksumAlgorithm::Crc64nvme => Self::Crc64nvme(Crc64Nvme::new()),
             ChecksumAlgorithm::Crc32c => Self::Crc32c(Crc32c::new()),
         }
@@ -217,7 +192,6 @@ impl StreamingChecksum {
     /// Folds the next piece of the payload in, in order.
     pub fn update(&mut self, bytes: &[u8]) {
         match self {
-            Self::Sha256(digest) => digest.update(bytes),
             Self::Crc64nvme(digest) => digest.update(bytes),
             Self::Crc32c(digest) => digest.update(bytes),
         }
@@ -226,7 +200,6 @@ impl StreamingChecksum {
     /// Closes the digest over everything fed so far.
     pub fn finish(self) -> Checksum {
         match self {
-            Self::Sha256(digest) => digest.finish(),
             Self::Crc64nvme(digest) => digest.finish(),
             Self::Crc32c(digest) => digest.finish(),
         }
@@ -307,115 +280,6 @@ impl fmt::Debug for Crc32c {
     }
 }
 
-// FIPS 180-4, section 5.3.3. `sha2` keeps its copy private.
-const SHA256_INITIAL_WORDS: [u32; 8] = [
-    0x6a09_e667,
-    0xbb67_ae85,
-    0x3c6e_f372,
-    0xa54f_f53a,
-    0x510e_527f,
-    0x9b05_688c,
-    0x1f83_d9ab,
-    0x5be0_cd19,
-];
-
-/// The SHA-256 state after a payload: the eight state words, the bytes
-/// after the last whole 64-byte block, and the payload's length.
-///
-/// It is also the incremental SHA-256 digest. A recorded state continues
-/// over later bytes exactly as if the digest had never stopped, so a writer
-/// that keeps it never reads the earlier bytes again.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(into = "Sha256StateFields", try_from = "Sha256StateFields")]
-pub struct Sha256State {
-    words: [u32; 8],
-    tail: Box<[u8]>,
-    length: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Sha256StateFields {
-    words: [u32; 8],
-    #[serde(with = "serde_bytes")]
-    tail: Vec<u8>,
-    length: u64,
-}
-
-impl From<Sha256State> for Sha256StateFields {
-    fn from(state: Sha256State) -> Self {
-        Self {
-            words: state.words,
-            tail: state.tail.into_vec(),
-            length: state.length,
-        }
-    }
-}
-
-impl TryFrom<Sha256StateFields> for Sha256State {
-    type Error = String;
-
-    fn try_from(fields: Sha256StateFields) -> Result<Self, Self::Error> {
-        if fields.tail.len() as u64 != fields.length % 64 {
-            return Err(format!(
-                "a sha256 state after {} bytes holds {} pending bytes",
-                fields.length,
-                fields.tail.len()
-            ));
-        }
-        Ok(Self {
-            words: fields.words,
-            tail: fields.tail.into_boxed_slice(),
-            length: fields.length,
-        })
-    }
-}
-
-impl Default for Sha256State {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Sha256State {
-    /// Starts the state of an empty payload.
-    pub fn new() -> Self {
-        Self {
-            words: SHA256_INITIAL_WORDS,
-            tail: Box::default(),
-            length: 0,
-        }
-    }
-
-    /// Folds the next piece of the payload in, in order.
-    pub fn update(&mut self, bytes: &[u8]) {
-        let mut buffer = BlockBuffer::<U64, Eager>::new(&self.tail);
-        buffer.digest_blocks(bytes, |blocks| sha2::compress256(&mut self.words, blocks));
-        self.tail = buffer.get_data().into();
-        self.length += bytes.len() as u64;
-    }
-
-    /// Length of the payload folded in so far.
-    pub fn length(&self) -> u64 {
-        self.length
-    }
-
-    /// The checksum of everything folded in so far. The state itself is
-    /// unchanged and can continue.
-    pub fn finish(&self) -> Checksum {
-        let mut words = self.words;
-        let mut buffer = BlockBuffer::<U64, Eager>::new(&self.tail);
-        buffer.len64_padding_be(self.length.wrapping_mul(8), |block| {
-            sha2::compress256(&mut words, std::slice::from_ref(block))
-        });
-        let digest: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
-        Checksum {
-            algorithm: ChecksumAlgorithm::Sha256,
-            value: hex_encode_bytes(&digest),
-        }
-    }
-}
-
 /// Describes why a content reference cannot be part of a durable commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ContentRefValidationError {
@@ -448,29 +312,18 @@ impl ContentRef {
     ///
     /// Every caller of this constructor moves the bytes through the LoonFS
     /// write path, so the checksum is trusted by construction.
-    pub fn blob_v1(owner_namespace_id: NamespaceId, content_id: ContentId, bytes: &[u8]) -> Self {
-        Self {
-            kind: ContentRefKind::BlobV1,
-            owner_namespace_id,
-            content_id,
-            size_bytes: bytes.len() as u64,
-            checksum: Checksum::sha256(bytes),
-        }
-    }
-
-    /// Builds a content reference from the SHA-256 state of a payload the
-    /// LoonFS write path folded in.
-    pub fn blob_v1_streamed(
+    pub fn blob_v1(
         owner_namespace_id: NamespaceId,
         content_id: ContentId,
-        state: &Sha256State,
+        bytes: &[u8],
+        algorithm: ChecksumAlgorithm,
     ) -> Self {
         Self {
             kind: ContentRefKind::BlobV1,
             owner_namespace_id,
             content_id,
-            size_bytes: state.length(),
-            checksum: state.finish(),
+            size_bytes: bytes.len() as u64,
+            checksum: Checksum::compute(algorithm, bytes),
         }
     }
 
@@ -490,7 +343,7 @@ impl ContentRef {
 mod tests {
     use super::{
         Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentRef, ContentRefKind,
-        ContentRefValidationError, Sha256State, StreamingChecksum,
+        ContentRefValidationError, StreamingChecksum,
     };
     use crate::ids::ContentId;
 
@@ -533,7 +386,6 @@ mod tests {
     #[test]
     fn every_checksum_algorithm_round_trips() {
         for (algorithm, wire) in [
-            (ChecksumAlgorithm::Sha256, "sha256"),
             (ChecksumAlgorithm::Crc64nvme, "crc64nvme"),
             (ChecksumAlgorithm::Crc32c, "crc32c"),
         ] {
@@ -553,6 +405,7 @@ mod tests {
     #[test]
     fn an_unknown_checksum_algorithm_fails_to_decode() {
         assert!(serde_json::from_str::<ChecksumAlgorithm>("\"md5\"").is_err());
+        assert!(serde_json::from_str::<ChecksumAlgorithm>("\"sha256\"").is_err());
 
         let json = r#"{
             "kind": "blob_v1",
@@ -570,11 +423,12 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             content_id(),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
 
         assert_eq!(content_ref.kind, ContentRefKind::BlobV1);
         assert_eq!(content_ref.size_bytes, 5);
-        assert_eq!(content_ref.checksum.algorithm, ChecksumAlgorithm::Sha256);
+        assert_eq!(content_ref.checksum.algorithm, ChecksumAlgorithm::Crc64nvme);
         content_ref.validate().expect("produced refs validate");
 
         let document = serde_json::to_value(&content_ref).expect("encode content ref");
@@ -596,10 +450,11 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             content_id(),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         content_ref.checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: content_ref.checksum.value.clone(),
+            value: "0".repeat(64),
         };
         assert!(matches!(
             content_ref.validate(),
@@ -612,7 +467,6 @@ mod tests {
     #[test]
     fn checksum_validation_enforces_exact_widths_and_lowercase_hex() {
         for (algorithm, width) in [
-            (ChecksumAlgorithm::Sha256, 64),
             (ChecksumAlgorithm::Crc64nvme, 16),
             (ChecksumAlgorithm::Crc32c, 8),
         ] {
@@ -673,11 +527,7 @@ mod tests {
     #[test]
     fn a_streamed_checksum_agrees_with_the_whole_payload_at_once() {
         let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
-        for expected in [
-            Checksum::sha256(&payload),
-            Checksum::crc64nvme(&payload),
-            Checksum::crc32c(&payload),
-        ] {
+        for expected in [Checksum::crc64nvme(&payload), Checksum::crc32c(&payload)] {
             let mut streaming = StreamingChecksum::for_algorithm(expected.algorithm);
             for chunk in payload.chunks(97) {
                 streaming.update(chunk);
@@ -687,49 +537,8 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_sha256_state_and_a_crc64nvme_combine_continue_over_appended_bytes() {
-        use sha2::Digest as _;
-        for (base_len, appended_len) in [
-            (0_usize, 5_usize),
-            (63, 1),
-            (64, 0),
-            (1000, 77),
-            (10_000_019, 4_096_003),
-        ] {
-            let base: Vec<u8> = (0..base_len).map(|i| (i * 31 % 251) as u8).collect();
-            let appended: Vec<u8> = (0..appended_len).map(|i| (i * 17 % 253) as u8).collect();
-            let whole = [base.as_slice(), appended.as_slice()].concat();
-
-            let mut state = Sha256State::new();
-            state.update(&base);
-            let recorded = serde_json::to_value(&state).expect("encode state");
-            let mut continued: Sha256State =
-                serde_json::from_value(recorded).expect("decode state");
-            continued.update(&appended);
-            assert_eq!(continued.length(), whole.len() as u64);
-            assert_eq!(
-                continued.finish().value,
-                crate::hex::hex_encode_bytes(&sha2::Sha256::digest(&whole))
-            );
-
-            assert_eq!(
-                Checksum::crc64nvme(&base)
-                    .crc64nvme_combine(&Checksum::crc64nvme(&appended), appended_len as u64),
-                Some(Checksum::crc64nvme(&whole))
-            );
-        }
-        let mut inconsistent = serde_json::to_value(Sha256State::new()).expect("encode state");
-        inconsistent["length"] = serde_json::json!(1);
-        assert!(serde_json::from_value::<Sha256State>(inconsistent).is_err());
-    }
-
-    #[test]
     fn every_algorithm_compares_bytes_against_the_checksum_they_produce() {
-        for algorithm in [
-            ChecksumAlgorithm::Sha256,
-            ChecksumAlgorithm::Crc64nvme,
-            ChecksumAlgorithm::Crc32c,
-        ] {
+        for algorithm in [ChecksumAlgorithm::Crc64nvme, ChecksumAlgorithm::Crc32c] {
             let expected = Checksum::compute(algorithm, b"hello");
             assert_eq!(expected.algorithm, algorithm);
             assert!(expected.matches(b"hello"));

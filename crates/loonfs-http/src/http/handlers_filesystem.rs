@@ -545,6 +545,7 @@ pub(super) async fn create_commit(
         &namespace_id,
         &mut operations,
         state.options.inline_content.inline_content_threshold_bytes,
+        state.probe_store.checksum_algorithm(),
     )
     .map_err(|error| error.with_commit_id(&commit_id))?;
     // Failed and uncertain outcomes echo the idempotency key the caller can

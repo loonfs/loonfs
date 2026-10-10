@@ -75,6 +75,123 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
         .map(|completed| completed.response)
 }
 
+#[tokio::test]
+async fn proxied_references_match_stored_checksums_and_appends_combine_without_content_reads() {
+    use futures::StreamExt;
+    use loonfs_core::publish::FilesystemOperation;
+    use loonfs_objectstore::keys::content_blob;
+    use loonfs_test_support::stores::{MemoryStore, RecordingStore};
+    use loonfs_types::{AbsolutePath, ChecksumAlgorithm, CommitId, PathEntryKind};
+
+    let directory = tempdir().expect("directory");
+    let stores: Vec<Arc<dyn ObjectStore>> = vec![
+        Arc::new(LocalFsStore::new(directory.path()).expect("local store")),
+        Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme)),
+        Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc32c)),
+    ];
+    for inner in stores {
+        let store = RecordingStore::new(inner, KeyPredicate::content_blob());
+        let namespace_id = NamespaceId::parse("checksums").expect("namespace");
+        let context = mutation_context();
+        bootstrap_namespace(&store, &namespace_id, &context)
+            .await
+            .expect("namespace");
+        for streamed in [false, true] {
+            let engine = namespace_engine(&store, &namespace_id, &context);
+            let begin = engine.begin_upload(None).await.expect("begin");
+            assert!(
+                matches!(begin.status, loonfs_types::api::v0::UploadSessionStatus::Open {
+                checksum_algorithm: algorithm, ..
+            } if algorithm == store.checksum_algorithm())
+            );
+            if streamed {
+                let body = futures::stream::iter([
+                    Ok(Bytes::from_static(b"hel")),
+                    Ok(Bytes::from_static(b"lo")),
+                ])
+                .boxed();
+                engine
+                    .upload_streamed_content(&begin.upload_id, None, body)
+                    .await
+                    .expect("stream");
+            } else {
+                engine
+                    .upload_content(&begin.upload_id, None, b"hello")
+                    .await
+                    .expect("bytes");
+            }
+            let completed = complete_upload(&store, &namespace_id, &begin.upload_id, &context)
+                .await
+                .expect("complete");
+            let reference = completed.content_ref().expect("reference");
+            let stored = store
+                .head(&content_blob(&namespace_id, &reference.content_id))
+                .await
+                .expect("head")
+                .expect("object");
+            assert_eq!(stored.checksum.as_ref(), Some(&reference.checksum));
+            assert_eq!(
+                reference.checksum,
+                Checksum::compute(store.checksum_algorithm(), b"hello")
+            );
+            let path =
+                AbsolutePath::parse(if streamed { "/stream" } else { "/bytes" }).expect("path");
+            submit_operation(
+                &store,
+                &namespace_id,
+                CommitId::generate(),
+                FilesystemOperation::PutFile {
+                    path: path.clone(),
+                    content_ref: Some(reference.clone()),
+                    inline_content: None,
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+                &context,
+            )
+            .await
+            .expect("put");
+            store.reset();
+            submit_operation(
+                &store,
+                &namespace_id,
+                CommitId::generate(),
+                FilesystemOperation::AppendFile {
+                    path: path.clone(),
+                    inline_content: b" world".to_vec(),
+                    expected_inode_id: None,
+                    expected_revision_no: None,
+                },
+                &context,
+            )
+            .await
+            .expect("append");
+            assert!(
+                store.snapshot().is_empty(),
+                "append must not read or write content objects"
+            );
+            let entry = resolve_path(&store, &namespace_id, path.as_str())
+                .await
+                .expect("entry");
+            let PathEntryKind::File { content_ref, .. } = entry.kind else {
+                panic!("expected file")
+            };
+            assert_eq!(
+                content_ref.checksum,
+                Checksum::compute(store.checksum_algorithm(), b"hello world")
+            );
+            assert_eq!(
+                read_file_bytes(&store, &namespace_id, path.as_str())
+                    .await
+                    .expect("read")
+                    .bytes,
+                b"hello world"
+            );
+        }
+    }
+}
+
 fn replay_read_guard_store(root: impl AsRef<Path>, namespace: &str) -> FailStore<LocalFsStore> {
     let wal_prefix = format!("namespaces/{namespace}/wal/");
     let store = FailStore::new(
@@ -499,7 +616,7 @@ mod streamed_content {
                 .expect("staged content")
                 .clone()
                 .checksum,
-            Checksum::sha256(&bytes),
+            Checksum::crc64nvme(&bytes),
             "the server hashed the whole stream itself"
         );
 
@@ -668,7 +785,8 @@ mod streamed_content {
                     .clone()
                     .content_id
                     .clone(),
-                &stored
+                &stored,
+                loonfs_types::ChecksumAlgorithm::Crc64nvme
             ),
             "the recorded reference must describe the object byte for byte"
         );
@@ -869,6 +987,57 @@ mod direct_multipart {
             Bytes::from(session.payload.clone())
         );
         assert_eq!(store.open_uploads(), 0, "completion consumes the upload");
+        use loonfs_core::publish::FilesystemOperation;
+        use loonfs_types::{AbsolutePath, CommitId, PathEntryKind};
+        let path = AbsolutePath::parse("/multipart").expect("path");
+        submit_operation(
+            &store,
+            &session.namespace_id,
+            CommitId::generate(),
+            FilesystemOperation::PutFile {
+                path: path.clone(),
+                content_ref: completed.content_ref().cloned(),
+                inline_content: None,
+                behavior: DestinationBehavior::NoReplace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+            &context,
+        )
+        .await
+        .expect("publish multipart content");
+        submit_operation(
+            &store,
+            &session.namespace_id,
+            CommitId::generate(),
+            FilesystemOperation::AppendFile {
+                path,
+                inline_content: b"tail".to_vec(),
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+            &context,
+        )
+        .await
+        .expect("append multipart content");
+        let entry = resolve_path(&store, &session.namespace_id, "/multipart")
+            .await
+            .expect("entry");
+        let PathEntryKind::File { content_ref, .. } = entry.kind else {
+            panic!("expected file")
+        };
+        let whole = [session.payload.as_slice(), b"tail"].concat();
+        assert_eq!(
+            content_ref.checksum,
+            Checksum::compute(store.checksum_algorithm(), &whole)
+        );
+        assert_eq!(
+            read_file_bytes(&store, &session.namespace_id, "/multipart")
+                .await
+                .expect("read")
+                .bytes,
+            whole
+        );
     }
 
     #[tokio::test]

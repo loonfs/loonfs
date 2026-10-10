@@ -3950,7 +3950,7 @@ mod direct_download {
                 &loonfs_types::api::v0::CompleteUploadBody::DirectMultipart {
                     content: UploadContentClaim {
                         size_bytes: 5,
-                        checksum: Checksum::sha256(b"hello"),
+                        checksum: Checksum::crc64nvme(b"hello"),
                     },
                     parts: Vec::new(),
                 },

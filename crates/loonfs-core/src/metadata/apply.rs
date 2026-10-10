@@ -130,8 +130,6 @@ impl MetadataState {
                 inode_id,
                 revision_no,
                 content_ref,
-                hash_state,
-                crc64nvme,
                 layout,
             } => {
                 if let Some(layout) = layout {
@@ -152,8 +150,6 @@ impl MetadataState {
                     committed_by: actor.clone(),
                     delta_index: *delta_index,
                     content_ref: content_ref.clone(),
-                    hash_state: hash_state.clone(),
-                    crc64nvme: crc64nvme.clone(),
                 });
             }
             WalDelta::TombstoneSubtree {

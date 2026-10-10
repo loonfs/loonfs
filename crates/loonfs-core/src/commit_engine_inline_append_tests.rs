@@ -172,7 +172,8 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
         ContentRef::blob_v1(
             namespace_id.clone(),
             original.content_id.clone(),
-            b"hello world"
+            b"hello world",
+            loonfs_types::ChecksumAlgorithm::Crc64nvme
         )
     );
     for _ in ["before the fold", "after the fold"] {
@@ -503,7 +504,7 @@ async fn an_append_retry_replays_and_changed_bytes_conflict() {
 /// A direct upload records only what its provider reports: a CRC-64/NVME
 /// on S3, a CRC-32C on GCS.
 #[tokio::test]
-async fn appends_continue_the_digest_their_base_recorded() {
+async fn appends_reject_a_base_in_another_store_algorithm() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let (inode_id, _) = folded_file(&store, &mut engine, &context, b"seed").await;
@@ -534,9 +535,6 @@ async fn appends_continue_the_digest_their_base_recorded() {
                     size_bytes: 6,
                     checksum: checksum.clone(),
                 },
-                hash_state: None,
-                crc64nvme: (checksum.algorithm == loonfs_types::ChecksumAlgorithm::Crc64nvme)
-                    .then(|| checksum.clone()),
                 layout: Some(loonfs_types::ContentLayout {
                     extents: vec![loonfs_types::ContentExtent {
                         owner_namespace_id: namespace_id.clone(),
@@ -552,6 +550,7 @@ async fn appends_continue_the_digest_their_base_recorded() {
         .await
         .expect("commit the upload");
         engine.invalidate_projection();
+        store.reset();
         let appended = publish(
             &mut engine,
             &store,
@@ -576,15 +575,15 @@ async fn appends_continue_the_digest_their_base_recorded() {
                 fold_wal(&store, &namespace_id).await.expect("fold");
             }
         } else {
-            let error = appended.expect_err("nothing to continue");
-            assert_eq!(error.code(), ErrorCode::NotSupported);
-            assert!(error.to_string().contains("`/file-0`"), "{error}");
+            let error = appended.expect_err("wrong store algorithm");
+            assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+            assert_no_writes(&store);
         }
     }
 }
 
 #[tokio::test]
-async fn a_copy_appends_from_its_revision_digests_under_a_fresh_chain_id() {
+async fn a_copy_appends_from_its_revision_checksums_under_a_fresh_chain_id() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let (_, original) = folded_file(&store, &mut engine, &context, b"hello").await;
@@ -629,7 +628,7 @@ async fn a_copy_appends_from_its_revision_digests_under_a_fresh_chain_id() {
         .all(|operation| loonfs_objectstore::layout::content_id_of(operation.key()).is_none()));
     let reference = current_ref(&store, &namespace_id, "/copy").await;
     assert_ne!(reference.content_id, original.content_id);
-    assert_eq!(reference.checksum, Checksum::sha256(b"hello?"));
+    assert_eq!(reference.checksum, Checksum::crc64nvme(b"hello?"));
 }
 
 fn copy(source: &str, destination: &str) -> FilesystemOperation {

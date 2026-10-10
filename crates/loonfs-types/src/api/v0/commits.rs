@@ -306,8 +306,9 @@ mod tests {
             crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("valid content id"),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
-        let sample_content_ref_json = r#"{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#;
+        let sample_content_ref_json = r#"{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}}"#;
 
         let version = binding_version();
         let directory_created = FilesystemChange::DirectoryCreated {

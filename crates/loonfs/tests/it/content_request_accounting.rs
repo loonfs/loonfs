@@ -256,7 +256,10 @@ async fn prepare_content_performs_one_content_put_and_no_reads() {
 
     let content_ref = prepared.content_ref();
     assert_eq!(content_ref.size_bytes, bytes.len() as u64);
-    assert_eq!(content_ref.checksum, loonfs_types::Checksum::sha256(bytes));
+    assert_eq!(
+        content_ref.checksum,
+        loonfs_types::Checksum::crc64nvme(bytes)
+    );
     assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
 }
 
@@ -451,7 +454,7 @@ async fn prepare_content_ref_accepts_a_matching_crc64nvme_ref() {
     assert_eq!(prepared.content_ref().size_bytes, bytes.len() as u64);
     assert_eq!(
         prepared.content_ref().checksum,
-        loonfs_types::Checksum::sha256(bytes),
+        loonfs_types::Checksum::crc64nvme(bytes),
         "the destination may use its own checksum algorithm"
     );
 }
@@ -475,7 +478,7 @@ async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
     assert_eq!(prepared.content_ref().size_bytes, bytes.len() as u64);
     assert_eq!(
         prepared.content_ref().checksum,
-        loonfs_types::Checksum::sha256(&bytes)
+        loonfs_types::Checksum::crc64nvme(&bytes)
     );
     assert_content_counts(harness.recording.snapshot(), 0, 2, 1, bytes.len());
 }

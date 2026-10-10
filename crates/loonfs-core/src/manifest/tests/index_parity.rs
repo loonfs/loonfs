@@ -357,7 +357,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         ApiMetadataRowFamily::Revisions,
     );
     let kept = |body: &[u8]| {
-        let checksum = Checksum::sha256(body);
+        let checksum = Checksum::crc64nvme(body);
         revisions.iter().any(|row| matches!(
             row,
             MetadataRow::FileRevision (crate::metadata::RevisionRecord { content_ref, .. }) if content_ref.checksum == checksum

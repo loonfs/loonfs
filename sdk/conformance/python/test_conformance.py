@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import io
 import json
 import os
@@ -570,6 +569,8 @@ def _crc_table(polynomial: int, mask: int) -> tuple[int, ...]:
     return tuple(values)
 
 
+_CRC32C_MASK = (1 << 32) - 1
+_CRC32C_TABLE = _crc_table(0x82F63B78, _CRC32C_MASK)
 _CRC64_NVME_MASK = (1 << 64) - 1
 _CRC64_NVME_TABLE = _crc_table(0x9A6C9329AC4BC9B5, _CRC64_NVME_MASK)
 
@@ -662,8 +663,8 @@ def test_server_client_rejects_a_partial_subject_context(options: dict[str, str]
 
 
 def _checksum(algorithm: str, content: bytes) -> Checksum:
-    if algorithm == "sha256":
-        value = hashlib.sha256(content).hexdigest()
+    if algorithm == "crc32c":
+        value = f"{_crc(content, _CRC32C_TABLE, _CRC32C_MASK):08x}"
     elif algorithm == "crc64nvme":
         value = f"{_crc(content, _CRC64_NVME_TABLE, _CRC64_NVME_MASK):016x}"
     else:

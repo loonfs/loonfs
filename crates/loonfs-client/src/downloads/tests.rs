@@ -125,6 +125,7 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
 
     let transport = scripted_transport::script([Outcome::Success(served)]);
@@ -238,6 +239,7 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
 
     let transport = scripted_transport::script([Outcome::Success(payload.clone())]);
@@ -263,6 +265,7 @@ async fn a_resume_takes_a_new_grant_and_sends_the_headers_it_returns() {
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let issued = grant_from(content_ref, "http://example.invalid/object?signed", held);
 
@@ -318,6 +321,7 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let path_grant = grant_from(content_ref, "http://example.invalid/object", held);
     let inode_grant = CreateDownloadByInodeResponse {
@@ -382,6 +386,7 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
 
     let transport = scripted_transport::script([Outcome::Success(payload[4..].to_vec())]);
@@ -407,6 +412,7 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let mut grant = grant(content_ref, "http://example.invalid/object");
     let ObjectTransferAccess::PresignedUrl { method, .. } = &mut grant.ranges[0].access;
@@ -431,6 +437,7 @@ async fn a_grant_from_past_the_start_is_refused_before_any_request() {
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     // The grant signs `range: bytes=5-9`.
     let resumed = grant_from(content_ref, "http://example.invalid/object", 5);

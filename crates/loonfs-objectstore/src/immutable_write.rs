@@ -166,11 +166,7 @@ mod tests {
             checksum,
         };
         assert!(decide_attestation("key", &expected, metadata(Some(expected.clone()))).is_ok());
-        for actual in [
-            Checksum::crc64nvme(b"other"),
-            Checksum::sha256(b"bytes"),
-            Checksum::crc32c(b"bytes"),
-        ] {
+        for actual in [Checksum::crc64nvme(b"other"), Checksum::crc32c(b"bytes")] {
             assert!(matches!(
                 decide_attestation("key", &expected, metadata(Some(actual))),
                 Err(ImmutableWriteError::DifferentObject { .. })

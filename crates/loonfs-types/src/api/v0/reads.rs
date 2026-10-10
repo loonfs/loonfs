@@ -400,6 +400,7 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             crate::ContentId::generate(),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         let mut file = entry("/report.txt", Some(InodeId(1)), Some("report.txt"));
         file.kind = PathEntryKind::File {
@@ -464,6 +465,7 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             crate::ContentId::generate(),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         );
         let file = PathEntryKind::File {
             revision_no: RevisionNo(1),

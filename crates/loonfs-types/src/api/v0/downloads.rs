@@ -95,6 +95,7 @@ mod tests {
             crate::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
+            crate::ChecksumAlgorithm::Crc64nvme,
         )
     }
 
@@ -105,8 +106,8 @@ mod tests {
             "content_id": "con_0123456789abcdef0123456789abcdef",
             "size_bytes": 5,
             "checksum": {
-                "algorithm": "sha256",
-                "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                "algorithm": "crc64nvme",
+                "value": "3377857006524257"
             }
         })
     }

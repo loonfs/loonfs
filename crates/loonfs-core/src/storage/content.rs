@@ -12,8 +12,8 @@ use futures::StreamExt;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteStream, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_types::{
-    Checksum, ContentId, ContentRef, ContentRefValidationError, Crc64Nvme, ErrorCode, NamespaceId,
-    PathEntry, Sha256State, StreamingChecksum,
+    Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentRefValidationError,
+    ErrorCode, NamespaceId, PathEntry, StreamingChecksum,
 };
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -23,16 +23,13 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 /// Confirms that LoonFS durably stored the content described by this
-/// reference, with the SHA-256 state and CRC-64/NVME it computed over the
-/// bytes.
+/// reference.
 #[allow(unreachable_pub)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContent {
     #[cfg(any(test, feature = "test-support"))]
     object_key: String,
     pub(crate) content_ref: ContentRef,
-    pub(crate) hash_state: Sha256State,
-    pub(crate) crc64nvme: Checksum,
 }
 
 #[allow(dead_code, unreachable_pub)]
@@ -143,13 +140,7 @@ pub fn prepare_stored_content(
     _catalog: &VerifiedNamespaceCatalogEntry,
     stored_content: StoredContent,
 ) -> PreparedContent {
-    PreparedContent::for_completed_upload(
-        stored_content.content_ref,
-        Some(stored_content.hash_state),
-        Some(stored_content.crc64nvme),
-        u64::MAX,
-        None,
-    )
+    PreparedContent::for_completed_upload(stored_content.content_ref, u64::MAX, None)
 }
 
 /// Fully validates an existing durable content reference for publication.
@@ -562,10 +553,6 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
 pub(crate) struct StagedStream {
     /// Identity, length, and checksum of the complete payload.
     pub content_ref: ContentRef,
-    /// SHA-256 state after the complete payload.
-    pub hash_state: Sha256State,
-    /// CRC-64/NVME of the complete payload.
-    pub crc64nvme: Checksum,
     /// Whether the object existed before this write.
     pub already_present: bool,
 }
@@ -590,7 +577,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     check_ownership: impl Future<Output = Result<(), CoreError>>,
 ) -> Result<StagedStream, CoreError> {
     let object_key = content_blob(&owner_namespace_id, &content_id);
-    let observed = Arc::new(Mutex::new(StreamedPayload::default()));
+    let observed = Arc::new(Mutex::new(StreamedPayload::new(store.checksum_algorithm())));
     let (request_check, check_requested) = oneshot::channel();
     let (allow_completion, completion_allowed) = oneshot::channel();
     let hashed = {
@@ -639,13 +626,16 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
         check,
     );
     checked?;
-    let observed = std::mem::take(&mut *observed.lock().unwrap_or_else(|err| err.into_inner()));
+    let observed = std::mem::replace(
+        &mut *observed.lock().unwrap_or_else(|err| err.into_inner()),
+        StreamedPayload::new(store.checksum_algorithm()),
+    );
     let already_present = match stored {
-        Ok(stored_bytes) if stored_bytes != observed.hash_state.length() => {
+        Ok(stored_bytes) if stored_bytes != observed.size_bytes => {
             return Err(CoreError::Internal(format!(
                 "streamed write of `{object_key}` stored {stored_bytes} bytes, \
                  but {} passed through this writer",
-                observed.hash_state.length()
+                observed.size_bytes
             )))
         }
         Ok(_) => false,
@@ -660,13 +650,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     };
 
     Ok(StagedStream {
-        content_ref: ContentRef::blob_v1_streamed(
-            owner_namespace_id,
-            content_id,
-            &observed.hash_state,
-        ),
-        hash_state: observed.hash_state,
-        crc64nvme: observed.crc64nvme.finish(),
+        content_ref: observed.into_content_ref(owner_namespace_id, content_id),
         already_present,
     })
 }
@@ -676,30 +660,47 @@ pub(crate) async fn identify_streamed_payload(
     owner_namespace_id: NamespaceId,
     content_id: ContentId,
     mut body: ByteStream,
+    algorithm: ChecksumAlgorithm,
 ) -> Result<ContentRef, CoreError> {
-    let mut hash_state = Sha256State::new();
+    let mut observed = StreamedPayload::new(algorithm);
     while let Some(chunk) = body.next().await {
         let chunk = chunk.map_err(|err| CoreError::store("upload body", &err))?;
-        hash_state.update(&chunk);
+        observed.update(&chunk);
     }
-    Ok(ContentRef::blob_v1_streamed(
-        owner_namespace_id,
-        content_id,
-        &hash_state,
-    ))
+    Ok(observed.into_content_ref(owner_namespace_id, content_id))
 }
 
-/// The SHA-256 state and CRC-64/NVME of a streamed payload.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct StreamedPayload {
-    hash_state: Sha256State,
-    crc64nvme: Crc64Nvme,
+    size_bytes: u64,
+    checksum: StreamingChecksum,
 }
 
 impl StreamedPayload {
+    fn new(algorithm: ChecksumAlgorithm) -> Self {
+        Self {
+            size_bytes: 0,
+            checksum: StreamingChecksum::for_algorithm(algorithm),
+        }
+    }
+
     fn update(&mut self, chunk: &[u8]) {
-        self.hash_state.update(chunk);
-        self.crc64nvme.update(chunk);
+        self.size_bytes += chunk.len() as u64;
+        self.checksum.update(chunk);
+    }
+
+    fn into_content_ref(
+        self,
+        owner_namespace_id: NamespaceId,
+        content_id: ContentId,
+    ) -> ContentRef {
+        ContentRef {
+            kind: ContentRefKind::BlobV1,
+            owner_namespace_id,
+            content_id,
+            size_bytes: self.size_bytes,
+            checksum: self.checksum.finish(),
+        }
     }
 }
 
@@ -711,9 +712,12 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     content_id: ContentId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    let mut hash_state = Sha256State::new();
-    hash_state.update(bytes);
-    let content_ref = ContentRef::blob_v1_streamed(owner_namespace_id, content_id, &hash_state);
+    let content_ref = ContentRef::blob_v1(
+        owner_namespace_id,
+        content_id,
+        bytes,
+        store.checksum_algorithm(),
+    );
     let object_key = content_blob(&content_ref.owner_namespace_id, &content_ref.content_id);
     store
         .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
@@ -723,8 +727,6 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
         #[cfg(any(test, feature = "test-support"))]
         object_key,
         content_ref,
-        hash_state,
-        crc64nvme: Checksum::crc64nvme(bytes),
     })
 }
 
@@ -833,6 +835,7 @@ mod tests {
             expected.owner_namespace_id.clone(),
             expected.content_id.clone(),
             b"mismatch",
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         put_content_object(&store, &planted, b"mismatch").await;
 
@@ -959,7 +962,7 @@ mod tests {
         // completion check exists to catch on a provider that accepts a
         // wrong claim.
         let mut wrong_checksum = content_ref.clone();
-        wrong_checksum.checksum = Checksum::sha256(b"other bytes");
+        wrong_checksum.checksum = Checksum::crc64nvme(b"other bytes");
         assert!(matches!(
             verify_durable_content_checksum(&store, &wrong_checksum)
                 .await
@@ -1052,6 +1055,7 @@ mod tests {
                     loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
                     loonfs_types::ContentId::generate(),
                     b"",
+                    loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 ),
                 revision_committed_by: loonfs_types::ActorId::loonfs(),
                 revision_committed_at_ms: 1,
@@ -1457,6 +1461,7 @@ mod tests {
             expected.owner_namespace_id.clone(),
             expected.content_id.clone(),
             &planted,
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         put_content_object(&store, &planted_ref, &planted).await;
 

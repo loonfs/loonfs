@@ -1821,12 +1821,9 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
         .get("UploadSessionStatusOpen")
         .expect("open session schema");
     let required = required_fields(open);
-    for field in [
-        "checksum_algorithm",
-        "access",
-        "part_size_bytes",
-        "content_ref",
-    ] {
+    assert!(open["properties"].get("checksum_algorithm").is_some());
+    assert!(required.contains("checksum_algorithm"));
+    for field in ["access", "part_size_bytes", "content_ref"] {
         assert!(
             open["properties"].get(field).is_some(),
             "open session includes `{field}`"

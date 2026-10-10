@@ -189,6 +189,7 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
         namespace_id.clone(),
         original.content_id.clone(),
         &bytes[..105],
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let older = view
         .resolve_content_location(&prefix)
@@ -230,7 +231,7 @@ async fn a_merged_span_must_match_its_objects_attestation() {
         store.clone(),
         KeyPredicate::exact(key.clone()),
         |mut metadata| {
-            metadata.checksum = Some(Checksum::sha256(b"bad"));
+            metadata.checksum = Some(Checksum::crc64nvme(b"bad"));
             metadata
         },
     );
@@ -620,6 +621,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         namespace_id.clone(),
         ContentId::parse("con_10000000000000000000000000000000").expect("base id"),
         Bytes::from_static(b"hello"),
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     publish(
         &mut engine,
@@ -1095,10 +1097,12 @@ async fn two_large_merges_share_one_folds_memory_budget() {
                 b'c',
             );
             revision_no.0 += 1;
-            let mut hash_state = loonfs_types::Sha256State::new();
-            hash_state.update(&bytes);
-            let content_ref =
-                ContentRef::blob_v1_streamed(namespace_id.clone(), content_id.clone(), &hash_state);
+            let content_ref = ContentRef::blob_v1(
+                namespace_id.clone(),
+                content_id.clone(),
+                &bytes,
+                store.checksum_algorithm(),
+            );
             let view = load_current_metadata_view(&store, &namespace_id)
                 .await
                 .expect("base view");
@@ -1121,8 +1125,6 @@ async fn two_large_merges_share_one_folds_memory_budget() {
                     inode_id,
                     revision_no,
                     content_ref: content_ref.clone(),
-                    hash_state: Some(hash_state),
-                    crc64nvme: None,
                     layout: Some(layout),
                 }],
                 bytes[offset..]
@@ -1363,6 +1365,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                     namespace_id.clone(),
                     ContentId::parse("con_00000000000000000000000000000001").expect("content"),
                     Bytes::from_static(b"target"),
+                    loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 )],
             ),
         )
@@ -1374,6 +1377,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             namespace_id.clone(),
             ContentId::parse("con_00000000000000000000000000000004").expect("content"),
             Bytes::from_static(b"hello"),
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         publish(
             &mut engine,
@@ -1459,6 +1463,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             namespace_id.clone(),
             ContentId::parse("con_00000000000000000000000000000003").expect("content"),
             Bytes::from_static(b"replacement"),
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let replacement = CommitCandidate::with_inline_content(
             CommitRequest::single(

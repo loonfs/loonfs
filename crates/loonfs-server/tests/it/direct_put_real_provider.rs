@@ -63,7 +63,7 @@ fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> UploadContent
 fn direct_put_of(begin: &UploadSession) -> (ChecksumAlgorithm, &ObjectTransferAccess) {
     match &begin.status {
         UploadSessionStatus::Open {
-            checksum_algorithm: Some(checksum_algorithm),
+            checksum_algorithm,
             access: Some(access),
             ..
         } => (*checksum_algorithm, access),
@@ -76,7 +76,7 @@ fn direct_multipart_of(begin: &UploadSession) -> (u64, ChecksumAlgorithm) {
     match &begin.status {
         UploadSessionStatus::Open {
             part_size_bytes: Some(part_size_bytes),
-            checksum_algorithm: Some(checksum_algorithm),
+            checksum_algorithm,
             ..
         } => (*part_size_bytes, *checksum_algorithm),
         other => panic!("a direct_multipart begin answered as {:?}", other),

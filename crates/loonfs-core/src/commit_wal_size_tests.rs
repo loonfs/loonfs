@@ -17,8 +17,8 @@ use loonfs_types::format::wal::{
 use loonfs_types::{
     ActorId, AttributeKey, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId,
     ContentId, ContentRef, ContentRefKind, DestinationBehavior, DestinationPrecondition,
-    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, Sha256State, WalNo,
-    WriterEpoch, MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
+    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalNo, WriterEpoch,
+    MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
 };
 use std::collections::BTreeMap;
 
@@ -58,14 +58,13 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         owner_namespace_id: namespace_id.clone(),
         content_id: ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
         size_bytes: u64::MAX,
-        checksum: Checksum::sha256(b"content"),
+        checksum: Checksum::crc64nvme(b"content"),
     };
-    let mut log_state = Sha256State::new();
-    log_state.update(b"log");
-    let log_ref = ContentRef::blob_v1_streamed(
+    let log_ref = ContentRef::blob_v1(
         NamespaceId::parse("o".repeat(MAX_ID_BYTES)).expect("owner"),
         ContentId::parse("con_fedcba9876543210fedcba9876543210").expect("content id"),
-        &log_state,
+        b"log",
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let mut state = MetadataState::default();
     state.apply_committed_wal_deltas_mut(
@@ -99,8 +98,6 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(MAX_PUBLIC_INTEGER - 1),
                 content_ref: content_ref.clone(),
-                hash_state: None,
-                crc64nvme: None,
                 layout: Some(loonfs_types::ContentLayout {
                     extents: (0..16)
                         .map(|index| loonfs_types::ContentExtent {
@@ -141,8 +138,6 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 inode_id: InodeId(3),
                 revision_no: RevisionNo(MAX_PUBLIC_INTEGER - MAX_COMMIT_OPERATIONS as u64),
                 content_ref: log_ref.clone(),
-                hash_state: Some(log_state),
-                crc64nvme: Some(Checksum::crc64nvme(b"log")),
                 layout: Some(loonfs_types::ContentLayout {
                     extents: vec![loonfs_types::ContentExtent {
                         owner_namespace_id: log_ref.owner_namespace_id.clone(),
@@ -163,6 +158,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 0;
                 loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES
             ]),
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let operation_count = match kind {
             "put" | "inline" => 1,

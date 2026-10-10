@@ -3,11 +3,10 @@ package conformance_test
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"hash/crc64"
 	"io"
 	"net/http"
@@ -428,8 +427,8 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatal("created upload session is not open")
 	}
 	directPut := begin.Open
-	if directPut.Access == nil || directPut.ChecksumAlgorithm == nil {
-		t.Fatal("direct_put session lacks access or checksum_algorithm")
+	if directPut.Access == nil {
+		t.Fatal("direct_put session lacks access")
 	}
 	if begin.Status != expected.BeginStatus {
 		t.Errorf("begin status = %q, want %q", begin.Status, expected.BeginStatus)
@@ -437,13 +436,13 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 	if string(begin.Open.Mode) != expected.Mode {
 		t.Errorf("begin upload mode = %q, want %q", begin.Open.Mode, expected.Mode)
 	}
-	if string(*directPut.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
-		t.Errorf("direct PUT checksum_algorithm = %q, want %q", *directPut.ChecksumAlgorithm, expected.ChecksumAlgorithm)
+	if string(directPut.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
+		t.Errorf("direct PUT checksum_algorithm = %q, want %q", directPut.ChecksumAlgorithm, expected.ChecksumAlgorithm)
 	}
 
 	putPresigned(t, directPut.Access, payload, false)
 	claim := &loonfs.UploadContentClaim{
-		Checksum:  mustChecksum(t, *directPut.ChecksumAlgorithm, payload),
+		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
 		SizeBytes: int64(len(payload)),
 	}
 	completed, err := h.client.Uploads.Complete(context.Background(), &loonfs.CompleteUploadRequest{
@@ -531,8 +530,8 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatal("created upload session is not open")
 	}
 	multipart := begin.Open
-	if multipart.PartSizeBytes == nil || multipart.ChecksumAlgorithm == nil {
-		t.Fatal("direct_multipart session lacks part_size_bytes or checksum_algorithm")
+	if multipart.PartSizeBytes == nil {
+		t.Fatal("direct_multipart session lacks part_size_bytes")
 	}
 	if begin.Status != expected.BeginStatus {
 		t.Errorf("begin status = %q, want %q", begin.Status, expected.BeginStatus)
@@ -543,8 +542,8 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	if *multipart.PartSizeBytes != request.PartSizeBytes {
 		t.Errorf("part_size_bytes = %d, want %d", *multipart.PartSizeBytes, request.PartSizeBytes)
 	}
-	if string(*multipart.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
-		t.Errorf("checksum_algorithm = %q, want %q", *multipart.ChecksumAlgorithm, expected.ChecksumAlgorithm)
+	if string(multipart.ChecksumAlgorithm) != expected.ChecksumAlgorithm {
+		t.Errorf("checksum_algorithm = %q, want %q", multipart.ChecksumAlgorithm, expected.ChecksumAlgorithm)
 	}
 	parts := splitPayload(t, payload, *multipart.PartSizeBytes)
 	if len(parts) != expected.PartCount {
@@ -553,7 +552,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	claims := make([]*loonfs.UploadPartChecksumClaim, len(parts))
 	for index, part := range parts {
 		claims[index] = &loonfs.UploadPartChecksumClaim{
-			Checksum:   mustChecksum(t, *multipart.ChecksumAlgorithm, part),
+			Checksum:   mustChecksum(t, multipart.ChecksumAlgorithm, part),
 			PartNumber: index + 1,
 		}
 	}
@@ -584,7 +583,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	sort.Slice(completedParts, func(left, right int) bool {
 		return completedParts[left].PartNumber < completedParts[right].PartNumber
 	})
-	wholeChecksum := mustChecksum(t, *multipart.ChecksumAlgorithm, payload)
+	wholeChecksum := mustChecksum(t, multipart.ChecksumAlgorithm, payload)
 	completionRequest := &loonfs.CompleteUploadRequest{
 		NamespaceID: request.NamespaceID,
 		UploadID:    string(begin.Open.UploadID),
@@ -1360,25 +1359,25 @@ func runChildrenByInode(t *testing.T, h *harness, testCase conformanceCase) {
 }
 
 type inodeMutationsRequest struct {
-	NamespaceID                string         `json:"namespace_id"`
-	Directory                  string         `json:"directory"`
-	ActorID                    loonfs.ActorID `json:"actor_id"`
-	PathDirectoryName          string         `json:"path_directory_name"`
-	PathFileName               string         `json:"path_file_name"`
-	InodeDirectoryName         string         `json:"inode_directory_name"`
-	InodeFileName              string         `json:"inode_file_name"`
-	RenamedFileName            string         `json:"renamed_file_name"`
-	MovedFileName              string         `json:"moved_file_name"`
-	ContentUTF8                string         `json:"content_utf8"`
-	RevisedContentUTF8         string         `json:"revised_content_utf8"`
+	NamespaceID             string         `json:"namespace_id"`
+	Directory               string         `json:"directory"`
+	ActorID                 loonfs.ActorID `json:"actor_id"`
+	PathDirectoryName       string         `json:"path_directory_name"`
+	PathFileName            string         `json:"path_file_name"`
+	InodeDirectoryName      string         `json:"inode_directory_name"`
+	InodeFileName           string         `json:"inode_file_name"`
+	RenamedFileName         string         `json:"renamed_file_name"`
+	MovedFileName           string         `json:"moved_file_name"`
+	ContentUTF8             string         `json:"content_utf8"`
+	RevisedContentUTF8      string         `json:"revised_content_utf8"`
 	MalformedBindingVersion string         `json:"malformed_binding_version"`
 }
 
 type inodeMutationsExpected struct {
-	EntryNames                 []string            `json:"entry_names"`
-	RevisedRevisionNo          int64               `json:"revised_revision_no"`
-	MovedCommittedSeq          int64               `json:"moved_committed_seq"`
-	DeletedCommittedSeq        int64               `json:"deleted_committed_seq"`
+	EntryNames              []string            `json:"entry_names"`
+	RevisedRevisionNo       int64               `json:"revised_revision_no"`
+	MovedCommittedSeq       int64               `json:"moved_committed_seq"`
+	DeletedCommittedSeq     int64               `json:"deleted_committed_seq"`
 	StaleBindingVersion     errorStatusExpected `json:"stale_binding_version"`
 	MalformedBindingVersion errorStatusExpected `json:"malformed_binding_version"`
 }
@@ -1530,11 +1529,11 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 			Operations: []*loonfs.FilesystemOperation{
 				{
 					MoveByInode: &loonfs.FilesystemOperationMoveByInode{
-						Behavior:                  &noReplace,
-						InodeID:                   inodeFile.InodeID,
-						ExpectedBindingVersion: version,
-						DestinationParentInodeID:  identityOf(inodeDirectory).inodeID,
-						DestinationDisplayName:    request.MovedFileName,
+						Behavior:                 &noReplace,
+						InodeID:                  inodeFile.InodeID,
+						ExpectedBindingVersion:   version,
+						DestinationParentInodeID: identityOf(inodeDirectory).inodeID,
+						DestinationDisplayName:   request.MovedFileName,
 					},
 				},
 			},
@@ -1623,8 +1622,8 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 		Operations: []*loonfs.FilesystemOperation{
 			{
 				DeleteByInode: &loonfs.FilesystemOperationDeleteByInode{
-					Behavior:                  &nonRecursive,
-					InodeID:                   inodeFile.InodeID,
+					Behavior:               &nonRecursive,
+					InodeID:                inodeFile.InodeID,
 					ExpectedBindingVersion: movedEntry.bindingVersion,
 				},
 			},
@@ -2615,12 +2614,12 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	directUploadID := string(directBegin.Open.UploadID)
 	directPut := directBegin.Open
-	if directPut.Access == nil || directPut.ChecksumAlgorithm == nil {
-		t.Fatal("direct_put session lacks access or checksum_algorithm")
+	if directPut.Access == nil {
+		t.Fatal("direct_put session lacks access")
 	}
 	putPresigned(t, directPut.Access, payload, false)
 	directClaim := &loonfs.UploadContentClaim{
-		Checksum:  mustChecksum(t, *directPut.ChecksumAlgorithm, payload),
+		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
 		SizeBytes: sizeBytes,
 	}
 	directCompletion := proxyCompleteUpload(
@@ -3117,9 +3116,8 @@ func mustChecksum(t *testing.T, algorithm loonfs.ChecksumAlgorithm, payload []by
 func checksumFor(algorithm loonfs.ChecksumAlgorithm, payload []byte) (*loonfs.Checksum, error) {
 	var value string
 	switch algorithm {
-	case loonfs.ChecksumAlgorithmSha256:
-		digest := sha256.Sum256(payload)
-		value = hex.EncodeToString(digest[:])
+	case loonfs.ChecksumAlgorithmCrc32C:
+		value = fmt.Sprintf("%08x", crc32.Checksum(payload, crc32.MakeTable(crc32.Castagnoli)))
 	case loonfs.ChecksumAlgorithmCrc64Nvme:
 		value = fmt.Sprintf("%016x", crc64.Checksum(payload, conformanceCRC64NVMeTable))
 	default:
@@ -3280,9 +3278,9 @@ func requireFileProjection(t *testing.T, entry *loonfs.PathEntry) *loonfs.PathEn
 
 // pathEntryIdentity is the common subset of the generated path-entry variants.
 type pathEntryIdentity struct {
-	path              string
-	inodeID           string
-	displayName       string
+	path           string
+	inodeID        string
+	displayName    string
 	bindingVersion string
 }
 
@@ -3292,17 +3290,17 @@ func identityOf(entry *loonfs.PathEntry) pathEntryIdentity {
 	}
 	if entry.Dir != nil {
 		return pathEntryIdentity{
-			path:              string(entry.Dir.Path),
-			inodeID:           string(entry.Dir.InodeID),
-			displayName:       optionalString(entry.Dir.DisplayName),
+			path:           string(entry.Dir.Path),
+			inodeID:        string(entry.Dir.InodeID),
+			displayName:    optionalString(entry.Dir.DisplayName),
 			bindingVersion: optionalString(entry.Dir.BindingVersion),
 		}
 	}
 	if entry.File != nil {
 		return pathEntryIdentity{
-			path:              string(entry.File.Path),
-			inodeID:           string(entry.File.InodeID),
-			displayName:       optionalString(entry.File.DisplayName),
+			path:           string(entry.File.Path),
+			inodeID:        string(entry.File.InodeID),
+			displayName:    optionalString(entry.File.DisplayName),
 			bindingVersion: optionalString(entry.File.BindingVersion),
 		}
 	}

@@ -472,7 +472,7 @@ impl Client {
                 return Err(negotiated_a_different_upload_mode());
             }
             let UploadSessionStatus::Open {
-                checksum_algorithm: Some(checksum_algorithm),
+                checksum_algorithm,
                 access: Some(access),
                 ..
             } = begin.status
@@ -545,7 +545,7 @@ impl Client {
                 }
                 let UploadSessionStatus::Open {
                     part_size_bytes: Some(part_size_bytes),
-                    checksum_algorithm: Some(checksum_algorithm),
+                    checksum_algorithm,
                     ..
                 } = begin.status
                 else {
