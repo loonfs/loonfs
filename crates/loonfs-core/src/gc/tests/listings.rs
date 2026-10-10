@@ -220,7 +220,10 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
         gc_namespace(&rooted, None, &namespace_id, &options(), &context(now_ms))
             .await
             .expect("root predecessor");
-        let rooted_reads = rooted.take_get_keys();
+        // Reads within one pass have no fixed order, so both lists are
+        // compared sorted.
+        let mut rooted_reads = rooted.take_get_keys();
+        rooted_reads.sort();
         let current_only = RecordingStore::metadata_segments(Arc::clone(&store));
         gc_namespace(
             &current_only,
@@ -231,7 +234,8 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
         )
         .await
         .expect("current only");
-        let current_reads = current_only.take_get_keys();
+        let mut current_reads = current_only.take_get_keys();
+        current_reads.sort();
         if own_runs {
             assert!(rooted_reads.len() > current_reads.len());
             assert!(layout_segments(&previous)
