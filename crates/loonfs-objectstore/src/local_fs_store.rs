@@ -41,6 +41,7 @@ const STORE_LOCK_FILE_NAME: &str = ".loonfs-store.lock";
 #[derive(Debug)]
 pub struct LocalFsStore {
     root: PathBuf,
+    checksum_algorithm: ChecksumAlgorithm,
     /// Logical prefix every key is confined beneath, or `None` for the root.
     key_prefix: Option<String>,
     write_lock: Mutex<()>,
@@ -56,6 +57,17 @@ impl LocalFsStore {
         Self::with_key_prefix(root, None)
     }
 
+    /// Uses the selected algorithm for stored checksums and compare tokens.
+    pub fn with_checksum_algorithm(
+        root: impl Into<PathBuf>,
+        checksum_algorithm: ChecksumAlgorithm,
+    ) -> Result<Self> {
+        Ok(Self {
+            checksum_algorithm,
+            ..Self::new(root)?
+        })
+    }
+
     /// Opens a local store whose keys are confined beneath `key_prefix`,
     /// matching how the provider adapters scope theirs.
     pub fn with_key_prefix(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
@@ -69,6 +81,7 @@ impl LocalFsStore {
         })?;
         Ok(Self {
             root,
+            checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             key_prefix: normalize_key_prefix(key_prefix)?,
             write_lock: Mutex::new(()),
         })
@@ -118,14 +131,13 @@ impl LocalFsStore {
         Ok(path)
     }
 
-    async fn metadata_for_path(key: &str, path: &Path) -> Result<Option<ObjectMetadata>> {
+    async fn metadata_for_path(&self, key: &str, path: &Path) -> Result<Option<ObjectMetadata>> {
         let metadata = match fs::metadata(path).await {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_error(key, err)),
         };
-        let Some(stored) = Self::file_checksum(key, path, ChecksumAlgorithm::Crc64nvme).await?
-        else {
+        let Some(stored) = Self::file_checksum(key, path, self.checksum_algorithm).await? else {
             return Ok(None);
         };
         Self::metadata_from_fs_metadata(key, &metadata, stored, path).map(Some)
@@ -312,7 +324,8 @@ impl LocalFsStore {
                 .await
                 .map_err(|err| map_create_error(key, err)),
             PutMode::CompareAndSwap { expected_etag } => {
-                let current = Self::metadata_for_path(key, path)
+                let current = self
+                    .metadata_for_path(key, path)
                     .await?
                     .ok_or_else(precondition_failed)?;
                 if current.etag.as_deref() != Some(expected_etag.as_str()) {
@@ -362,7 +375,7 @@ impl LocalFsStore {
 impl LocalFsStore {
     async fn head_object(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let path = self.resolve_key(key)?;
-        Self::metadata_for_path(key, &path).await
+        self.metadata_for_path(key, &path).await
     }
 
     async fn get_with_metadata_object(&self, key: &str) -> Result<Option<ObjectBody>> {
@@ -379,8 +392,12 @@ impl LocalFsStore {
             .await
             .map_err(|err| io_error(key, err))?;
 
-        let metadata =
-            Self::metadata_from_fs_metadata(key, &fs_metadata, Checksum::crc64nvme(&bytes), &path)?;
+        let metadata = Self::metadata_from_fs_metadata(
+            key,
+            &fs_metadata,
+            Checksum::compute(self.checksum_algorithm, &bytes),
+            &path,
+        )?;
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
@@ -458,7 +475,8 @@ impl LocalFsStore {
                 Self::create_new_object(key, &self.root, &path, bytes).await?;
             }
             PutMode::CompareAndSwap { expected_etag } => {
-                let current = Self::metadata_for_path(key, &path)
+                let current = self
+                    .metadata_for_path(key, &path)
                     .await?
                     .ok_or_else(precondition_failed)?;
                 if current.etag.as_deref() != Some(expected_etag.as_str()) {
@@ -478,7 +496,12 @@ impl LocalFsStore {
             }
             Err(err) => return Err(io_error(key, err)),
         };
-        Self::metadata_from_fs_metadata(key, &metadata, Checksum::crc64nvme(bytes), &path)
+        Self::metadata_from_fs_metadata(
+            key,
+            &metadata,
+            Checksum::compute(self.checksum_algorithm, bytes),
+            &path,
+        )
     }
 
     async fn delete_object(&self, key: &str) -> Result<()> {
@@ -508,7 +531,7 @@ impl LocalFsStore {
 #[async_trait]
 impl ObjectStore for LocalFsStore {
     fn checksum_algorithm(&self) -> ChecksumAlgorithm {
-        ChecksumAlgorithm::Crc64nvme
+        self.checksum_algorithm
     }
 
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
@@ -992,7 +1015,11 @@ fn temp_path(path: &Path) -> PathBuf {
 }
 
 fn etag(checksum: &Checksum) -> String {
-    format!("local-fs-v1:crc64nvme:{}", checksum.value)
+    format!(
+        "local-fs-v1:{}:{}",
+        checksum.algorithm.as_str(),
+        checksum.value
+    )
 }
 
 fn map_create_error(key: &str, err: std::io::Error) -> ObjectStoreError {

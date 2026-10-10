@@ -13,8 +13,9 @@ use loonfs_objectstore::presign::{
     DirectGetIssuer, DirectMultipartIssuer, DirectPutIssuer, DirectTransferIssuers,
     PresignedGetRequest, PresignedPartRequest, PresignedPutRequest, PresignedUrl,
 };
-use loonfs_objectstore::{ByteRange, ObjectStore, ObjectStoreError, SharedObjectStore};
+use loonfs_objectstore::{ByteRange, ObjectStoreError, SharedObjectStore};
 use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
+use loonfs_types::ChecksumAlgorithm;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -30,6 +31,22 @@ pub const AUTH_TOKEN: &str = "conformance-test-token";
 
 const DIRECT_PUT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const PROXY_UPLOAD_MAX_BYTES: u64 = 6 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StoreShape {
+    #[default]
+    S3,
+    Gcs,
+}
+
+impl StoreShape {
+    pub fn checksum_algorithm(self) -> ChecksumAlgorithm {
+        match self {
+            Self::S3 => ChecksumAlgorithm::Crc64nvme,
+            Self::Gcs => ChecksumAlgorithm::Crc32c,
+        }
+    }
+}
 
 /// A running conformance API and transfer service.
 #[derive(Debug)]
@@ -74,7 +91,7 @@ pub enum ConformanceServerError {
 }
 
 /// Starts a conformance API and its loopback transfer service.
-pub async fn start_server() -> Result<ConformanceServer, ConformanceServerError> {
+pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, ConformanceServerError> {
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|source| ConformanceServerError::Bind { source })?;
@@ -90,14 +107,20 @@ pub async fn start_server() -> Result<ConformanceServer, ConformanceServerError>
 
     let temp_dir = tempfile::tempdir().map_err(config_error)?;
     let store_root = temp_dir.path().join("store");
-    let inner = LocalFsStore::new(&store_root).map_err(config_error)?;
-    let store = Arc::new(FakeMultipartStore::with_enforcement(
-        inner,
-        MultipartChecksumEnforcement::Precondition,
-    ));
-    let shared_store: SharedObjectStore = store.clone();
+    let inner = LocalFsStore::with_checksum_algorithm(&store_root, shape.checksum_algorithm())
+        .map_err(config_error)?;
+    let (shared_store, multipart_store): (SharedObjectStore, _) = match shape {
+        StoreShape::S3 => {
+            let store = Arc::new(FakeMultipartStore::with_enforcement(
+                inner,
+                MultipartChecksumEnforcement::Precondition,
+            ));
+            (store.clone(), Some(store))
+        }
+        StoreShape::Gcs => (Arc::new(inner), None),
+    };
 
-    let provider_router = transfer_router(store);
+    let provider_router = transfer_router(shared_store.clone(), multipart_store);
     let provider_task = tokio::spawn(async move {
         axum::serve(provider_listener, provider_router)
             .await
@@ -109,7 +132,10 @@ pub async fn start_server() -> Result<ConformanceServer, ConformanceServerError>
     let transfers = DirectTransferIssuers {
         get: issuer.clone(),
         put: Some(issuer.clone()),
-        multipart: Some(issuer),
+        multipart: match shape {
+            StoreShape::S3 => Some(issuer),
+            StoreShape::Gcs => None,
+        },
     };
 
     let config_path = temp_dir.path().join("loonfs-server.toml");
@@ -253,16 +279,25 @@ impl DirectMultipartIssuer for LoopbackIssuer {
 
 type ConformanceStore = FakeMultipartStore<LocalFsStore>;
 
-fn transfer_router(store: Arc<ConformanceStore>) -> Router {
-    Router::new()
+fn transfer_router(
+    store: SharedObjectStore,
+    multipart_store: Option<Arc<ConformanceStore>>,
+) -> Router {
+    let mut router = Router::new()
         .route("/objects/{*key}", get(get_object).put(put_object))
-        .route("/multipart/{upload_id}/{part_number}", put(put_part))
-        .layer(axum::extract::DefaultBodyLimit::disable())
-        .with_state(store)
+        .with_state(store);
+    if let Some(store) = multipart_store {
+        router = router.merge(
+            Router::new()
+                .route("/multipart/{upload_id}/{part_number}", put(put_part))
+                .with_state(store),
+        );
+    }
+    router.layer(axum::extract::DefaultBodyLimit::disable())
 }
 
 async fn get_object(
-    State(store): State<Arc<ConformanceStore>>,
+    State(store): State<SharedObjectStore>,
     AxumPath(key): AxumPath<String>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
@@ -295,7 +330,7 @@ fn signed_range(value: &str) -> Option<ByteRange> {
 }
 
 async fn put_object(
-    State(store): State<Arc<ConformanceStore>>,
+    State(store): State<SharedObjectStore>,
     AxumPath(key): AxumPath<String>,
     body: Bytes,
 ) -> Response {

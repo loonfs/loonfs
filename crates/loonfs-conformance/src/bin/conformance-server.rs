@@ -1,4 +1,6 @@
-use loonfs_conformance::server::start_server;
+//! Runs the reference server until standard input closes.
+
+use loonfs_conformance::server::{start_server, StoreShape};
 use serde::Serialize;
 use std::io::{Read, Write};
 
@@ -10,7 +12,21 @@ struct ServerInfo<'a> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let server = start_server().await?;
+    let shape = match std::env::var("LOONFS_CONFORMANCE_SHAPE") {
+        Ok(value) => match value.as_str() {
+            "s3" => StoreShape::S3,
+            "gcs" => StoreShape::Gcs,
+            _ => {
+                return Err(format!(
+                    "invalid `LOONFS_CONFORMANCE_SHAPE` {value:?}: expected `s3` or `gcs`"
+                )
+                .into())
+            }
+        },
+        Err(std::env::VarError::NotPresent) => StoreShape::default(),
+        Err(error) => return Err(error.into()),
+    };
+    let server = start_server(shape).await?;
     let info = ServerInfo {
         base_url: &server.base_url,
         token: server.token,
