@@ -22,7 +22,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     context: &crate::context::MutationContext,
     deadline: &Deadline,
     pool: std::sync::Arc<crate::cache::ReadWorkingMemory>,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> Result<DeleteNamespaceResponse> {
     update_manifest(store, namespace_id, deadline, |mut payload| {
         let acquired_writer = &acquired_writer;
@@ -49,7 +49,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
                     deadline,
                     crate::manifest::MetadataLsmPolicy::default(),
                     pool,
-                    merge_memory,
+                    content_writes,
                 )
                 .await?;
                 return Ok(ManifestChange::Again);

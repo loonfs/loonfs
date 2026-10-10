@@ -2381,7 +2381,7 @@ async fn a_failed_fold_reloads_the_tail() {
         &Deadline::start(Arc::new(
             loonfs_objectstore::timing::StdMonotonicTimer::default(),
         )),
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .expect("another process folds the tail");

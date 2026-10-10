@@ -26,18 +26,18 @@ pub const DEFAULT_MAX_CONCURRENT_READS: usize = 64;
 pub(crate) const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: usize = 8;
 /// Default bytes retained across read, publication, and fold memos.
 pub const DEFAULT_MAX_READ_WORKING_BYTES: usize = 256 * 1024 * 1024;
-/// Default memory for merging content extents across runtimes sharing a budget.
-pub const DEFAULT_MAX_CONTENT_MERGE_BYTES: usize = 128 * 1024 * 1024;
+/// Default content writes in flight across runtimes sharing a budget.
+pub const DEFAULT_MAX_CONTENT_WRITES: usize = 32;
 const DEFAULT_MAX_ADMITTED_REQUESTS: usize = 8192;
 const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Work in flight that one or more runtimes share: admitted
 /// publication requests, running reads and publications, WAL folds, metadata merges,
-/// the decoded input one merge may hold, content merge memory, and retained read working memory.
+/// the decoded input one merge may hold, content writes, and retained read working memory.
 ///
 /// Each [`LoonFs`](crate::LoonFs) built with the budget charges the
 /// publication requests it admits to the budget's totals, and takes its
-/// read, publication, fold, and compaction permits from it, so the limits bound the
+/// read, publication, fold, compaction, and content write permits from it, so the limits bound the
 /// work of every runtime that shares it. Publication admission never waits: a request
 /// past an admitted total fails at once with `commit_queue_full`. Permit
 /// waits are first come, first served, whichever runtime they belong to. No
@@ -60,7 +60,7 @@ struct ExecutionBudgetInner {
     folds: PermitPool,
     compactions: PermitPool,
     max_merge_input_bytes: NonZeroUsize,
-    content_merge_memory: Arc<Semaphore>,
+    content_writes: Arc<Semaphore>,
 }
 
 impl fmt::Debug for ExecutionBudget {
@@ -100,7 +100,7 @@ impl ExecutionBudget {
                 )
                 .unwrap()
             },
-            max_content_merge_bytes: DEFAULT_MAX_CONTENT_MERGE_BYTES,
+            max_content_writes: const { NonZeroUsize::new(DEFAULT_MAX_CONTENT_WRITES).unwrap() },
             metrics_recorder: None,
         }
     }
@@ -128,8 +128,8 @@ impl ExecutionBudget {
         }
     }
 
-    pub(crate) fn content_merge_memory(&self) -> Arc<Semaphore> {
-        Arc::clone(&self.inner.content_merge_memory)
+    pub(crate) fn content_writes(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.inner.content_writes)
     }
 
     pub(crate) fn read_working_memory(&self) -> Arc<ReadWorkingMemory> {
@@ -189,7 +189,7 @@ pub struct ExecutionBudgetBuilder {
     max_concurrent_folds: NonZeroUsize,
     max_concurrent_compactions: NonZeroUsize,
     max_merge_input_bytes: NonZeroUsize,
-    max_content_merge_bytes: usize,
+    max_content_writes: NonZeroUsize,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
@@ -272,11 +272,10 @@ impl ExecutionBudgetBuilder {
         self
     }
 
-    /// Limits memory for merging content extents during publication, folds, and
-    /// direct downloads. Defaults to 128 MiB. Values below 32 MiB use 32 MiB,
-    /// which allows one merge to finish.
-    pub fn max_content_merge_bytes(mut self, bytes: usize) -> Self {
-        self.max_content_merge_bytes = bytes;
+    /// Limits content writes during publication, folds, staging, and direct downloads.
+    /// Each write holds one permit until it finishes. Defaults to 32.
+    pub fn max_content_writes(mut self, limit: NonZeroUsize) -> Self {
+        self.max_content_writes = limit;
         self
     }
 
@@ -317,9 +316,8 @@ impl ExecutionBudgetBuilder {
                 folds: PermitPool::new(self.max_concurrent_folds, folds),
                 compactions: PermitPool::new(self.max_concurrent_compactions, compactions),
                 max_merge_input_bytes: self.max_merge_input_bytes,
-                content_merge_memory: Arc::new(Semaphore::new(
-                    self.max_content_merge_bytes
-                        .clamp(32 * 1024 * 1024, Semaphore::MAX_PERMITS),
+                content_writes: Arc::new(Semaphore::new(
+                    self.max_content_writes.get().min(Semaphore::MAX_PERMITS),
                 )),
             }),
         }

@@ -109,7 +109,7 @@ async fn verify_segments<S: ObjectStore>(
 
 #[tokio::test]
 async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_order() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     for rows_per_segment in [2, usize::MAX] {
         let directory = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("segment-wave").expect("namespace id");
@@ -173,7 +173,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                     max_rows_per_segment: NonZeroUsize::new(rows_per_segment).expect("row limit"),
                     ..MetadataLsmPolicy::default()
                 },
-                &merge_memory,
+                &content_writes,
             ),
             async {
                 store.wait_until_blocked().await;
@@ -223,7 +223,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
 
 #[tokio::test]
 async fn a_failed_segment_put_prevents_fold_publication() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("failed-segment-wave").expect("namespace id");
     let local = LocalFsStore::new(directory.path()).expect("store");
@@ -260,7 +260,7 @@ async fn a_failed_segment_put_prevents_fold_publication() {
             max_rows_per_segment: NonZeroUsize::new(2).expect("row limit"),
             ..MetadataLsmPolicy::default()
         },
-        &merge_memory,
+        &content_writes,
     )
     .await;
     assert!(matches!(

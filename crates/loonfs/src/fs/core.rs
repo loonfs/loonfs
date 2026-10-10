@@ -235,7 +235,7 @@ impl RuntimeCore {
         let engine = NamespaceReaderEngine::reader(
             self.inner.store.clone(),
             namespace_id.clone(),
-            self.inner.config.execution_budget.content_merge_memory(),
+            self.inner.config.execution_budget.content_writes(),
         );
         match &self.subject {
             Some(subject) => engine.with_subject(subject.clone()),
@@ -253,7 +253,7 @@ impl RuntimeCore {
             self.inner.store.clone(),
             namespace_id.clone(),
             actor.writer_id.clone(),
-            self.inner.config.execution_budget.content_merge_memory(),
+            self.inner.config.execution_budget.content_writes(),
         )
         .with_wall_clock(self.inner.wall_clock.clone())
         .with_metadata_lsm_policy(self.inner.config.metadata_lsm_policy)

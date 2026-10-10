@@ -89,7 +89,7 @@ pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
         &deadline,
         MetadataLsmPolicy::default(),
         Arc::default(),
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
 }
@@ -100,10 +100,10 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
     pool: Arc<ReadWorkingMemory>,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldWalResponse> {
     let basis =
-        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool, merge_memory)
+        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool, content_writes)
             .await?;
     Ok(fold_wal_response(namespace_id, basis))
 }
@@ -114,7 +114,7 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
     pool: &Arc<ReadWorkingMemory>,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldedBasis> {
     retry_while_contended(|| async move {
         // The fallback reloads after every lost race, so it never relies on
@@ -128,7 +128,7 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
                 &projection,
                 deadline,
                 policy,
-                merge_memory,
+                content_writes,
             )
             .await?
             {
@@ -150,7 +150,7 @@ pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWal> {
     let projection = load_fold_projection(store, namespace_id, segment_cache).await?;
     fold_held_projection(
@@ -160,7 +160,7 @@ pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
         projection,
         deadline,
         policy,
-        merge_memory,
+        content_writes,
     )
     .await
 }
@@ -189,12 +189,12 @@ async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
     mut projection: ManifestProjection<'a, S>,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWal> {
     if let Some(current) = already_current(&projection) {
         return Ok(current);
     }
-    let layouts = materialize_tail_content(store, &projection, merge_memory).await?;
+    let layouts = materialize_tail_content(store, &projection, content_writes).await?;
     let mut attempt =
         publish_fold(store, namespace_id, &projection, &layouts, deadline, policy).await?;
     for _retry in 0..CONTENTION_RETRY_LIMIT {
@@ -254,12 +254,12 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
     projection: &ManifestProjection<'_, S>,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWal> {
     if let Some(current) = already_current(projection) {
         return Ok(current);
     }
-    let layouts = materialize_tail_content(store, projection, merge_memory).await?;
+    let layouts = materialize_tail_content(store, projection, content_writes).await?;
     publish_fold(store, namespace_id, projection, &layouts, deadline, policy).await
 }
 
@@ -331,12 +331,10 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
     })))
 }
 
-/// Checks whole tail values before writing any object, then writes each chain's
-/// extents with shared merge memory and bounded concurrency, and returns the layouts.
 async fn materialize_tail_content<S: ObjectStore + ?Sized>(
     store: &S,
     projection: &ManifestProjection<'_, S>,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> Result<HashMap<ContentId, ContentLayoutRecord>> {
     let tail = projection.tail_state.as_ref();
     let assembled = tail
@@ -351,7 +349,7 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
             let layouts = &layouts;
             async move {
                 let layout =
-                    write_tail_content(store, projection, tail, content, pieces, merge_memory)
+                    write_tail_content(store, projection, tail, content, pieces, content_writes)
                         .await?;
                 {
                     layouts
@@ -381,7 +379,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     input: Option<WalFoldInput>,
     deadline: &Deadline,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldedWalTail> {
     let policy = MetadataLsmPolicy::default();
     let pool = read_working_memory(segment_cache);
@@ -401,7 +399,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
             manifest_projection,
             deadline,
             policy,
-            merge_memory,
+            content_writes,
         )
         .await?
         {
@@ -413,13 +411,13 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
                     deadline,
                     policy,
                     &pool,
-                    merge_memory,
+                    content_writes,
                 )
                 .await?
             }
         }
     } else {
-        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool, merge_memory)
+        fold_wal_basis_with_deadline(store, namespace_id, deadline, policy, &pool, content_writes)
             .await?
     };
     Ok(FoldedWalTail {

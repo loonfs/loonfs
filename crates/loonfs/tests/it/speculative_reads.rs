@@ -175,7 +175,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
         store.clone(),
         namespace_id.clone(),
         writer_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .bootstrap_namespace(
         &loonfs_test_support::test_actor(),
@@ -223,7 +223,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     );
     let result = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .publish_batch(
         &store,

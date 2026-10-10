@@ -96,7 +96,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> PublishBatchAgainstViewResult {
     if candidates.is_empty() {
         return PublishBatchAgainstViewResult::unchanged(Vec::new());
@@ -136,7 +136,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         for (index, candidate) in candidates.iter().enumerate() {
             let admission = prepare_candidate_request(
                 store,
-                merge_memory,
+                content_writes,
                 namespace_id,
                 view,
                 &session,
@@ -472,7 +472,7 @@ mod tests {
                 tip: attempt.clone(),
                 attempt,
             },
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await;
 
@@ -547,7 +547,7 @@ mod tests {
                 attempt: batch.observe(),
                 tip: batch.observe(),
             },
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await;
 

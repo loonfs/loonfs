@@ -659,29 +659,67 @@ async fn one_namespace_id_in_two_stores_is_charged_separately() {
     second.runtime.shutdown().await.expect("shut down");
 }
 
-#[test]
-fn content_merges_share_the_configured_pool() {
-    let default = ExecutionBudget::default();
+#[tokio::test]
+async fn content_staging_holds_the_shared_write_permit_without_publication_admission() {
+    use bytes::Bytes;
+    use futures::{stream, StreamExt};
+    use loonfs_test_support::stores::ConcurrencyWatchStore;
     assert_eq!(
-        default.content_merge_memory().available_permits(),
-        128 * 1024 * 1024
+        ExecutionBudget::default()
+            .content_writes()
+            .available_permits(),
+        32
     );
     let budget = ExecutionBudget::builder()
-        .max_content_merge_bytes(64 * 1024 * 1024)
+        .max_content_writes(NonZeroUsize::MIN)
         .build();
-    let pool = budget.content_merge_memory();
-    let shared = budget.clone().content_merge_memory();
-    assert!(Arc::ptr_eq(&pool, &shared));
-    let permits = pool.try_acquire_many(32 * 1024 * 1024).expect("one merge");
-    assert_eq!(shared.available_permits(), 32 * 1024 * 1024);
-    drop(permits);
-    assert_eq!(shared.available_permits(), 64 * 1024 * 1024);
-    assert_eq!(
-        ExecutionBudget::builder()
-            .max_content_merge_bytes(1)
-            .build()
-            .content_merge_memory()
-            .available_permits(),
-        32 * 1024 * 1024
-    );
+    let root = tempdir().expect("directory");
+    let store = Arc::new(ConcurrencyWatchStore::new(
+        BlockingStore::new(
+            LocalFsStore::new(root.path()).expect("store"),
+            KeyPredicate::content_blob(),
+            OperationClass::Put,
+        ),
+        KeyPredicate::content_blob(),
+    ));
+    let runtime = LoonFs::builder_with_store(store.clone())
+        .writer_id("staging-writer")
+        .execution_budget(budget.clone())
+        .inline_content(crate::InlineContentPolicy {
+            inline_content_threshold_bytes: None,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("runtime");
+    let namespace_id = namespace_id("staging");
+    runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("namespace");
+    let namespace = runtime.open_namespace(&namespace_id).expect("open");
+    store.inner().block_next();
+    let mut writes = std::pin::pin!(async {
+        tokio::join!(
+            namespace.prepare_content(b"first"),
+            namespace
+                .prepare_content_stream(stream::iter([Ok(Bytes::from_static(b"second"))]).boxed(),)
+        )
+    });
+    tokio::select! {
+        () = store.inner().wait_until_blocked() => {}
+        _ = &mut writes => panic!("staging finished before writing"),
+    }
+    assert!(futures::poll!(&mut writes).is_pending());
+    assert_eq!(budget.content_writes().available_permits(), 0);
+    assert_eq!(budget.stats().admitted_requests, 0);
+    assert_eq!(store.puts().total, 1);
+    store.inner().release();
+    let (first, second) = writes.await;
+    first.expect("buffered staging");
+    second.expect("streamed staging");
+    assert_eq!(store.puts().total, 2);
+    assert_eq!(store.puts().peak_in_flight, 1);
+    assert_eq!(budget.content_writes().available_permits(), 1);
+    runtime.shutdown().await.expect("shutdown");
 }

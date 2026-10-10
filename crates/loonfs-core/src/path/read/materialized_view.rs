@@ -412,7 +412,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &S,
         content_ref: &ContentRef,
         start_offset: u64,
-        merge_memory: &Semaphore,
+        content_writes: &Semaphore,
     ) -> Result<Vec<GrantedRange>> {
         if start_offset != 0 && start_offset >= content_ref.size_bytes {
             return Err(CoreError::ResumeOffsetOutOfRange {
@@ -438,6 +438,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .map_err(|error| CoreError::store(key, &error))?
                 .is_none()
             {
+                let _permit = content_writes
+                    .acquire()
+                    .await
+                    .expect("content write semaphore should remain open");
                 store
                     .put_immutable_verified(key, bytes::Bytes::new())
                     .await
@@ -476,7 +480,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 &self.wal_tail,
                 content,
                 assemble_tail_content(content)?,
-                merge_memory,
+                content_writes,
             )
             .await
             .map_err(cannot_write)?
@@ -517,7 +521,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
         start_offset: u64,
         access: &ReadAccess<'_, S>,
-        merge_memory: &Semaphore,
+        content_writes: &Semaphore,
     ) -> Result<DirectDownloadTarget> {
         let (entry, content_ref) = self
             .resolve_file_content(absolute_path, revision_no, access)
@@ -529,7 +533,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             });
         };
         let ranges = self
-            .download_ranges(store, &content_ref, start_offset, merge_memory)
+            .download_ranges(store, &content_ref, start_offset, content_writes)
             .await?;
 
         Ok(DirectDownloadTarget {
@@ -620,7 +624,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
         start_offset: u64,
         access: &ReadAccess<'_, S>,
-        merge_memory: &Semaphore,
+        content_writes: &Semaphore,
     ) -> Result<DirectDownloadByInodeTarget> {
         let revision = match revision_no {
             Some(revision_no) => {
@@ -630,7 +634,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             None => self.current_revision_for_inode(inode_id, access).await?,
         };
         let ranges = self
-            .download_ranges(store, &revision.content_ref, start_offset, merge_memory)
+            .download_ranges(store, &revision.content_ref, start_offset, content_writes)
             .await?;
         Ok(DirectDownloadByInodeTarget {
             inode_id,
@@ -1338,7 +1342,7 @@ mod tests {
                     operation,
                 ))],
                 &context,
-                std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+                std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             )
             .await
             .into_iter()
@@ -1390,7 +1394,7 @@ mod tests {
                 },
             ))],
             &context(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await
         .into_iter()

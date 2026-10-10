@@ -323,7 +323,7 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
         store.clone(),
         namespace_id.clone(),
         loonfs_types::WriterId::parse("manifest-advance").expect("writer id"),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .claim_compactor()
     .await

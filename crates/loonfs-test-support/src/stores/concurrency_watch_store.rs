@@ -183,6 +183,17 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
         self.inner.compare_and_swap(key, expected_etag, bytes).await
     }
 
+    async fn assemble(
+        &self,
+        key: &str,
+        sources: &[loonfs_objectstore::AssemblySource],
+        tail: Vec<Bytes>,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata, loonfs_objectstore::ImmutableWriteError> {
+        let _guard = self.enter(key, &self.puts).await;
+        self.inner.assemble(key, sources, tail, expected).await
+    }
+
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         self.inner.delete(key).await
     }

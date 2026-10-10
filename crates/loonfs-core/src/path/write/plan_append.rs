@@ -25,7 +25,7 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
     expected_inode_id: Option<InodeId>,
     expected_revision_no: Option<RevisionNo>,
     store: &S,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
@@ -59,7 +59,7 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
         .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
     plan_append(
         store,
-        merge_memory,
+        content_writes,
         view,
         absolute_path.as_str(),
         revision,
@@ -74,7 +74,7 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     expected_revision_no: Option<RevisionNo>,
     store: &S,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
@@ -97,7 +97,7 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
         .ok_or(CoreError::InodeNotFound(inode_id))?;
     plan_append(
         store,
-        merge_memory,
+        content_writes,
         view,
         target.absolute_path.as_str(),
         revision,
@@ -112,7 +112,7 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
 /// the revision, not about the content it would have extended.
 async fn plan_append<S: ObjectStore + ?Sized>(
     store: &S,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     target: &str,
     revision: RevisionRecord,
@@ -130,7 +130,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    let appended = append_to(store, merge_memory, view, target, &revision, bytes).await?;
+    let appended = append_to(store, content_writes, view, target, &revision, bytes).await?;
     Ok(CompiledFilesystemOperation {
         ops: vec![CommitOp::ReplaceFile {
             inode_id: revision.inode_id,
@@ -143,7 +143,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
 
 async fn append_to<S: ObjectStore + ?Sized>(
     store: &S,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     target: &str,
     base_row: &RevisionRecord,
@@ -197,7 +197,7 @@ async fn append_to<S: ObjectStore + ?Sized>(
                     CoreError::Internal("append planning requires the publish tail".to_owned())
                 })?,
                 base,
-                merge_memory,
+                content_writes,
             )
             .await?,
         )

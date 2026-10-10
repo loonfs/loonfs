@@ -617,7 +617,7 @@ pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
 
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEngine {
-    content_merge_memory: Arc<tokio::sync::Semaphore>,
+    content_writes: Arc<tokio::sync::Semaphore>,
     namespace_id: NamespaceId,
     publish_tail: Option<PublishTailPosition>,
     projection_observed: Option<Observation>,
@@ -640,13 +640,10 @@ pub struct NamespaceCommitEngine {
 }
 
 impl NamespaceCommitEngine {
-    pub fn new(
-        namespace_id: NamespaceId,
-        content_merge_memory: Arc<tokio::sync::Semaphore>,
-    ) -> Self {
+    pub fn new(namespace_id: NamespaceId, content_writes: Arc<tokio::sync::Semaphore>) -> Self {
         Self {
             namespace_id,
-            content_merge_memory,
+            content_writes,
             publish_tail: None,
             projection_observed: None,
             acquired_anchor: None,
@@ -665,7 +662,7 @@ impl NamespaceCommitEngine {
     pub(crate) fn with_unshared_head_state(namespace_id: NamespaceId) -> Self {
         Self::new(
             namespace_id,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .head_state(Arc::new(HeadStateCache::unshared(usize::MAX)))
     }
@@ -889,7 +886,7 @@ impl NamespaceCommitEngine {
             context,
             &deadline,
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
-            &self.content_merge_memory,
+            &self.content_writes,
         )
         .await;
         self.invalidate_projection();
@@ -1026,7 +1023,7 @@ impl NamespaceCommitEngine {
                 attempt: attempt.clone(),
                 tip: projection_observed.clone(),
             },
-            &self.content_merge_memory,
+            &self.content_writes,
         )
         .await;
         self.projection_observed = Some(projection_observed);
@@ -1127,9 +1124,9 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidates: Vec<CommitCandidate>,
     context: &MutationContext,
-    content_merge_memory: Arc<tokio::sync::Semaphore>,
+    content_writes: Arc<tokio::sync::Semaphore>,
 ) -> Vec<Result<Commit>> {
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone(), content_merge_memory);
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone(), content_writes);
     let batch = Deadline::start(Arc::clone(&engine.timer));
     let mut results = vec![None; candidates.len()];
     let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
@@ -1158,9 +1155,9 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     options: DeleteNamespaceOptions,
     context: &MutationContext,
-    content_merge_memory: Arc<tokio::sync::Semaphore>,
+    content_writes: Arc<tokio::sync::Semaphore>,
 ) -> Result<DeleteNamespaceResponse> {
-    NamespaceCommitEngine::new(namespace_id.clone(), content_merge_memory)
+    NamespaceCommitEngine::new(namespace_id.clone(), content_writes)
         .delete_namespace(store, options, context)
         .await
 }
@@ -1462,7 +1459,7 @@ mod tests {
         let writer_b = context("writer-b");
         let mut engine_b = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         let takeover = engine_b
             .publish_batch(
@@ -1533,7 +1530,7 @@ mod tests {
 
         let mut engine_a = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         engine_a
             .publish_batch(
@@ -1571,7 +1568,7 @@ mod tests {
         let writer_b = context("writer-b");
         let mut engine_b = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         engine_b
             .publish_batch(
@@ -1618,7 +1615,7 @@ mod tests {
         let writer_b = context("writer-b");
         let mut engine_b = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         engine_b
             .publish_batch(
@@ -1660,7 +1657,7 @@ mod tests {
         drop(engine_a1);
         let mut engine_a2 = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .writer_session(session);
         let still_fenced = engine_a2
@@ -1797,7 +1794,7 @@ mod tests {
             &namespace_id,
             None,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .expect("fold");
@@ -2046,7 +2043,7 @@ mod tests {
             &namespace_id,
             None,
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .expect("another process folds");
@@ -2097,7 +2094,7 @@ mod tests {
                 &namespace_id,
                 Some(input),
                 &Deadline::start(timer.clone()),
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                &tokio::sync::Semaphore::new(32),
             )
             .await
             .expect("own fold");
@@ -2285,7 +2282,7 @@ mod tests {
                     &namespace_id,
                     None,
                     &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-                    &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                    &tokio::sync::Semaphore::new(32),
                 )
                 .await
                 .expect("another process folds");
@@ -2321,7 +2318,7 @@ mod tests {
             .expect("bootstrap");
         let mut over_budget = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         over_budget
             .session_writer_epoch(&store, &writer)
@@ -2363,7 +2360,7 @@ mod tests {
 
         let mut healthy = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         let retried = healthy
             .publish_batch(
@@ -2397,7 +2394,7 @@ mod tests {
             .expect("bootstrap");
         let mut seed = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         seed.publish_batch(
             &store,
@@ -2419,7 +2416,7 @@ mod tests {
             &writer,
             Default::default(),
             None,
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -2429,7 +2426,7 @@ mod tests {
         // its validation walks need.
         let mut uncached = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         store.reset();
         uncached
@@ -2467,7 +2464,7 @@ mod tests {
         let cache = Arc::new(MetadataSegmentCache::unshared(usize::MAX));
         let mut cached = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .segment_cache(cache);
         store.reset();

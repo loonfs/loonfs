@@ -51,7 +51,7 @@ async fn publish_inline(
     request.subject = subject;
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .publish_batch(
         store,
@@ -203,7 +203,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
                 store.clone(),
                 source.clone(),
                 WriterId::parse("fold").expect("writer"),
-                std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+                std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             )
             .fold_wal()
             .await

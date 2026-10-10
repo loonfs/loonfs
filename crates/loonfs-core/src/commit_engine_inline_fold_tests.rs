@@ -13,27 +13,23 @@ fn family(operation: &RecordedOperation) -> Option<DurableObjectFamily> {
     parse_object_key(operation.key()).map(|key| key.family())
 }
 
-fn creates_content(operation: &RecordedOperation) -> bool {
-    matches!(
-        operation,
-        RecordedOperation::Put { .. }
-            | RecordedOperation::PutImmutableStream { .. }
-            | RecordedOperation::Assemble { .. }
-    ) && family(operation) == Some(DurableObjectFamily::ContentBlob)
+fn assembles_content(operation: &RecordedOperation) -> bool {
+    matches!(operation, RecordedOperation::Assemble { .. })
+        && family(operation) == Some(DurableObjectFamily::ContentBlob)
 }
 
-fn content_puts(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
+fn content_assemblies(store: &RecordingStore<LocalFsStore>) -> Vec<String> {
     store
         .snapshot()
         .iter()
-        .filter(|operation| creates_content(operation))
+        .filter(|operation| assembles_content(operation))
         .map(|operation| operation.key().to_owned())
         .collect()
 }
 
 #[tokio::test]
 async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
@@ -70,7 +66,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
         &engine.namespace_id,
         Some(input.clone()),
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        &merge_memory,
+        &content_writes,
     )
     .await
     .expect("fold");
@@ -112,7 +108,7 @@ async fn an_own_fold_replays_only_later_objects_after_projection_invalidation() 
 
 #[tokio::test]
 async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     // A receipt replay does not land a put, so it also tests that discovery
     // itself refreshes the tip and basis observations.
     for replay_receipt in [false, true] {
@@ -154,7 +150,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             &engine.namespace_id,
             Some(input.clone()),
             &Deadline::start(timer.clone()),
-            &merge_memory,
+            &content_writes,
         )
         .await
         .expect("fold");
@@ -237,7 +233,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
 
 #[tokio::test]
 async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
@@ -254,7 +250,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
         &engine.namespace_id,
         Some(input),
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        &merge_memory,
+        &content_writes,
     )
     .await
     .expect("fold");
@@ -262,7 +258,7 @@ async fn a_takeover_after_an_own_fold_fences_the_writer_without_a_view() {
     engine.record_wal_fold(Some(&folded));
     NamespaceCommitEngine::new(
         engine.namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .session_writer_epoch(
         &store,
@@ -298,11 +294,11 @@ pub(super) fn assert_content_before_metadata(store: &RecordingStore<LocalFsStore
                 )
         })
         .expect("metadata write");
-    assert_eq!(content_puts(store).len(), count);
+    assert_eq!(content_assemblies(store).len(), count);
     assert_eq!(
         operations[..first_metadata]
             .iter()
-            .filter(|operation| creates_content(operation))
+            .filter(|operation| assembles_content(operation))
             .count(),
         count
     );
@@ -319,7 +315,7 @@ impl MonotonicTimer for SteppingTimer {
 
 #[tokio::test]
 async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     let (_directory, store, mut engine, context) = setup().await;
     let values = vec![
         inline(&engine.namespace_id, Bytes::from_static(b"retained")),
@@ -349,7 +345,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             &engine.namespace_id,
             Some(input.clone()),
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            &merge_memory,
+            &content_writes,
         )
         .await,
         Err(CoreError::Store {
@@ -358,7 +354,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         })
     ));
     assert_content_before_metadata(&store, values.len());
-    let keys = content_puts(&store);
+    let keys = content_assemblies(&store);
     assert_eq!(
         load_current_manifest(&store, &engine.namespace_id)
             .await
@@ -388,14 +384,14 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
             &engine.namespace_id,
             Some(input.clone()),
             &crate::time::Deadline::start(timer.clone()),
-            &merge_memory,
+            &content_writes,
         )
         .await,
         Err(CoreError::MetadataPublicationBudgetExceeded { .. })
     ));
     assert_eq!(store.counts().puts, values.len());
     assert_eq!(store.counts().deletes, 0);
-    assert_eq!(content_puts(&store).len(), values.len());
+    assert_eq!(content_assemblies(&store).len(), values.len());
     assert_eq!(
         load_current_manifest(&store, &engine.namespace_id)
             .await
@@ -411,25 +407,22 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         &engine.namespace_id,
         Some(input),
         &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        &merge_memory,
+        &content_writes,
     )
     .await
     .expect("retry");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     assert_content_before_metadata(&store, values.len());
-    let mut retry_keys = content_puts(&store);
+    let mut retry_keys = content_assemblies(&store);
     retry_keys.sort();
     let mut keys = keys;
     keys.sort();
     assert_eq!(retry_keys, keys);
-    for key in &keys {
-        assert!(store.snapshot().iter().any(|operation| matches!(operation, RecordedOperation::Head { key: actual } if actual == key)));
-    }
 }
 
 #[tokio::test]
 async fn competing_engines_materialize_identical_objects_and_publish_one_manifest() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     let (_directory, store, mut first, context) = setup().await;
     let values = vec![inline(&first.namespace_id, Bytes::from_static(b"shared"))];
     let candidate = candidate("race", values);
@@ -458,7 +451,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         &first.namespace_id,
         Some(first_input),
         &deadline,
-        &merge_memory,
+        &content_writes,
     );
     let second_fold = async {
         blocked.wait_until_blocked().await;
@@ -468,7 +461,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
             &second.namespace_id,
             Some(second_input),
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            &merge_memory,
+            &content_writes,
         )
         .await;
         blocked.release();
@@ -486,7 +479,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
         first_result.response.manifest_no,
         second_result.response.manifest_no
     );
-    let keys = content_puts(&store);
+    let keys = content_assemblies(&store);
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0], keys[1]);
     assert_eq!(
@@ -527,7 +520,7 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
     assert_eq!(store.counts().puts, 1);
-    assert_eq!(content_puts(&store), vec![key.clone()]);
+    assert_eq!(content_assemblies(&store), vec![key.clone()]);
     assert_eq!(
         load_current_manifest(&store, &engine.namespace_id)
             .await
@@ -568,14 +561,15 @@ async fn a_materialization_transport_failure_remains_retryable() {
     let failing = FailStore::new(
         store.clone(),
         KeyPredicate::content_blob(),
-        OperationClass::Head,
-        InjectedError::Transport("stored checksum head failure".to_owned()),
-    );
+        OperationClass::Put,
+        InjectedError::Transport("assembly failure".to_owned()),
+    )
+    .apply_then_fail();
     failing.fail_all();
     store.reset();
     let error = fold_wal(&failing, &engine.namespace_id)
         .await
-        .expect_err("stored checksum head failure");
+        .expect_err("assembly failure");
     assert!(
         matches!(
             error,
@@ -587,7 +581,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
         "{error:?}"
     );
     assert_eq!(store.counts().puts, 1);
-    assert_eq!(content_puts(&store), vec![key]);
+    assert_eq!(content_assemblies(&store), vec![key]);
     assert_eq!(
         load_current_manifest(&store, &engine.namespace_id)
             .await
@@ -600,7 +594,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
 
 #[tokio::test]
 async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     let (_directory, store, mut engine, context) = setup().await;
     let before = candidate(
         "before",
@@ -650,7 +644,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         &engine.namespace_id,
         Some(input.clone()),
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        &merge_memory,
+        &content_writes,
     )
     .await
     .expect("fold");

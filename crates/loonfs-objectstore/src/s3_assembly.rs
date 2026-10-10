@@ -1,8 +1,11 @@
-//! Multipart copy and bounded reads for S3 and R2 assemblies.
+//! Create-only puts, multipart copy, and bounded reads for S3 and R2 assemblies.
 
-use super::{assembled_crc64nvme, S3RequestSigner};
+use super::{assembled_crc64nvme, S3RequestSigner, MULTIPART_CONTROL_TTL};
 use crate::assembly::{check_expected, plan_parts, source_range, READ_BYTES};
-use crate::provider_object_store::MAX_PROVIDER_MULTIPART_PARTS;
+use crate::presign::{base64_crc64nvme, DirectPutIssuer, PresignedPutRequest};
+use crate::provider_object_store::{
+    MAX_PROVIDER_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
+};
 use crate::{
     AssemblySource, ByteRange, ConfiguredObjectStoreKind, ObjectMetadata, ObjectStoreError,
     PutMode, Result,
@@ -35,6 +38,22 @@ impl S3RequestSigner {
             .collect();
         let size_bytes =
             lengths.iter().sum::<u64>() + tail.iter().map(|piece| piece.len() as u64).sum::<u64>();
+        if size_bytes < PROVIDER_MULTIPART_THRESHOLD_BYTES {
+            let bytes = self
+                .read_assembly_part(
+                    sources,
+                    &ranges,
+                    &etags,
+                    &tail,
+                    &ByteRange {
+                        start_inclusive: 0,
+                        end_exclusive: size_bytes,
+                    },
+                )
+                .await?;
+            check_expected(key, expected, &Checksum::crc64nvme(&bytes))?;
+            return self.create_assembly(key, bytes, expected).await;
+        }
         let plan = plan_parts(
             &lengths,
             tail.iter().map(|piece| piece.len() as u64).sum::<u64>(),
@@ -75,16 +94,13 @@ impl S3RequestSigner {
             };
             parts.push(part);
         }
-        if parts.is_empty() {
-            parts.push(self.upload_part(key, &upload_id, 1, Bytes::new()).await?);
-        }
         let crc = assembled_crc64nvme(parts.iter().zip(&plan).map(|(part, planned)| {
             (
                 &part.checksum,
                 planned.range.end_exclusive - planned.range.start_inclusive,
             )
         }))
-        .unwrap_or_else(|| Checksum::crc64nvme(&[]));
+        .expect("nonempty multipart parts should have valid CRC-64/NVME checksums");
         check_expected(key, expected, &crc)?;
         let etag = self
             .finish_upload(
@@ -105,6 +121,42 @@ impl S3RequestSigner {
         })
     }
 
+    async fn create_assembly(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata> {
+        let mut signed = self
+            .request_signer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: key,
+                    expires_in: MULTIPART_CONTROL_TTL,
+                },
+                Self::signing_time(),
+            )
+            .await?;
+        signed.headers.insert(
+            "x-amz-checksum-crc64nvme".to_owned(),
+            base64_crc64nvme(expected)?,
+        );
+        let size_bytes = bytes.len() as u64;
+        let response = self.send_checked(key, signed, bytes.into()).await?;
+        let etag = response
+            .headers
+            .get(http::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        Ok(ObjectMetadata {
+            etag,
+            version: None,
+            size_bytes,
+            last_modified_ms: None,
+            checksum: Some(expected.clone()),
+        })
+    }
+
     async fn read_assembly_part(
         &self,
         sources: &[AssemblySource],
@@ -119,6 +171,7 @@ impl S3RequestSigner {
             let end = start + range.end_exclusive - range.start_inclusive;
             let mut offset = start.max(part.start_inclusive);
             let last = end.min(part.end_exclusive);
+            let first_byte = bytes.len();
             while offset < last {
                 let chunk_end = (offset + READ_BYTES).min(last);
                 let read_range = ByteRange {
@@ -131,6 +184,13 @@ impl S3RequestSigner {
                 }
                 bytes.extend_from_slice(&chunk);
                 offset = chunk_end;
+            }
+            if part.start_inclusive <= start && part.end_exclusive >= end {
+                check_expected(
+                    &source.key,
+                    &source.checksum,
+                    &Checksum::crc64nvme(&bytes[first_byte..]),
+                )?;
             }
             start = end;
         }

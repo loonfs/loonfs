@@ -92,7 +92,7 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for number in 0..9 {
         publish(&mut engine, &store, &format!("data-{number}"))
@@ -365,7 +365,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
         .expect("create");
     let mut first = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     publish(&mut first, &store, "seed").await.expect("seed");
     let mut second = first.clone();
@@ -448,7 +448,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     ));
     let mut active = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .writer_session(session);
     assert_eq!(
@@ -473,7 +473,7 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     publish(&mut engine, &store, "one").await.expect("one");
     publish(&mut engine, &store, "two").await.expect("two");
@@ -534,7 +534,7 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for name in ["one", "two", "three"] {
         publish(&mut engine, &store, name).await.expect(name);
@@ -570,7 +570,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for number in 1..20 {
         publish(&mut engine, &store, &format!("directory-{number}"))
@@ -622,7 +622,7 @@ async fn a_bounded_tail_load_names_the_missing_wal_object() {
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for name in ["one", "two", "three"] {
         publish(&mut engine, &store, name).await.expect(name);
@@ -690,7 +690,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         .expect("create");
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     publish(&mut engine, &store, "seed").await.expect("seed");
     engine.invalidate_projection();
@@ -905,7 +905,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
         .expect("create");
     let mut writer_a = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .monotonic_timer(timer_a.clone());
     writer_a
@@ -932,7 +932,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             blocked.wait_until_blocked().await;
             let mut writer_b = NamespaceCommitEngine::new(
                 namespace_id.clone(),
-                std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+                std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             )
             .monotonic_timer(timer_b.clone());
             writer_b
@@ -964,7 +964,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 &Deadline::start(timer_b.clone()),
                 crate::manifest::MetadataLsmPolicy::default(),
                 Arc::default(),
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                &tokio::sync::Semaphore::new(32),
             )
             .await
             .expect("fold takeover and commit");

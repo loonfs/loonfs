@@ -334,7 +334,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         &namespace_id,
         DeleteNamespaceOptions::default(),
         &setup,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .await
     .expect("delete namespace");
@@ -468,7 +468,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .expect("fork");
@@ -477,7 +477,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         &source,
         DeleteNamespaceOptions::default(),
         &setup,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .await
     .expect("delete source");
@@ -514,7 +514,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         &clone,
         DeleteNamespaceOptions::default(),
         &setup,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .await
     .expect("delete clone");
@@ -938,7 +938,7 @@ async fn put_file_content_with_id<S: ObjectStore>(
     let content_ref = stored.content_ref().clone();
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .publish_batch(
         store,
@@ -1001,7 +1001,7 @@ async fn publish_inline(
     );
     NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .publish_batch(
         store,
@@ -1191,7 +1191,7 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     let error = crate::NamespaceEngine::reader(
         &store,
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .read_content_ref(&first, u64::MAX, &read_context(&store, &namespace_id).await)
     .await
@@ -1266,7 +1266,7 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_pin_exists() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .expect("fork");
@@ -1305,7 +1305,7 @@ async fn the_wal_tail_roots_inline_content_a_direct_download_wrote_early() {
     let target = crate::NamespaceEngine::reader(
         &store,
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .direct_download_target(
         "/owned-0",
@@ -1780,7 +1780,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -1795,7 +1795,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         &setup,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -1930,7 +1930,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .expect("fork");
@@ -1959,7 +1959,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         &clone,
         DeleteNamespaceOptions::default(),
         &setup,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .await
     .expect("terminal delete of the fork target");
@@ -2052,7 +2052,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .expect("fork");
@@ -2099,7 +2099,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .expect("fork");
@@ -2168,7 +2168,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         &setup,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -2184,7 +2184,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         Arc::new(StdMonotonicTimer::default()),
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .expect("fork retry after abandonment");
@@ -2494,7 +2494,7 @@ async fn retired_content_namespace<S: ObjectStore>(
         namespace_id,
         Default::default(),
         &setup,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .await
     .expect("delete");
@@ -2543,7 +2543,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             &namespace_id,
             Default::default(),
             &setup,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await
         .expect("delete");
@@ -2856,7 +2856,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
                 &setup,
                 Default::default(),
                 None,
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                &tokio::sync::Semaphore::new(32),
             )
             .await
             .map(crate::pin::checkpoint_summary)
@@ -2924,7 +2924,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         &namespace_id,
         Default::default(),
         &context(deleted_at),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .await
     .expect("delete");
@@ -2972,7 +2972,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         &setup,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -3030,7 +3030,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
             Arc::new(StdMonotonicTimer::default()),
             Default::default(),
             None,
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .expect("fork");

@@ -100,7 +100,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         &context,
         Default::default(),
         None,
-        &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+        &tokio::sync::Semaphore::new(32),
     )
     .await
     .expect("pin the original history");

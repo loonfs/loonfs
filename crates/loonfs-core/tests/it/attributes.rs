@@ -416,7 +416,7 @@ async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
     let store = RecordingStore::new(store, KeyPredicate::any());
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     let receipt = publish_request(&mut engine, &store, request.clone(), &context)
         .await
@@ -568,7 +568,7 @@ async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_t
 
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     publish_request(
         &mut engine,

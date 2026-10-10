@@ -795,9 +795,10 @@ mod tests {
     use crate::presign::{
         base64_crc64nvme, S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
     };
-    use crate::provider_object_store::{MultipartController, PROVIDER_MIN_COPIED_PART_BYTES};
+    use crate::provider_object_store::MultipartController;
     use crate::signed_request::{classify_signed_response, SignedResponse};
     use crate::test_support::{aws_environment_lock, isolated_aws_environment};
+    use crate::ByteRange;
     use crate::{
         AssemblySource, AwsS3Credentials, ConfiguredObjectStoreKind, ObjectStoreError,
         ObjectStoreErrorClass,
@@ -857,6 +858,16 @@ mod tests {
                             .header("x-amz-checksum-crc64nvme", checksum)
                             .body(Bytes::new()),
                     )
+                }
+                http::Method::GET => {
+                    let (first, last) = request.headers()[http::header::RANGE]
+                        .to_str().expect("range").strip_prefix("bytes=").expect("bytes")
+                        .split_once('-').expect("bounds");
+                    let first: usize = first.parse().expect("first");
+                    let end = last.parse::<usize>().expect("last") + 1;
+                    assert!(end - first <= crate::assembly::READ_BYTES as usize);
+                    assert_eq!(request.headers()[http::header::IF_MATCH], "\"base\"");
+                    ("get", response.body(Bytes::copy_from_slice(&self.base[first..end])))
                 }
                 http::Method::POST if query.contains("uploads") => (
                     "create",
@@ -1039,6 +1050,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn small_assemblies_read_each_source_once_and_create_in_one_request() {
+        for kind in [
+            ConfiguredObjectStoreKind::AwsS3,
+            ConfiguredObjectStoreKind::CloudflareR2,
+        ] {
+            for correct in [true, false] {
+                let base = vec![b'a'; 3 * 1024 * 1024];
+                let checksum = Checksum::crc64nvme(&base);
+                let provider = ScriptedProvider {
+                    base: Arc::new(base),
+                    operations: Arc::default(),
+                    aborted: Arc::default(),
+                    objects: Arc::default(),
+                };
+                let signer = scripted_signer(kind, &provider);
+                let sources = vec![
+                    AssemblySource {
+                        key: BASE_KEY.to_owned(),
+                        range: None,
+                        checksum: if correct {
+                            checksum.clone()
+                        } else {
+                            Checksum::crc64nvme(b"wrong")
+                        },
+                    };
+                    2
+                ];
+                let tail = Bytes::from_static(b"tail");
+                let expected = checksum
+                    .crc_combine(&checksum, provider.base.len() as u64)
+                    .expect("sources")
+                    .crc_combine(&Checksum::crc64nvme(&tail), tail.len() as u64)
+                    .expect("tail");
+                let result = signer.assemble(KEY, &sources, vec![tail], &expected).await;
+                if correct {
+                    assert_eq!(result.expect("assembly").checksum, Some(expected));
+                    assert_eq!(provider.operations(), ["head", "head", "get", "get", "put"]);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(ObjectStoreError::ChecksumMismatch { .. })
+                    ));
+                    assert_eq!(provider.operations(), ["head", "head", "get"]);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn assembly_checks_copied_parts_before_completing() {
         for kind in [
             ConfiguredObjectStoreKind::AwsS3,
@@ -1047,12 +1107,14 @@ mod tests {
             let length = if kind == ConfiguredObjectStoreKind::CloudflareR2 {
                 64 * 1024 * 1024
             } else {
-                PROVIDER_MIN_COPIED_PART_BYTES as usize
+                crate::assembly::READ_BYTES as usize
             };
             let base = vec![b'a'; length];
             let tail = Bytes::from_static(b"tail");
             let checksum = Checksum::crc64nvme(&base);
             let expected = checksum
+                .crc_combine(&Checksum::crc64nvme(&base[..3]), 3)
+                .expect("small source")
                 .crc_combine(&Checksum::crc64nvme(&tail), tail.len() as u64)
                 .expect("combined");
             for correct in [true, false] {
@@ -1063,11 +1125,21 @@ mod tests {
                     objects: Arc::default(),
                 };
                 let signer = scripted_signer(kind, &provider);
-                let sources = [AssemblySource {
-                    key: BASE_KEY.to_owned(),
-                    range: None,
-                    checksum: checksum.clone(),
-                }];
+                let sources = [
+                    AssemblySource {
+                        key: BASE_KEY.to_owned(),
+                        range: None,
+                        checksum: checksum.clone(),
+                    },
+                    AssemblySource {
+                        key: BASE_KEY.to_owned(),
+                        range: Some(ByteRange {
+                            start_inclusive: 0,
+                            end_exclusive: 3,
+                        }),
+                        checksum: Checksum::crc64nvme(&base[..3]),
+                    },
+                ];
                 let claim = if correct {
                     expected.clone()
                 } else {
@@ -1085,7 +1157,7 @@ mod tests {
                     assert_eq!(result.expect("assembly").checksum, Some(expected.clone()));
                     assert_eq!(
                         provider.operations(),
-                        ["head", "create", "copy", "upload", "complete"]
+                        ["head", "head", "create", "copy", "get", "upload", "complete"]
                     );
                 } else {
                     assert!(matches!(
@@ -1095,7 +1167,7 @@ mod tests {
                     provider.aborted.notified().await;
                     assert_eq!(
                         provider.operations(),
-                        ["head", "create", "copy", "upload", "abort"]
+                        ["head", "head", "create", "copy", "get", "upload", "abort"]
                     );
                 }
             }

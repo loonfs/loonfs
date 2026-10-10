@@ -1,17 +1,12 @@
 //! Writes WAL pieces as immutable extents and merges the chain's own extents.
 
-use super::content::{
-    content_object_key_for_ref, DurableContentValidationError, CONTENT_READ_CHUNK_BYTES,
-};
+use super::content::{content_object_key_for_ref, DurableContentValidationError};
 use super::content_location::{extent_object_key, ContentLocation, LayoutLookup, LocatedExtent};
 use crate::error::{CoreError, Result};
-use crate::limits::{MAX_LAYOUT_EXTENTS, MAX_MERGED_EXTENT_BYTES};
+use crate::limits::MAX_LAYOUT_EXTENTS;
 use crate::wal::{ProjectedContent, ProjectedWalTail};
 use bytes::Bytes;
-use futures::stream::{self, StreamExt};
-use loonfs_objectstore::{
-    AssemblySource, ByteRange, ImmutableWriteError, ObjectStore, ObjectStoreError,
-};
+use loonfs_objectstore::{AssemblySource, ImmutableWriteError, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{
     Checksum, ChecksumAlgorithm, ContentExtent, ContentLayout, ContentRef, ExtentObject,
@@ -63,7 +58,7 @@ pub(crate) async fn materialize_content_layout<S: ObjectStore + ?Sized, L: Layou
     lookup: &L,
     tail: &ProjectedWalTail,
     content_ref: &ContentRef,
-    merge_memory: &Semaphore,
+    content_writes: &Semaphore,
 ) -> Result<ContentLayout> {
     let location = ContentLocation::resolve(lookup, Some(tail), content_ref).await?;
     let mut layout =
@@ -77,7 +72,7 @@ pub(crate) async fn materialize_content_layout<S: ObjectStore + ?Sized, L: Layou
                 tail,
                 content,
                 assemble_tail_content(content)?,
-                merge_memory,
+                content_writes,
             )
             .await?
             .layout
@@ -112,7 +107,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
     tail: &ProjectedWalTail,
     content: &ProjectedContent,
     pieces: Vec<Bytes>,
-    merge_memory: &Semaphore,
+    content_writes: &Semaphore,
 ) -> Result<ContentLayoutRecord> {
     let newest = &content.content_ref;
     let mut location = ContentLocation::resolve(lookup, Some(tail), newest).await?;
@@ -120,11 +115,49 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         location.extents.clear();
     }
     let mut start = location.extents_length();
-    let candidate = if content.pieces[0].offset == start {
+    let mut candidate = if content.pieces[0].offset == start {
         pieces
     } else {
         location.pieces().to_vec()
     };
+    if let Some(last) = location.extents.last_mut().filter(|last| {
+        last.extent.content_id == newest.content_id
+            && last.extent.owner_namespace_id == newest.owner_namespace_id
+    }) {
+        let full_length = match last.extent.object {
+            ExtentObject::Span { start, end } => end - start,
+            ExtentObject::Whole => {
+                let row = lookup
+                    .content_layout(&newest.content_id)
+                    .await?
+                    .expect("resolved extents should have a layout");
+                row.layout
+                    .extents
+                    .iter()
+                    .find(|extent| extent_object_key(extent) == last.object_key)
+                    .expect("resolved extent should occur in its layout")
+                    .length
+            }
+        };
+        let mut skip = full_length - last.extent.length;
+        if skip > newest.size_bytes - start {
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "content object `{}` extends past its newest reference",
+                last.object_key
+            )));
+        }
+        start += skip;
+        last.extent.length = full_length;
+        // Validation can materialize bytes that remain in the WAL tail.
+        candidate = candidate
+            .into_iter()
+            .filter_map(|piece| {
+                let skipped = skip.min(piece.len() as u64) as usize;
+                skip -= skipped as u64;
+                (skipped < piece.len()).then(|| piece.slice(skipped..))
+            })
+            .collect();
+    }
     // The whole key can already hold the first reference after a failed fold.
     let whole = location.extents.is_empty()
         && tail.rows.revisions().iter().all(|revision| {
@@ -136,19 +169,8 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
     let MergePlan {
         retained,
         candidate_length,
-        assembly,
     } = merge_plan(&extents, newest, tail_length);
     let merged_length = candidate_length - tail_length;
-    let _merge_permits = if assembly || candidate_length > MAX_MERGED_EXTENT_BYTES {
-        None
-    } else {
-        Some(
-            merge_memory
-                .acquire_many(candidate_length as u32)
-                .await
-                .expect("merge semaphore should remain open"),
-        )
-    };
     start -= merged_length;
     let object = if whole && start == 0 {
         ExtentObject::Whole
@@ -166,67 +188,15 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         length: candidate_length,
     };
     let object_key = extent_object_key(&extent);
-    write_candidate(
-        store,
-        &object_key,
-        &extents[retained..],
-        candidate,
-        candidate_length,
-        assembly,
-    )
-    .await?;
-    extents.truncate(retained);
-    let mut extents: Vec<_> = extents.into_iter().map(|located| located.extent).collect();
-    extents.push(extent);
-    Ok(ContentLayoutRecord {
-        owner_namespace_id: newest.owner_namespace_id.clone(),
-        content_id: newest.content_id.clone(),
-        committed_seq: content.committed_seq,
-        size_bytes: newest.size_bytes,
-        layout: ContentLayout { extents },
-    })
-}
-
-async fn write_candidate<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    extents: &[LocatedExtent],
-    pieces: Vec<Bytes>,
-    candidate_length: u64,
-    assembly: bool,
-) -> Result<()> {
-    let written = if assembly {
-        let (sources, expected) = assembly_sources(store, object_key, extents, &pieces).await?;
-        store
-            .assemble(object_key, &sources, pieces, &expected)
-            .await
-    } else if candidate_length > MAX_MERGED_EXTENT_BYTES {
-        let body = stream::iter(pieces)
-            .flat_map(|piece| {
-                stream::iter(
-                    (0..piece.len())
-                        .step_by(CONTENT_READ_CHUNK_BYTES as usize)
-                        .map(move |start| {
-                            Ok(piece.slice(
-                                start..(start + CONTENT_READ_CHUNK_BYTES as usize).min(piece.len()),
-                            ))
-                        }),
-                )
-            })
-            .boxed();
-        store
-            .put_immutable_verified_stream(object_key, candidate_length, body)
-            .await
-    } else {
-        let mut bytes = Vec::with_capacity(candidate_length as usize);
-        for extent in extents {
-            read_extent(store, extent, &mut bytes).await?;
-        }
-        for piece in pieces {
-            bytes.extend_from_slice(&piece);
-        }
-        store.put_immutable_verified(object_key, bytes.into()).await
-    };
+    let _permit = content_writes
+        .acquire()
+        .await
+        .expect("content write semaphore should remain open");
+    let (sources, expected) =
+        assembly_sources(store, &object_key, &extents[retained..], &candidate).await?;
+    let written = store
+        .assemble(&object_key, &sources, candidate, &expected)
+        .await;
     if let Err(error) = written {
         tracing::error!(object_key, %error, "content write failed");
         return Err(match error {
@@ -241,10 +211,25 @@ async fn write_candidate<S: ObjectStore + ?Sized>(
                 &object_key,
                 &ObjectStoreError::retryable_transport(&object_key, message),
             ),
+            ImmutableWriteError::Transport {
+                source: ObjectStoreError::ChecksumMismatch { object_key },
+                ..
+            } => CoreError::NamespaceCorrupt(format!(
+                "content object `{object_key}` does not match its stored checksum"
+            )),
             error => CoreError::from(error),
         });
     }
-    Ok(())
+    extents.truncate(retained);
+    let mut extents: Vec<_> = extents.into_iter().map(|located| located.extent).collect();
+    extents.push(extent);
+    Ok(ContentLayoutRecord {
+        owner_namespace_id: newest.owner_namespace_id.clone(),
+        content_id: newest.content_id.clone(),
+        committed_seq: content.committed_seq,
+        size_bytes: newest.size_bytes,
+        layout: ContentLayout { extents },
+    })
 }
 
 fn checksum_pieces(pieces: &[Bytes], algorithm: ChecksumAlgorithm) -> Checksum {
@@ -258,13 +243,21 @@ fn checksum_pieces(pieces: &[Bytes], algorithm: ChecksumAlgorithm) -> Checksum {
 struct MergePlan {
     retained: usize,
     candidate_length: u64,
-    assembly: bool,
 }
 
 fn merge_plan(extents: &[LocatedExtent], newest: &ContentRef, tail_length: u64) -> MergePlan {
     let mut retained = extents.len();
     let mut candidate_length = tail_length;
-    for located in extents.iter().rev() {
+    if tail_length == 0 {
+        if let Some(last) = extents.last().filter(|last| {
+            last.extent.content_id == newest.content_id
+                && last.extent.owner_namespace_id == newest.owner_namespace_id
+        }) {
+            retained -= 1;
+            candidate_length = last.extent.length;
+        }
+    }
+    for located in extents[..retained].iter().rev() {
         let extent = &located.extent;
         // A fresh chain keeps its base's extents shared.
         if extent.content_id != newest.content_id
@@ -280,7 +273,6 @@ fn merge_plan(extents: &[LocatedExtent], newest: &ContentRef, tail_length: u64) 
         located.extent.content_id == newest.content_id
             && located.extent.owner_namespace_id == newest.owner_namespace_id
     };
-    let mut assembly = candidate_length > MAX_MERGED_EXTENT_BYTES && retained < extents.len();
     if extents[..retained].iter().filter(own).count() + 1 > MAX_LAYOUT_EXTENTS {
         let largest = extents
             .iter()
@@ -295,12 +287,10 @@ fn merge_plan(extents: &[LocatedExtent], newest: &ContentRef, tail_length: u64) 
                 .iter()
                 .map(|located| located.extent.length)
                 .sum::<u64>();
-        assembly = true;
     }
     MergePlan {
         retained,
         candidate_length,
-        assembly,
     }
 }
 
@@ -311,7 +301,7 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
     tail: &[Bytes],
 ) -> Result<(Vec<AssemblySource>, Checksum)> {
     let mut sources = Vec::with_capacity(extents.len());
-    let mut expected: Option<Checksum> = None;
+    let mut expected = Checksum::compute(store.checksum_algorithm(), &[]);
     for located in extents {
         let source_key = &located.object_key;
         let corrupt = || {
@@ -331,19 +321,15 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
             .checksum
             .filter(|checksum| checksum.algorithm == store.checksum_algorithm())
             .ok_or_else(corrupt)?;
-        expected = Some(match expected {
-            None => checksum.clone(),
-            Some(previous) => previous
-                .crc_combine(&checksum, stored.size_bytes)
-                .ok_or_else(corrupt)?,
-        });
+        expected = expected
+            .crc_combine(&checksum, stored.size_bytes)
+            .ok_or_else(corrupt)?;
         sources.push(AssemblySource {
             key: source_key.clone(),
             range: None,
             checksum,
         });
     }
-    let expected = expected.expect("an assembly merge should have source extents");
     let expected = expected
         .crc_combine(
             &checksum_pieces(tail, expected.algorithm),
@@ -353,64 +339,6 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
             CoreError::NamespaceCorrupt(format!("content object `{key}` has no combinable CRC"))
         })?;
     Ok((sources, expected))
-}
-
-async fn read_extent<S: ObjectStore + ?Sized>(
-    store: &S,
-    located: &LocatedExtent,
-    bytes: &mut Vec<u8>,
-) -> Result<()> {
-    let key = &located.object_key;
-    let corrupt = || {
-        CoreError::NamespaceCorrupt(format!(
-            "content object `{key}` does not hold its stored extent bytes"
-        ))
-    };
-    let metadata = store
-        .head(key)
-        .await
-        .map_err(|error| CoreError::store(key, &error))?
-        .ok_or_else(corrupt)?;
-    let extent = &located.extent;
-    if metadata.size_bytes < extent.offset + extent.length {
-        return Err(corrupt());
-    }
-    let expected = metadata.checksum.ok_or_else(corrupt)?;
-    let (mut offset, end) = (extent.offset, extent.offset + extent.length);
-    let mut state = (offset == 0 && end == metadata.size_bytes)
-        .then(|| StreamingChecksum::for_algorithm(store.checksum_algorithm()));
-    while offset < end {
-        let chunk_end = end.min(offset + CONTENT_READ_CHUNK_BYTES);
-        let chunk = store
-            .get(
-                key,
-                Some(ByteRange {
-                    start_inclusive: offset,
-                    end_exclusive: chunk_end,
-                }),
-            )
-            .await
-            .map_err(|error| CoreError::store(key, &error))?
-            .ok_or_else(corrupt)?;
-        if chunk.len() as u64 != chunk_end - offset {
-            return Err(corrupt());
-        }
-        if let Some(state) = &mut state {
-            state.update(&chunk);
-        }
-        let first = offset.max(extent.offset);
-        let last = chunk_end.min(extent.offset + extent.length);
-        if first < last {
-            bytes.extend_from_slice(&chunk[(first - offset) as usize..(last - offset) as usize]);
-        }
-        offset = chunk_end;
-    }
-    if let Some(state) = state {
-        if state.finish() != expected {
-            return Err(corrupt());
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

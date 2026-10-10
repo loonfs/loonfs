@@ -900,7 +900,7 @@ fn read_engine<'a>(
     loonfs_core::NamespaceReaderEngine::reader(
         store,
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .with_subject(subject(principal, &[principal]))
 }
@@ -1311,7 +1311,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
         loonfs_core::NamespaceReaderEngine::reader(
             &store,
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         ),
     ] {
         engine
@@ -1335,7 +1335,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
     let engine = loonfs_core::NamespaceReaderEngine::reader(
         &store,
         namespace_id,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     let error = engine
         .resolve_path("/team/file", StatOptions::default(), &context)

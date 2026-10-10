@@ -1,4 +1,4 @@
-//! Generation-bound GCS compose and temporary object cleanup.
+//! Create-only GCS media uploads, compose, and temporary object cleanup.
 
 use super::{gcs_object, precondition_failed_when_missing, GcsRequestSigner, GCS_JSON_OBJECTS};
 use crate::assembly::{check_expected, combined_checksum, source_range, READ_BYTES};
@@ -6,7 +6,9 @@ use crate::keys::temporary_object;
 use crate::keyspace::scope_object_key;
 use crate::layout::parse_object_key;
 use crate::presign::percent_encode_segment;
-use crate::provider_object_store::{AbortUploadOnDrop, MultipartController, PartReader};
+use crate::provider_object_store::{
+    AbortUploadOnDrop, MultipartController, PartReader, PROVIDER_MULTIPART_THRESHOLD_BYTES,
+};
 use crate::signed_request::SignedResponse;
 use crate::{AssemblySource, ByteRange, ObjectMetadata, ObjectStoreError, Result};
 use bytes::Bytes;
@@ -213,6 +215,16 @@ impl GcsRequestSigner {
             object_key: key.to_owned(),
         })?;
         check_expected(key, expected, &actual)?;
+        let size_bytes = resolved
+            .iter()
+            .map(|(_, range)| range.end_exclusive - range.start_inclusive)
+            .sum::<u64>()
+            + tail.iter().map(|piece| piece.len() as u64).sum::<u64>();
+        if size_bytes < PROVIDER_MULTIPART_THRESHOLD_BYTES {
+            return self
+                .create_assembly(key, sources, &resolved, tail, expected)
+                .await;
+        }
         let mut temporary = Vec::new();
         let result = self
             .compose_assembly(
@@ -231,6 +243,49 @@ impl GcsRequestSigner {
         }
         result.map_err(precondition_failed_when_missing)
     }
+    async fn create_assembly(
+        &self,
+        key: &str,
+        sources: &[AssemblySource],
+        resolved: &[(ObjectMetadata, ByteRange)],
+        tail: Vec<Bytes>,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata> {
+        let mut bytes = Vec::new();
+        for (source, (metadata, range)) in sources.iter().zip(resolved) {
+            let generation = crate::required_etag(&source.key, metadata.etag.clone())?;
+            let start = bytes.len();
+            let mut offset = range.start_inclusive;
+            while offset < range.end_exclusive {
+                let end = (offset + READ_BYTES).min(range.end_exclusive);
+                let chunk = self
+                    .get_range(
+                        &source.key,
+                        &generation,
+                        &ByteRange {
+                            start_inclusive: offset,
+                            end_exclusive: end,
+                        },
+                    )
+                    .await?;
+                bytes.extend_from_slice(&chunk);
+                offset = end;
+            }
+            check_expected(
+                &source.key,
+                &source.checksum,
+                &Checksum::crc32c(&bytes[start..]),
+            )?;
+        }
+        for piece in tail {
+            bytes.extend_from_slice(&piece);
+        }
+        check_expected(key, expected, &Checksum::crc32c(&bytes))?;
+        let mut rest = PartReader::new(stream::empty().boxed(), 1);
+        rest.next_part().await?;
+        self.put_if_absent(key, bytes.into(), rest, 1).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn compose_assembly(
         &self,

@@ -25,7 +25,7 @@ pub(crate) fn namespace_engine<'a, S: ObjectStore + ?Sized>(
         store,
         namespace_id.clone(),
         context.writer_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
 }
 
@@ -197,7 +197,7 @@ pub(crate) mod commit_split_support {
     ) -> Vec<Result<loonfs_types::api::v0::Commit, CoreError>> {
         let mut engine = NamespaceCommitEngine::new(
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         engine
             .publish_batch(

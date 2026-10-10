@@ -85,7 +85,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         ];
         let mut engine = NamespaceCommitEngine::new(
             ns.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .head_state(Arc::new(HeadStateCache::unshared(usize::MAX)));
         for (index, operation) in operations.into_iter().enumerate() {
@@ -135,7 +135,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             &ns,
             input.clone(),
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .expect("fold");
@@ -157,7 +157,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             &ns,
             input,
             &loonfs_core::time::Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default())),
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .expect("repeat fold");

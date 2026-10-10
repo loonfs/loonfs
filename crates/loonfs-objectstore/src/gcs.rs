@@ -414,6 +414,13 @@ mod tests {
             let response = if parts
                 .uri
                 .query()
+                .is_some_and(|query| query.contains("alt=media"))
+            {
+                assert_eq!(parts.headers[http::header::RANGE], "bytes=0-4");
+                response.body(Bytes::from_static(b"hello"))
+            } else if parts
+                .uri
+                .query()
                 .is_some_and(|query| query.contains("uploadType=resumable"))
             {
                 response
@@ -493,6 +500,62 @@ mod tests {
             if part_bytes <= 5 {
                 assert_eq!(requests[0].2, b"{}"[..]);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn small_assemblies_read_sources_and_create_with_one_media_request() {
+        use super::*;
+        let (_directory, path) = gcs_fixture_service_account_key_file("gcs-assembly");
+        let requests = UploadRequests::default();
+        let signer = GcsRequestSigner {
+            request_signer: Arc::new(
+                GcsV4Presigner::new(GcsPresignerConfig {
+                    bucket: "bucket".to_owned(),
+                    service_account_key_path: path.display().to_string(),
+                    key_prefix: None,
+                })
+                .expect("signer"),
+            ),
+            http: HttpClient::new(requests.clone()),
+            credentials: Arc::new(object_store::StaticCredentialProvider::new(
+                object_store::gcp::GcpCredential {
+                    bearer: "test".to_owned(),
+                },
+            )),
+            bucket: "bucket".to_owned(),
+            key_prefix: None,
+        };
+        let expected = Checksum::crc32c(b"hello");
+        let key = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
+        for sources in [
+            vec![],
+            vec![AssemblySource {
+                key: "source".to_owned(),
+                range: None,
+                checksum: expected.clone(),
+            }],
+        ] {
+            requests.0.lock().expect("requests").clear();
+            let tail = if sources.is_empty() {
+                vec![Bytes::from_static(b"hello")]
+            } else {
+                vec![]
+            };
+            let metadata = signer
+                .assemble(key, &sources, tail, &expected)
+                .await
+                .expect("assembly");
+            assert_eq!(metadata.checksum, Some(expected.clone()));
+            let requests = requests.0.lock().expect("requests");
+            assert_eq!(requests.len(), 2 * sources.len() + 1);
+            if !sources.is_empty() {
+                assert!(requests[1].0.contains("alt=media&generation=1"));
+            }
+            let (url, headers, bytes) = requests.last().expect("create");
+            assert!(url.contains("uploadType=media&ifGenerationMatch=0"));
+            assert_eq!(headers["x-goog-hash"], "crc32c=mnG7TA==");
+            assert_eq!(bytes.as_ref(), b"hello");
         }
     }
 

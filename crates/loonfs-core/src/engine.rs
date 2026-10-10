@@ -124,7 +124,7 @@ pub struct NamespaceEngine<S, M> {
     store: S,
     namespace_id: NamespaceId,
     mode: M,
-    content_merge_memory: Arc<tokio::sync::Semaphore>,
+    content_writes: Arc<tokio::sync::Semaphore>,
     wall_clock: Arc<dyn crate::time::WallClock>,
     subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
@@ -354,12 +354,12 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
     pub fn reader(
         store: S,
         namespace_id: NamespaceId,
-        content_merge_memory: Arc<tokio::sync::Semaphore>,
+        content_writes: Arc<tokio::sync::Semaphore>,
     ) -> Self {
         Self {
             store,
             namespace_id,
-            content_merge_memory,
+            content_writes,
             mode: ReadOnly,
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
@@ -380,12 +380,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         store: S,
         namespace_id: NamespaceId,
         writer_id: WriterId,
-        content_merge_memory: Arc<tokio::sync::Semaphore>,
+        content_writes: Arc<tokio::sync::Semaphore>,
     ) -> Self {
         Self {
             store,
             namespace_id,
-            content_merge_memory,
+            content_writes,
             mode: Writable { writer_id },
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
@@ -505,7 +505,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             Arc::new(crate::time::StdMonotonicTimer::default()),
             self.metadata_lsm_policy(),
             self.segment_cache.as_deref(),
-            &self.content_merge_memory,
+            &self.content_writes,
         )
         .await
     }
@@ -521,7 +521,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             options,
             &self.mutation_context()?,
-            Arc::clone(&self.content_merge_memory),
+            Arc::clone(&self.content_writes),
         )
         .await
     }
@@ -702,7 +702,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             revision_no,
             start_offset,
             &access,
-            &self.content_merge_memory,
+            &self.content_writes,
         )
         .await
     }
@@ -725,7 +725,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             revision_no,
             start_offset,
             &access,
-            &self.content_merge_memory,
+            &self.content_writes,
         )
         .await
     }
@@ -969,7 +969,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             candidates,
             &context,
-            Arc::clone(&self.content_merge_memory),
+            Arc::clone(&self.content_writes),
         )
         .await)
     }
@@ -1063,6 +1063,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject: Option<&Subject>,
         bytes: &[u8],
     ) -> Result<UploadSession> {
+        let _permit = self
+            .content_writes
+            .acquire()
+            .await
+            .expect("content write semaphore should remain open");
         crate::protocol::upload_content(
             &self.store,
             &self.namespace_id,
@@ -1082,6 +1087,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject: Option<&Subject>,
         body: ByteStream,
     ) -> Result<UploadSession> {
+        let _permit = self
+            .content_writes
+            .acquire()
+            .await
+            .expect("content write semaphore should remain open");
         crate::protocol::upload_streamed_content(
             &self.store,
             &self.namespace_id,
@@ -1155,6 +1165,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject_id: Option<&loonfs_types::SubjectId>,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
+        let _permit = self
+            .content_writes
+            .acquire()
+            .await
+            .expect("content write semaphore should remain open");
         crate::protocol::stage_owned_bytes(
             &self.store,
             self.own_catalog(catalog)?,
@@ -1192,6 +1207,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             None => ContentLocation::whole(content_ref)?,
         };
         let body = open_content_import_reader(self.store.clone(), location, content_ref).await?;
+        let _permit = self
+            .content_writes
+            .acquire()
+            .await
+            .expect("content write semaphore should remain open");
         crate::protocol::stage_owned_stream(
             &self.store,
             catalog,
@@ -1214,6 +1234,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject_id: Option<&loonfs_types::SubjectId>,
         body: ByteStream,
     ) -> Result<PreparedContent> {
+        let _permit = self
+            .content_writes
+            .acquire()
+            .await
+            .expect("content write semaphore should remain open");
         crate::protocol::stage_owned_stream(
             &self.store,
             self.own_catalog(catalog)?,
@@ -1307,7 +1332,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &context,
             self.metadata_lsm_policy(),
             self.segment_cache.as_deref(),
-            &self.content_merge_memory,
+            &self.content_writes,
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -1326,7 +1351,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &context,
             self.metadata_lsm_policy(),
             self.segment_cache.as_deref(),
-            &self.content_merge_memory,
+            &self.content_writes,
         )
         .await
         .map(crate::pin::checkpoint_summary)
@@ -1396,7 +1421,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
             self.metadata_lsm_policy(),
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
-            &self.content_merge_memory,
+            &self.content_writes,
         )
         .await
     }
@@ -1482,7 +1507,7 @@ mod tests {
             store,
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
 
         assert_eq!(engine.namespace_id(), &namespace_id);
@@ -1497,7 +1522,7 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         crate::test_support::ops::create(
             &writer.store,
@@ -1510,7 +1535,7 @@ mod tests {
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             namespace_id.clone(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         let loaded = crate::namespace::read_anchor::load_read_anchor(&reader.store, &namespace_id)
             .await
@@ -1542,7 +1567,7 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("writer store"),
             namespace_id.clone(),
             WriterId::parse("writer-a").expect("writer id"),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         crate::test_support::ops::create(
             &writer.store,
@@ -1556,7 +1581,7 @@ mod tests {
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("reader store"),
             namespace_id,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
         let crate::UploadSessionView {
             session: status,

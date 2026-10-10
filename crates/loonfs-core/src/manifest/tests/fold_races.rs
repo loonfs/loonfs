@@ -24,7 +24,7 @@ enum Rival {
 
 impl Rival {
     async fn publish(&self, store: &LocalFsStore, namespace_id: &NamespaceId) {
-        let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+        let content_writes = tokio::sync::Semaphore::new(32);
         match self {
             Self::CompactorClaim => {
                 claim_compactor(store, namespace_id)
@@ -64,7 +64,7 @@ impl Rival {
                     namespace_id,
                     Some(WalFoldInput::clone(input)),
                     &deadline(),
-                    &merge_memory,
+                    &content_writes,
                 )
                 .await
                 .expect("rival fold");
@@ -170,7 +170,7 @@ impl Writer {
     /// for the next rival, and so on. The request log is cleared after each
     /// rival.
     async fn fold_against(&mut self, rivals: &[Rival]) -> FoldedWalTail {
-        let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+        let content_writes = tokio::sync::Semaphore::new(32);
         let input = self.engine.begin_wal_fold().expect("tail");
         let basis = input.basis.manifest_no();
         let other = self.other_process();
@@ -197,7 +197,7 @@ impl Writer {
                 &self.namespace_id,
                 Some(input),
                 &deadline,
-                &merge_memory,
+                &content_writes,
             ),
             async {
                 for (gate, rival) in gates.iter().zip(rivals) {
@@ -285,7 +285,7 @@ fn request_counts(store: &RecordingStore<LocalFsStore>) -> StoreCounts {
 
 #[tokio::test]
 async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     for rival in [Rival::Merge, Rival::CompactorClaim, Rival::RetentionAdvance] {
         let mut writer = Writer::open().await;
         writer
@@ -327,7 +327,7 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
             &writer.namespace_id,
             None,
             &deadline(),
-            &merge_memory,
+            &content_writes,
         )
         .await
         .expect("cold fold");

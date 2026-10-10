@@ -195,9 +195,6 @@ pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
 /// Bounds a chain's own extents while keeping shared base extents separate.
 pub(crate) const MAX_LAYOUT_EXTENTS: usize = 32;
 
-/// Bounds extent bytes held by in-memory merges across the fold.
-pub(crate) const MAX_MERGED_EXTENT_BYTES: u64 = 32 * 1024 * 1024;
-
 #[cfg(test)]
 mod tests {
     use super::*;
