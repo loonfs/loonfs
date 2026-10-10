@@ -5,6 +5,7 @@ use super::live_set::LiveSet;
 use super::sweep::Sweep;
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::manifest::cache::read_working_memory;
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::metadata::row_decode::content_layout_from_manifest_row;
@@ -18,6 +19,7 @@ use loonfs_types::format::manifest::{lookup_keys, ContentLayoutRecord, MetadataR
 use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
 use loonfs_types::{ContentExtent, NamespaceId};
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 const LAYOUT_PAGE_ROWS: usize = 1024;
 
@@ -35,6 +37,27 @@ impl<'a> ContentSweep<'a> {
         live: &'a LiveSet,
         shard_rows: usize,
         seed: u64,
+    ) -> Result<Option<Self>> {
+        Self::load_with_byte_limit(
+            store,
+            cache,
+            namespace_id,
+            live,
+            shard_rows,
+            seed,
+            MAX_BLOOM_FILTER_BYTES,
+        )
+        .await
+    }
+
+    pub(super) async fn load_with_byte_limit<S: ObjectStore + ?Sized>(
+        store: &S,
+        cache: Option<&MetadataSegmentCache>,
+        namespace_id: &NamespaceId,
+        live: &'a LiveSet,
+        shard_rows: usize,
+        seed: u64,
+        byte_limit: usize,
     ) -> Result<Option<Self>> {
         if live.namespace_deleted {
             tracing::info!(namespace_id = %namespace_id, shard_width = 0,
@@ -65,21 +88,31 @@ impl<'a> ContentSweep<'a> {
         {
             shard_width += 1;
         }
-        let expected_entries = live.content_layout_rows.saturating_mul(4);
-        let Some(mut shared) = BloomFilter::new(expected_entries, seed) else {
+        let expected_entries = live.content_layout_rows;
+        let Some(mut shared) = BloomFilter::with_byte_limit(expected_entries, seed, byte_limit)
+        else {
             tracing::info!(namespace_id = %namespace_id, shard_width, layout_views = 0, expected_entries,
                 "shared base filter exceeded its byte limit; skipped content sweep");
             return Ok(None);
         };
         tracing::info!(namespace_id = %namespace_id, shard_width,
             layout_views = views.len(), "collecting namespace");
-        scan_layout_extents(store, cache, namespace_id, &views, "", |row, extent| {
-            if extent.content_id != row.content_id {
-                shared.insert(extent_object_key(extent).as_bytes());
+        let scanned = scan_layout_extents(store, cache, namespace_id, &views, "", |row, extent| {
+            if extent.content_id != row.content_id
+                && shared
+                    .insert(extent_object_key(extent).as_bytes())
+                    .is_none()
+            {
+                return Ok(ControlFlow::Break(()));
             }
-            Ok(())
+            Ok(ControlFlow::Continue(()))
         })
         .await?;
+        if scanned.is_break() {
+            tracing::info!(namespace_id = %namespace_id, shard_width, layout_views = views.len(), expected_entries,
+                "shared base filter exceeded its byte limit; skipped content sweep");
+            return Ok(None);
+        }
         Ok(Some(Self {
             views,
             shared,
@@ -99,7 +132,7 @@ impl<'a> ContentSweep<'a> {
                 format!("con_{shard:0width$x}", width = self.shard_width as usize)
             };
             let mut keys = ChargedSet::new(sweep.namespace_id, read_working_memory(cache));
-            scan_layout_extents(
+            let _ = scan_layout_extents(
                 sweep.store,
                 cache,
                 sweep.namespace_id,
@@ -109,7 +142,7 @@ impl<'a> ContentSweep<'a> {
                     if extent.content_id.as_str().starts_with(&id_prefix) {
                         keys.insert(extent_object_key(extent))?;
                     }
-                    Ok(())
+                    Ok(ControlFlow::Continue(()))
                 },
             )
             .await?;
@@ -138,8 +171,8 @@ async fn scan_layout_extents<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     views: &[&LoadedManifest],
     id_prefix: &str,
-    mut visit: impl FnMut(&ContentLayoutRecord, &ContentExtent) -> Result<()>,
-) -> Result<()> {
+    mut visit: impl FnMut(&ContentLayoutRecord, &ContentExtent) -> Result<ControlFlow<()>>,
+) -> Result<ControlFlow<()>> {
     let family = MetadataRowFamily::ContentLayouts;
     let prefix = format!("{}{id_prefix}", family.row_key_prefix());
     let upper_bound = string_prefix_upper_bound(&prefix);
@@ -167,8 +200,9 @@ async fn scan_layout_extents<S: ObjectStore + ?Sized>(
             for (_, row) in rows {
                 let row = content_layout_from_manifest_row(row)?;
                 for extent in &row.layout.extents {
-                    if extent.owner_namespace_id == *namespace_id {
-                        visit(&row, extent)?;
+                    if extent.owner_namespace_id == *namespace_id && visit(&row, extent)?.is_break()
+                    {
+                        return Ok(ControlFlow::Break(()));
                     }
                 }
             }
@@ -177,5 +211,5 @@ async fn scan_layout_extents<S: ObjectStore + ?Sized>(
             }
         }
     }
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }

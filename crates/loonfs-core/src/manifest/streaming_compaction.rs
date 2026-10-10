@@ -836,7 +836,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                     break;
                 }
                 if let MetadataRow::FileRevision(row) = iterator[0].take_head() {
-                    filter.insert(row.content_ref.content_id.as_str().as_bytes());
+                    filter
+                        .insert(row.content_ref.content_id.as_str().as_bytes())
+                        .expect("revision rows should fit the basis row count");
                 }
             }
         }
