@@ -56,6 +56,7 @@ mod fork_chain;
 mod listings;
 mod many_pins;
 mod retirement;
+mod shared_bases;
 mod superseded_roots;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;

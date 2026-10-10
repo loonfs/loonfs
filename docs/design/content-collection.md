@@ -14,11 +14,11 @@ A content object owned by namespace `N` stays while a layout names that object o
 2. A revision delta in `N`'s unfolded WAL tail, or an extent owned by `N` in the tail row state's layouts.
 3. An upload session record in `N`, whatever its status.
 
-The pass deletes every other object under `namespaces/N/content/` whose provider age is at least `T`. It keeps younger objects and keys the layout does not recognize.
+The pass considers every other object under `namespaces/N/content/` for deletion once its provider age is at least `T`. It keeps younger objects, keys the layout does not recognize, and false positives from the shared base filter.
 
 One rule covers every way content becomes garbage. A completed session's cleanup removes only its record, after the content grace, and a later pass collects the object if nothing published it. An aborted session's cleanup deletes its object at once, and the pass collects anything a late write leaves after the record is gone. A retired namespace is the same rule with no roots and no age gate: the retirement sweep deletes its whole content prefix. A deleted namespace that has not retired keeps its content.
 
-Layout roots protect exact object keys. A layout can name a shared base in another id shard; a separate shared-base set protects that key throughout the pass. Tail and session ids protect both the whole object and every span of their chains. An old span that no layout, tail, or session names can be collected even while its chain remains live.
+Within each shard, layout roots protect exact object keys. A layout can name a shared base in another id shard. A Bloom filter over shared object keys protects those bases throughout the pass. False positives retain unreferenced objects for that pass. Every inserted key remains protected. The pass's supplied `now_ms` seeds the filter, so a pass with a different clock uses a different seed. Tail and session ids protect both the whole object and every span of their chains. An old span that no layout, tail, or session names can be collected even while its chain remains live.
 
 ## Why the roots are enough
 
@@ -30,10 +30,11 @@ The pass lists upload sessions before it reads the WAL tail and scans layout row
 
 ## Costs
 
-- Two scans of the layout family per distinct layout view. The first collects shared bases. The second scans disjoint id ranges, one shard at a time. A fork's scans also read inherited segments.
+- Two scans of the layout family per distinct layout view. The first inserts shared base object keys into the Bloom filter. The second scans disjoint id ranges, one shard at a time. A fork's scans also read inherited segments.
 - One content listing per shard. The current manifest's layout segment row counts and `content_shard_rows` determine the shard count. The hex prefix width is the smallest `k` from 0 through 4 for which `rows / 16^k <= content_shard_rows`. There are `16^k` shards, visited in order. The default target is 65,536 rows per shard. Uneven id distribution can put more rows in one shard.
 - One listing of upload sessions and one read of each record before the tail, besides the session sweep's own listing and reads.
 - No HEAD requests during the sweep. Discovery keeps its HEAD probe for the current manifest's successor. Candidate ages and successor ages come from listing timestamps. Missing timestamps retain objects.
-- Memory for one shard's object keys, the shared-base keys, and the tail and session ids. All three sets are charged to the read working memory alongside scan blocks. A set that exceeds that budget fails the pass. The shard set is released before the next shard.
+- Read working memory for one shard's exact object keys, the tail and session ids, and scan blocks. A set that exceeds that budget fails the pass. The shard set is released before the next shard.
+- A shared base Bloom filter with its own 64 MiB byte cap, separate from read working memory. It uses the same xxh64 double hashing and seven probes as layout compaction. It reserves ten bits per expected entry, sized for four entries per layout row in the current manifest. More shared keys can increase false positives without increasing memory. If that size would exceed the cap, the pass logs the limit and skips the active namespace's content sweep. Other families still sweep. No content listing or shared base scan runs in that case.
 
 A deleted namespace pays none of these content-root costs.

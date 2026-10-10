@@ -60,6 +60,7 @@
 pub(crate) mod authorize;
 mod binding_version;
 mod block_cache;
+mod bloom_filter;
 mod commit_engine;
 mod commit_wal_size;
 mod context;

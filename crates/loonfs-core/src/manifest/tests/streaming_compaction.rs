@@ -3411,7 +3411,7 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
                 for family in &mut run.segments {
                     if family.family == ApiMetadataRowFamily::Revisions {
                         family.segments[0].row_count =
-                            crate::limits::MAX_CHAIN_FILTER_BYTES as u64 * 8 / 10 + 1;
+                            crate::limits::MAX_BLOOM_FILTER_BYTES as u64 * 8 / 10 + 1;
                     }
                 }
             }

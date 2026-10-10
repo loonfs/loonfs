@@ -14,8 +14,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::{GcResponse, NamespaceId};
 
 /// Collects one namespace. The root scan reads through `segment_cache`
-/// and charges the content roots it holds to that cache's read working
-/// memory, so a pass never holds more than the configured budget.
+/// and charges exact content roots to that cache's read working memory.
+/// The shared base filter has a separate byte cap.
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -47,10 +47,9 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         namespace_id,
         &live,
         options.content_shard_rows,
+        context.now_ms,
     )
     .await?;
-    tracing::info!(namespace_id = %namespace_id, shard_width = content.shard_width,
-        layout_views = content.view_count(), "collecting namespace");
     let mut sweep = Sweep {
         store,
         namespace_id,
@@ -61,7 +60,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     };
     for family in CandidateFamily::ALL {
         if family == CandidateFamily::Content {
-            if !live.namespace_deleted {
+            if let Some(content) = &content {
                 content.sweep(&mut sweep, segment_cache).await?;
             }
             continue;
