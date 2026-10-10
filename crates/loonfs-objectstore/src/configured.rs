@@ -1,7 +1,6 @@
 //! [`ConfiguredObjectStore`]: one provider client built from configuration,
 //! paired with the direct transfers that provider can authorize.
 
-use crate::abs::{azure_abs, AzureAbsStoreConfig};
 use crate::aws_credentials::{aws_credentials_source, static_aws_credentials_source};
 use crate::gcs::{gcp_gcs_with_issuers, GcpGcsStoreConfig};
 use crate::local_fs_store::LocalFsStore;
@@ -36,8 +35,6 @@ pub enum ConfiguredObjectStoreKind {
     CloudflareR2,
     /// Uses Google Cloud Storage's native generation-aware API.
     GcpGcs,
-    /// Uses Azure Blob Storage's native shared-key API.
-    AzureAbs,
 }
 
 impl ConfiguredObjectStoreKind {
@@ -49,7 +46,6 @@ impl ConfiguredObjectStoreKind {
             Self::AwsS3 => "aws-s3",
             Self::CloudflareR2 => "cloudflare-r2",
             Self::GcpGcs => "gcp-gcs",
-            Self::AzureAbs => "azure-abs",
         }
     }
 }
@@ -147,17 +143,6 @@ impl ConfiguredObjectStore {
         })
     }
 
-    /// Builds a native Azure Blob store without direct-transfer issuance.
-    ///
-    /// Construction fails when the endpoint, provider, runtime, or key prefix is invalid.
-    pub fn azure_abs(config: AzureAbsStoreConfig) -> Result<Self> {
-        let store = azure_abs(config)?;
-        Ok(Self {
-            inner: Arc::new(store),
-            direct_transfers: None,
-        })
-    }
-
     /// Returns the direct transfers this deployment can authorize, or `None`
     /// when every transfer has to be proxied.
     ///
@@ -212,7 +197,6 @@ pub(crate) fn endpoint_host_is_proven(uri: &Uri, domain_families: &[&str]) -> bo
 #[cfg(test)]
 mod tests {
     use super::ConfiguredObjectStore;
-    use crate::abs::AzureAbsStoreConfig;
     use crate::gcs::GcpGcsStoreConfig;
     use crate::keys::hint;
     use crate::local_fs_store::LocalFsStore;
@@ -222,11 +206,10 @@ mod tests {
         GCP_GCS_MAX_DIRECT_PUT_BYTES,
     };
     use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
-    use crate::test_support::{gcs_fixture_service_account_key_file, AZURITE_ACCOUNT_KEY};
+    use crate::test_support::gcs_fixture_service_account_key_file;
     use crate::ObjectStoreError;
     use crate::{AwsS3Credentials, ObjectStore};
     use bytes::Bytes;
-    use loonfs_types::ChecksumAlgorithm;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -272,7 +255,6 @@ mod tests {
             transfers.multipart.is_none(),
             "this adapter signs no multipart for GCS, which is spelled as an absent signer"
         );
-        assert_eq!(put.stored_checksum_algorithm(), ChecksumAlgorithm::Crc32c);
         assert_eq!(put.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
     }
 
@@ -342,16 +324,6 @@ mod tests {
         // live-conformance flag instead — and that run is recorded on the
         // flag.
         assert!(gcs_store().direct_transfers().is_some());
-
-        let azure = ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
-            account_name: "devstoreaccount1".to_owned(),
-            container_name: "container".to_owned(),
-            access_key: AZURITE_ACCOUNT_KEY.into(),
-            endpoint_url: None,
-            key_prefix: Some("tenant-a".to_owned()),
-        })
-        .expect("construct azure store");
-        assert!(azure.direct_transfers().is_none());
     }
 
     #[test]
@@ -376,10 +348,6 @@ mod tests {
         let s3 = aws_s3_store(None).direct_transfers().expect("s3 transfers");
         let s3_put = s3.put.expect("s3 signs whole-object writes");
         assert!(s3.multipart.is_some());
-        assert_eq!(
-            s3_put.stored_checksum_algorithm(),
-            ChecksumAlgorithm::Crc64nvme
-        );
         assert_eq!(s3_put.max_content_bytes(), AWS_S3_MAX_DIRECT_PUT_BYTES);
 
         let r2 = r2_store("https://account.r2.cloudflarestorage.com")

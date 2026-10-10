@@ -15,7 +15,6 @@ use crate::presign::v4::{
     hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, unix_ms,
     V4Endpoint, V4RequestParts, V4Scheme,
 };
-use crate::provider_object_store::SHA256_METADATA_KEY;
 use crate::{ByteRange, ObjectStoreError, PutMode};
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -121,7 +120,7 @@ impl S3CompatiblePresigner {
     /// `GetObjectAttributes` would answer the same question on AWS S3 and
     /// return 501 on Cloudflare R2, so the head is the only portable surface
     /// and the only one this crate signs.
-    pub(crate) async fn presign_head_stored_checksum(
+    pub(crate) async fn presign_head(
         &self,
         object_key: &str,
         expires_in: Duration,
@@ -139,16 +138,15 @@ impl S3CompatiblePresigner {
     }
 
     /// Signs `CreateMultipartUpload` for an object whose checksum will cover
-    /// the whole assembly, carrying `sha256` as its attestation when given.
+    /// the whole assembly.
     pub(crate) async fn presign_create_multipart(
         &self,
         object_key: &str,
-        sha256: Option<&Checksum>,
         expires_in: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
         let credentials = self.signing_credentials(expires_in, now).await?;
-        let mut required_headers = BTreeMap::from([
+        let required_headers = BTreeMap::from([
             (
                 S3_CHECKSUM_ALGORITHM_HEADER.to_owned(),
                 S3_CRC64NVME_ALGORITHM.to_owned(),
@@ -158,12 +156,7 @@ impl S3CompatiblePresigner {
                 S3_FULL_OBJECT_CHECKSUM_TYPE.to_owned(),
             ),
         ]);
-        if let Some(sha256) = sha256 {
-            required_headers.insert(
-                format!("x-amz-meta-{SHA256_METADATA_KEY}"),
-                sha256.value.clone(),
-            );
-        }
+
         self.presign_with_query(
             &credentials,
             "POST",
@@ -474,10 +467,6 @@ impl S3CompatiblePresigner {
 
 #[async_trait]
 impl DirectPutIssuer for S3CompatiblePresigner {
-    fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
-        ChecksumAlgorithm::Crc64nvme
-    }
-
     fn max_content_bytes(&self) -> u64 {
         self.config.direct_put_max_content_bytes
     }
@@ -591,7 +580,6 @@ mod tests {
     };
     use crate::{AwsS3Credentials, ByteRange, ObjectStoreError, PutMode};
     use async_trait::async_trait;
-    use loonfs_types::Checksum;
     use object_store::client::CredentialProvider;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -731,12 +719,12 @@ mod tests {
             .expect("uploads also report effective expiry");
         assert_eq!(signed.expires_at_ms, 1_700_000_300_000);
         let signed = signer
-            .presign_head_stored_checksum(CONTENT_KEY, Duration::from_secs(60), now)
+            .presign_head(CONTENT_KEY, Duration::from_secs(60), now)
             .await
             .expect("shorter requested lifetime is preserved");
         assert_eq!(signed.expires_at_ms, 1_700_000_060_000);
         assert!(signer
-            .presign_head_stored_checksum(CONTENT_KEY, Duration::from_secs(1), expiry)
+            .presign_head(CONTENT_KEY, Duration::from_secs(1), expiry)
             .await
             .is_err());
         assert!(signer
@@ -891,7 +879,7 @@ mod tests {
     #[tokio::test]
     async fn presigned_head_signs_the_checksum_mode_header() {
         let signed = presigner(Some("tenant-a"), None)
-            .presign_head_stored_checksum(
+            .presign_head(
                 CONTENT_KEY,
                 Duration::from_secs(60),
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),
@@ -920,16 +908,11 @@ mod tests {
         let signer = presigner(Some("tenant-a"), None);
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let ttl = Duration::from_secs(60);
-        let sha256 = Checksum::sha256(b"object");
 
         let created = signer
-            .presign_create_multipart(CONTENT_KEY, Some(&sha256), ttl, now)
+            .presign_create_multipart(CONTENT_KEY, ttl, now)
             .await
             .expect("presign create");
-        assert_eq!(
-            created.headers.get("x-amz-meta-sha256"),
-            Some(&sha256.value)
-        );
         for (mode, header, value) in [
             (PutMode::CreateIfAbsent, "if-none-match", "*"),
             (
@@ -953,6 +936,20 @@ mod tests {
                 .contains(&format!("X-Amz-SignedHeaders=host%3B{header}&")));
         }
         let base_key = "namespaces/other/content/con_fedcba9876543210fedcba9876543210";
+        assert_eq!(
+            created
+                .headers
+                .get("x-amz-checksum-algorithm")
+                .map(String::as_str),
+            Some("CRC64NVME")
+        );
+        assert_eq!(
+            created
+                .headers
+                .get("x-amz-checksum-type")
+                .map(String::as_str),
+            Some("FULL_OBJECT")
+        );
         let copied = signer
             .presign_copy_part(
                 CONTENT_KEY,

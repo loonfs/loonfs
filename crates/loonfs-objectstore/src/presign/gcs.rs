@@ -138,7 +138,7 @@ impl GcsV4Presigner {
     /// GCS reports the stored CRC-32C in the `x-goog-hash` response header of
     /// an ordinary object request, so no special request header is needed to
     /// ask for it and the capability signs `host` alone.
-    pub(crate) fn presign_head_stored_checksum(
+    pub(crate) fn presign_head(
         &self,
         object_key: &str,
         expires_in: Duration,
@@ -212,10 +212,6 @@ impl GcsV4Presigner {
 
 #[async_trait]
 impl DirectPutIssuer for GcsV4Presigner {
-    fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
-        ChecksumAlgorithm::Crc32c
-    }
-
     fn max_content_bytes(&self) -> u64 {
         GCP_GCS_MAX_DIRECT_PUT_BYTES
     }
@@ -436,7 +432,7 @@ mod tests {
     #[test]
     fn presigned_head_reads_the_object_back_with_host_signed_alone() {
         let signed = presigner(Some("tenant-a"))
-            .presign_head_stored_checksum(CONTENT_KEY, EXPIRES_IN, signing_time())
+            .presign_head(CONTENT_KEY, EXPIRES_IN, signing_time())
             .expect("presign head");
 
         assert_eq!(signed.method, "HEAD");
@@ -563,12 +559,8 @@ mod tests {
     }
 
     #[test]
-    fn gcs_advertises_crc32c_and_googles_documented_single_request_ceiling() {
+    fn gcs_advertises_googles_documented_single_request_ceiling() {
         let signer = presigner(None);
-        assert_eq!(
-            signer.stored_checksum_algorithm(),
-            ChecksumAlgorithm::Crc32c
-        );
         assert_eq!(signer.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
         assert_eq!(GCP_GCS_MAX_DIRECT_PUT_BYTES, 5 * 1024 * 1024 * 1024 * 1024);
     }

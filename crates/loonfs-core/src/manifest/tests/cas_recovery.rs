@@ -665,6 +665,10 @@ struct StaleObjectOnceStore {
 
 #[async_trait]
 impl ObjectStore for StaleObjectOnceStore {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.inner.checksum_algorithm()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
     }

@@ -26,15 +26,13 @@ use crate::provider_object_store::{
 };
 use crate::retry::{with_transport_retry, DEFAULT};
 use crate::signed_request::{
-    classify_signed_response, object_length_from_signed_head, send_signed,
-    stored_checksum_from_signed_head, SignedResponse,
+    classify_signed_response, object_length_from_signed_head, send_signed, SignedResponse,
 };
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
 use crate::{
     AssemblySource, ByteRange, MultipartPart, ObjectMetadata, ObjectStoreError,
     ObjectStoreErrorClass, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
-    StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -51,14 +49,6 @@ use std::time::{Duration, SystemTime};
 /// Lifetime of the internally signed multipart control requests. Like the
 /// checksum head, each is issued immediately and never handed out.
 const MULTIPART_CONTROL_TTL: Duration = Duration::from_secs(60);
-
-/// Provider checksum headers this adapter understands, in the order it
-/// prefers them, paired with the durable algorithm each one names.
-const S3_CHECKSUM_HEADERS: &[(&str, ChecksumAlgorithm)] = &[
-    ("x-amz-checksum-crc64nvme", ChecksumAlgorithm::Crc64nvme),
-    ("x-amz-checksum-sha256", ChecksumAlgorithm::Sha256),
-    ("x-amz-checksum-crc32c", ChecksumAlgorithm::Crc32c),
-];
 
 /// Supplies credentials, addressing, and key scoping for AWS S3.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +184,7 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         .connect(&crate::provider_object_store::provider_client_options())
         .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
     let mut builder = AmazonS3Builder::new()
+        .with_checksum_algorithm(object_store::aws::Checksum::CRC64NVME)
         .with_http_connector(io_runtime.connector())
         .with_client_options(crate::provider_object_store::provider_client_options())
         .with_retry(crate::provider_object_store::provider_retry_config())
@@ -225,6 +216,11 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         })
         .build()
         .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
+    let signer = Arc::new(S3RequestSigner {
+        request_signer: Arc::clone(&request_signer),
+        http,
+        kind: config.kind,
+    });
     let store = ProviderObjectStore::new(
         Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
         Arc::new(one_attempt),
@@ -235,12 +231,8 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         },
         config.kind,
         io_runtime,
+        signer.clone(),
     )?;
-    let signer = Arc::new(S3RequestSigner {
-        request_signer: Arc::clone(&request_signer),
-        http,
-        kind: config.kind,
-    });
     let direct_transfers = DirectTransferIssuers {
         get: request_signer.clone(),
         put: Some(request_signer.clone()),
@@ -249,7 +241,6 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
 
     let store = store
         .compare_token(CompareToken::Etag)
-        .checksum_reader(signer.clone())
         .multipart_controller(signer);
     Ok((store, direct_transfers))
 }
@@ -299,32 +290,22 @@ impl StoredChecksumReader for S3RequestSigner {
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let signed = self
             .request_signer
-            .presign_head_stored_checksum(key, CHECKSUM_HEAD_TTL, Self::signing_time())
+            .presign_head(key, CHECKSUM_HEAD_TTL, Self::signing_time())
             .await?;
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         crate::signed_request::metadata_from_signed_head(
             key,
             &response,
-            "x-amz-meta-sha256",
             "x-amz-version-id",
             s3_stored_checksum,
         )
-    }
-
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        let signed = self
-            .request_signer
-            .presign_head_stored_checksum(key, CHECKSUM_HEAD_TTL, Self::signing_time())
-            .await?;
-        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-        stored_checksum_from_signed_head(key, &response, s3_stored_checksum)
     }
 }
 
 #[async_trait]
 impl MultipartController for S3RequestSigner {
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
-        self.create_upload(key, None).await
+        self.create_upload(key).await
     }
 
     async fn complete_multipart_upload(
@@ -373,10 +354,9 @@ impl MultipartController for S3RequestSigner {
         key: &str,
         head: Bytes,
         rest: PartReader<'_>,
-        sha256: Option<&Checksum>,
         part_window: usize,
     ) -> Result<ObjectMetadata> {
-        let upload_id = self.create_upload(key, sha256).await?;
+        let upload_id = self.create_upload(key).await?;
         let mut abort_on_drop = self.abort_on_drop(key, &upload_id);
         let mut crc = StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc64nvme);
         let mut size_bytes = 0;
@@ -425,7 +405,7 @@ impl MultipartController for S3RequestSigner {
             version: None,
             size_bytes,
             last_modified_ms: None,
-            attestation: Some(sha256.cloned().unwrap_or(crc)),
+            checksum: Some(crc),
         })
     }
 
@@ -447,10 +427,10 @@ impl MultipartController for S3RequestSigner {
 }
 
 impl S3RequestSigner {
-    async fn create_upload(&self, key: &str, sha256: Option<&Checksum>) -> Result<String> {
+    async fn create_upload(&self, key: &str) -> Result<String> {
         let signed = self
             .request_signer
-            .presign_create_multipart(key, sha256, MULTIPART_CONTROL_TTL, Self::signing_time())
+            .presign_create_multipart(key, MULTIPART_CONTROL_TTL, Self::signing_time())
             .await?;
         let response = self
             .send_checked(key, signed, HttpRequestBody::empty())
@@ -565,7 +545,7 @@ impl S3RequestSigner {
     async fn head_object(&self, key: &str) -> Result<Option<(u64, String)>> {
         let signed = self
             .request_signer
-            .presign_head_stored_checksum(key, CHECKSUM_HEAD_TTL, Self::signing_time())
+            .presign_head(key, CHECKSUM_HEAD_TTL, Self::signing_time())
             .await?;
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         object_length_from_signed_head(key, &response)
@@ -711,16 +691,9 @@ fn assembled_crc64nvme<'a>(
     })
 }
 
-/// Reads whichever full-object checksum the provider stored.
-///
-/// The checksum *type* header is deliberately not consulted: R2 never sends
-/// one, and full-object coverage is established when LoonFS writes the
-/// object, not discovered when it reads the metadata back.
 fn s3_stored_checksum(headers: &http::HeaderMap) -> Option<Checksum> {
-    S3_CHECKSUM_HEADERS.iter().find_map(|(header, algorithm)| {
-        let value = headers.get(*header)?.to_str().ok()?;
-        base64_checksum(*algorithm, value)
-    })
+    let value = headers.get("x-amz-checksum-crc64nvme")?.to_str().ok()?;
+    base64_checksum(ChecksumAlgorithm::Crc64nvme, value)
 }
 
 /// Decodes the base64 spelling the S3 family uses for a checksum.
@@ -841,19 +814,23 @@ mod tests {
     const KEY: &str = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
     const BASE_KEY: &str = "namespaces/demo/content/con_fedcba9876543210fedcba9876543210";
 
-    /// Answers the S3 requests of an assembly from a base, with `base` as
-    /// the object at every key, and records which operation each request
-    /// was.
     #[derive(Debug, Clone)]
     struct ScriptedProvider {
         base: Arc<Vec<u8>>,
         operations: Arc<Mutex<Vec<&'static str>>>,
         aborted: Arc<Notify>,
+        objects: Arc<Mutex<std::collections::HashMap<String, Bytes>>>,
     }
 
     impl ScriptedProvider {
         fn operations(&self) -> Vec<&'static str> {
             self.operations.lock().expect("operations").clone()
+        }
+    }
+
+    impl object_store::client::HttpConnector for ScriptedProvider {
+        fn connect(&self, _: &object_store::ClientOptions) -> object_store::Result<HttpClient> {
+            Ok(HttpClient::new(self.clone()))
         }
     }
 
@@ -863,13 +840,24 @@ mod tests {
             let query = request.uri().query().unwrap_or_default().to_owned();
             let response = http::Response::builder();
             let (operation, response) = match *request.method() {
-                http::Method::HEAD => (
-                    "head",
-                    response
-                        .header(http::header::CONTENT_LENGTH, self.base.len())
-                        .header(http::header::ETAG, "\"base\"")
-                        .body(Bytes::new()),
-                ),
+                http::Method::HEAD => {
+                    assert_eq!(request.headers()["x-amz-checksum-mode"], "ENABLED");
+                    let bytes = if request.uri().path().ends_with(BASE_KEY) {
+                        Bytes::copy_from_slice(&self.base)
+                    } else {
+                        self.objects.lock().expect("objects")[request.uri().path()].clone()
+                    };
+                    let checksum = base64_crc64nvme(&Checksum::crc64nvme(&bytes))
+                        .expect("checksum");
+                    (
+                        "head",
+                        response
+                            .header(http::header::CONTENT_LENGTH, bytes.len())
+                            .header(http::header::ETAG, "\"base\"")
+                            .header("x-amz-checksum-crc64nvme", checksum)
+                            .body(Bytes::new()),
+                    )
+                }
                 http::Method::POST if query.contains("uploads") => (
                     "create",
                     response.body(Bytes::from_static(
@@ -896,6 +884,25 @@ mod tests {
                             "<CopyPartResult><ETag>\"copied\"</ETag><ChecksumCRC64NVME>{reported}</ChecksumCRC64NVME></CopyPartResult>"
                         ))),
                     )
+                }
+                http::Method::PUT if !query.contains("partNumber") => {
+                    use http_body_util::BodyExt as _;
+                    let (parts, body) = request.into_parts();
+                    let bytes = body.collect().await?.to_bytes();
+                    let checksum = base64_crc64nvme(&Checksum::crc64nvme(&bytes)).expect("checksum");
+                    assert_eq!(parts.headers["x-amz-checksum-crc64nvme"], checksum);
+                    assert_eq!(parts.headers["if-none-match"], "*");
+                    assert!(!parts.headers.keys().any(|name| {
+                        name.as_str().starts_with("x-amz-meta-")
+                    }));
+                    let mut objects = self.objects.lock().expect("objects");
+                    let response = if objects.contains_key(parts.uri.path()) {
+                        response.status(http::StatusCode::PRECONDITION_FAILED)
+                    } else {
+                        objects.insert(parts.uri.path().to_owned(), bytes);
+                        response.header(http::header::ETAG, "\"written\"")
+                    };
+                    ("put", response.body(Bytes::new()))
                 }
                 http::Method::PUT => (
                     "upload",
@@ -960,6 +967,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verified_put_and_assembly_accept_the_same_stored_checksum() {
+        use crate::{
+            ImmutableWriteError, ObjectStore, ProviderObjectStore, ProviderObjectStoreConfig,
+        };
+        for kind in [
+            ConfiguredObjectStoreKind::AwsS3,
+            ConfiguredObjectStoreKind::CloudflareR2,
+        ] {
+            let provider = ScriptedProvider {
+                base: Arc::new(b"source".to_vec()),
+                operations: Arc::default(),
+                aborted: Arc::default(),
+                objects: Arc::default(),
+            };
+            let client = Arc::new(
+                object_store::aws::AmazonS3Builder::new()
+                    .with_bucket_name("bucket")
+                    .with_region("us-east-1")
+                    .with_access_key_id("test-access")
+                    .with_secret_access_key("test-secret")
+                    .with_endpoint("http://provider.invalid")
+                    .with_allow_http(true)
+                    .with_checksum_algorithm(object_store::aws::Checksum::CRC64NVME)
+                    .with_http_connector(provider.clone())
+                    .build()
+                    .expect("client"),
+            );
+            let signer = Arc::new(scripted_signer(kind, &provider));
+            let store = ProviderObjectStore::new(
+                client.clone(),
+                client.clone(),
+                client.clone(),
+                client,
+                ProviderObjectStoreConfig { key_prefix: None },
+                kind,
+                crate::store_io_runtime::StoreIoRuntime::new().expect("runtime"),
+                signer.clone(),
+            )
+            .expect("store")
+            .multipart_controller(signer);
+            let bytes = Bytes::from_static(b"source tail");
+            let expected = Checksum::crc64nvme(&bytes);
+            store
+                .put_immutable_verified(KEY, bytes)
+                .await
+                .expect("verified put");
+            let sources = [AssemblySource {
+                key: BASE_KEY.to_owned(),
+                range: None,
+                checksum: Checksum::crc64nvme(b"source"),
+            }];
+            let accepted = store
+                .assemble(KEY, &sources, vec![Bytes::from_static(b" tail")], &expected)
+                .await
+                .expect("same object");
+            assert_eq!(accepted.checksum, Some(expected));
+            assert!(matches!(
+                store
+                    .assemble(
+                        KEY,
+                        &sources,
+                        vec![Bytes::from_static(b" other")],
+                        &Checksum::crc64nvme(b"source other")
+                    )
+                    .await,
+                Err(ImmutableWriteError::DifferentObject { .. })
+            ));
+            assert_eq!(provider.operations(), ["put", "head", "head"]);
+        }
+    }
+
+    #[tokio::test]
     async fn assembly_checks_copied_parts_before_completing() {
         for kind in [
             ConfiguredObjectStoreKind::AwsS3,
@@ -981,6 +1060,7 @@ mod tests {
                     base: Arc::new(base.clone()),
                     operations: Arc::default(),
                     aborted: Arc::default(),
+                    objects: Arc::default(),
                 };
                 let signer = scripted_signer(kind, &provider);
                 let sources = [AssemblySource {
@@ -1002,10 +1082,7 @@ mod tests {
                     )
                     .await;
                 if correct {
-                    assert_eq!(
-                        result.expect("assembly").attestation,
-                        Some(expected.clone())
-                    );
+                    assert_eq!(result.expect("assembly").checksum, Some(expected.clone()));
                     assert_eq!(
                         provider.operations(),
                         ["head", "create", "copy", "upload", "complete"]

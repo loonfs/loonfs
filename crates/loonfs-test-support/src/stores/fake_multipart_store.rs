@@ -24,7 +24,7 @@ use futures::stream::BoxStream;
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     AssemblySource, ByteRange, ByteStream, ImmutableWriteError, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, Result, StoredObjectChecksum,
+    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, Result,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::collections::BTreeMap;
@@ -140,38 +140,18 @@ impl<S> FakeMultipartStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.inner.checksum_algorithm()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let mut metadata = self.inner.head(key).await?;
         if let Some(metadata) = &mut metadata {
             if let Some(checksum) = self.stored_checksums.lock().expect("checksums").get(key) {
-                metadata.attestation = Some(checksum.clone());
+                metadata.checksum = Some(checksum.clone());
             }
         }
         Ok(metadata)
-    }
-
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        let checksum = self
-            .stored_checksums
-            .lock()
-            .expect("stored checksum lock should not be poisoned")
-            .get(key)
-            .cloned();
-        if let Some(checksum) = checksum {
-            let size_bytes = self
-                .inner
-                .head(key)
-                .await?
-                .ok_or_else(|| ObjectStoreError::NotFound {
-                    object_key: key.to_owned(),
-                })?
-                .size_bytes;
-            return Ok(Some(StoredObjectChecksum {
-                size_bytes,
-                checksum,
-            }));
-        }
-        self.inner.head_stored_checksum(key).await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
@@ -295,12 +275,12 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             source,
         };
         if let Some(metadata) = self.head(key).await.map_err(failed)? {
-            return match &metadata.attestation {
+            return match &metadata.checksum {
                 Some(actual) if actual == expected => Ok(metadata),
                 Some(_) => Err(ImmutableWriteError::DifferentObject {
                     object_key: key.to_owned(),
                 }),
-                None => Err(ImmutableWriteError::Unattested {
+                None => Err(ImmutableWriteError::StoredChecksumMissing {
                     object_key: key.to_owned(),
                 }),
             };
@@ -344,7 +324,7 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             .lock()
             .expect("checksums")
             .insert(key.to_owned(), expected.clone());
-        metadata.attestation = Some(expected.clone());
+        metadata.checksum = Some(expected.clone());
         Ok(metadata)
     }
 

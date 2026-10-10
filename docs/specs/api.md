@@ -462,8 +462,8 @@ checksum covers one multipart upload part. A `checksum_algorithm` field selects
 an algorithm but does not contain a checksum value.
 
 Service-proxied uploads use `sha256`. Direct PUT and direct multipart use the
-`checksum_algorithm` returned when the session begins. Direct multipart
-currently uses `crc64nvme`. Reads verify the algorithm stored in the content
+`checksum_algorithm` returned when the session begins. Both begin responses use
+the store's checksum algorithm. Reads verify the algorithm stored in the content
 reference.
 
 ## 5. Minimal upload, commit, and change-feed model

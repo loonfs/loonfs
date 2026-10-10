@@ -576,7 +576,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .expect("open namespace");
     let bytes = b"direct provider upload";
     let begin = namespace
-        .create_direct_put_upload_target(loonfs_types::ChecksumAlgorithm::Crc64nvme)
+        .create_direct_put_upload_target()
         .await
         .expect("begin direct put");
     harness.recording.reset();

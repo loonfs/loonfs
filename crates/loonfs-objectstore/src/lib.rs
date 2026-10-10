@@ -3,15 +3,13 @@
 //! LoonFS assumes only the narrow provider contract the format spec names —
 //! create-if-absent, compare-and-swap, read-after-write visibility, prefix
 //! listing — and this crate owns that boundary: the [`ObjectStore`] trait,
-//! provider adapters for S3, Cloudflare R2, Google Cloud Storage, Azure Blob
-//! Storage, and the local filesystem, the durable key layout in [`keys`] and
+//! provider adapters for S3, Cloudflare R2, Google Cloud Storage, and the local filesystem, the durable key layout in [`keys`] and
 //! [`layout`], and the contract probe in [`probe`] that proves a configured
 //! store honours that contract — the same checks the conformance suite runs
 //! against real providers.
 
 #![warn(missing_docs)]
 
-pub mod abs;
 mod assembly;
 mod attempts;
 mod aws_credentials;
@@ -44,7 +42,7 @@ pub use immutable_write::ImmutableWriteError;
 pub use object_store::{
     required_etag, AssemblySource, ByteRange, ByteStream, ListedObject, MultipartPart, ObjectBody,
     ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, Result,
-    SharedObjectStore, StoredObjectChecksum,
+    SharedObjectStore,
 };
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
 pub use provider_object_store::{
@@ -55,6 +53,6 @@ pub use provider_object_store::{
     PROVIDER_PUBLICATION_REQUEST_BOUND, PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };
 pub use store_config::{
-    AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, GcpGcsCredentials, StoreConfig,
-    StoreConfigError, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
+    AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, StoreConfig, StoreConfigError,
+    ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
 };

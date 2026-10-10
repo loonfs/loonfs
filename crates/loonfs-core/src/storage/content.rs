@@ -166,16 +166,12 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     Ok(PreparedContent::for_durable_content_write(content_ref))
 }
 
-/// Compares a content reference with the size and checksum stored by the provider.
-///
-/// This verifies direct uploads without downloading the object. Callers must
-/// delete the unpublished object when the values do not match.
 pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
     store: &S,
     content_ref: &ContentRef,
 ) -> Result<(), DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_ref)?;
-    let stored = match store.head_stored_checksum(&object_key).await {
+    let stored = match store.head(&object_key).await {
         Ok(Some(stored)) => stored,
         Ok(None) => return Err(DurableContentValidationError::MissingContentObject { object_key }),
         Err(err) => {
@@ -193,11 +189,21 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
             actual: stored.size_bytes,
         });
     }
-    if stored.checksum != content_ref.checksum {
+    let checksum = stored
+        .checksum
+        .ok_or_else(|| DurableContentValidationError::Store {
+            object_key: object_key.clone(),
+            message: ObjectStoreError::StoredChecksumMissing {
+                object_key: object_key.clone(),
+            }
+            .public_message()
+            .into_owned(),
+        })?;
+    if checksum != content_ref.checksum {
         return Err(DurableContentValidationError::ContentChecksumMismatch {
             object_key,
             expected: describe_checksum(&content_ref.checksum),
-            actual: describe_checksum(&stored.checksum),
+            actual: describe_checksum(&checksum),
         });
     }
     Ok(())

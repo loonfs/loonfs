@@ -8,7 +8,7 @@ macro_rules! delegate_object_store {
     ($receiver:ident => $inner:expr; except get) => {
         $crate::delegate_object_store!($receiver => $inner;
             head,
-            head_stored_checksum,
+            checksum_algorithm,
             create_multipart_upload,
             complete_multipart_upload,
             abort_multipart_upload,
@@ -31,35 +31,12 @@ macro_rules! delegate_object_store {
     ($receiver:ident => $inner:expr; except put) => {
         $crate::delegate_object_store!($receiver => $inner;
             head,
-            head_stored_checksum,
+            checksum_algorithm,
             create_multipart_upload,
             complete_multipart_upload,
             abort_multipart_upload,
             get_with_metadata,
             get,
-            delete,
-            list_prefix_stream,
-            list_entries_from_stream,
-            list_prefix,
-            list_child_prefixes,
-        );
-    };
-    ($receiver:ident => $inner:expr; except head_stored_checksum) => {
-        $crate::delegate_object_store!($receiver => $inner;
-            head,
-            create_multipart_upload,
-            complete_multipart_upload,
-            abort_multipart_upload,
-            get_with_metadata,
-            get,
-            put,
-            put_streamed,
-            put_overwrite,
-            put_if_absent,
-            put_immutable_verified,
-            put_immutable_verified_stream,
-            assemble,
-            compare_and_swap,
             delete,
             list_prefix_stream,
             list_entries_from_stream,
@@ -98,25 +75,9 @@ macro_rules! __delegate_object_store_method {
             ::std::boxed::Box::pin(async move { $inner.head(key).await })
         }
     };
-    (head_stored_checksum, $receiver:ident, $inner:expr) => {
-        fn head_stored_checksum<'store, 'key, 'future>(
-            &'store $receiver,
-            key: &'key str,
-        ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<
-                    Output = Result<
-                        Option<::loonfs_objectstore::StoredObjectChecksum>,
-                        ::loonfs_objectstore::ObjectStoreError,
-                    >,
-                > + Send
-                + 'future,
-        >>
-        where
-            'store: 'future,
-            'key: 'future,
-            Self: 'future,
-        {
-            ::std::boxed::Box::pin(async move { $inner.head_stored_checksum(key).await })
+    (checksum_algorithm, $receiver:ident, $inner:expr) => {
+        fn checksum_algorithm(&$receiver) -> ::loonfs_types::ChecksumAlgorithm {
+            $inner.checksum_algorithm()
         }
     };
     (create_multipart_upload, $receiver:ident, $inner:expr) => {
@@ -405,11 +366,10 @@ macro_rules! __delegate_object_store_method {
         }
     };
     (put_immutable_verified_stream, $receiver:ident, $inner:expr) => {
-        fn put_immutable_verified_stream<'store, 'key, 'sha, 'body, 'future>(
+        fn put_immutable_verified_stream<'store, 'key, 'body, 'future>(
             &'store $receiver,
             key: &'key str,
             size_bytes: u64,
-            sha256: Option<&'sha ::loonfs_types::Checksum>,
             body: ::futures::stream::BoxStream<
                 'body,
                 Result<::bytes::Bytes, ::loonfs_objectstore::ObjectStoreError>,
@@ -426,13 +386,12 @@ macro_rules! __delegate_object_store_method {
         where
             'store: 'future,
             'key: 'future,
-            'sha: 'future,
             'body: 'future,
             Self: 'future,
         {
             ::std::boxed::Box::pin(async move {
                 $inner
-                    .put_immutable_verified_stream(key, size_bytes, sha256, body)
+                    .put_immutable_verified_stream(key, size_bytes, body)
                     .await
             })
         }

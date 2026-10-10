@@ -32,8 +32,6 @@ pub enum TraceStoreKind {
     R2,
     /// Google Cloud Storage.
     Gcs,
-    /// Azure Blob Storage.
-    Abs,
     /// Backend not identified by the caller.
     Unknown,
 }
@@ -46,7 +44,6 @@ impl TraceStoreKind {
             Self::S3 => "s3",
             Self::R2 => "r2",
             Self::Gcs => "gcs",
-            Self::Abs => "abs",
             Self::Unknown => "unknown",
         }
     }
@@ -62,7 +59,6 @@ impl From<ConfiguredObjectStoreKind> for TraceStoreKind {
             ConfiguredObjectStoreKind::AwsS3 => Self::S3,
             ConfiguredObjectStoreKind::CloudflareR2 => Self::R2,
             ConfiguredObjectStoreKind::GcpGcs => Self::Gcs,
-            ConfiguredObjectStoreKind::AzureAbs => Self::Abs,
         }
     }
 }
@@ -119,7 +115,6 @@ mod tests {
             (ConfiguredObjectStoreKind::AwsS3, TraceStoreKind::S3),
             (ConfiguredObjectStoreKind::CloudflareR2, TraceStoreKind::R2),
             (ConfiguredObjectStoreKind::GcpGcs, TraceStoreKind::Gcs),
-            (ConfiguredObjectStoreKind::AzureAbs, TraceStoreKind::Abs),
         ];
         for (kind, expected) in cases {
             assert_eq!(TraceStoreKind::from(kind), expected);
@@ -134,7 +129,6 @@ mod tests {
         assert_eq!(TraceStoreKind::S3.as_str(), "s3");
         assert_eq!(TraceStoreKind::R2.as_str(), "r2");
         assert_eq!(TraceStoreKind::Gcs.as_str(), "gcs");
-        assert_eq!(TraceStoreKind::Abs.as_str(), "abs");
         assert_eq!(TraceStoreKind::Unknown.as_str(), "unknown");
     }
 

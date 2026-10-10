@@ -7,7 +7,7 @@ use crate::object_store::Result;
 use crate::ListedObject;
 use crate::{
     AssemblySource, ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
+    ObjectStoreError, ObjectStoreErrorClass, PutMode,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -398,24 +398,13 @@ impl<S> ObjectStore for InstrumentedObjectStore<S>
 where
     S: ObjectStore,
 {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.inner.checksum_algorithm()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let start = sample_clock();
         let (result, attempts) = counting_attempts(self.inner.head(key)).await;
-        self.record_head_like(
-            ObjectStoreOperation::Head,
-            key,
-            start.elapsed(),
-            attempts,
-            &result,
-        );
-        result
-    }
-
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        let start = sample_clock();
-        let (result, attempts) = counting_attempts(self.inner.head_stored_checksum(key)).await;
-        // One provider metadata request, recorded as the head it is: the
-        // point of this call is that it moves no payload.
         self.record_head_like(
             ObjectStoreOperation::Head,
             key,
@@ -556,13 +545,12 @@ where
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Option<&Checksum>,
         body: BoxStream<'_, Result<Bytes>>,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         let start = sample_clock();
         let (result, attempts) = counting_attempts(
             self.inner
-                .put_immutable_verified_stream(key, size_bytes, sha256, body),
+                .put_immutable_verified_stream(key, size_bytes, body),
         )
         .await;
         let mut sample = ObjectStoreMetricSample::new(

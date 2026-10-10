@@ -8,7 +8,7 @@ use futures::StreamExt;
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, StoredObjectChecksum,
+    ObjectStoreError, PutMode,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt;
@@ -21,6 +21,7 @@ pub struct MetadataMapStore<S> {
     inner: S,
     keys: KeyPredicate,
     transform: Arc<Transform>,
+    algorithm: Option<loonfs_types::ChecksumAlgorithm>,
 }
 
 impl<S> MetadataMapStore<S> {
@@ -34,7 +35,14 @@ impl<S> MetadataMapStore<S> {
             inner,
             keys,
             transform: Arc::new(transform),
+            algorithm: None,
         }
+    }
+
+    /// Declares the algorithm supplied by the metadata transform.
+    pub fn algorithm(mut self, algorithm: loonfs_types::ChecksumAlgorithm) -> Self {
+        self.algorithm = Some(algorithm);
+        self
     }
 
     /// Reports matching objects as last modified at unix epoch zero.
@@ -87,22 +95,17 @@ impl<S: fmt::Debug> fmt::Debug for MetadataMapStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.algorithm
+            .unwrap_or_else(|| self.inner.checksum_algorithm())
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         Ok(self
             .inner
             .head(key)
             .await?
             .map(|metadata| self.map(key, metadata)))
-    }
-
-    /// Passed through unchanged: this store rewrites object metadata, and a
-    /// stored checksum is the provider's statement about bytes, not metadata
-    /// a test may rewrite without making the object lie about itself.
-    async fn head_stored_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
-        self.inner.head_stored_checksum(key).await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String, ObjectStoreError> {
@@ -200,7 +203,7 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
                             etag: None,
                             version: None,
                             size_bytes: 0,
-                            attestation: None,
+                            checksum: None,
                         })
                         .last_modified_ms;
                     }

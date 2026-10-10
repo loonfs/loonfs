@@ -3,7 +3,7 @@
 use crate::object_store::Result;
 use crate::ByteRange;
 use async_trait::async_trait;
-use loonfs_types::{Checksum, ChecksumAlgorithm};
+use loonfs_types::Checksum;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -88,19 +88,12 @@ pub struct PresignedUrl {
 /// - The signed request must be create-only, so an existing object is never
 ///   replaced through a transfer capability (S3-family: a signed
 ///   `if-none-match: *` header).
-/// - The issuer must report the checksum algorithm the provider stores for a
-///   checksum-less single PUT. Completion verifies that stored checksum.
+/// - Completion verifies the checksum returned by the store.
 ///
 /// A provider that cannot preserve create-only writes and report a durable
 /// full-object checksum must not implement this trait.
 #[async_trait]
 pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
-    /// The whole-object checksum this provider stores for a single PUT.
-    ///
-    /// The begin response returns this algorithm to the client. Completion
-    /// compares the client checksum with the checksum stored by the provider.
-    fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm;
-
     /// The largest object this provider accepts in one presigned request.
     ///
     /// The server can reject a size hint above this limit at begin. Completion

@@ -332,9 +332,9 @@ impl From<ImmutableWriteError> for CoreError {
             ImmutableWriteError::DifferentObject { object_key } => Self::NamespaceCorrupt(format!(
                 "immutable object `{object_key}` already exists with different bytes"
             )),
-            ImmutableWriteError::Unattested { object_key } => Self::NamespaceCorrupt(format!(
-                "immutable object `{object_key}` already exists without an attestation"
-            )),
+            ImmutableWriteError::StoredChecksumMissing { object_key } => Self::NamespaceCorrupt(
+                format!("immutable object `{object_key}` already exists without a stored checksum"),
+            ),
             ImmutableWriteError::Transport { object_key, source } => Self::Store {
                 object_key,
                 message: source.public_message().into_owned(),

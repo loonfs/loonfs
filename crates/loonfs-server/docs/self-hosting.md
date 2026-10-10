@@ -25,7 +25,6 @@ Start with the example for your object store:
 - [local filesystem](../config/local-fs.example.toml)
 - [Amazon S3](../config/aws-s3.example.toml)
 - [Google Cloud Storage](../config/gcp-gcs.example.toml)
-- [Azure Blob Storage](../config/azure-abs.example.toml)
 - [Cloudflare R2](../config/cloudflare-r2.example.toml)
 
 The server rejects unknown fields and invalid values at startup.

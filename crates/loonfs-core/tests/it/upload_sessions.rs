@@ -16,11 +16,11 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
 use loonfs_types::api::v0::CompleteMultipartUploadRequest;
+use loonfs_types::Checksum;
 use loonfs_types::{
     format::control::{ControlObjectKind, UploadSessionMode, UploadSessionPayload},
     ContentRef, DestinationBehavior, NamespaceId, UploadId,
 };
-use loonfs_types::{Checksum, ChecksumAlgorithm};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -38,11 +38,10 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
 async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checksum_algorithm: ChecksumAlgorithm,
     context: &MutationContext,
 ) -> Result<DirectPutUploadTarget, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .begin_direct_put_upload_target(None, checksum_algorithm)
+        .begin_direct_put_upload_target(None)
         .await
 }
 
@@ -132,14 +131,12 @@ async fn begin_direct_put_mints_the_target_object_up_front() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let first =
-        begin_direct_put_upload_target(&store, &namespace_id, ChecksumAlgorithm::Sha256, &context)
-            .await
-            .expect("first direct put target");
-    let second =
-        begin_direct_put_upload_target(&store, &namespace_id, ChecksumAlgorithm::Sha256, &context)
-            .await
-            .expect("second direct put target");
+    let first = begin_direct_put_upload_target(&store, &namespace_id, &context)
+        .await
+        .expect("first direct put target");
+    let second = begin_direct_put_upload_target(&store, &namespace_id, &context)
+        .await
+        .expect("second direct put target");
 
     let first_content_id = first.object_key.rsplit('/').next().expect("content id");
     assert!(first_content_id.starts_with("con_"));

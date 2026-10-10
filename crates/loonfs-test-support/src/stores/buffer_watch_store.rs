@@ -11,7 +11,7 @@ use futures::stream::{BoxStream, StreamExt};
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     ByteRange, ByteStream, ImmutableWriteError, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -129,15 +129,12 @@ impl<S> BufferWatchStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.inner.checksum_algorithm()
     }
 
-    async fn head_stored_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
-        self.inner.head_stored_checksum(key).await
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String, ObjectStoreError> {
@@ -227,7 +224,6 @@ impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Option<&Checksum>,
         body: BoxStream<'_, Result<Bytes, ObjectStoreError>>,
     ) -> Result<ObjectMetadata, ImmutableWriteError> {
         let body = if self.matches(key) {
@@ -236,7 +232,7 @@ impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
             body
         };
         self.inner
-            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .put_immutable_verified_stream(key, size_bytes, body)
             .await
     }
 

@@ -122,10 +122,10 @@ async fn records_an_assembly_with_its_tail_as_bytes_in() {
             &[AssemblySource {
                 key: "source".to_owned(),
                 range: None,
-                checksum: Checksum::sha256(b"base"),
+                checksum: Checksum::crc64nvme(b"base"),
             }],
             vec![bytes(b" "), bytes(b"more")],
-            &Checksum::sha256(b"base more"),
+            &Checksum::crc64nvme(b"base more"),
         )
         .await
         .expect("assembly");
@@ -474,13 +474,17 @@ impl DelegatingWriteStore {
             version: None,
             size_bytes: 0,
             last_modified_ms: None,
-            attestation: None,
+            checksum: None,
         }
     }
 }
 
 #[async_trait]
 impl ObjectStore for DelegatingWriteStore {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        loonfs_types::ChecksumAlgorithm::Crc64nvme
+    }
+
     async fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         Ok(None)
     }

@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
-use loonfs_types::{Checksum, EffectiveLimit, Page};
+use loonfs_types::{Checksum, ChecksumAlgorithm, EffectiveLimit, Page};
 use std::borrow::Cow;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -46,8 +46,8 @@ pub struct ObjectMetadata {
     /// Advisory: garbage collection uses it for grace/reap age checks and
     /// treats an absent value as "young" (retain). Never a validity input.
     pub last_modified_ms: Option<u64>,
-    /// The writer's SHA-256, or the provider's full-object checksum.
-    pub attestation: Option<Checksum>,
+    /// The provider's stored full-object checksum in its declared algorithm.
+    pub checksum: Option<Checksum>,
 }
 
 /// Bytes copied from an existing object into an assembly.
@@ -57,20 +57,7 @@ pub struct AssemblySource {
     pub key: String,
     /// Half-open byte range, or the whole object when absent.
     pub range: Option<ByteRange>,
-    /// Checksum of exactly the selected bytes.
-    pub checksum: Checksum,
-}
-
-/// Size and the stored full-object checksum for one object, read from a
-/// single provider metadata request.
-///
-/// This is the evidence a completion check needs to decide whether the
-/// object at a key is the object that was promised, without downloading it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredObjectChecksum {
-    /// Complete object length the provider reports.
-    pub size_bytes: u64,
-    /// Full-object checksum the provider stored with the object.
+    /// Checksum of exactly the selected bytes in the store's algorithm.
     pub checksum: Checksum,
 }
 
@@ -392,29 +379,15 @@ pub(crate) async fn collect_stream(mut body: BoxStream<'_, Result<Bytes>>) -> Re
 /// may lag behind direct reads.
 #[async_trait]
 pub trait ObjectStore: Send + Sync + Debug {
+    /// Selects the checksum verified on upload and returned by `head`.
+    /// Providers may store a checksum they compute or one combined from verified requests.
+    fn checksum_algorithm(&self) -> ChecksumAlgorithm;
+
     /// Reads metadata for one key, returning `None` when the object is absent.
     ///
     /// The returned compare token belongs to this exact observation. Invalid
     /// keys and provider failures are returned as [`ObjectStoreError`].
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>>;
-
-    /// Reads size and the stored full-object checksum for one key, returning
-    /// `None` when the object is absent.
-    ///
-    /// This uses one metadata request. S3-compatible stores use `HeadObject`
-    /// with checksum mode because some providers do not support
-    /// `GetObjectAttributes`.
-    ///
-    /// Stores without checksum readback return [`ObjectStoreError::Unsupported`].
-    /// Existing objects without a stored checksum return
-    /// [`ObjectStoreError::StoredChecksumMissing`]. Direct uploads require
-    /// this capability for completion verification.
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        let _ = key;
-        Err(ObjectStoreError::Unsupported(
-            "stored full-object checksum readback",
-        ))
-    }
 
     /// Opens a provider multipart upload targeting `key`, whose eventual
     /// checksum covers the whole assembled object.
@@ -485,7 +458,7 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Writes bytes under the requested overwrite or provider-enforced precondition.
     ///
     /// Successful completion is immediately authoritative. A create-if-absent
-    /// write records the SHA-256 of `bytes` as the object's attestation.
+    /// write sends the store's checksum for the provider to verify and store.
     /// Invalid keys, failed conditions, permission failures, and ambiguous
     /// transport failures are returned.
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata>;
@@ -498,8 +471,7 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// create-if-absent completes conditionally where the provider allows it;
     /// elsewhere a multipart provider may check `mode` immediately before
     /// assembly rather than atomically with it, so this method is only safe
-    /// for immutable, uniquely named keys. A write longer than one part
-    /// carries no attestation. Failed multipart writes must be aborted.
+    /// for immutable, uniquely named keys. Failed multipart writes must be aborted.
     ///
     /// The default implementation buffers the complete stream before calling
     /// [`Self::put`]. Providers should override it to provide bounded-memory
@@ -597,18 +569,9 @@ pub trait ObjectStore: Send + Sync + Debug {
         self.put(key, bytes, PutMode::CreateIfAbsent).await
     }
 
-    /// Writes `bytes` under an immutable `key` and accepts success only when
-    /// the key holds exactly those bytes.
-    ///
-    /// Every size is written with create-if-absent, which attests the
-    /// SHA-256 of `bytes`. A key found occupied is decided by one `head`: an
-    /// equal attestation is this object and returns its metadata, a
-    /// different one answers [`crate::ImmutableWriteError::DifferentObject`],
-    /// and a missing one answers [`crate::ImmutableWriteError::Unattested`].
-    /// No bytes are read back. Transport failures retry under one operation
-    /// deadline, and a retry whose earlier attempt landed resolves through
-    /// the same `head`. Mutable keys must use [`Self::put`] and own their
-    /// protocol-specific ambiguity resolution.
+    /// Creates an immutable object and accepts an occupied key only when its stored
+    /// checksum equals the checksum of `bytes`. Transport failures retry under
+    /// one operation deadline. Missing stored checksums fail verification.
     async fn put_immutable_verified(
         &self,
         key: &str,
@@ -617,40 +580,31 @@ pub trait ObjectStore: Send + Sync + Debug {
         crate::immutable_write::put(self, key, bytes).await
     }
 
-    /// Creates `key` from `body`, a stream of `size_bytes` bytes, only while
-    /// the key is absent, and records `sha256`, when given, as the object's
-    /// attestation.
-    ///
-    /// A body below one part is buffered and takes the single-request
-    /// create. A longer one goes through the provider's conditional
-    /// multipart create, with the attestation set when the upload starts, so
-    /// the body is never held whole. The body may borrow, for a caller that
-    /// streams it out of this store. An error item ends the write before
-    /// anything is created. A key found occupied is decided by one `head`
-    /// against `sha256`, as [`Self::put_immutable_verified`] decides it;
-    /// without `sha256` it answers
-    /// [`crate::ImmutableWriteError::Unattested`]. A stream cannot be sent
-    /// twice, so a transport failure is returned rather than retried.
-    ///
-    /// The default buffers the body and creates it through [`Self::put`],
-    /// which attests the body's own SHA-256.
+    /// Creates an immutable object while computing its checksum from the stream.
+    /// An error item prevents completion. An occupied key is checked by `head`.
+    /// Providers override this buffered default for bounded memory. Streams do not retry.
     async fn put_immutable_verified_stream(
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Option<&Checksum>,
         body: BoxStream<'_, Result<Bytes>>,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         let _ = size_bytes;
-        let created = match collect_stream(body).await {
-            Ok(bytes) => self.put(key, bytes, PutMode::CreateIfAbsent).await,
-            Err(error) => Err(error),
-        };
-        crate::immutable_write::decide_created(self, key, sha256, created).await
+        let bytes =
+            collect_stream(body)
+                .await
+                .map_err(|source| crate::ImmutableWriteError::Transport {
+                    object_key: key.to_owned(),
+                    source,
+                })?;
+        let checksum = Checksum::compute(self.checksum_algorithm(), &bytes);
+        let created = self.put(key, bytes, PutMode::CreateIfAbsent).await;
+        crate::immutable_write::decide_created(self, key, &checksum, created).await
     }
 
     /// Creates `key` from `sources` in order followed by the pieces in `tail`.
-    /// An occupied key succeeds only with an equal `expected` attestation.
+    /// `expected` and source checksums use the store's algorithm.
+    /// An occupied key succeeds only with an equal stored checksum.
     /// Missing or short sources fail the precondition before completion.
     async fn assemble(
         &self,
@@ -686,12 +640,12 @@ pub trait ObjectStore: Send + Sync + Debug {
 
 #[async_trait]
 impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        self.as_ref().head(key).await
+    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+        self.as_ref().checksum_algorithm()
     }
 
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        self.as_ref().head_stored_checksum(key).await
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+        self.as_ref().head(key).await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
@@ -783,11 +737,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Option<&Checksum>,
         body: BoxStream<'_, Result<Bytes>>,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         self.as_ref()
-            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .put_immutable_verified_stream(key, size_bytes, body)
             .await
     }
 
@@ -815,12 +768,12 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
 
 #[async_trait]
 impl<T: ObjectStore + ?Sized> ObjectStore for &T {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        (*self).head(key).await
+    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+        (*self).checksum_algorithm()
     }
 
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        (*self).head_stored_checksum(key).await
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+        (*self).head(key).await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
@@ -912,11 +865,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Option<&Checksum>,
         body: BoxStream<'_, Result<Bytes>>,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         (*self)
-            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .put_immutable_verified_stream(key, size_bytes, body)
             .await
     }
 
@@ -994,6 +946,10 @@ mod tests {
 
     #[async_trait]
     impl ObjectStore for ListOverrideStore {
+        fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+            loonfs_types::ChecksumAlgorithm::Crc64nvme
+        }
+
         async fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>> {
             Ok(None)
         }

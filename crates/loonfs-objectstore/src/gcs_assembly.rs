@@ -1,8 +1,6 @@
 //! Generation-bound GCS compose and temporary object cleanup.
 
-use super::{
-    attested, gcs_object, precondition_failed_when_missing, GcsRequestSigner, GCS_JSON_OBJECTS,
-};
+use super::{gcs_object, precondition_failed_when_missing, GcsRequestSigner, GCS_JSON_OBJECTS};
 use crate::assembly::{check_expected, combined_checksum, source_range, READ_BYTES};
 use crate::keys::temporary_object;
 use crate::keyspace::scope_object_key;
@@ -18,7 +16,7 @@ use loonfs_types::{Checksum, ChecksumAlgorithm, NamespaceId};
 use object_store::client::HttpRequestBody;
 
 impl GcsRequestSigner {
-    async fn object(&self, key: &str) -> Result<(ObjectMetadata, Option<Checksum>)> {
+    async fn object(&self, key: &str) -> Result<ObjectMetadata> {
         let url = format!(
             "{GCS_JSON_OBJECTS}/{}/o/{}",
             percent_encode_segment(&self.bucket),
@@ -39,18 +37,13 @@ impl GcsRequestSigner {
         }))
     }
 
-    async fn compose(
-        &self,
-        key: &str,
-        sources: Vec<serde_json::Value>,
-        sha256: Option<&Checksum>,
-    ) -> Result<(ObjectMetadata, Option<Checksum>)> {
+    async fn compose(&self, key: &str, sources: Vec<serde_json::Value>) -> Result<ObjectMetadata> {
         let url = format!(
             "{GCS_JSON_OBJECTS}/{}/o/{}/compose?ifGenerationMatch=0",
             percent_encode_segment(&self.bucket),
             self.object_name(key)?
         );
-        let body = serde_json::json!({ "sourceObjects": sources, "destination": attested(sha256) });
+        let body = serde_json::json!({ "sourceObjects": sources, "destination": {} });
         let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
         let response = self
             .send_authorized(key, request, body.to_string().into())
@@ -138,7 +131,7 @@ impl GcsRequestSigner {
         .boxed();
         let mut reader = PartReader::new(body, READ_BYTES as usize);
         let head = reader.next_part().await?.unwrap_or_default();
-        self.put_if_absent(temporary, head, reader, None, 1).await
+        self.put_if_absent(temporary, head, reader, 1).await
     }
 
     fn temporary_cleanup(&self, key: &str) -> AbortUploadOnDrop {
@@ -185,11 +178,7 @@ impl GcsRequestSigner {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
-        if expected.algorithm == ChecksumAlgorithm::Crc64nvme {
-            return Err(ObjectStoreError::Unsupported(
-                "gcs assembly requires sha256 or crc32c",
-            ));
-        }
+        crate::assembly::check_algorithms(ChecksumAlgorithm::Crc32c, key, sources, expected)?;
         let namespace_id = parse_object_key(key)
             .and_then(|parsed| NamespaceId::parse(parsed.owner_namespace_id()).ok())
             .ok_or_else(|| ObjectStoreError::InvalidKey {
@@ -198,39 +187,32 @@ impl GcsRequestSigner {
             })?;
         let mut resolved = Vec::with_capacity(sources.len());
         for source in sources {
-            let (metadata, crc) = self.object(&source.key).await?;
+            let metadata = self.object(&source.key).await?;
             let range = source_range(source, metadata.size_bytes)?;
-            if source.range.is_none() {
-                let actual = if source.checksum.algorithm == ChecksumAlgorithm::Sha256 {
-                    metadata.attestation.as_ref()
-                } else {
-                    crc.as_ref()
-                };
-                if let Some(actual) =
-                    actual.filter(|actual| actual.algorithm == source.checksum.algorithm)
-                {
-                    check_expected(&source.key, &source.checksum, actual)?;
+            let checksum = metadata.checksum.as_ref().ok_or_else(|| {
+                ObjectStoreError::StoredChecksumMissing {
+                    object_key: source.key.clone(),
                 }
+            })?;
+            if source.range.is_none() {
+                check_expected(&source.key, &source.checksum, checksum)?;
             }
-            resolved.push((metadata, crc, range));
+            resolved.push((metadata, range));
         }
-        if expected.algorithm == ChecksumAlgorithm::Crc32c {
-            if let Some(actual) = combined_checksum(
-                ChecksumAlgorithm::Crc32c,
-                sources
-                    .iter()
-                    .zip(&resolved)
-                    .map(|(source, (_, _, range))| {
-                        (
-                            &source.checksum,
-                            range.end_exclusive - range.start_inclusive,
-                        )
-                    }),
-                &tail,
-            ) {
-                check_expected(key, expected, &actual)?;
-            }
-        }
+        let actual = combined_checksum(
+            ChecksumAlgorithm::Crc32c,
+            sources.iter().zip(&resolved).map(|(source, (_, range))| {
+                (
+                    &source.checksum,
+                    range.end_exclusive - range.start_inclusive,
+                )
+            }),
+            &tail,
+        )
+        .ok_or_else(|| ObjectStoreError::ChecksumMismatch {
+            object_key: key.to_owned(),
+        })?;
+        check_expected(key, expected, &actual)?;
         let mut temporary = Vec::new();
         let result = self
             .compose_assembly(
@@ -254,7 +236,7 @@ impl GcsRequestSigner {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        resolved: Vec<(ObjectMetadata, Option<Checksum>, ByteRange)>,
+        resolved: Vec<(ObjectMetadata, ByteRange)>,
         tail: Vec<Bytes>,
         expected: &Checksum,
         namespace_id: &NamespaceId,
@@ -262,21 +244,22 @@ impl GcsRequestSigner {
     ) -> Result<ObjectMetadata> {
         let mut objects = Vec::new();
         let mut checksum = Checksum::crc32c(&[]);
-        for (source, (metadata, crc, range)) in sources.iter().zip(resolved) {
-            let (name, metadata, crc) = if source.range.is_some() {
+        for (source, (metadata, range)) in sources.iter().zip(resolved) {
+            let (name, metadata) = if source.range.is_some() {
                 let name = temporary_object(namespace_id);
                 temporary.push((name.clone(), self.temporary_cleanup(&name)));
                 let uploaded = self.upload_range(&name, source, &metadata, range).await?;
-                let crc = uploaded.attestation.clone();
-                (name, uploaded, crc)
+                (name, uploaded)
             } else {
-                (source.key.clone(), metadata, crc)
+                (source.key.clone(), metadata)
             };
-            let crc = crc.ok_or_else(|| ObjectStoreError::StoredChecksumMissing {
-                object_key: name.clone(),
+            let crc = metadata.checksum.as_ref().ok_or_else(|| {
+                ObjectStoreError::StoredChecksumMissing {
+                    object_key: name.clone(),
+                }
             })?;
             checksum = checksum
-                .crc_combine(&crc, metadata.size_bytes)
+                .crc_combine(crc, metadata.size_bytes)
                 .ok_or_else(|| ObjectStoreError::ChecksumMismatch {
                     object_key: name.clone(),
                 })?;
@@ -287,9 +270,7 @@ impl GcsRequestSigner {
                 .crc_combine(&Checksum::crc32c(piece), piece.len() as u64)
                 .expect("CRC-32C values should combine");
         }
-        if expected.algorithm == ChecksumAlgorithm::Crc32c {
-            check_expected(key, expected, &checksum)?;
-        }
+        check_expected(key, expected, &checksum)?;
         if !tail.is_empty() || objects.is_empty() {
             let name = temporary_object(namespace_id);
             temporary.push((name.clone(), self.temporary_cleanup(&name)));
@@ -298,7 +279,7 @@ impl GcsRequestSigner {
                 READ_BYTES as usize,
             );
             let head = reader.next_part().await?.unwrap_or_default();
-            let metadata = self.put_if_absent(&name, head, reader, None, 1).await?;
+            let metadata = self.put_if_absent(&name, head, reader, 1).await?;
             objects.push(self.compose_source(&name, &metadata)?);
         }
         while objects.len() > 32 {
@@ -306,14 +287,14 @@ impl GcsRequestSigner {
             for group in objects.chunks(32) {
                 let name = temporary_object(namespace_id);
                 temporary.push((name.clone(), self.temporary_cleanup(&name)));
-                let (metadata, _) = self.compose(&name, group.to_vec(), None).await?;
+                let metadata = self.compose(&name, group.to_vec()).await?;
                 next.push(self.compose_source(&name, &metadata)?);
             }
             objects = next;
         }
-        let sha256 = (expected.algorithm == ChecksumAlgorithm::Sha256).then_some(expected);
-        let (metadata, actual) = self.compose(key, objects, sha256).await?;
-        if expected.algorithm == ChecksumAlgorithm::Crc32c && actual.as_ref() != Some(expected) {
+        let metadata = self.compose(key, objects).await?;
+        let actual = metadata.checksum.as_ref();
+        if actual != Some(expected) {
             self.delete_temporary(key).await;
             return Err(ObjectStoreError::ChecksumMismatch {
                 object_key: key.to_owned(),

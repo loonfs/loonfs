@@ -3197,35 +3197,12 @@ mod direct_download {
     #[derive(Debug)]
     struct LoopbackIssuer {
         object_base_url: String,
-        /// The whole-object checksum this stand-in provider enforces.
-        ///
-        /// Providers do not agree on one -- the S3 family verifies CRC-64/NVME
-        /// and GCS verifies CRC-32C -- so the shape is a parameter here for
-        /// the same reason it is a trait method in the real issuers: the
-        /// client folds whichever the deployment names.
-        checksum_algorithm: ChecksumAlgorithm,
     }
 
     impl LoopbackIssuer {
-        /// The S3-compatible shape: a whole-object CRC-64/NVME.
         fn at(object_base_url: impl Into<String>) -> Arc<Self> {
-            Self::with_checksum(object_base_url, ChecksumAlgorithm::Crc64nvme)
-        }
-
-        /// The GCS shape: a whole-object CRC-32C. Callers pair it with a
-        /// bundle carrying no multipart signer, which is the rest of that
-        /// shape.
-        fn crc32c_at(object_base_url: impl Into<String>) -> Arc<Self> {
-            Self::with_checksum(object_base_url, ChecksumAlgorithm::Crc32c)
-        }
-
-        fn with_checksum(
-            object_base_url: impl Into<String>,
-            checksum_algorithm: ChecksumAlgorithm,
-        ) -> Arc<Self> {
             Arc::new(Self {
                 object_base_url: object_base_url.into(),
-                checksum_algorithm,
             })
         }
     }
@@ -3256,10 +3233,6 @@ mod direct_download {
 
     #[async_trait]
     impl DirectPutIssuer for LoopbackIssuer {
-        fn stored_checksum_algorithm(&self) -> ChecksumAlgorithm {
-            self.checksum_algorithm
-        }
-
         fn max_content_bytes(&self) -> u64 {
             LOOPBACK_DIRECT_PUT_MAX_BYTES
         }
@@ -3431,15 +3404,6 @@ mod direct_download {
         Arc::new(LocalFsStore::new(root).expect("construct local store for the object double"))
     }
 
-    /// A store that reports an object's stored checksum as a CRC-32C, the way
-    /// a GCS provider answers.
-    ///
-    /// The reference local store reports SHA-256, which is the readback that
-    /// pairs with an S3-compatible issuer. A provider's readback algorithm
-    /// and its `direct_put` issuer's algorithm have to be the same one, or
-    /// completion compares two digests of different kinds and refuses every
-    /// upload — so a CRC-32C issuer needs a CRC-32C readback beneath it, and
-    /// this double supplies one.
     #[derive(Debug)]
     struct Crc32cReadbackStore {
         inner: LocalFsStore,
@@ -3447,18 +3411,20 @@ mod direct_download {
 
     #[async_trait::async_trait]
     impl loonfs_objectstore::ObjectStore for Crc32cReadbackStore {
-        delegate_object_store!(self => self.inner; except head_stored_checksum);
-
-        async fn head_stored_checksum(
+        delegate_object_store!(self => self.inner; get_with_metadata, get, put, delete, list_entries_from_stream, list_child_prefixes);
+        fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+            ChecksumAlgorithm::Crc32c
+        }
+        async fn head(
             &self,
             key: &str,
-        ) -> Result<Option<loonfs_objectstore::StoredObjectChecksum>, ObjectStoreError> {
-            let Some(bytes) = self.inner.get(key, None).await? else {
+        ) -> Result<Option<loonfs_objectstore::ObjectMetadata>, ObjectStoreError> {
+            let Some(body) = self.inner.get_with_metadata(key).await? else {
                 return Ok(None);
             };
-            Ok(Some(loonfs_objectstore::StoredObjectChecksum {
-                size_bytes: bytes.len() as u64,
-                checksum: Checksum::crc32c(&bytes),
+            Ok(Some(loonfs_objectstore::ObjectMetadata {
+                checksum: Some(Checksum::crc32c(&body.bytes)),
+                ..body.metadata
             }))
         }
     }
@@ -4014,7 +3980,7 @@ mod direct_download {
     async fn a_crc32c_provider_without_multipart_carries_a_file_end_to_end() {
         let temp_dir = tempdir().expect("tempdir");
         let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
-        let issuer = LoopbackIssuer::crc32c_at(object_base_url);
+        let issuer = LoopbackIssuer::at(object_base_url);
         let transfers = DirectTransferIssuers {
             get: issuer.clone(),
             put: Some(issuer),

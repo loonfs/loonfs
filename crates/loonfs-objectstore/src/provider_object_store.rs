@@ -1,6 +1,5 @@
 //! The shared provider transport: timeouts, bounded retries for replay-safe
-//! delete and multipart stages, multipart upload for large payloads, and the
-//! write attestation kept in provider user metadata.
+//! delete and multipart stages, and multipart upload for large payloads.
 
 use crate::keyspace::{
     normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
@@ -13,7 +12,7 @@ use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::ListedObject;
 use crate::{
     AssemblySource, ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -26,8 +25,8 @@ use provider_store::list::{PaginatedListOptions, PaginatedListStore};
 use provider_store::multipart::{MultipartStore, PartId};
 use provider_store::path::Path;
 use provider_store::{
-    Attribute, Attributes, GetOptions, GetRange, ObjectMeta, ObjectStoreExt, PutOptions,
-    PutPayload, PutResult, UpdateVersion,
+    GetOptions, GetRange, ObjectMeta, ObjectStoreExt, PutOptions, PutPayload, PutResult,
+    UpdateVersion,
 };
 use std::borrow::Cow;
 use std::fmt;
@@ -182,20 +181,6 @@ pub(crate) enum CompareToken {
 #[async_trait]
 pub(crate) trait StoredChecksumReader: Send + Sync {
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>>;
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>>;
-}
-
-/// User-metadata name under which providers keep a write's attestation.
-pub(crate) const SHA256_METADATA_KEY: &str = "sha256";
-
-/// Reads an attestation kept in user metadata; a value that is not a SHA-256
-/// is no attestation.
-pub(crate) fn attested_sha256(value: &str) -> Option<Checksum> {
-    let sha256 = Checksum {
-        algorithm: ChecksumAlgorithm::Sha256,
-        value: value.to_owned(),
-    };
-    sha256.validate().is_ok().then_some(sha256)
 }
 
 /// The provider's own multi-request writes, sent as requests this crate
@@ -231,7 +216,7 @@ pub(crate) trait MultipartController: Send + Sync {
     }
 
     /// Writes `head` and then every part of `rest` to `key` only while `key`
-    /// is absent, attesting `sha256` when given, with at most `part_window`
+    /// is absent, with at most `part_window`
     /// parts in flight. A provider whose upload takes its parts in order
     /// sends them one at a time.
     async fn put_if_absent(
@@ -239,7 +224,6 @@ pub(crate) trait MultipartController: Send + Sync {
         key: &str,
         head: Bytes,
         rest: PartReader<'_>,
-        sha256: Option<&Checksum>,
         part_window: usize,
     ) -> Result<ObjectMetadata>;
 
@@ -259,7 +243,7 @@ pub struct ProviderObjectStore {
     one_attempt: Arc<dyn provider_store::ObjectStore>,
     multipart: Arc<dyn MultipartStore>,
     paginated: Arc<dyn PaginatedListStore>,
-    checksum_reader: Option<Arc<dyn StoredChecksumReader>>,
+    checksum_reader: Arc<dyn StoredChecksumReader>,
     multipart_controller: Option<Arc<dyn MultipartController>>,
     compare_token: CompareToken,
     kind: ConfiguredObjectStoreKind,
@@ -288,6 +272,7 @@ impl ProviderObjectStore {
     /// Conditional flat puts go to `one_attempt`; everything else uses
     /// `inner`. Construction fails when `config.key_prefix` is not a
     /// normalized, non-escaping logical prefix.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         inner: Arc<dyn provider_store::ObjectStore>,
         one_attempt: Arc<dyn provider_store::ObjectStore>,
@@ -296,13 +281,14 @@ impl ProviderObjectStore {
         config: ProviderObjectStoreConfig,
         kind: ConfiguredObjectStoreKind,
         io_runtime: StoreIoRuntime,
+        checksum_reader: Arc<dyn StoredChecksumReader>,
     ) -> Result<Self> {
         Ok(Self {
             inner,
             one_attempt,
             multipart,
             paginated,
-            checksum_reader: None,
+            checksum_reader,
             multipart_controller: None,
             compare_token: CompareToken::Etag,
             kind,
@@ -316,14 +302,6 @@ impl ProviderObjectStore {
 
     pub(crate) fn compare_token(mut self, compare_token: CompareToken) -> Self {
         self.compare_token = compare_token;
-        self
-    }
-
-    pub(crate) fn checksum_reader(
-        mut self,
-        checksum_reader: Arc<dyn StoredChecksumReader>,
-    ) -> Self {
-        self.checksum_reader = Some(checksum_reader);
         self
     }
 
@@ -371,15 +349,13 @@ impl ProviderObjectStore {
         }
     }
 
-    fn metadata_from_meta(&self, meta: ObjectMeta, attributes: &Attributes) -> ObjectMetadata {
+    fn metadata_from_meta(&self, meta: ObjectMeta) -> ObjectMetadata {
         self.with_compare_token(ObjectMetadata {
             etag: meta.e_tag,
             version: meta.version,
             size_bytes: meta.size,
             last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
-            attestation: attributes
-                .get(&Attribute::Metadata(SHA256_METADATA_KEY.into()))
-                .and_then(|value| attested_sha256(value)),
+            checksum: None,
         })
     }
 
@@ -389,7 +365,7 @@ impl ProviderObjectStore {
             version: result.version,
             size_bytes,
             last_modified_ms: None,
-            attestation: None,
+            checksum: None,
         })
     }
 
@@ -792,31 +768,16 @@ impl MultipartWrite<'_> {
 
 #[async_trait]
 impl ObjectStore for ProviderObjectStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        if let Some(reader) = &self.checksum_reader {
-            return reader.head_metadata(key).await;
-        }
-        let path = self.to_path(key)?;
-        let options = GetOptions {
-            head: true,
-            ..Default::default()
-        };
-        match self.inner.get_opts(&path, options).await {
-            Ok(result) => Ok(Some(
-                self.metadata_from_meta(result.meta, &result.attributes),
-            )),
-            Err(error) if provider_not_found(&error) => Ok(None),
-            Err(error) => Err(map_provider_error(key, error)),
+    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+        match self.kind {
+            ConfiguredObjectStoreKind::GcpGcs => ChecksumAlgorithm::Crc32c,
+            _ => ChecksumAlgorithm::Crc64nvme,
         }
     }
 
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        match &self.checksum_reader {
-            Some(reader) => reader.head_stored_checksum(key).await,
-            None => Err(ObjectStoreError::Unsupported(
-                "stored full-object checksum readback",
-            )),
-        }
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+        self.to_path(key)?;
+        self.checksum_reader.head_metadata(key).await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
@@ -864,7 +825,7 @@ impl ObjectStore for ProviderObjectStore {
         let path = self.to_path(key)?;
         match self.inner.get(&path).await {
             Ok(result) => {
-                let metadata = self.metadata_from_meta(result.meta.clone(), &result.attributes);
+                let metadata = self.metadata_from_meta(result.meta.clone());
                 let bytes = result
                     .bytes()
                     .await
@@ -956,8 +917,7 @@ impl ObjectStore for ProviderObjectStore {
     }
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        let sha256 = matches!(mode, PutMode::CreateIfAbsent).then(|| Checksum::sha256(&bytes));
-        self.put_attested(key, bytes, mode, sha256).await
+        self.put_checked(key, bytes, mode).await
     }
 
     /// A verified write of one part or less is the single-request create
@@ -979,10 +939,8 @@ impl ObjectStore for ProviderObjectStore {
         else {
             return crate::immutable_write::put(self, key, bytes).await;
         };
-        let sha256 = Checksum::sha256(&bytes);
         crate::immutable_write::put_with(self, key, &bytes, || {
             let bytes = bytes.clone();
-            let sha256 = &sha256;
             async move {
                 let mut parts = PartReader::new(
                     stream::once(async { Ok(bytes) }).boxed(),
@@ -990,13 +948,7 @@ impl ObjectStore for ProviderObjectStore {
                 );
                 let head = parts.next_part().await?.unwrap_or_default();
                 controller
-                    .put_if_absent(
-                        key,
-                        head,
-                        parts,
-                        Some(sha256),
-                        PROVIDER_MULTIPART_PART_WINDOW,
-                    )
+                    .put_if_absent(key, head, parts, PROVIDER_MULTIPART_PART_WINDOW)
                     .await
             }
         })
@@ -1027,26 +979,31 @@ impl ObjectStore for ProviderObjectStore {
             self.put(key, head, mode).await?;
             return Ok(size_bytes);
         }
-        self.put_parts(key, head, reader, mode, None, 1)
+        self.put_parts(key, head, reader, mode, 1)
             .await
             .map(|metadata| metadata.size_bytes)
     }
 
-    /// A body below the multipart threshold is buffered and takes the
-    /// attested single-request create. A longer one is cut into parts as it
-    /// arrives and goes through [`Self::put_parts`].
     async fn put_immutable_verified_stream(
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Option<&Checksum>,
         body: BoxStream<'_, Result<Bytes>>,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        let mut checksum =
+            loonfs_types::StreamingChecksum::for_algorithm(self.checksum_algorithm());
+        let mut complete = false;
         let created = async {
+            let body = body
+                .inspect_ok(|chunk| checksum.update(chunk))
+                .chain(stream::once(async {
+                    complete = true;
+                    Ok(Bytes::new())
+                }))
+                .boxed();
             if size_bytes < self.multipart_geometry.threshold_bytes {
-                let bytes = collect_stream(body).await?;
                 return self
-                    .put_attested(key, bytes, PutMode::CreateIfAbsent, sha256.cloned())
+                    .put(key, collect_stream(body).await?, PutMode::CreateIfAbsent)
                     .await;
             }
             let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
@@ -1056,13 +1013,18 @@ impl ObjectStore for ProviderObjectStore {
                 head,
                 reader,
                 PutMode::CreateIfAbsent,
-                sha256,
                 PROVIDER_MULTIPART_PART_WINDOW,
             )
             .await
         }
         .await;
-        crate::immutable_write::decide_created(self, key, sha256, created).await
+        if !complete {
+            return created.map_err(|source| crate::ImmutableWriteError::Transport {
+                object_key: key.to_owned(),
+                source,
+            });
+        }
+        crate::immutable_write::decide_created(self, key, &checksum.finish(), created).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
@@ -1094,6 +1056,11 @@ impl ObjectStore for ProviderObjectStore {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+        crate::assembly::check_algorithms(self.checksum_algorithm(), key, sources, expected)
+            .map_err(|source| crate::ImmutableWriteError::Transport {
+                object_key: key.to_owned(),
+                source,
+            })?;
         let Some(controller) = &self.multipart_controller else {
             return crate::assembly::put_buffered(self, key, sources, tail, expected).await;
         };
@@ -1110,7 +1077,7 @@ impl ObjectStore for ProviderObjectStore {
             Ok(None) => {}
         }
         let created = controller.assemble(key, sources, tail, expected).await;
-        crate::immutable_write::decide_created(self, key, Some(expected), created).await
+        crate::immutable_write::decide_created(self, key, expected, created).await
     }
 
     fn list_entries_from_stream(
@@ -1262,19 +1229,18 @@ impl ObjectStore for ProviderObjectStore {
 }
 
 impl ProviderObjectStore {
-    /// Writes one object and records `sha256` as its attestation when given.
-    ///
-    /// A large overwrite uploads parts; a conditional write is one request at
-    /// every size.
-    async fn put_attested(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-        sha256: Option<Checksum>,
-    ) -> Result<ObjectMetadata> {
+    async fn put_checked(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         let path = self.to_path(key)?;
         self.validate_compare_token(key, &mode)?;
+        if self.kind == ConfiguredObjectStoreKind::GcpGcs && matches!(mode, PutMode::CreateIfAbsent)
+        {
+            if let Some(controller) = &self.multipart_controller {
+                let mut rest = PartReader::new(stream::empty().boxed(), 1);
+                rest.next_part().await?;
+                return controller.put_if_absent(key, bytes, rest, 1).await;
+            }
+        }
+        let checksum = Checksum::compute(self.checksum_algorithm(), &bytes);
         let size_bytes = bytes.len() as u64;
         if size_bytes >= self.multipart_geometry.threshold_bytes
             && matches!(mode, PutMode::Overwrite)
@@ -1291,16 +1257,8 @@ impl ProviderObjectStore {
             PutMode::CreateIfAbsent | PutMode::CompareAndSwap { .. } => &self.one_attempt,
         };
         let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
-        let mut attributes = Attributes::new();
-        if let Some(sha256) = &sha256 {
-            attributes.insert(
-                Attribute::Metadata(SHA256_METADATA_KEY.into()),
-                sha256.value.clone().into(),
-            );
-        }
         let options = PutOptions {
             mode: self.map_put_mode(mode),
-            attributes,
             ..Default::default()
         };
         match client
@@ -1308,7 +1266,7 @@ impl ProviderObjectStore {
             .await
         {
             Ok(result) => Ok(ObjectMetadata {
-                attestation: sha256,
+                checksum: Some(checksum),
                 ..self.metadata_from_put_result(result, size_bytes)
             }),
             Err(err) if compare_and_swap && provider_not_found(&err) => {
@@ -1320,25 +1278,16 @@ impl ProviderObjectStore {
         }
     }
 
-    /// Uploads `head` and then every part of `rest`. A create-if-absent goes
-    /// through the provider's own conditional create where it has one, which
-    /// records `sha256` when the upload starts and keeps at most
-    /// `part_window` parts in flight. Elsewhere the upstream multipart upload
-    /// sends one part at a time, checks `mode` against a `head` before
-    /// completion, and records no attestation.
     async fn put_parts(
         &self,
         key: &str,
         head: Bytes,
         rest: PartReader<'_>,
         mode: PutMode,
-        sha256: Option<&Checksum>,
         part_window: usize,
     ) -> Result<ObjectMetadata> {
         if let (PutMode::CreateIfAbsent, Some(controller)) = (&mode, &self.multipart_controller) {
-            return controller
-                .put_if_absent(key, head, rest, sha256, part_window)
-                .await;
+            return controller.put_if_absent(key, head, rest, part_window).await;
         }
         let path = self.to_path(key)?;
         let upload = MultipartWrite {
@@ -1553,14 +1502,40 @@ mod tests {
             Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&inner) as Arc<dyn MultipartStore>,
-            Arc::new(MemoryPages(inner)),
+            Arc::new(MemoryPages(Arc::clone(&inner))),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
             },
             ConfiguredObjectStoreKind::LocalFs,
             StoreIoRuntime::new().expect("store io runtime"),
+            inner,
         )
         .expect("provider store")
+    }
+
+    #[async_trait]
+    impl StoredChecksumReader for InMemory {
+        async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+            let path = Path::from(format!("tenant-a/{key}"));
+            match self.get(&path).await {
+                Ok(result) => {
+                    let meta = result.meta.clone();
+                    let bytes = result
+                        .bytes()
+                        .await
+                        .map_err(|error| map_provider_error(key, error))?;
+                    Ok(Some(ObjectMetadata {
+                        etag: meta.e_tag,
+                        version: meta.version,
+                        size_bytes: meta.size,
+                        last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
+                        checksum: Some(Checksum::crc64nvme(&bytes)),
+                    }))
+                }
+                Err(error) if provider_not_found(&error) => Ok(None),
+                Err(error) => Err(map_provider_error(key, error)),
+            }
+        }
     }
 
     struct MemoryPages(Arc<InMemory>);
@@ -2034,6 +2009,7 @@ mod tests {
         block_part_uploads: AtomicBool,
         part_started: Notify,
         multipart_aborted: Notify,
+        missing_checksum: Mutex<Option<String>>,
         next_upload_id: AtomicUsize,
         multipart_uploads: Mutex<HashMap<String, BTreeMap<usize, Bytes>>>,
     }
@@ -2320,17 +2296,38 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl StoredChecksumReader for FlakyStore {
+        async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+            self.heads.fetch_add(1, Ordering::SeqCst);
+            let mut metadata = self.inner.head_metadata(key).await?;
+            if self
+                .missing_checksum
+                .lock()
+                .expect("checksum fault")
+                .as_deref()
+                == Some(key)
+            {
+                if let Some(metadata) = &mut metadata {
+                    metadata.checksum = None;
+                }
+            }
+            Ok(metadata)
+        }
+    }
+
     fn retrying_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
         ProviderObjectStore::new(
             Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&flaky) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&flaky) as Arc<dyn MultipartStore>,
-            flaky,
+            flaky.clone(),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
             },
             ConfiguredObjectStoreKind::LocalFs,
             StoreIoRuntime::new().expect("store io runtime"),
+            flaky,
         )
         .expect("provider store")
         .transport_retry(TransportRetryPolicy {
@@ -2384,7 +2381,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_create_carries_an_attestation_that_head_and_get_report() {
+    async fn head_reports_the_stored_checksum_after_creates_and_overwrites() {
         let store = memory_store();
         let created = "namespaces/demo/content/con_00000000000000000000000000000001";
         let replaced = "namespaces/demo/hint.json";
@@ -2397,17 +2394,17 @@ mod tests {
             .await
             .expect("overwrite");
 
-        let attested = Some(Checksum::sha256(b"created"));
+        let attested = Some(Checksum::crc64nvme(b"created"));
         let head = store.head(created).await.expect("head").expect("created");
         let body = store
             .get_with_metadata(created)
             .await
             .expect("get")
             .expect("created");
-        assert_eq!(head.attestation, attested);
-        assert_eq!(body.metadata.attestation, attested);
+        assert_eq!(head.checksum, attested);
+        assert_eq!(body.bytes, b"created");
         let replaced = store.head(replaced).await.expect("head").expect("replaced");
-        assert_eq!(replaced.attestation, None);
+        assert_eq!(replaced.checksum, Some(Checksum::crc64nvme(b"replaced")));
     }
 
     #[tokio::test]
@@ -2426,8 +2423,8 @@ mod tests {
                 .await
                 .expect("immutable write");
             let head = store.head(key).await.expect("head").expect("written");
-            assert_eq!(written.attestation, Some(Checksum::sha256(&payload)));
-            assert_eq!(head.attestation, written.attestation);
+            assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
+            assert_eq!(head.checksum, written.checksum);
         }
 
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
@@ -2451,20 +2448,21 @@ mod tests {
             .await
             .expect("seed different");
         seed_scoped_object(&flaky, unattested, ours.clone()).await;
+        *flaky.missing_checksum.lock().expect("checksum fault") = Some(unattested.to_owned());
         flaky.puts.store(0, Ordering::SeqCst);
 
         let accepted = store
             .put_immutable_verified(identical, ours.clone())
             .await
             .expect("an equal attestation is this object");
-        assert_eq!(accepted.attestation, Some(Checksum::sha256(&ours)));
+        assert_eq!(accepted.checksum, Some(Checksum::crc64nvme(&ours)));
         assert!(matches!(
             store.put_immutable_verified(different, ours.clone()).await,
             Err(crate::ImmutableWriteError::DifferentObject { object_key }) if object_key == different
         ));
         assert!(matches!(
             store.put_immutable_verified(unattested, ours).await,
-            Err(crate::ImmutableWriteError::Unattested { object_key }) if object_key == unattested
+            Err(crate::ImmutableWriteError::StoredChecksumMissing { object_key }) if object_key == unattested
         ));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
         assert_eq!(flaky.heads.load(Ordering::SeqCst), 3);
@@ -2577,6 +2575,7 @@ mod tests {
             ProviderObjectStoreConfig { key_prefix: None },
             ConfiguredObjectStoreKind::LocalFs,
             StoreIoRuntime::new().expect("store io runtime"),
+            resending.clone(),
         )
         .expect("provider store");
         script_puts(&one_attempt, [WriteScript::LandThenFail]);
@@ -2890,8 +2889,6 @@ mod tests {
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
     }
 
-    /// A controller that records the part window of each conditional create
-    /// handed to it and answers with the attestation it was given.
     #[derive(Default)]
     struct CountingController {
         part_windows: Mutex<Vec<usize>>,
@@ -2910,15 +2907,18 @@ mod tests {
             _key: &str,
             head: Bytes,
             mut rest: PartReader<'_>,
-            sha256: Option<&Checksum>,
             part_window: usize,
         ) -> Result<ObjectMetadata> {
             self.part_windows
                 .lock()
                 .expect("part windows")
                 .push(part_window);
+            let mut checksum =
+                loonfs_types::StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc64nvme);
+            checksum.update(&head);
             let mut size_bytes = head.len() as u64;
             while let Some(part) = rest.next_part().await? {
+                checksum.update(&part);
                 size_bytes += part.len() as u64;
             }
             Ok(ObjectMetadata {
@@ -2926,7 +2926,7 @@ mod tests {
                 version: None,
                 size_bytes,
                 last_modified_ms: None,
-                attestation: sha256.cloned(),
+                checksum: Some(checksum.finish()),
             })
         }
 
@@ -2966,14 +2966,13 @@ mod tests {
             .expect("a large verified write creates through the controller");
         assert_eq!(controller.part_windows(), [PROVIDER_MULTIPART_PART_WINDOW]);
         assert_eq!(written.size_bytes, payload.len() as u64);
-        assert_eq!(written.attestation, Some(Checksum::sha256(&payload)));
+        assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
 
         let written = store
             .put_immutable_verified_stream(
                 MULTIPART_KEY,
                 payload.len() as u64,
-                Some(&Checksum::sha256(&payload)),
                 streamed(&payload, 100),
             )
             .await
@@ -2983,11 +2982,11 @@ mod tests {
             [PROVIDER_MULTIPART_PART_WINDOW; 2]
         );
         assert_eq!(written.size_bytes, payload.len() as u64);
-        assert_eq!(written.attestation, Some(Checksum::sha256(&payload)));
+        assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
 
         let small = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
         store
-            .put_immutable_verified_stream(small, 10, None, streamed(&payload[..10], 4))
+            .put_immutable_verified_stream(small, 10, streamed(&payload[..10], 4))
             .await
             .expect("a small streamed verified write is one request");
         assert_eq!(
@@ -2996,7 +2995,7 @@ mod tests {
         );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         let held = store.head(small).await.expect("head").expect("object");
-        assert_eq!(held.attestation, None, "no attestation was asked for");
+        assert_eq!(held.checksum, Some(Checksum::crc64nvme(&payload[..10])));
 
         let uploaded = store
             .put_streamed(

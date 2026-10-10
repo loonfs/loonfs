@@ -18,11 +18,7 @@ impl S3RequestSigner {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
-        if expected.algorithm == ChecksumAlgorithm::Crc32c {
-            return Err(ObjectStoreError::Unsupported(
-                "s3 assembly requires sha256 or crc64nvme",
-            ));
-        }
+        crate::assembly::check_algorithms(ChecksumAlgorithm::Crc64nvme, key, sources, expected)?;
         let mut ranges = Vec::with_capacity(sources.len());
         let mut etags = Vec::with_capacity(sources.len());
         for source in sources {
@@ -49,8 +45,7 @@ impl S3RequestSigner {
                 "assembly exceeds the provider part limit".to_owned(),
             ));
         }
-        let sha256 = (expected.algorithm == ChecksumAlgorithm::Sha256).then_some(expected);
-        let upload_id = self.create_upload(key, sha256).await?;
+        let upload_id = self.create_upload(key).await?;
         let mut abort_on_drop = self.abort_on_drop(key, &upload_id);
         let mut parts = Vec::with_capacity(plan.len());
         for planned in &plan {
@@ -90,9 +85,7 @@ impl S3RequestSigner {
             )
         }))
         .unwrap_or_else(|| Checksum::crc64nvme(&[]));
-        if expected.algorithm == ChecksumAlgorithm::Crc64nvme {
-            check_expected(key, expected, &crc)?;
-        }
+        check_expected(key, expected, &crc)?;
         let etag = self
             .finish_upload(
                 key,
@@ -108,7 +101,7 @@ impl S3RequestSigner {
             version: None,
             size_bytes,
             last_modified_ms: None,
-            attestation: Some(sha256.cloned().unwrap_or(crc)),
+            checksum: Some(crc),
         })
     }
 

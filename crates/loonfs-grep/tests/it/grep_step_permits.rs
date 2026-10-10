@@ -91,7 +91,7 @@ async fn hold_request() {
 impl ObjectStore for ContentWatch {
     delegate_object_store!(self => self.inner;
         head,
-        head_stored_checksum,
+        checksum_algorithm,
         create_multipart_upload,
         complete_multipart_upload,
         abort_multipart_upload,

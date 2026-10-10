@@ -97,8 +97,6 @@ pub struct DirectMultipartUploadTarget {
     pub checksum_algorithm: ChecksumAlgorithm,
 }
 
-const DIRECT_MULTIPART_CHECKSUM_ALGORITHM: ChecksumAlgorithm = ChecksumAlgorithm::Crc64nvme;
-
 /// Completion data after the request has been decoded for the stored upload
 /// mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +158,6 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     subject: Option<&Subject>,
-    checksum_algorithm: ChecksumAlgorithm,
     context: &MutationContext,
 ) -> Result<DirectPutUploadTarget> {
     let catalog = ensure_upload_namespace_available(store, namespace_id).await?;
@@ -171,7 +168,7 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
         store,
         &catalog,
         recorded,
-        NewUploadSession::direct_put(content_id, checksum_algorithm),
+        NewUploadSession::direct_put(content_id, store.checksum_algorithm()),
         context,
     )
     .await?;
@@ -207,7 +204,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
         content_id.clone(),
         &provider_upload_id,
         part_size_bytes,
-        DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
+        store.checksum_algorithm(),
     );
     let session = match create_upload_session(store, &catalog, recorded, session, context).await {
         Ok(session) => session,
@@ -227,7 +224,7 @@ pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized
         session,
         object_key,
         part_size_bytes: part_size_bytes.get(),
-        checksum_algorithm: DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
+        checksum_algorithm: store.checksum_algorithm(),
     })
 }
 
@@ -2201,15 +2198,9 @@ mod tests {
         create(&store, &namespace_id, &setup)
             .await
             .expect("bootstrap");
-        let begin = begin_direct_put_upload_target(
-            &store,
-            &namespace_id,
-            None,
-            ChecksumAlgorithm::Crc64nvme,
-            &setup,
-        )
-        .await
-        .expect("begin direct put");
+        let begin = begin_direct_put_upload_target(&store, &namespace_id, None, &setup)
+            .await
+            .expect("begin direct put");
 
         let wrong_algorithm = complete_upload(
             &store,
@@ -2352,15 +2343,9 @@ mod tests {
         create(&store, &namespace_id, &setup)
             .await
             .expect("bootstrap");
-        let begin = begin_direct_put_upload_target(
-            &store,
-            &namespace_id,
-            None,
-            ChecksumAlgorithm::Crc64nvme,
-            &setup,
-        )
-        .await
-        .expect("begin direct put");
+        let begin = begin_direct_put_upload_target(&store, &namespace_id, None, &setup)
+            .await
+            .expect("begin direct put");
         let written = vec![b'x'; BYTES.len()];
         store
             .put(
@@ -2527,7 +2512,7 @@ mod tests {
                 ContentId::generate(),
                 "provider-upload",
                 NonZeroU64::new(5 * 1024 * 1024).expect("part size"),
-                DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
+                store.checksum_algorithm(),
             ),
             &setup,
         )
@@ -2747,7 +2732,7 @@ mod tests {
                 ContentId::generate(),
                 "provider-upload",
                 NonZeroU64::new(5 * 1024 * 1024).expect("part size"),
-                DIRECT_MULTIPART_CHECKSUM_ALGORITHM,
+                inner.checksum_algorithm(),
             ),
             &context(1_000),
         )

@@ -351,8 +351,6 @@ pub(crate) enum ProfileCreateCommand {
     R2(ProfileCreateR2Args),
     /// Create a Google Cloud Storage-backed embedded profile.
     Gcs(ProfileCreateGcsArgs),
-    /// Create an Azure Blob Storage-backed embedded profile.
-    Azure(ProfileCreateAzureArgs),
     /// Create a local-filesystem-backed embedded profile.
     Local(ProfileCreateLocalArgs),
     /// Create a remote-server profile.
@@ -454,29 +452,6 @@ pub(crate) struct ProfileCreateGcsArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct ProfileCreateAzureArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    /// Azure storage account name.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub account_name: Option<String>,
-    /// Azure blob container name.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub container_name: Option<String>,
-    /// Azure storage access key.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub access_key: Option<String>,
-    /// Custom Azure endpoint URL.
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub endpoint_url: Option<String>,
-    /// Optional object-key prefix.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub key_prefix: Option<String>,
-    #[command(flatten)]
-    pub actor: ProfileCreateActorArgs,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct ProfileCreateLocalArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub name: String,
@@ -515,8 +490,6 @@ pub(crate) enum ProfileUpdateCommand {
     R2(ProfileUpdateR2Args),
     /// Update a Google Cloud Storage-backed embedded profile.
     Gcs(ProfileUpdateGcsArgs),
-    /// Update an Azure Blob Storage-backed embedded profile.
-    Azure(ProfileUpdateAzureArgs),
     /// Update a local-filesystem-backed embedded profile.
     Local(ProfileUpdateLocalArgs),
     /// Update a remote-server profile.
@@ -610,29 +583,6 @@ pub(crate) struct ProfileUpdateGcsArgs {
     /// Path to a GCP service-account key.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub service_account_key_path: Option<String>,
-    /// Optional object-key prefix.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub key_prefix: Option<String>,
-    #[command(flatten)]
-    pub actor: ProfileUpdateActorArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProfileUpdateAzureArgs {
-    #[arg(value_hint = ValueHint::Other)]
-    pub name: String,
-    /// Azure storage account name.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub account_name: Option<String>,
-    /// Azure blob container name.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub container_name: Option<String>,
-    /// Azure storage access key.
-    #[arg(long, value_hint = ValueHint::Other)]
-    pub access_key: Option<String>,
-    /// Custom Azure endpoint URL.
-    #[arg(long, value_hint = ValueHint::Url)]
-    pub endpoint_url: Option<String>,
     /// Optional object-key prefix.
     #[arg(long, value_hint = ValueHint::Other)]
     pub key_prefix: Option<String>,
@@ -2023,15 +1973,9 @@ mod tests {
     fn management_command_model_uses_noun_families() {
         let command = Cli::command();
         let profile_create = subcommand(subcommand(&command, "profile"), "create");
-        assert_subcommands(
-            profile_create,
-            &["s3", "r2", "gcs", "azure", "local", "remote"],
-        );
+        assert_subcommands(profile_create, &["s3", "r2", "gcs", "local", "remote"]);
         let profile_update = subcommand(subcommand(&command, "profile"), "update");
-        assert_subcommands(
-            profile_update,
-            &["s3", "r2", "gcs", "azure", "local", "remote"],
-        );
+        assert_subcommands(profile_update, &["s3", "r2", "gcs", "local", "remote"]);
 
         let namespace = subcommand(&command, "namespace");
         assert_subcommands(namespace, &["create", "show", "delete", "fork"]);

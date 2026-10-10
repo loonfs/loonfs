@@ -153,7 +153,6 @@ Profile management
   loonfs profile create s3 <name> [s3-options]
   loonfs profile create r2 <name> [r2-options]
   loonfs profile create gcs <name> [gcs-options]
-  loonfs profile create azure <name> [azure-options]
   loonfs profile create local <name> [local-options]
   loonfs profile create remote <name> [remote-options]
     Add a provider-specific profile to the config file
@@ -485,12 +484,6 @@ Profile create options
     --bucket <name>
     --service-account-key-path <path>
 
-  loonfs profile create azure:
-    --account-name <name>
-    --container-name <name>
-    --access-key <key>
-    --endpoint-url <url>               optional
-
   loonfs profile create remote:
     --server-url <url>
     --auth-token <token>               optional; otherwise read
@@ -538,12 +531,6 @@ Update options
   gcp-gcs profile updates:
     --bucket <name>
     --service-account-key-path <path>
-
-  azure-abs profile updates:
-    --account-name <name>
-    --container-name <name>
-    --access-key <key>
-    --endpoint-url <url>
 
   Remote profile updates:
     --server-url <url>

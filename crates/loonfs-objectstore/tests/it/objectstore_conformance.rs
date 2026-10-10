@@ -1,17 +1,15 @@
 use crate::provider_env::{
-    provider_env_example_contents, AwsS3ConformanceConfig, AzureAbsConformanceConfig,
-    CloudflareR2ConformanceConfig, GcpGcsConformanceConfig, AWS_S3_OPTIONAL_VARS,
-    AWS_S3_REQUIRED_VARS, AZURE_ABS_OPTIONAL_VARS, AZURE_ABS_REQUIRED_VARS,
+    provider_env_example_contents, AwsS3ConformanceConfig, CloudflareR2ConformanceConfig,
+    GcpGcsConformanceConfig, AWS_S3_OPTIONAL_VARS, AWS_S3_REQUIRED_VARS,
     CLOUDFLARE_R2_OPTIONAL_VARS, CLOUDFLARE_R2_REQUIRED_VARS, GCP_GCS_OPTIONAL_VARS,
     GCP_GCS_REQUIRED_VARS,
 };
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
-use loonfs_objectstore::abs::{azure_abs, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{gcp_gcs, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
+use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeReport};
 use loonfs_objectstore::s3_compatible::{
     aws_s3, cloudflare_r2, AwsS3StoreConfig, CloudflareR2StoreConfig,
 };
@@ -33,8 +31,6 @@ fn provider_env_example_covers_real_provider_contract() {
         .chain(CLOUDFLARE_R2_OPTIONAL_VARS.iter())
         .chain(GCP_GCS_REQUIRED_VARS.iter())
         .chain(GCP_GCS_OPTIONAL_VARS.iter())
-        .chain(AZURE_ABS_REQUIRED_VARS.iter())
-        .chain(AZURE_ABS_OPTIONAL_VARS.iter())
     {
         assert!(
             example.contains(name),
@@ -47,7 +43,7 @@ fn provider_env_example_covers_real_provider_contract() {
 async fn local_fs_passes_the_store_contract_probe() {
     let temp_dir = test_dir("contract-probe");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_store_contract_probe_passes(&store, false).await;
+    assert_store_contract_probe_passes(&store).await;
     assert_start_after_contract(&store).await;
     assert_child_prefix_contract(&store).await;
 }
@@ -96,7 +92,6 @@ async fn local_fs_honours_assembly() {
         &store,
         &[(16, 30), (1024, 30)],
         ChecksumAlgorithm::Crc64nvme,
-        false,
     )
     .await;
 }
@@ -123,7 +118,6 @@ async fn aws_s3_assembly() {
         &store,
         &[(1024, 9 * MIB), (9 * MIB, 9 * MIB)],
         ChecksumAlgorithm::Crc64nvme,
-        true,
     )
     .await;
 }
@@ -146,7 +140,6 @@ async fn cloudflare_r2_assembly() {
         &store,
         &[(1024, 30), (64 * MIB, 64 * MIB), (40 * MIB, 90 * MIB)],
         ChecksumAlgorithm::Crc64nvme,
-        true,
     )
     .await;
 }
@@ -166,32 +159,19 @@ async fn gcp_gcs_assembly() {
         &store,
         &[(1024, 30), (9 * MIB, 30)],
         ChecksumAlgorithm::Crc32c,
-        true,
     )
     .await;
     assert_chained_compose(&store).await;
 }
 
 #[tokio::test]
-#[ignore = "requires real Azure Blob Storage credentials"]
+#[ignore = "Azure Blob Storage needs a native checksum adapter"]
 async fn azure_abs_assembly() {
-    let config = AzureAbsConformanceConfig::from_env()
-        .expect("load Azure Blob Storage real-provider conformance environment");
-    let store = azure_abs(AzureAbsStoreConfig {
-        account_name: config.account_name,
-        container_name: config.container_name,
-        access_key: config.access_key,
-        endpoint_url: config.endpoint,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create Azure Blob Storage object store");
-    assert_assembly(
-        &store,
-        &[(1024, 30), (9 * MIB, 30)],
-        ChecksumAlgorithm::Crc64nvme,
-        false,
-    )
-    .await;
+    let error = toml::from_str::<loonfs_objectstore::StoreConfig>(r#"kind = "azure-abs""#)
+        .expect_err("Azure requires a native adapter");
+    assert!(error
+        .to_string()
+        .contains("Azure Blob Storage is not supported yet: it stores no full-object checksum"));
 }
 
 #[tokio::test]
@@ -212,7 +192,7 @@ async fn aws_s3_real_provider_conformance() {
         force_path_style: false,
     })
     .expect("create AWS S3 object store");
-    assert_provider_conformance(&store, true).await;
+    assert_provider_conformance(&store).await;
 }
 
 #[tokio::test]
@@ -276,7 +256,7 @@ async fn aws_s3_put_stores_a_trustworthy_checksum() {
 
 #[tokio::test]
 #[ignore = "requires real Cloudflare R2 credentials"]
-async fn cloudflare_r2_checksumless_put_stores_a_trustworthy_checksum() {
+async fn cloudflare_r2_put_stores_a_trustworthy_checksum() {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
     let store = cloudflare_r2(CloudflareR2StoreConfig {
@@ -293,7 +273,7 @@ async fn cloudflare_r2_checksumless_put_stores_a_trustworthy_checksum() {
 
 #[tokio::test]
 #[ignore = "requires real GCP GCS credentials"]
-async fn gcp_gcs_checksumless_put_stores_a_trustworthy_checksum() {
+async fn gcp_gcs_put_stores_a_trustworthy_checksum() {
     let config = GcpGcsConformanceConfig::from_env()
         .expect("load GCP GCS real-provider conformance environment");
     let store = gcp_gcs(GcpGcsStoreConfig {
@@ -382,7 +362,7 @@ async fn cloudflare_r2_real_provider_conformance() {
         key_prefix: Some(config.prefix),
     })
     .expect("create Cloudflare R2 object store");
-    assert_provider_conformance(&store, true).await;
+    assert_provider_conformance(&store).await;
 }
 
 #[tokio::test]
@@ -396,7 +376,7 @@ async fn gcp_gcs_real_provider_conformance() {
         key_prefix: Some(config.prefix),
     })
     .expect("create GCP GCS object store");
-    assert_provider_conformance(&store, true).await;
+    assert_provider_conformance(&store).await;
 }
 
 #[tokio::test]
@@ -414,35 +394,23 @@ async fn gcp_gcs_streamed_write_round_trips() {
 }
 
 #[tokio::test]
-#[ignore = "requires real Azure Blob Storage credentials"]
+#[ignore = "Azure Blob Storage needs a native checksum adapter"]
 async fn azure_abs_real_provider_conformance() {
-    let config = AzureAbsConformanceConfig::from_env()
-        .expect("load Azure Blob Storage real-provider conformance environment");
-    let store = azure_abs(AzureAbsStoreConfig {
-        account_name: config.account_name,
-        container_name: config.container_name,
-        access_key: config.access_key,
-        endpoint_url: config.endpoint,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create Azure Blob Storage object store");
-    assert_provider_conformance(&store, false).await;
+    let error = toml::from_str::<loonfs_objectstore::StoreConfig>(r#"kind = "azure-abs""#)
+        .expect_err("Azure requires a native adapter");
+    assert!(error
+        .to_string()
+        .contains("Azure Blob Storage is not supported yet: it stores no full-object checksum"));
 }
 
 #[tokio::test]
-#[ignore = "requires real Azure Blob Storage credentials"]
+#[ignore = "Azure Blob Storage needs a native checksum adapter"]
 async fn azure_abs_streamed_write_round_trips() {
-    let config = AzureAbsConformanceConfig::from_env()
-        .expect("load Azure Blob Storage real-provider conformance environment");
-    let store = azure_abs(AzureAbsStoreConfig {
-        account_name: config.account_name,
-        container_name: config.container_name,
-        access_key: config.access_key,
-        endpoint_url: config.endpoint,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create Azure Blob Storage object store");
-    assert_streamed_write_round_trips(&store).await;
+    let error = toml::from_str::<loonfs_objectstore::StoreConfig>(r#"kind = "azure-abs""#)
+        .expect_err("Azure requires a native adapter");
+    assert!(error
+        .to_string()
+        .contains("Azure Blob Storage is not supported yet: it stores no full-object checksum"));
 }
 
 /// The live provider sweep: the store contract probe, plus the key
@@ -451,8 +419,8 @@ async fn azure_abs_streamed_write_round_trips() {
 /// The probe is the production surface an operator runs, and running it
 /// here is what stops the two from drifting: a contract check changes for
 /// production and for this sweep in one edit, or not at all.
-async fn assert_provider_conformance(store: &dyn ObjectStore, direct_put_proven: bool) {
-    assert_store_contract_probe_passes(store, direct_put_proven).await;
+async fn assert_provider_conformance(store: &dyn ObjectStore) {
+    assert_store_contract_probe_passes(store).await;
     assert_start_after_contract(store).await;
     assert_child_prefix_contract(store).await;
     assert_rejects_invalid_keys_consistently(store).await;
@@ -599,29 +567,14 @@ async fn assert_start_after_contract(store: &dyn ObjectStore) {
     }
 }
 
-/// Requires every probe check to pass, and prints the whole report when one
-/// does not.
-///
-/// The report is the point of a live run. Cloudflare R2's 501 answer to
-/// `GetObjectAttributes` was read off exactly this output, so a failure
-/// shows every check's verdict rather than the first one that broke.
-///
-/// `stored_checksum_readback` may return `unsupported` only for providers that
-/// do not offer direct PUT. AWS S3, Cloudflare R2, and GCS are tested with
-/// direct PUT enabled, so they must return stored checksums. Every other probe
-/// check must pass for every provider.
-async fn assert_store_contract_probe_passes(store: &dyn ObjectStore, direct_put_proven: bool) {
+async fn assert_store_contract_probe_passes(store: &dyn ObjectStore) {
     let run_id = loonfs_types::generated_id("probe");
     let report = run_store_contract_probe(store, &run_id).await;
-    let acceptable = report.checks.iter().all(|check| match check.outcome {
-        StoreProbeOutcome::Passed => true,
-        StoreProbeOutcome::Unsupported => {
-            check.name == "stored_checksum_readback" && !direct_put_proven
-        }
-        StoreProbeOutcome::Failed { .. } => false,
-    });
     assert!(
-        acceptable,
+        report
+            .checks
+            .iter()
+            .all(|check| matches!(check.outcome, loonfs_objectstore::StoreProbeOutcome::Passed)),
         "store contract probe {run_id} did not pass:\n{}",
         probe_report_lines(&report)
     );
@@ -661,10 +614,7 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
         .await
         .expect("upload object");
 
-    let stored = store
-        .head_stored_checksum(&key)
-        .await
-        .expect("head the stored checksum");
+    let stored = store.head(&key).await.expect("head the stored checksum");
     assert!(
         stored.is_some(),
         "{provider}: no stored checksum reported after PUT"
@@ -675,9 +625,10 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
         payload.len() as u64,
         "{provider}: stored size does not match the uploaded bytes"
     );
-    let local = Checksum::compute(stored.checksum.algorithm, &payload);
+    let checksum = stored.checksum.expect("stored checksum");
+    let local = Checksum::compute(store.checksum_algorithm(), &payload);
     assert_eq!(
-        stored.checksum, local,
+        checksum, local,
         "{provider}: stored checksum does not match the uploaded bytes"
     );
     store.delete(&key).await.expect("delete the test object");
@@ -756,7 +707,6 @@ async fn assert_assembly<S: ObjectStore>(
     store: &S,
     cases: &[(usize, usize)],
     crc: ChecksumAlgorithm,
-    provider_attestation: bool,
 ) {
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     for &(first_length, second_length) in cases {
@@ -792,9 +742,7 @@ async fn assert_assembly<S: ObjectStore>(
             store.get(&key, None).await.expect("get").expect("object"),
             payload
         );
-        if provider_attestation {
-            assert_eq!(written.attestation, Some(expected.clone()));
-        }
+        assert_eq!(written.checksum, Some(expected.clone()));
         assert_eq!(
             store
                 .assemble(
@@ -918,7 +866,7 @@ async fn assert_chained_compose<S: ObjectStore>(store: &S) {
         .assemble(&key, &sources, Vec::new(), &expected)
         .await
         .expect("chained compose");
-    assert_eq!(result.attestation, Some(expected));
+    assert_eq!(result.checksum, Some(expected));
     assert_eq!(
         store.get(&key, None).await.expect("get").expect("object"),
         bytes
