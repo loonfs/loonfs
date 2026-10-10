@@ -2,8 +2,9 @@
 //! row-key order.
 
 use crate::metadata::{active_deletion_from_tombstone, MetadataState};
+use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_types::{ChangeSeq, ContentId, Sha256State};
+use loonfs_types::{ChangeSeq, ContentId};
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -56,11 +57,11 @@ pub(super) fn manifest_rows_for_family(
             })
             .map(MetadataRow::ActiveDeletion)
             .collect::<Vec<_>>(),
-        MetadataRowFamily::ContentPublications => metadata_state
-            .content_publications()
+        MetadataRowFamily::ContentLayouts => metadata_state
+            .content_layouts()
             .iter()
             .cloned()
-            .map(MetadataRow::ContentPublication)
+            .map(MetadataRow::ContentLayout)
             .collect::<Vec<_>>(),
         MetadataRowFamily::CommitReceipts => metadata_state
             .commit_receipts()
@@ -102,21 +103,16 @@ pub(super) fn manifest_rows_for_family_after_seq(
         .collect()
 }
 
-/// Writes a fold's SHA-256 state for a content id into each publication row
-/// of that id whose size the state covers and whose delta recorded none.
-pub(super) fn with_hash_states(
+/// Replaces tail layouts for chains the fold wrote and restores row-key order.
+pub(super) fn with_layouts(
+    family: MetadataRowFamily,
     mut rows: Vec<MetadataRow>,
-    hash_states: &HashMap<ContentId, Sha256State>,
+    layouts: &HashMap<ContentId, ContentLayoutRecord>,
 ) -> Vec<MetadataRow> {
-    for row in &mut rows {
-        if let MetadataRow::ContentPublication(record) = row {
-            if record.hash_state.is_none() {
-                record.hash_state = hash_states
-                    .get(&record.content_id)
-                    .filter(|state| state.length() == record.size_bytes)
-                    .cloned();
-            }
-        }
+    if family == MetadataRowFamily::ContentLayouts {
+        rows.retain(|row| !matches!(row, MetadataRow::ContentLayout(record) if layouts.contains_key(&record.content_id)));
+        rows.extend(layouts.values().cloned().map(MetadataRow::ContentLayout));
+        rows.sort_by_key(MetadataRow::row_key);
     }
     rows
 }
@@ -135,7 +131,7 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         },
         MetadataRow::CommitReceipt(record) => record.committed_seq,
         MetadataRow::Commit(record) => record.committed_seq,
-        MetadataRow::ContentPublication(record) => record.committed_seq,
+        MetadataRow::ContentLayout(record) => record.committed_seq,
         MetadataRow::AttributesRevision(record) => record.committed_seq,
         MetadataRow::AccessRevision(record) => record.committed_seq,
     }
@@ -151,7 +147,7 @@ pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::ActiveDeletion(_) => "active_deletion",
         MetadataRow::CommitReceipt(_) => "commit_receipt",
         MetadataRow::Commit(_) => "commit",
-        MetadataRow::ContentPublication(_) => "content_publication",
+        MetadataRow::ContentLayout(_) => "content_layout",
         MetadataRow::AttributesRevision(_) => "attributes_revision",
         MetadataRow::AccessRevision(_) => "access_revision",
     }

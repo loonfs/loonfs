@@ -5,8 +5,8 @@ use super::indexes::MetadataIndexes;
 use crate::heap_bytes::HeapBytes;
 use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindingRecord,
-    InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord, InodeRecord,
+    RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
@@ -20,7 +20,7 @@ pub struct MetadataState {
     pub(super) subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     pub(super) commit_receipts: Vec<CommitReceiptRecord>,
     pub(super) commits: Vec<WalCommitPayload>,
-    pub(super) content_publications: Vec<ContentPublicationRecord>,
+    pub(super) content_layouts: Vec<ContentLayoutRecord>,
     pub(super) attributes_revisions: Vec<AttributesRevisionRecord>,
     pub(super) access_revisions: Vec<AccessRevisionRecord>,
     pub(super) row_count: usize,
@@ -147,7 +147,7 @@ impl MetadataState {
         commit_receipts: Vec<CommitReceiptRecord>,
         commits: Vec<WalCommitPayload>,
         attributes_revisions: Vec<AttributesRevisionRecord>,
-        content_publications: Vec<ContentPublicationRecord>,
+        content_layouts: Vec<ContentLayoutRecord>,
         access_revisions: Vec<AccessRevisionRecord>,
     ) -> Self {
         let mut state = Self {
@@ -159,7 +159,7 @@ impl MetadataState {
             commits,
             attributes_revisions,
             access_revisions,
-            content_publications,
+            content_layouts,
             row_count: 0,
             row_heap_bytes: 0,
             indexes: MetadataIndexes::default(),
@@ -203,50 +203,36 @@ impl MetadataState {
         &self.commits
     }
 
-    pub fn content_publications(&self) -> &[ContentPublicationRecord] {
-        &self.content_publications
+    pub fn content_layouts(&self) -> &[ContentLayoutRecord] {
+        &self.content_layouts
     }
 
-    /// The first publication row of `content_id` in row-key order: the
-    /// longest reference, from its earliest commit.
-    pub fn content_head(
-        &self,
-        content_id: &loonfs_types::ContentId,
-    ) -> Option<&ContentPublicationRecord> {
-        self.indexes.content_head(content_id)
-    }
-
-    /// The first publication row of the reference `content_id` and
-    /// `size_bytes` name. Rows are pushed in commit order.
-    pub fn content_publication(
-        &self,
-        content_id: &loonfs_types::ContentId,
-        size_bytes: u64,
-    ) -> Option<&ContentPublicationRecord> {
-        self.content_publications
+    pub fn content_head(&self, content_id: &loonfs_types::ContentId) -> Option<u64> {
+        self.revisions
             .iter()
-            .find(|row| &row.content_id == content_id && row.size_bytes == size_bytes)
+            .filter(|row| &row.content_ref.content_id == content_id)
+            .max_by_key(|row| {
+                (
+                    row.content_ref.size_bytes,
+                    row.committed_seq,
+                    row.delta_index,
+                )
+            })
+            .map(|row| row.content_ref.size_bytes)
+            .or_else(|| self.content_layout(content_id).map(|row| row.size_bytes))
     }
 
-    /// Whether this commit already published the reference `content_id`
-    /// and `size_bytes` name. A commit's rows are the last ones pushed.
-    pub(crate) fn publishes_in_commit(
+    pub fn content_layout(
         &self,
-        committed_seq: ChangeSeq,
         content_id: &loonfs_types::ContentId,
-        size_bytes: u64,
-    ) -> bool {
-        self.content_publications
-            .iter()
-            .rev()
-            .take_while(|row| row.committed_seq == committed_seq)
-            .any(|row| &row.content_id == content_id && row.size_bytes == size_bytes)
+    ) -> Option<&ContentLayoutRecord> {
+        self.indexes.content_layout(content_id)
     }
 
-    pub(crate) fn push_content_publication_record(&mut self, record: ContentPublicationRecord) {
-        self.indexes.record_content_publication(&record);
+    pub(crate) fn push_content_layout_record(&mut self, record: ContentLayoutRecord) {
+        self.indexes.record_content_layout(&record);
         self.record_row_weight(record.heap_bytes());
-        self.content_publications.push(record);
+        self.content_layouts.push(record);
     }
 
     pub fn attributes_revisions(&self) -> &[AttributesRevisionRecord] {
@@ -270,7 +256,7 @@ impl MetadataState {
             + self.subtree_tombstones.capacity() * size_of::<SubtreeTombstoneRecord>()
             + self.commit_receipts.capacity() * size_of::<CommitReceiptRecord>()
             + self.commits.capacity() * size_of::<WalCommitPayload>()
-            + self.content_publications.capacity() * size_of::<ContentPublicationRecord>()
+            + self.content_layouts.capacity() * size_of::<ContentLayoutRecord>()
             + self.attributes_revisions.capacity() * size_of::<AttributesRevisionRecord>()
             + self.access_revisions.capacity() * size_of::<AccessRevisionRecord>()
             + self.row_heap_bytes
@@ -364,8 +350,8 @@ impl MetadataStateBuilder {
         self.state.push_subtree_tombstone_record(record);
     }
 
-    pub(crate) fn push_content_publication(&mut self, record: ContentPublicationRecord) {
-        self.state.push_content_publication_record(record);
+    pub(crate) fn push_content_layout(&mut self, record: ContentLayoutRecord) {
+        self.state.push_content_layout_record(record);
     }
 
     pub(crate) fn push_commit_receipt(&mut self, record: CommitReceiptRecord) {
@@ -399,7 +385,7 @@ fn metadata_row_count(state: &MetadataState) -> usize {
         .saturating_add(state.subtree_tombstones.len())
         .saturating_add(state.commit_receipts.len())
         .saturating_add(state.commits.len())
-        .saturating_add(state.content_publications.len())
+        .saturating_add(state.content_layouts.len())
         .saturating_add(state.attributes_revisions.len())
         .saturating_add(state.access_revisions.len())
 }
@@ -417,7 +403,7 @@ fn metadata_row_heap_bytes(state: &MetadataState) -> usize {
         .saturating_add(total(&state.subtree_tombstones))
         .saturating_add(total(&state.commit_receipts))
         .saturating_add(total(&state.commits))
-        .saturating_add(total(&state.content_publications))
+        .saturating_add(total(&state.content_layouts))
         .saturating_add(total(&state.attributes_revisions))
         .saturating_add(total(&state.access_revisions))
 }

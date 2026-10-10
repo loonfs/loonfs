@@ -11,7 +11,7 @@ use crate::error::CoreError;
 use crate::manifest::VerifiedMetadataSegments;
 use crate::metadata::{
     active_deletion_from_tombstone, recoverable_deletion_from_active_record, AccessRevisionRecord,
-    ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
+    ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
     DirentryBindingRecord, InodeRecord, MetadataState, RecoverableDeletion, ResolvedVisiblePath,
     RevisionRecord, SubtreeTombstoneRecord,
 };
@@ -79,6 +79,18 @@ pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
     visible_seq: ChangeSeq,
     naming: NamespaceNaming,
     sources: MetadataSourceStack<'a, 'store, S>,
+}
+
+#[async_trait::async_trait]
+impl<S: ObjectStore + ?Sized> crate::storage::content_location::LayoutLookup
+    for MetadataView<'_, '_, S>
+{
+    async fn content_layout(
+        &self,
+        content_id: &loonfs_types::ContentId,
+    ) -> crate::error::Result<Option<ContentLayoutRecord>> {
+        self.content_layout(content_id).await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -536,74 +548,58 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             }))
     }
 
-    /// The first publication row of `content_id` in row-key order among the
-    /// rows visible here: the chain head, which names the longest reference.
+    /// Returns the largest visible chain size so a shorter restore or copy cannot
+    /// shrink the head and allow conflicting appends.
     pub(crate) async fn content_head(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> Result<Option<ContentPublicationRecord>, CoreError> {
-        let manifest_head = match self.manifest_segments() {
-            Some(segments) => {
-                manifest_index::content_head(segments, content_id, self.visible_seq()).await?
-            }
-            None => None,
-        };
-        Ok(self
+    ) -> Result<Option<u64>, CoreError> {
+        let tail_size = self
             .row_states()
-            .filter_map(|state| state.content_head(content_id))
-            .filter(|head| head.committed_seq <= self.visible_seq())
-            .cloned()
-            .chain(manifest_head)
-            .min_by_key(|head| (std::cmp::Reverse(head.size_bytes), head.committed_seq)))
+            .flat_map(|state| state.revisions())
+            .filter(|row| {
+                &row.content_ref.content_id == content_id && row.committed_seq <= self.visible_seq()
+            })
+            .map(|row| row.content_ref.size_bytes)
+            .max();
+        let layout_size = self
+            .content_layout(content_id)
+            .await?
+            .map(|row| row.size_bytes);
+        Ok(tail_size.into_iter().chain(layout_size).max())
     }
 
-    /// The row states answer first, so a publication still in the WAL tail
-    /// costs no manifest probe.
     pub(crate) async fn content_published(
         &self,
         content_id: &loonfs_types::ContentId,
     ) -> Result<bool, CoreError> {
-        if self
-            .row_states()
-            .filter_map(|state| state.content_head(content_id))
-            .any(|head| head.committed_seq <= self.visible_seq())
-        {
+        if self.row_states().any(|state| {
+            state.revisions().iter().any(|row| {
+                &row.content_ref.content_id == content_id && row.committed_seq <= self.visible_seq()
+            })
+        }) {
             return Ok(true);
         }
-        let Some(segments) = self.manifest_segments() else {
-            return Ok(false);
-        };
-        let head = manifest_index::content_head(segments, content_id, self.visible_seq()).await?;
-        Ok(head.is_some())
+        Ok(self.content_layout(content_id).await?.is_some())
     }
 
-    /// The first publication row of the reference to `content_id` of
-    /// `size_bytes` among the rows visible here: the row its writer
-    /// published, which records what that writer knew of the bytes.
-    pub(crate) async fn content_publication(
+    /// Takes the newest visible tail layout, or the newest layout in the manifest.
+    pub(crate) async fn content_layout(
         &self,
         content_id: &loonfs_types::ContentId,
-        size_bytes: u64,
-    ) -> Result<Option<ContentPublicationRecord>, CoreError> {
-        let manifest_row = match self.manifest_segments() {
-            Some(segments) => {
-                manifest_index::content_publication(
-                    segments,
-                    content_id,
-                    size_bytes,
-                    self.visible_seq(),
-                )
-                .await?
-            }
-            None => None,
-        };
-        Ok(self
+    ) -> Result<Option<ContentLayoutRecord>, CoreError> {
+        if let Some(row) = self
             .row_states()
-            .filter_map(|state| state.content_publication(content_id, size_bytes))
-            .filter(|row| row.committed_seq <= self.visible_seq())
-            .cloned()
-            .chain(manifest_row)
-            .min_by_key(|row| row.committed_seq))
+            .flat_map(|state| state.content_layouts())
+            .filter(|row| &row.content_id == content_id && row.committed_seq <= self.visible_seq())
+            .max_by_key(|row| row.committed_seq)
+        {
+            return Ok(Some(row.clone()));
+        }
+        match self.manifest_segments() {
+            Some(segments) => manifest_index::content_layout(segments, content_id).await,
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn find_commit_receipt(

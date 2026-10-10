@@ -6,8 +6,8 @@
 use super::*;
 use crate::error::ErrorCode;
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::{ByteRange, PutMode};
-use loonfs_types::{Checksum, ContentRefKind, Sha256State};
+use loonfs_objectstore::PutMode;
+use loonfs_types::{Checksum, ContentRefKind};
 
 fn append(path: &str, bytes: &[u8]) -> FilesystemOperation {
     FilesystemOperation::AppendFile {
@@ -88,7 +88,7 @@ async fn current_ref(
 }
 
 #[tokio::test]
-async fn an_append_extends_its_object_and_earlier_revisions_keep_their_prefix() {
+async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
     let (_directory, store, mut engine, context) = setup().await;
     let (_, original) = folded_file(&store, &mut engine, &context, b"hello").await;
     engine.invalidate_projection();
@@ -136,7 +136,7 @@ async fn an_append_extends_its_object_and_earlier_revisions_keep_their_prefix() 
             .await
             .expect("get")
             .expect("object"),
-        b"hello world".as_slice()
+        b"hello".as_slice()
     );
 }
 
@@ -478,13 +478,22 @@ async fn appends_continue_the_digest_their_base_recorded() {
                 content_ref: ContentRef {
                     kind: ContentRefKind::BlobV1,
                     owner_namespace_id: namespace_id.clone(),
-                    content_id,
+                    content_id: content_id.clone(),
                     size_bytes: 6,
                     checksum: checksum.clone(),
                 },
                 hash_state: None,
                 crc64nvme: (checksum.algorithm == loonfs_types::ChecksumAlgorithm::Crc64nvme)
                     .then(|| checksum.clone()),
+                layout: Some(loonfs_types::ContentLayout {
+                    extents: vec![loonfs_types::ContentExtent {
+                        owner_namespace_id: namespace_id.clone(),
+                        content_id,
+                        object: loonfs_types::ExtentObject::Whole,
+                        offset: 0,
+                        length: 6,
+                    }],
+                }),
             }],
             Vec::new(),
         )
@@ -522,117 +531,51 @@ async fn appends_continue_the_digest_their_base_recorded() {
     }
 }
 
-/// The first fold of a chain from a direct upload reads the object to
-/// attest the extension. It records the SHA-256 state it computed, so the
-/// next append names a SHA-256 and the fold after it reads nothing.
 #[tokio::test]
-async fn a_fold_records_the_state_it_computed_for_a_crc_chain() {
+async fn a_copy_appends_from_its_revision_digests_under_a_fresh_chain_id() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
-    let (inode_id, _) = folded_file(&store, &mut engine, &context, b"seed").await;
-    let content_id = ContentId::generate();
-    let key = content_blob(&namespace_id, &content_id);
-    store
-        .put(&key, Bytes::from_static(b"direct"), PutMode::CreateIfAbsent)
-        .await
-        .expect("direct upload");
-    crate::test_support::ops::append_wal_commit(
-        &store,
-        &namespace_id,
-        vec![WalDelta::AppendFileRevision {
-            delta_index: 0,
-            inode_id,
-            revision_no: RevisionNo(2),
-            content_ref: ContentRef {
-                kind: ContentRefKind::BlobV1,
-                owner_namespace_id: namespace_id.clone(),
-                content_id: content_id.clone(),
-                size_bytes: 6,
-                checksum: Checksum::crc64nvme(b"direct"),
-            },
-            hash_state: None,
-            crc64nvme: Some(Checksum::crc64nvme(b"direct")),
-        }],
-        Vec::new(),
-    )
-    .await
-    .expect("commit the upload");
-    let operations_on_key = |store: &RecordingStore<LocalFsStore>| {
-        store
-            .snapshot()
-            .into_iter()
-            .filter(|operation| operation.key() == key)
-            .collect::<Vec<_>>()
-    };
-
+    let (_, original) = folded_file(&store, &mut engine, &context, b"hello").await;
     engine.invalidate_projection();
     publish(
         &mut engine,
         &store,
         &context,
-        request("crc", vec![append("/file-0", b"+one")]),
+        request(
+            "copy",
+            vec![FilesystemOperation::CopyPath {
+                source_path: AbsolutePath::parse("/file-0").expect("path"),
+                destination_path: AbsolutePath::parse("/copy").expect("path"),
+                precondition: Default::default(),
+            }],
+        ),
     )
     .await
-    .expect("append to a CRC-64/NVME");
-    store.reset();
-    fold_wal(&store, &namespace_id).await.expect("first fold");
-    assert_eq!(
-        operations_on_key(&store),
-        [
-            RecordedOperation::Head { key: key.clone() },
-            RecordedOperation::Get {
-                key: key.clone(),
-                range: Some(ByteRange {
-                    start_inclusive: 0,
-                    end_exclusive: 6,
-                }),
-                result_bytes: 6,
-            },
-            RecordedOperation::Extend {
-                key: key.clone(),
-                bytes: 4,
-            },
-        ]
-    );
-    let head = load_current_metadata_view(&store, &namespace_id)
-        .await
-        .expect("view")
-        .projected_metadata_view()
-        .content_head(&content_id)
-        .await
-        .expect("head")
-        .expect("publication row");
-    let mut state = Sha256State::new();
-    state.update(b"direct+one");
-    assert_eq!((head.size_bytes, head.hash_state), (10, Some(state)));
-
-    engine.invalidate_projection();
+    .expect("copy");
     publish(
         &mut engine,
         &store,
         &context,
-        request("sha256", vec![append("/file-0", b"+two")]),
+        request("original", vec![append("/file-0", b"!")]),
     )
     .await
-    .expect("append to the recorded state");
-    assert_eq!(
-        current_ref(&store, &namespace_id, "/file-0").await.checksum,
-        Checksum::sha256(b"direct+one+two")
-    );
+    .expect("append original");
+    fold_wal(&store, &namespace_id).await.expect("fold");
+    engine.invalidate_projection();
     store.reset();
-    fold_wal(&store, &namespace_id).await.expect("second fold");
-    assert_eq!(
-        operations_on_key(&store),
-        [
-            RecordedOperation::Head { key: key.clone() },
-            RecordedOperation::Extend {
-                key: key.clone(),
-                bytes: 4,
-            },
-        ]
-    );
-    assert_eq!(
-        read_file(&store, &namespace_id, RevisionNo(4)).await,
-        b"direct+one+two"
-    );
+    publish(
+        &mut engine,
+        &store,
+        &context,
+        request("copied", vec![append("/copy", b"?")]),
+    )
+    .await
+    .expect("append copy");
+    assert!(store
+        .snapshot()
+        .iter()
+        .all(|operation| loonfs_objectstore::layout::content_id_of(operation.key()).is_none()));
+    let reference = current_ref(&store, &namespace_id, "/copy").await;
+    assert_ne!(reference.content_id, original.content_id);
+    assert_eq!(reference.checksum, Checksum::sha256(b"hello?"));
 }

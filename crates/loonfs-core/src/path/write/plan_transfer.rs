@@ -324,7 +324,7 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
             ops.push(CommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
                 base_revision_no,
-                content_ref: revision.content_ref,
+                content_ref: revision.content_ref.clone(),
             });
         }
         ReplaceDestination::Vacant => {
@@ -336,7 +336,7 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
                 child_inode_id,
                 parent_inode_id: target_parent,
                 display_name: target_name.clone(),
-                content_ref: revision.content_ref,
+                content_ref: revision.content_ref.clone(),
             });
             // A copy to a vacant destination is a new resource that stands
             // for the source, so it starts with the source's attributes. The
@@ -358,7 +358,11 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
             }
         }
     }
-    Ok(CompiledFilesystemOperation::new(ops))
+    Ok(CompiledFilesystemOperation {
+        ops,
+        appended: None,
+        source_revision: Some(revision),
+    })
 }
 
 async fn ensure_expected_destination_revision<S: ObjectStore + ?Sized>(

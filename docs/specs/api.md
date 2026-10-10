@@ -2923,12 +2923,12 @@ bypass that service limit and keep object traffic off the server. So
 any direct write — the read is not a separate decision, and a deployment
 that offers none of them cannot have created such a file in the first place.
 
-A direct download requires a content object that holds the file's bytes. If
-some of them are still in the WAL, the server writes them into the content
-object, as a fold would, before returning a download URL. If the deployment
-cannot write that object, the request returns `content_not_materialized`.
-Read through the proxied content route, which can serve the WAL bytes
-directly, or retry after a fold writes the object.
+A direct download requires one object that holds the revision's bytes.
+A revision of a chain that starts in the tail is served from the chain's object,
+written first as a fold would when it is absent. A revision whose bytes lie in
+several objects, or follow an object the tail extends, returns
+`content_not_materialized`. The proxied content route reads both.
+A zero-byte reference writes its empty whole object when absent and signs it.
 
 `POST /v0/namespaces/{ns}/filesystem/downloads` takes a path and, optionally,
 the revision to read and the first byte to read in its JSON body:

@@ -67,11 +67,27 @@ impl<'a> ParsedObjectKey<'a> {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        ["namespaces", owner_namespace_id, "content", content_id] => Some(parsed(
-            DurableObjectFamily::ContentBlob,
-            owner_namespace_id,
-            Some(content_id),
-        )),
+        ["namespaces", owner_namespace_id, "content", content_id] if content_id.len() == 36 => {
+            Some(parsed(
+                DurableObjectFamily::ContentBlob,
+                owner_namespace_id,
+                Some(content_id),
+            ))
+        }
+        ["namespaces", owner_namespace_id, "content", object]
+            if object.len() == 78
+                && object.is_ascii()
+                && object.as_bytes()[36] == b'-'
+                && object.as_bytes()[57] == b'-'
+                && object[37..57].bytes().all(|byte| byte.is_ascii_digit())
+                && object[58..].bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            Some(parsed(
+                DurableObjectFamily::ContentBlob,
+                owner_namespace_id,
+                Some(&object[..36]),
+            ))
+        }
         ["namespaces", namespace, "wal", object] => object
             .strip_suffix(".wal.zst")
             .filter(|identifier| parse_wal_no(identifier).is_some())
@@ -250,6 +266,33 @@ mod tests {
     use loonfs_types::{
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
     };
+
+    #[test]
+    fn spans_use_the_chain_id_and_require_exact_decimal_bounds() {
+        let owner = NamespaceId::parse("owner").expect("namespace");
+        let content_id = ContentId::generate();
+        let own_key = content_blob(&owner, &content_id);
+        let key = crate::keys::content_span(&owner, &content_id, 2, 19);
+        assert_eq!(
+            key,
+            format!("{own_key}-00000000000000000002-00000000000000000019")
+        );
+        assert_eq!(super::content_id_of(&key), Some(content_id.clone()));
+        assert_eq!(super::content_id_of(&own_key), Some(content_id));
+        assert!(own_key < key);
+        assert!(parse_object_key(&format!(
+            "{own_key}/00000000000000000002-00000000000000000019"
+        ))
+        .is_none());
+        for suffix in [
+            "2-19",
+            "00000000000000000002_00000000000000000019",
+            "00000000000000000002-0000000000000000001x",
+            "00000000000000000002-00000000000000000019/extra",
+        ] {
+            assert!(parse_object_key(&format!("{own_key}-{suffix}")).is_none());
+        }
+    }
 
     #[test]
     fn built_keys_parse_to_their_family_owner_and_identifier() {

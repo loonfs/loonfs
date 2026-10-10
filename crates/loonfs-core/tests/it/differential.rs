@@ -48,7 +48,20 @@ struct NormalizedDirectoryBinding {
     position: DeltaPosition,
     display_name: Option<DisplayName>,
 }
-type NormalizedRevisions = Vec<(u64, u64, u64, CommitId, u64, ActorId, u32, ContentId)>;
+#[derive(Debug, PartialEq, Eq)]
+struct NormalizedRevision {
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+    committed_seq: ChangeSeq,
+    commit_id: CommitId,
+    committed_at_ms: u64,
+    committed_by: ActorId,
+    delta_index: u32,
+    content_ref: ContentRef,
+    hash_state: Option<loonfs_types::Sha256State>,
+    crc64nvme: Option<Checksum>,
+}
+type NormalizedRevisions = Vec<NormalizedRevision>;
 type NormalizedTombstones = Vec<NormalizedTombstone>;
 type NormalizedAttributes = Vec<NormalizedAttributeRevision>;
 type NormalizedMetadata = (
@@ -260,6 +273,7 @@ fn create_file(
             content_ref,
             hash_state: None,
             crc64nvme: None,
+            layout: None,
         },
     ]
 }
@@ -277,6 +291,7 @@ fn append_revision(
         content_ref,
         hash_state: None,
         crc64nvme: None,
+        layout: None,
     }]
 }
 
@@ -1041,7 +1056,7 @@ fn repeated_content_in_one_commit_emits_one_publication() {
 }
 
 #[test]
-fn appends_publish_one_row_per_reference_with_the_longest_first() {
+fn appends_record_revision_digests_and_the_chain_head() {
     let content_id = ContentId::generate();
     let namespace_id = content_ref("unused").owner_namespace_id;
     let appended = |delta_index, revision_no, bytes: &[u8]| {
@@ -1054,6 +1069,7 @@ fn appends_publish_one_row_per_reference_with_the_longest_first() {
             content_ref: ContentRef::blob_v1(namespace_id.clone(), content_id.clone(), bytes),
             hash_state: Some(hash_state),
             crc64nvme: Some(loonfs_types::Checksum::crc64nvme(bytes)),
+            layout: None,
         }
     };
     let mut first = create_file(
@@ -1183,19 +1199,13 @@ async fn planned_appends_match_the_model() {
     assert_eq!(commits.len(), 6);
     let model = assert_core_matches_model(CaseInsensitive, &["/log", "/copy"], &commits);
     let chains: BTreeSet<_> = model
-        .content_publications
+        .revisions
         .iter()
-        .map(|row| &row.content_id)
+        .map(|row| &row.content_ref.content_id)
         .collect();
     assert_eq!(chains.len(), 3);
 }
 
-/// Plans appends to a direct upload, which records only a CRC-64/NVME, and
-/// folds after every commit. The fold records the SHA-256 state it computes
-/// for a chain without one, so the append after it names a SHA-256. A
-/// restore and an append to it start a second chain from the upload, which
-/// the fold streams. The state the fold records is in segment rows only, so
-/// the replay of the published deltas compares what the deltas carry.
 #[tokio::test]
 async fn planned_appends_to_a_crc_base_match_the_model() {
     let directory = tempfile::tempdir().expect("directory");
@@ -1309,10 +1319,10 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         [
             (6, Checksum::crc64nvme(b"direct"), false),
             (10, Checksum::crc64nvme(b"direct+one"), false),
-            (14, Checksum::sha256(b"direct+one+two"), true),
+            (14, Checksum::crc64nvme(b"direct+one+two"), false),
             (6, Checksum::crc64nvme(b"direct"), false),
             (12, Checksum::crc64nvme(b"direct+three"), false),
-            (17, Checksum::sha256(b"direct+three+four"), true),
+            (17, Checksum::crc64nvme(b"direct+three+four"), false),
         ]
     );
     assert_core_matches_model(CaseInsensitive, &["/log"], &commits);
@@ -1381,52 +1391,45 @@ fn assert_core_matches_model(
             )
         })
         .collect();
-    assert_eq!(core_state.content_publications().len(), published.len());
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
-    let mut core_publications: Vec<_> = core_state
-        .content_publications()
+    let mut core_layouts: Vec<_> = core_state
+        .content_layouts()
         .iter()
         .map(|row| {
             (
-                MetadataRow::ContentPublication(row.clone()).row_key(),
+                MetadataRow::ContentLayout(row.clone()).row_key(),
                 (
                     &row.content_id,
                     row.committed_seq,
-                    row.delta_index,
                     row.size_bytes,
-                    &row.hash_state,
-                    &row.crc64nvme,
+                    &row.layout,
+                    &row.owner_namespace_id,
                 ),
             )
         })
         .collect();
-    core_publications.sort_by(|left, right| left.0.cmp(&right.0));
+    core_layouts.sort_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(
-        core_publications
+        core_layouts
             .into_iter()
             .map(|(_, row)| row)
             .collect::<Vec<_>>(),
         model_state
-            .content_publications_in_key_order()
+            .content_layouts_in_key_order()
             .into_iter()
             .map(|row| (
                 &row.content_id,
                 row.committed_seq,
-                row.delta_index,
                 row.size_bytes,
-                &row.hash_state,
-                &row.crc64nvme,
+                &row.layout,
+                &row.owner_namespace_id,
             ))
             .collect::<Vec<_>>()
     );
     for (content_id, _, _) in &published {
         assert_eq!(
-            core_state
-                .content_head(content_id)
-                .map(|head| (head.size_bytes, head.committed_seq)),
-            model_state
-                .content_head(content_id)
-                .map(|head| (head.size_bytes, head.committed_seq))
+            core_state.content_head(content_id),
+            model_state.content_head(content_id)
         );
     }
     model_state
@@ -1641,17 +1644,17 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
         state
             .revisions()
             .iter()
-            .map(|revision| {
-                (
-                    revision.inode_id.0,
-                    revision.revision_no.0,
-                    revision.committed_seq.0,
-                    revision.commit_id.clone(),
-                    revision.committed_at_ms,
-                    revision.committed_by.clone(),
-                    revision.delta_index,
-                    revision.content_ref.content_id.clone(),
-                )
+            .map(|revision| NormalizedRevision {
+                inode_id: revision.inode_id,
+                revision_no: revision.revision_no,
+                committed_seq: revision.committed_seq,
+                commit_id: revision.commit_id.clone(),
+                committed_at_ms: revision.committed_at_ms,
+                committed_by: revision.committed_by.clone(),
+                delta_index: revision.delta_index,
+                content_ref: revision.content_ref.clone(),
+                hash_state: revision.hash_state.clone(),
+                crc64nvme: revision.crc64nvme.clone(),
             })
             .collect(),
         state
@@ -1743,17 +1746,17 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
         direntry_binds.iter().map(model_binding).collect(),
         revisions
             .iter()
-            .map(|revision| {
-                (
-                    revision.inode_id.0,
-                    revision.revision_no.0,
-                    revision.committed_seq.0,
-                    revision.commit_id.clone(),
-                    revision.committed_at_ms,
-                    revision.committed_by.clone(),
-                    revision.revision_delta_index,
-                    revision.content_ref.content_id.clone(),
-                )
+            .map(|revision| NormalizedRevision {
+                inode_id: revision.inode_id,
+                revision_no: revision.revision_no,
+                committed_seq: revision.committed_seq,
+                commit_id: revision.commit_id.clone(),
+                committed_at_ms: revision.committed_at_ms,
+                committed_by: revision.committed_by.clone(),
+                delta_index: revision.revision_delta_index,
+                content_ref: revision.content_ref.clone(),
+                hash_state: revision.hash_state.clone(),
+                crc64nvme: revision.crc64nvme.clone(),
             })
             .collect(),
         subtree_tombstones

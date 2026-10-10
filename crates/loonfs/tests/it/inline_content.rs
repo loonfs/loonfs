@@ -71,7 +71,7 @@ async fn publish_inline(
 }
 
 #[tokio::test]
-async fn reader_downloads_materialize_tail_content_by_path_and_inode() {
+async fn reader_downloads_write_tail_content_by_path_and_inode() {
     let directory = tempfile::tempdir().expect("directory");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -221,7 +221,7 @@ async fn imports_read_the_owners_tail_before_folding_and_object_after_folding() 
                     .iter()
                     .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
                     .count(),
-                1
+                0
             );
             assert_eq!(
                 source_operations

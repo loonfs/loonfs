@@ -2,7 +2,7 @@
 //! [`MetadataState`] rows.
 
 use super::{
-    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
     DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     TombstoneRowAction,
 };
@@ -132,19 +132,15 @@ impl MetadataState {
                 content_ref,
                 hash_state,
                 crc64nvme,
+                layout,
             } => {
-                if !self.publishes_in_commit(
-                    committed_seq,
-                    &content_ref.content_id,
-                    content_ref.size_bytes,
-                ) {
-                    self.push_content_publication_record(ContentPublicationRecord {
+                if let Some(layout) = layout {
+                    self.push_content_layout_record(ContentLayoutRecord {
+                        owner_namespace_id: content_ref.owner_namespace_id.clone(),
                         content_id: content_ref.content_id.clone(),
                         committed_seq,
-                        delta_index: *delta_index,
                         size_bytes: content_ref.size_bytes,
-                        hash_state: hash_state.clone(),
-                        crc64nvme: crc64nvme.clone(),
+                        layout: layout.clone(),
                     });
                 }
                 self.push_revision_record(RevisionRecord {
@@ -156,6 +152,8 @@ impl MetadataState {
                     committed_by: actor.clone(),
                     delta_index: *delta_index,
                     content_ref: content_ref.clone(),
+                    hash_state: hash_state.clone(),
+                    crc64nvme: crc64nvme.clone(),
                 });
             }
             WalDelta::TombstoneSubtree {

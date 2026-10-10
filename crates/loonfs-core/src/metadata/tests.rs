@@ -91,6 +91,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
             ),
             hash_state: None,
             crc64nvme: None,
+            layout: None,
         },
         WalDelta::TombstoneSubtree {
             delta_index: 2,
@@ -618,6 +619,8 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
         committed_by: actor(),
         delta_index: 0,
         content_ref,
+        hash_state: None,
+        crc64nvme: None,
     });
     builder.push_revision(RevisionRecord {
         inode_id: InodeId(7),
@@ -628,6 +631,8 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
         committed_by: actor(),
         delta_index: 0,
         content_ref: replacement_ref,
+        hash_state: None,
+        crc64nvme: None,
     });
     builder.push_commit_receipt(CommitReceiptRecord {
         commit_id: CommitId::parse("indexed-commit").expect("valid commit id"),
@@ -1114,56 +1119,4 @@ fn has_visible_children_sees_through_unbinds() {
         !visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe emptied directory")
     );
-}
-
-#[test]
-fn publication_rows_put_the_longest_reference_of_a_content_id_first() {
-    let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
-    let content_id = ContentId::generate();
-    let revision = |delta_index, revision_no, bytes: &[u8]| WalDelta::AppendFileRevision {
-        delta_index,
-        inode_id: InodeId(7),
-        revision_no: RevisionNo(revision_no),
-        content_ref: ContentRef::blob_v1(namespace_id.clone(), content_id.clone(), bytes),
-        hash_state: None,
-        crc64nvme: None,
-    };
-    let mut state = MetadataState::default();
-    state.apply_committed_wal_deltas_mut(
-        ChangeSeq(1),
-        &commit_id(1),
-        &actor(),
-        1_000,
-        &[revision(0, 1, b"hello")],
-    );
-    state.apply_committed_wal_deltas_mut(
-        ChangeSeq(2),
-        &commit_id(2),
-        &actor(),
-        2_000,
-        &[
-            revision(0, 2, b"hello world"),
-            revision(1, 3, b"hello"),
-            revision(2, 4, b"hello world"),
-        ],
-    );
-
-    let mut rows: Vec<_> = state
-        .content_publications()
-        .iter()
-        .map(|row| {
-            (
-                loonfs_types::format::manifest::MetadataRow::ContentPublication(row.clone())
-                    .row_key(),
-                (row.size_bytes, row.committed_seq.0, row.delta_index),
-            )
-        })
-        .collect();
-    rows.sort();
-    assert_eq!(
-        rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
-        [(11, 2, 0), (5, 1, 0), (5, 2, 1)]
-    );
-    let head = state.content_head(&content_id).expect("chain head");
-    assert_eq!((head.size_bytes, head.committed_seq), (11, ChangeSeq(2)));
 }

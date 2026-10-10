@@ -119,7 +119,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    let appended = append_to(view, target, &revision.content_ref, bytes).await?;
+    let appended = append_to(view, target, &revision, bytes).await?;
     Ok(CompiledFilesystemOperation {
         ops: vec![CommitOp::ReplaceFile {
             inode_id: revision.inode_id,
@@ -127,44 +127,25 @@ async fn plan_append<S: ObjectStore + ?Sized>(
             content_ref: appended.content_ref.clone(),
         }],
         appended: Some(appended),
+        source_revision: None,
     })
 }
 
-/// Builds the reference to `base`'s bytes followed by `bytes`, and the
-/// piece that carries them.
-///
-/// The bytes extend `base`'s content object only when this namespace owns
-/// it and `base` names all of it. Otherwise they start a new object whose
-/// first bytes are `base`'s. Appending to no bytes also starts a new object,
-/// so its piece never shares offset 0 with an empty value in this commit.
 async fn append_to<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     target: &str,
-    base: &ContentRef,
+    base_row: &RevisionRecord,
     bytes: &[u8],
 ) -> Result<AppendedContent> {
-    let missing_row = || {
-        CoreError::NamespaceCorrupt(format!(
-            "`{target}` names {} bytes of content `{}`, which no publication row records",
-            base.size_bytes, base.content_id
-        ))
-    };
-    let head = view
+    let base = &base_row.content_ref;
+    let head_size = view
         .view
         .content_head(&base.content_id)
         .await?
-        .ok_or_else(missing_row)?;
+        .unwrap_or(base.size_bytes);
     let extends_base = base.owner_namespace_id == *view.namespace_id
-        && head.size_bytes == base.size_bytes
+        && head_size == base.size_bytes
         && base.size_bytes > 0;
-    let base_row = if head.size_bytes == base.size_bytes {
-        head
-    } else {
-        view.view
-            .content_publication(&base.content_id, base.size_bytes)
-            .await?
-            .ok_or_else(missing_row)?
-    };
     let added = bytes.len() as u64;
     let size_bytes = base.size_bytes.checked_add(added).ok_or_else(|| {
         CoreError::Internal(format!(
@@ -174,17 +155,18 @@ async fn append_to<S: ObjectStore + ?Sized>(
     })?;
     let crc64nvme = base_row
         .crc64nvme
+        .as_ref()
         .map(|crc| {
             crc.crc64nvme_combine(&Checksum::crc64nvme(bytes), added)
                 .ok_or_else(|| {
                     CoreError::NamespaceCorrupt(format!(
-                        "the publication row of content `{}` records a malformed `crc64nvme`",
+                        "the revision row of content `{}` records a malformed `crc64nvme`",
                         base.content_id
                     ))
                 })
         })
         .transpose()?;
-    let (hash_state, checksum) = match (base_row.hash_state, &crc64nvme) {
+    let (hash_state, checksum) = match (base_row.hash_state.clone(), &crc64nvme) {
         (Some(mut state), _) => {
             state.update(bytes);
             let checksum = state.finish();

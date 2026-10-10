@@ -3,6 +3,9 @@
 #[path = "commit_engine_inline_retention_tests.rs"]
 mod retention;
 
+#[path = "commit_engine_inline_layout_tests.rs"]
+mod layouts;
+
 use super::*;
 use crate::manifest::{fold_wal, fold_wal_tail};
 use crate::path::read::load_current_metadata_view;
@@ -107,9 +110,9 @@ async fn folded_file(
     store: &RecordingStore<LocalFsStore>,
     engine: &mut NamespaceCommitEngine,
     context: &MutationContext,
-    bytes: &'static [u8],
+    bytes: &[u8],
 ) -> (InodeId, ContentRef) {
-    let value = inline(&engine.namespace_id, Bytes::from_static(bytes));
+    let value = inline(&engine.namespace_id, Bytes::copy_from_slice(bytes));
     publish(
         engine,
         store,
@@ -158,6 +161,7 @@ async fn commit_piece(
             content_ref: content_ref.clone(),
             hash_state: Some(hash_state),
             crc64nvme: Some(loonfs_types::Checksum::crc64nvme(whole)),
+            layout: None,
         }],
         vec![WalInlineContent {
             content_id: content_id.clone(),

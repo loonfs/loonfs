@@ -1058,7 +1058,7 @@ async fn compaction_keeps_the_newest_revision_at_the_floor_and_every_publication
 
     for group in [
         MetadataFamilyGroup::Revisions,
-        MetadataFamilyGroup::ContentPublications,
+        MetadataFamilyGroup::ContentLayouts,
     ] {
         let before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
         let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
@@ -1077,7 +1077,7 @@ async fn compaction_keeps_the_newest_revision_at_the_floor_and_every_publication
         publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
         let after = group_rows_of_current_manifest(&store, &namespace_id, group).await;
 
-        if group == MetadataFamilyGroup::ContentPublications {
+        if group == MetadataFamilyGroup::ContentLayouts {
             assert_eq!(after, before, "publication rows are never dropped");
             assert_eq!(result.rows_read, result.rows_written);
             continue;

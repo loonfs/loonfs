@@ -466,16 +466,11 @@ impl Namespace<Writable> {
             .pinned_metadata_read(&content_ref.owner_namespace_id)
             .await?;
         owner.require_administrator(&context).await?;
-        // Forks pin manifests, so inherited content from a deleted owner is already an object.
-        let owner_location = if context.head.status.is_deleted() {
-            None
-        } else {
-            Some(
-                owner
-                    .resolve_content_location(&content_ref, &context)
-                    .await?,
-            )
-        };
+        let owner_location = Some(
+            owner
+                .resolve_content_location(&content_ref, &context)
+                .await?,
+        );
         match engine
             .import_content_ref(
                 &catalog,

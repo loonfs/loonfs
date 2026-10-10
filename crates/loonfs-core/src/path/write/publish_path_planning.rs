@@ -44,6 +44,7 @@ pub(super) async fn require_vacant_path<S: ObjectStore + ?Sized>(
 pub(super) struct CompiledFilesystemOperation {
     pub(super) ops: Vec<CommitOp>,
     pub(super) appended: Option<AppendedContent>,
+    pub(super) source_revision: Option<crate::metadata::RevisionRecord>,
 }
 
 impl CompiledFilesystemOperation {
@@ -51,6 +52,7 @@ impl CompiledFilesystemOperation {
         Self {
             ops,
             appended: None,
+            source_revision: None,
         }
     }
 }

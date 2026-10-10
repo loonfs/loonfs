@@ -7,7 +7,7 @@
 use crate::error::CoreError;
 use crate::metadata::{
     AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentPublicationRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
+    ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
 use loonfs_types::format::manifest::MetadataRow;
@@ -63,12 +63,12 @@ pub(crate) fn active_deletion_from_manifest_row(
     }
 }
 
-pub(crate) fn content_publication_from_manifest_row(
+pub(crate) fn content_layout_from_manifest_row(
     row: MetadataRow,
-) -> Result<ContentPublicationRecord, CoreError> {
+) -> Result<ContentLayoutRecord, CoreError> {
     match row {
-        MetadataRow::ContentPublication(record) => Ok(record),
-        other => Err(foreign_row("content_publication", &other)),
+        MetadataRow::ContentLayout(record) => Ok(record),
+        other => Err(foreign_row("content_layout", &other)),
     }
 }
 

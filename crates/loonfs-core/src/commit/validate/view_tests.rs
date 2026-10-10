@@ -154,6 +154,7 @@ fn create_file_overlay_rows_match_replayed_wal_deltas() {
                 content_ref: content_ref(1),
                 hash_state: None,
                 crc64nvme: None,
+                layout: None,
             },
         ],
     );
@@ -170,6 +171,7 @@ fn replace_file_overlay_rows_match_replayed_wal_deltas() {
             content_ref: content_ref(2),
             hash_state: None,
             crc64nvme: None,
+            layout: None,
         }],
     );
 }
@@ -185,6 +187,7 @@ fn restore_revision_overlay_rows_match_replayed_wal_deltas() {
             content_ref: content_ref(3),
             hash_state: None,
             crc64nvme: None,
+            layout: None,
         }],
     );
 }
@@ -285,6 +288,7 @@ fn rename_of_same_commit_binding_overlay_rows_match_replayed_wal_deltas() {
                 content_ref: content_ref(4),
                 hash_state: None,
                 crc64nvme: None,
+                layout: None,
             },
             WalDelta::UnbindDirentry {
                 delta_index: 3,
@@ -425,6 +429,7 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 content_ref: content_ref(5),
                 hash_state: None,
                 crc64nvme: None,
+                layout: None,
             },
             WalDelta::AppendFileRevision {
                 delta_index: 5,
@@ -433,6 +438,7 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 content_ref: content_ref(6),
                 hash_state: None,
                 crc64nvme: None,
+                layout: None,
             },
             WalDelta::UnbindDirentry {
                 delta_index: 6,
@@ -466,6 +472,7 @@ fn chained_multi_op_commit_overlay_rows_match_replayed_wal_deltas() {
                 content_ref: content_ref(5),
                 hash_state: None,
                 crc64nvme: None,
+                layout: None,
             },
             WalDelta::UnbindDirentry {
                 delta_index: 9,
@@ -561,6 +568,7 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             content_ref: content_ref(7),
             hash_state: None,
             crc64nvme: None,
+            layout: None,
         },
     ];
     let second_deltas = [
@@ -571,6 +579,7 @@ fn overlays_across_commits_match_accumulated_wal_replay() {
             content_ref: content_ref(8),
             hash_state: None,
             crc64nvme: None,
+            layout: None,
         },
         WalDelta::UnbindDirentry {
             delta_index: 1,

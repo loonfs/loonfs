@@ -81,6 +81,22 @@ const REVISION_BYTES: usize = delta_bytes(
         ("revision_no", INTEGER_BYTES),
         ("content_ref", CONTENT_REF_BYTES),
         (
+            "layout",
+            map_bytes(&[(
+                "extents",
+                9 + map_bytes(&[
+                    ("owner_namespace_id", string_bytes(MAX_ID_BYTES)),
+                    ("content_id", string_bytes(MAX_ID_BYTES)),
+                    (
+                        "object",
+                        map_bytes(&[("kind", string_bytes("whole".len()))]),
+                    ),
+                    ("offset", INTEGER_BYTES),
+                    ("length", INTEGER_BYTES),
+                ]),
+            )]),
+        ),
+        (
             "hash_state",
             map_bytes(&[
                 ("words", 9 + 8 * INDEX_BYTES),

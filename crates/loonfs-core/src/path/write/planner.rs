@@ -122,8 +122,16 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                     .iter()
                     .find(|value| value.content_ref == *content_ref)
                     .map_or_else(
-                        || candidate.content_digests(content_ref),
-                        |value| (value.hash_state.clone(), value.crc64nvme.clone()),
+                        || {
+                            unit.source_revision
+                                .as_ref()
+                                .filter(|row| row.content_ref == *content_ref)
+                                .map_or_else(
+                                    || candidate.revision_content(content_ref),
+                                    |row| (row.hash_state.clone(), row.crc64nvme.clone(), None),
+                                )
+                        },
+                        |value| (value.hash_state.clone(), value.crc64nvme.clone(), None),
                     )
             },
         )

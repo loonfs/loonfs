@@ -248,7 +248,7 @@ fn validate_run_index_parity(
                 | MetadataRowFamily::Inodes
                 | MetadataRowFamily::Tombstones
                 | MetadataRowFamily::ActiveDeletions
-                | MetadataRowFamily::ContentPublications
+                | MetadataRowFamily::ContentLayouts
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access => {}
             }

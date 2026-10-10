@@ -86,6 +86,19 @@ pub fn content_blob(owner_namespace_id: &NamespaceId, content_id: &ContentId) ->
     format!("namespaces/{owner_namespace_id}/content/{content_id}")
 }
 
+/// Builds the immutable object key for one run of chain bytes.
+pub fn content_span(
+    owner_namespace_id: &NamespaceId,
+    content_id: &ContentId,
+    start: u64,
+    end: u64,
+) -> String {
+    format!(
+        "{}-{start:020}-{end:020}",
+        content_blob(owner_namespace_id, content_id)
+    )
+}
+
 /// Builds a fresh key for a temporary object that an extension writes and
 /// deletes under one namespace.
 pub fn temporary_object(namespace_id: &NamespaceId) -> String {
@@ -193,6 +206,8 @@ mod tests {
                 .replace("{group}", "bindings")
                 .replace("{segment_id}", "seg_00000000000000000000000000000001")
                 .replace("{upload_id}", "upl_00000000000000000000000000000001")
+                .replace("{start:020}", "00000000000000000002")
+                .replace("{end:020}", "00000000000000000019")
                 .replace("{content_id}", CONTENT_ID)
                 .replace("{temporary_id}", &temporary_id)
         };
@@ -216,6 +231,10 @@ mod tests {
             (
                 "Content objects",
                 content_blob(&namespace_id(), &content_id()),
+            ),
+            (
+                "Content span objects",
+                super::content_span(&namespace_id(), &content_id(), 2, 19),
             ),
             ("Temporary objects", temporary),
         ];

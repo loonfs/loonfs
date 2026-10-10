@@ -216,12 +216,15 @@ impl CommitCandidate {
         }
     }
 
-    /// The SHA-256 state and CRC-64/NVME this candidate carries for the
-    /// bytes behind `content_ref`, when it carries them.
-    pub(crate) fn content_digests(
+    /// Digest continuation and uploaded placement carried by this candidate.
+    pub(crate) fn revision_content(
         &self,
         content_ref: &ContentRef,
-    ) -> (Option<Sha256State>, Option<Checksum>) {
+    ) -> (
+        Option<Sha256State>,
+        Option<Checksum>,
+        Option<loonfs_types::ContentLayout>,
+    ) {
         if let Some(value) = self
             .inline_content
             .iter()
@@ -230,16 +233,29 @@ impl CommitCandidate {
             return (
                 Some(value.hash_state().clone()),
                 Some(value.crc64nvme().clone()),
+                None,
             );
         }
         let ContentPreparation::Ready(proofs) = &self.content else {
-            return (None, None);
+            return (None, None, None);
         };
         proofs
             .iter()
             .find(|proof| proof.content_ref() == content_ref)
-            .map_or((None, None), |proof| {
-                (proof.hash_state().cloned(), proof.crc64nvme().cloned())
+            .map_or((None, None, None), |proof| {
+                (
+                    proof.hash_state().cloned(),
+                    proof.crc64nvme().cloned(),
+                    Some(loonfs_types::ContentLayout {
+                        extents: vec![loonfs_types::ContentExtent {
+                            owner_namespace_id: content_ref.owner_namespace_id.clone(),
+                            content_id: content_ref.content_id.clone(),
+                            object: loonfs_types::ExtentObject::Whole,
+                            offset: 0,
+                            length: content_ref.size_bytes,
+                        }],
+                    }),
+                )
             })
     }
 

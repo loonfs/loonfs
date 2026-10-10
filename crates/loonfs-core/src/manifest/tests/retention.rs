@@ -51,6 +51,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             committed_by,
                             delta_index,
                             content_ref,
+                            ..
                         }) => MetadataRow::FileRevision(crate::metadata::RevisionRecord {
                             inode_id,
                             revision_no,
@@ -66,6 +67,8 @@ fn metadata_states_equivalent_ignoring_content_identity(
                                 .expect("placeholder content id"),
                                 ..content_ref
                             },
+                            hash_state: None,
+                            crc64nvme: None,
                         }),
                         MetadataRow::Commit(mut record) => {
                             record.semantic_commit_fingerprint =
@@ -73,6 +76,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             for delta in &mut record.deltas {
                                 if let loonfs_types::format::wal::WalDelta::AppendFileRevision {
                                     content_ref,
+                                    layout,
                                     ..
                                 } = &mut delta.delta
                                 {
@@ -80,16 +84,24 @@ fn metadata_states_equivalent_ignoring_content_identity(
                                         "con_00000000000000000000000000000000",
                                     )
                                     .expect("placeholder content id");
+                                    if let Some(layout) = layout {
+                                        for extent in &mut layout.extents {
+                                            extent.content_id = content_ref.content_id.clone();
+                                        }
+                                    }
                                 }
                             }
                             MetadataRow::Commit(record)
                         }
-                        MetadataRow::ContentPublication(mut record) => {
+                        MetadataRow::ContentLayout(mut record) => {
                             record.content_id = loonfs_types::ContentId::parse(
                                 "con_00000000000000000000000000000000",
                             )
                             .expect("placeholder content id");
-                            MetadataRow::ContentPublication(record)
+                            for extent in &mut record.layout.extents {
+                                extent.content_id = record.content_id.clone();
+                            }
+                            MetadataRow::ContentLayout(record)
                         }
                         other => other,
                     })

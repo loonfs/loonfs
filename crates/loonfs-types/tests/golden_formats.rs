@@ -288,6 +288,15 @@ fn sample_wal_payload() -> WalObjectPayload {
                 content_ref: sample_content_ref(),
                 hash_state: None,
                 crc64nvme: None,
+                layout: Some(loonfs_types::ContentLayout {
+                    extents: vec![loonfs_types::ContentExtent {
+                        owner_namespace_id: sample_content_ref().owner_namespace_id,
+                        content_id: sample_content_ref().content_id,
+                        object: loonfs_types::ExtentObject::Whole,
+                        offset: 0,
+                        length: sample_content_ref().size_bytes,
+                    }],
+                }),
             },
         },
         WalCommitDelta {
@@ -320,6 +329,18 @@ fn sample_wal_payload() -> WalObjectPayload {
                 access_revision_no: AccessRevisionNo(1),
                 boundary: true,
                 grants: sample_grants(),
+            },
+        },
+        WalCommitDelta {
+            semantic_operation_index: 6,
+            delta: WalDelta::AppendFileRevision {
+                delta_index: 7,
+                inode_id: InodeId(6),
+                revision_no: RevisionNo(1),
+                content_ref: sample_content_ref(),
+                hash_state: None,
+                crc64nvme: None,
+                layout: None,
             },
         },
     ];
@@ -355,9 +376,11 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
         if let WalDelta::AppendFileRevision {
             hash_state,
             crc64nvme,
+            layout,
             ..
         } = &mut delta.delta
         {
+            *layout = None;
             *hash_state = Some(sample_hash_state());
             *crc64nvme = Some(Checksum::crc64nvme(b"golden bytes"));
         }
@@ -400,6 +423,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             content_ref: empty_content_ref,
             hash_state: None,
             crc64nvme: None,
+            layout: None,
         },
     });
     payload.records[0].deltas.push(WalCommitDelta {
@@ -411,6 +435,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             content_ref: ContentRef::blob_v1(namespace_id(), chain_id, b"golden chain"),
             hash_state: None,
             crc64nvme: None,
+            layout: None,
         },
     });
     payload.head_seq = ChangeSeq(3);
@@ -479,10 +504,10 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         }],
     };
     let mut publication = manifest.runs[0].segments[0].clone();
-    publication.family = MetadataRowFamily::ContentPublications;
+    publication.family = MetadataRowFamily::ContentLayouts;
     publication.segment_id =
         MetadataSegmentId::parse("seg_0123456789abcdef0123456789abcdee").expect("segment id");
-    publication.min_row_key = sample_content_publication_row().row_key();
+    publication.min_row_key = sample_content_layout_row().row_key();
     publication.max_row_key = publication.min_row_key.clone();
     publication.row_count = 1;
     manifest.runs[0].segments.push(publication);
@@ -1293,7 +1318,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
         MetadataRowFamily::ActiveDeletions,
         MetadataRowFamily::CommitReceipts,
         MetadataRowFamily::Commits,
-        MetadataRowFamily::ContentPublications,
+        MetadataRowFamily::ContentLayouts,
         MetadataRowFamily::Attributes,
         MetadataRowFamily::Access,
     ]
@@ -1311,7 +1336,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"active_deletions\"",
             "\"commit_receipts\"",
             "\"commits\"",
-            "\"content_publications\"",
+            "\"content_layouts\"",
             "\"attributes\"",
             "\"access\"",
         ],
@@ -1774,6 +1799,7 @@ fn wal_delta_wire_tags_match_spec_names() {
                 content_ref: sample_content_ref(),
                 hash_state: None,
                 crc64nvme: None,
+                layout: None,
             }),
             "append_file_revision",
         ),
@@ -2035,6 +2061,8 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             committed_by: actor(),
             delta_index: 0,
             content_ref: sample_crc_content_ref(),
+            hash_state: None,
+            crc64nvme: None,
         }),
         MetadataRow::FileRevision(loonfs_types::format::manifest::RevisionRecord {
             inode_id: InodeId(2),
@@ -2045,6 +2073,8 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
             committed_by: actor(),
             delta_index: 0,
             content_ref: sample_content_ref(),
+            hash_state: Some(sample_hash_state()),
+            crc64nvme: Some(Checksum::crc64nvme(b"golden bytes")),
         }),
     ]
 }
@@ -2519,6 +2549,8 @@ fn provenance_rows_reject_every_missing_required_field() {
                 committed_by: actor(),
                 delta_index: 0,
                 content_ref: sample_content_ref(),
+                hash_state: None,
+                crc64nvme: None,
             }),
             &["commit_id", "committed_by"][..],
         ),
@@ -2659,35 +2691,52 @@ fn every_metadata_row_rejects_unknown_fields() {
     }
 }
 
-fn sample_content_publication_row() -> MetadataRow {
-    MetadataRow::ContentPublication(loonfs_types::format::manifest::ContentPublicationRecord {
-        content_id: sample_content_ref().content_id,
+fn sample_content_layout_row() -> MetadataRow {
+    let reference = sample_content_ref();
+    MetadataRow::ContentLayout(loonfs_types::format::manifest::ContentLayoutRecord {
+        owner_namespace_id: reference.owner_namespace_id.clone(),
+        content_id: reference.content_id.clone(),
         committed_seq: ChangeSeq(2),
-        delta_index: 3,
         size_bytes: 12,
-        hash_state: Some(sample_hash_state()),
-        crc64nvme: Some(Checksum::crc64nvme(b"golden bytes")),
+        layout: loonfs_types::ContentLayout {
+            extents: vec![
+                loonfs_types::ContentExtent {
+                    owner_namespace_id: reference.owner_namespace_id.clone(),
+                    content_id: reference.content_id.clone(),
+                    object: loonfs_types::ExtentObject::Whole,
+                    offset: 0,
+                    length: 8,
+                },
+                loonfs_types::ContentExtent {
+                    owner_namespace_id: reference.owner_namespace_id,
+                    content_id: reference.content_id,
+                    object: loonfs_types::ExtentObject::Span { start: 8, end: 12 },
+                    offset: 0,
+                    length: 4,
+                },
+            ],
+        },
     })
 }
 
 #[test]
-fn content_publication_rows_match_golden_bytes_and_lookup_grammar() {
-    let row = sample_content_publication_row();
+fn content_layout_rows_match_golden_bytes_and_lookup_grammar() {
+    let row = sample_content_layout_row();
     let key = format!(
-        "content-publication-{}-18446744073709551603-00000000000000000002",
+        "content-layout-{}-18446744073709551613",
         sample_content_ref().content_id
     );
     assert_eq!(row.row_key(), key);
     assert_eq!(
-        row.filter_key_for_family(MetadataRowFamily::ContentPublications),
-        format!("content-publication-{}", sample_content_ref().content_id)
+        row.filter_key_for_family(MetadataRowFamily::ContentLayouts),
+        format!("content-layout-{}", sample_content_ref().content_id)
     );
     assert_rows_match_single_block_golden(
-        "sst_block_data_content_publications.v1.bin",
+        "sst_block_data_content_layouts.v1.bin",
         std::slice::from_ref(&row),
     );
     assert_eq!(
-        decode_golden_data_block("sst_block_data_content_publications.v1.bin").rows,
+        decode_golden_data_block("sst_block_data_content_layouts.v1.bin").rows,
         [row]
     );
 }

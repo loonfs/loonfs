@@ -1,7 +1,7 @@
 //! Segments metadata rows into runs and writes the immutable metadata
 //! segments a manifest references.
 
-use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_hash_states};
+use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_layouts};
 use super::runs::{MetadataFamilySegments, MetadataLsmPolicy, MANIFEST_ROW_FAMILIES};
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
@@ -10,13 +10,14 @@ use bytes::Bytes;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
 };
 #[cfg(test)]
 pub(super) use loonfs_types::format::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_types::format::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
-use loonfs_types::{ChangeSeq, ContentId, MetadataSegmentId, NamespaceId, Sha256State};
+use loonfs_types::{ChangeSeq, ContentId, MetadataSegmentId, NamespaceId};
 use std::collections::HashMap;
 use std::future::Future;
 
@@ -30,16 +31,17 @@ pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     metadata_state: &MetadataState,
-    hash_states: &HashMap<ContentId, Sha256State>,
+    layouts: &HashMap<ContentId, ContentLayoutRecord>,
     policy: MetadataLsmPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
         namespace_id,
         |family| {
-            with_hash_states(
+            with_layouts(
+                family,
                 manifest_rows_for_family(metadata_state, family),
-                hash_states,
+                layouts,
             )
         },
         policy,
@@ -75,16 +77,17 @@ pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
-    hash_states: &HashMap<ContentId, Sha256State>,
+    layouts: &HashMap<ContentId, ContentLayoutRecord>,
     policy: MetadataLsmPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
         namespace_id,
         |family| {
-            with_hash_states(
+            with_layouts(
+                family,
                 manifest_rows_for_family_after_seq(metadata_state, family, after_seq),
-                hash_states,
+                layouts,
             )
         },
         policy,

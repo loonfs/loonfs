@@ -162,7 +162,7 @@ pub enum CoreError {
     ShuttingDown,
     #[error("checkpoint unavailable: {0}")]
     CheckpointUnavailable(String),
-    #[error("content `{content_id}` is not yet materialized; read through the proxied route or retry after the next fold")]
+    #[error("content `{content_id}` has no single object for direct download; read through the proxied route")]
     ContentNotMaterialized { content_id: loonfs_types::ContentId },
     #[error("invalid checkpoint request: {0}")]
     InvalidCheckpointRequest(String),

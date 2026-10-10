@@ -32,6 +32,7 @@ pub struct ProjectedWalTail {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectedContent {
     pub(crate) content_ref: ContentRef,
+    pub(crate) committed_seq: loonfs_types::ChangeSeq,
     /// The CRC-64/NVME the delta of `content_ref` recorded.
     pub(crate) crc64nvme: Option<Checksum>,
     pub(crate) pieces: Vec<ProjectedPiece>,
@@ -85,7 +86,7 @@ impl ProjectedWalTail {
                 })
                 .max_by_key(|(content_ref, _)| content_ref.size_bytes)
                 .expect("decoded inline content should have a same-commit reference");
-            self.insert_piece(content_ref, crc64nvme, entry);
+            self.insert_piece(content_ref, crc64nvme, entry, record.committed_seq);
         }
         self.rows.apply_committed_wal_record_mut(record);
         self.activity = activity;
@@ -94,6 +95,7 @@ impl ProjectedWalTail {
 
     /// The unfolded pieces of the content `content_ref` names, when the
     /// tail holds any.
+    #[cfg(test)]
     pub(crate) fn content(&self, content_ref: &ContentRef) -> Option<&ProjectedContent> {
         self.content_by_id(&content_ref.owner_namespace_id, &content_ref.content_id)
     }
@@ -133,6 +135,7 @@ impl ProjectedWalTail {
         content_ref: &ContentRef,
         crc64nvme: &Option<Checksum>,
         entry: &WalInlineContent,
+        committed_seq: loonfs_types::ChangeSeq,
     ) {
         let position = match self.content_positions.entry(content_ref.content_id.clone()) {
             Entry::Occupied(entry) => *entry.get(),
@@ -141,6 +144,7 @@ impl ProjectedWalTail {
                 vacant.insert(self.contents.len());
                 self.contents.push(ProjectedContent {
                     content_ref: content_ref.clone(),
+                    committed_seq,
                     crc64nvme: crc64nvme.clone(),
                     pieces: Vec::new(),
                 });
@@ -153,6 +157,7 @@ impl ProjectedWalTail {
             self.inline_entry_heap_bytes -=
                 content.content_ref.heap_bytes() + content.crc64nvme.heap_bytes();
             content.content_ref = content_ref.clone();
+            content.committed_seq = committed_seq;
             content.crc64nvme = crc64nvme.clone();
             self.inline_entry_heap_bytes += content_ref.heap_bytes() + crc64nvme.heap_bytes();
         }
@@ -216,6 +221,7 @@ mod tests {
                     ),
                     hash_state: None,
                     crc64nvme: None,
+                    layout: None,
                 },
             }],
             inline_content: vec![WalInlineContent {

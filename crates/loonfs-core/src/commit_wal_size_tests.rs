@@ -98,6 +98,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 content_ref: content_ref.clone(),
                 hash_state: None,
                 crc64nvme: None,
+                layout: None,
             },
             WalDelta::AppendAttributesRevision {
                 delta_index: 4,
@@ -129,6 +130,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 content_ref: log_ref,
                 hash_state: Some(log_state),
                 crc64nvme: Some(Checksum::crc64nvme(b"log")),
+                layout: None,
             },
         ],
     );

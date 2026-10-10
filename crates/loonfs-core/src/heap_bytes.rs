@@ -12,9 +12,9 @@ use loonfs_types::format::control::{ForkBasis, ManifestRef, WriterBlock};
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentPublicationRecord, DeletedBinding, DirentryBindingRecord,
-    InodeRecord, MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess,
-    NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord, InodeRecord,
+    MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestPayload,
+    RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_types::format::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{
@@ -264,7 +264,7 @@ impl HeapBytes for MetadataRow {
             MetadataRow::ActiveDeletion(record) => record.heap_bytes(),
             MetadataRow::CommitReceipt(record) => record.heap_bytes(),
             MetadataRow::Commit(record) => record.heap_bytes(),
-            MetadataRow::ContentPublication(record) => record.heap_bytes(),
+            MetadataRow::ContentLayout(record) => record.heap_bytes(),
             MetadataRow::AttributesRevision(record) => record.heap_bytes(),
             MetadataRow::AccessRevision(record) => record.heap_bytes(),
         }
@@ -287,7 +287,11 @@ impl HeapBytes for DirentryBindingRecord {
 
 impl HeapBytes for RevisionRecord {
     fn heap_bytes(&self) -> usize {
-        self.commit_id.heap_bytes() + self.committed_by.heap_bytes() + self.content_ref.heap_bytes()
+        self.commit_id.heap_bytes()
+            + self.committed_by.heap_bytes()
+            + self.content_ref.heap_bytes()
+            + self.hash_state.heap_bytes()
+            + self.crc64nvme.heap_bytes()
     }
 }
 
@@ -314,9 +318,11 @@ impl HeapBytes for ActiveDeletionRecord {
     }
 }
 
-impl HeapBytes for ContentPublicationRecord {
+impl HeapBytes for ContentLayoutRecord {
     fn heap_bytes(&self) -> usize {
-        self.content_id.heap_bytes() + self.hash_state.heap_bytes() + self.crc64nvme.heap_bytes()
+        self.owner_namespace_id.heap_bytes()
+            + self.content_id.heap_bytes()
+            + self.layout.heap_bytes()
     }
 }
 
@@ -369,8 +375,14 @@ impl HeapBytes for WalCommitDelta {
                 content_ref,
                 hash_state,
                 crc64nvme,
+                layout,
                 ..
-            } => content_ref.heap_bytes() + hash_state.heap_bytes() + crc64nvme.heap_bytes(),
+            } => {
+                content_ref.heap_bytes()
+                    + hash_state.heap_bytes()
+                    + crc64nvme.heap_bytes()
+                    + layout.heap_bytes()
+            }
             WalDelta::TombstoneSubtree {
                 deleted_binding, ..
             } => deleted_binding.heap_bytes(),
@@ -468,6 +480,19 @@ impl HeapBytes for MetadataSegmentRef {
 impl HeapBytes for SegmentIndexEntry {
     fn heap_bytes(&self) -> usize {
         self.last_row_key.heap_bytes()
+    }
+}
+
+impl HeapBytes for loonfs_types::ContentLayout {
+    fn heap_bytes(&self) -> usize {
+        self.extents.capacity() * size_of::<loonfs_types::ContentExtent>()
+            + self
+                .extents
+                .iter()
+                .map(|extent| {
+                    extent.owner_namespace_id.heap_bytes() + extent.content_id.heap_bytes()
+                })
+                .sum::<usize>()
     }
 }
 

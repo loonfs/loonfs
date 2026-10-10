@@ -7,7 +7,7 @@
 //! [`merge_group_in_step`] runs within a bounded maintenance pass.
 //! [`run_metadata_compaction_job`] writes direct output with epoch fencing.
 //! Only base merges may remove rows below the
-//! retention floor; delta merges preserve every row.
+//! retention floor. Every merge drops superseded layout rows.
 
 use super::block_fetch::segment_object_len;
 use super::block_load::SessionBlockMemo;
@@ -606,8 +606,11 @@ const fn row_cluster(families: &'static [MetadataRowFamily]) -> RetentionCluster
     }
 }
 
-const PUBLICATION_CLUSTERS: [RetentionCluster; 1] =
-    [row_cluster(&[MetadataRowFamily::ContentPublications])];
+const LAYOUT_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
+    families: &[MetadataRowFamily::ContentLayouts],
+    locality: LocalityGrouping::LeadingKeyComponents(1),
+    rule: RetentionRule::NewestPerGroup,
+}];
 const INODE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Inodes])];
 const TOMBSTONE_CLUSTERS: [RetentionCluster; 1] = [row_cluster(&[MetadataRowFamily::Tombstones])];
 const COMMIT_CLUSTERS: [RetentionCluster; 2] = [
@@ -651,7 +654,7 @@ pub(super) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
         MetadataFamilyGroup::Tombstones => &TOMBSTONE_CLUSTERS,
         MetadataFamilyGroup::ActiveDeletions => &ACTIVE_DELETION_CLUSTERS,
         MetadataFamilyGroup::Commits => &COMMIT_CLUSTERS,
-        MetadataFamilyGroup::ContentPublications => &PUBLICATION_CLUSTERS,
+        MetadataFamilyGroup::ContentLayouts => &LAYOUT_CLUSTERS,
         MetadataFamilyGroup::Attributes => &ATTRIBUTE_CLUSTERS,
         MetadataFamilyGroup::Access => &ACCESS_CLUSTERS,
     }
@@ -798,14 +801,11 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         Ok(())
     }
 
-    /// Which rule decides this cluster's rows.
-    ///
-    /// Dropping is only visibility-preserving over a window that starts at the
-    /// group's oldest run, and the placement is what records that
-    /// ([`MergePlacement`]). A merge above the base merges its window exactly
-    /// as it stands, so every cluster keeps every row.
+    // A newer layout covers every prefix its older rows covered.
     fn rule_for(&self, cluster: &RetentionCluster) -> RetentionRule {
-        if self.placement.may_drop_rows_below_the_retention_floor() {
+        if self.placement.may_drop_rows_below_the_retention_floor()
+            || cluster.rule == RetentionRule::NewestPerGroup
+        {
             cluster.rule
         } else {
             RetentionRule::KeepEveryRow
@@ -1049,7 +1049,7 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
         | MetadataFamilyGroup::Tombstones
         | MetadataFamilyGroup::ActiveDeletions
         | MetadataFamilyGroup::Commits
-        | MetadataFamilyGroup::ContentPublications
+        | MetadataFamilyGroup::ContentLayouts
         | MetadataFamilyGroup::Attributes
         | MetadataFamilyGroup::Access => None,
     }

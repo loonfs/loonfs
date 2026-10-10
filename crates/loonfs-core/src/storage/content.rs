@@ -92,7 +92,7 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
     content_ref: &ContentRef,
 ) -> Result<(), DurableContentValidationError> {
-    ContentLocation::resolve(None, content_ref)?
+    ContentLocation::whole(content_ref)?
         .get_bytes(store, content_ref)
         .await
         .map(drop)
@@ -105,7 +105,7 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
     content_ref: &ContentRef,
 ) -> Result<ByteStream, DurableContentValidationError> {
     let stream_key = location.object_key().to_owned();
-    let source = FileContentStream::open_inner(
+    let mut source = FileContentStream::open_inner(
         store,
         location,
         None,
@@ -115,7 +115,11 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
         0,
     )
     .await?;
-    let body = futures::stream::try_unfold(source, move |mut source| {
+    let first = source.next_verified_chunk().await?;
+    if source.next_offset == content_ref.size_bytes {
+        source.completion()?;
+    }
+    let remaining = futures::stream::try_unfold(source, move |mut source| {
         let stream_key = stream_key.clone();
         async move {
             match source.next_verified_chunk().await {
@@ -128,7 +132,9 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
         }
     })
     .boxed();
-    Ok(body)
+    Ok(futures::stream::iter(first.into_iter().map(Ok))
+        .chain(remaining)
+        .boxed())
 }
 
 /// Prepares content from an acknowledged durable write.
@@ -296,28 +302,6 @@ impl<S: ObjectStore> FileContentStream<S> {
         chunk_bytes: NonZeroU64,
         start_offset: u64,
     ) -> Result<Self, DurableContentValidationError> {
-        location.check_prefix(&store).await?;
-        Self::open_with_checked_prefix(
-            store,
-            location,
-            entry,
-            content_ref,
-            chunk_bytes,
-            start_offset,
-        )
-        .await
-    }
-
-    /// Opens the stream for a caller that has already run
-    /// [`ContentLocation::check_prefix`] on `location`.
-    pub(super) async fn open_with_checked_prefix(
-        store: S,
-        location: ContentLocation,
-        entry: Option<PathEntry>,
-        content_ref: ContentRef,
-        chunk_bytes: NonZeroU64,
-        start_offset: u64,
-    ) -> Result<Self, DurableContentValidationError> {
         if location.is_resident() {
             let bytes = location
                 .read_range(&store, 0, content_ref.size_bytes)
@@ -443,8 +427,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// for past the declared size, so reaching this point *is* having folded
     /// exactly `size_bytes` — the resumed head start, which the first
     /// [`Self::next_chunk`] refuses to start without, plus everything
-    /// fetched from it to the end. An object prefix's length was checked
-    /// by a head request before the stream opened.
+    /// fetched from it to the end.
     fn completion(&mut self) -> Result<(), DurableContentValidationError> {
         let verdict = match self.completion.take() {
             Some(verdict) => verdict,
@@ -759,7 +742,7 @@ mod tests {
         store: &S,
         content_ref: &ContentRef,
     ) -> Result<Vec<u8>, DurableContentValidationError> {
-        ContentLocation::resolve(None, content_ref)?
+        ContentLocation::whole(content_ref)?
             .get_bytes(store, content_ref)
             .await
     }
@@ -1088,7 +1071,7 @@ mod tests {
     ) -> Result<FileContentStream<S>, DurableContentValidationError> {
         FileContentStream::open_inner(
             store,
-            super::ContentLocation::resolve(None, content_ref)?,
+            super::ContentLocation::whole(content_ref)?,
             Some(test_entry()),
             content_ref.clone(),
             test_chunk_bytes(),
@@ -1490,16 +1473,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_streamed_read_reports_a_missing_object_when_it_opens() {
+    async fn a_streamed_read_reports_a_missing_object_on_its_first_range() {
         let (_temp_dir, store) = test_store();
         let content_ref = content_ref(b"never stored");
 
-        let err = open_stream(&store, &content_ref)
+        let mut stream = open_stream(&store, &content_ref)
             .await
-            .expect_err("missing object");
+            .expect("open stream");
+        let err = stream.next_chunk().await.expect_err("missing object");
         assert!(matches!(
             err,
-            DurableContentValidationError::MissingContentObject { .. }
+            CoreError::DurableContent(DurableContentValidationError::MissingContentObject { .. })
         ));
     }
 
@@ -1511,12 +1495,14 @@ mod tests {
         put_content_object(&store, &content_ref, &bytes).await;
         content_ref.size_bytes += 1;
 
-        let err = open_stream(&store, &content_ref)
+        let mut stream = open_stream(&store, &content_ref)
             .await
-            .expect_err("length mismatch");
+            .expect("open stream");
+        stream.next_chunk().await.expect("first range");
+        let err = stream.next_chunk().await.expect_err("length mismatch");
         assert!(matches!(
             err,
-            DurableContentValidationError::ContentLengthMismatch { .. }
+            CoreError::DurableContent(DurableContentValidationError::ContentLengthMismatch { .. })
         ));
     }
 

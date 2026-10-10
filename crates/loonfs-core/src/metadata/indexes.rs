@@ -2,7 +2,7 @@
 //! incrementally as deltas apply so head reads skip the row scans.
 
 use super::{
-    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
     DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     TombstoneRowAction,
 };
@@ -18,7 +18,7 @@ pub(super) struct MetadataIndexes {
     latest_binding_by_child: HashMap<InodeId, DirentryBindingRecord>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
     commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
-    content_head_by_id: HashMap<loonfs_types::ContentId, ContentPublicationRecord>,
+    content_layout_by_id: HashMap<loonfs_types::ContentId, ContentLayoutRecord>,
     /// What the indexed keys and records own, since each index holds its
     /// own copy of a row.
     owned_heap_bytes: usize,
@@ -33,7 +33,7 @@ impl Default for MetadataIndexes {
             latest_binding_by_child: HashMap::new(),
             tombstone_by_root: HashMap::new(),
             commit_receipt_by_id: HashMap::new(),
-            content_head_by_id: HashMap::new(),
+            content_layout_by_id: HashMap::new(),
             owned_heap_bytes: 0,
         }
     }
@@ -59,8 +59,8 @@ impl MetadataIndexes {
             indexes.record_tombstone(tombstone);
         }
 
-        for publication in &state.content_publications {
-            indexes.record_content_publication(publication);
+        for layout in &state.content_layouts {
+            indexes.record_content_layout(layout);
         }
         for receipt in &state.commit_receipts {
             indexes.record_commit_receipt(receipt);
@@ -88,7 +88,7 @@ impl MetadataIndexes {
             + hash_map_table_bytes(&self.latest_binding_by_child)
             + hash_map_table_bytes(&self.tombstone_by_root)
             + hash_map_table_bytes(&self.commit_receipt_by_id)
-            + hash_map_table_bytes(&self.content_head_by_id)
+            + hash_map_table_bytes(&self.content_layout_by_id)
             + self.owned_heap_bytes
     }
 
@@ -185,21 +185,21 @@ impl MetadataIndexes {
         );
     }
 
-    pub(super) fn content_head(
+    pub(super) fn content_layout(
         &self,
         content_id: &loonfs_types::ContentId,
-    ) -> Option<&ContentPublicationRecord> {
-        self.content_head_by_id.get(content_id)
+    ) -> Option<&ContentLayoutRecord> {
+        self.content_layout_by_id.get(content_id)
     }
 
-    pub(super) fn record_content_publication(&mut self, record: &ContentPublicationRecord) {
+    pub(super) fn record_content_layout(&mut self, record: &ContentLayoutRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
         replace_if_newer(
-            &mut self.content_head_by_id,
+            &mut self.content_layout_by_id,
             &mut self.owned_heap_bytes,
             record.content_id.clone(),
             record.clone(),
-            |head| (head.size_bytes, std::cmp::Reverse(head.committed_seq)),
+            |row| row.committed_seq,
         );
     }
 

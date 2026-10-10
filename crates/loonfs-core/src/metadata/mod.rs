@@ -21,7 +21,7 @@ mod visibility;
 pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
 pub use self::rows::MetadataState;
 pub use loonfs_types::format::manifest::{
-    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentPublicationRecord,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
     DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 
