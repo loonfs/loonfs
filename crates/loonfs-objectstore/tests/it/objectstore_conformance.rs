@@ -780,7 +780,12 @@ async fn assert_assembly<S: ObjectStore>(
         let key = content_blob(&namespace_id, &ContentId::generate());
         let expected = Checksum::compute(crc, &payload);
         let written = store
-            .assemble(&key, &sources, tail.clone(), &expected)
+            .assemble(
+                &key,
+                &sources,
+                vec![tail.slice(..2), tail.slice(2..)],
+                &expected,
+            )
             .await
             .expect("assembly");
         assert_eq!(
@@ -792,7 +797,12 @@ async fn assert_assembly<S: ObjectStore>(
         }
         assert_eq!(
             store
-                .assemble(&key, &sources, tail.clone(), &expected)
+                .assemble(
+                    &key,
+                    &sources,
+                    vec![tail.slice(..2), tail.slice(2..)],
+                    &expected
+                )
                 .await
                 .expect("retry")
                 .size_bytes,
@@ -804,7 +814,7 @@ async fn assert_assembly<S: ObjectStore>(
                 .assemble(
                     &wrong_key,
                     &sources,
-                    tail,
+                    vec![tail],
                     &Checksum::compute(crc, b"wrong")
                 )
                 .await,
@@ -825,7 +835,7 @@ async fn assert_assembly<S: ObjectStore>(
             .assemble(
                 &ranged,
                 &sources,
-                Bytes::from_static(b"tail"),
+                vec![Bytes::from_static(b"ta"), Bytes::from_static(b"il")],
                 &Checksum::compute(crc, &ranged_bytes),
             )
             .await
@@ -845,7 +855,7 @@ async fn assert_assembly<S: ObjectStore>(
         });
         assert!(matches!(
             store
-                .assemble(&ranged, &sources, Bytes::new(), &expected)
+                .assemble(&ranged, &sources, Vec::new(), &expected)
                 .await,
             Err(ImmutableWriteError::Transport {
                 source: ObjectStoreError::PreconditionFailed { .. },
@@ -860,7 +870,7 @@ async fn assert_assembly<S: ObjectStore>(
         store.delete(&sources[0].key).await.expect("delete source");
         assert!(matches!(
             store
-                .assemble(&ranged, &sources, Bytes::new(), &expected)
+                .assemble(&ranged, &sources, Vec::new(), &expected)
                 .await,
             Err(ImmutableWriteError::Transport {
                 source: ObjectStoreError::PreconditionFailed { .. },
@@ -905,7 +915,7 @@ async fn assert_chained_compose<S: ObjectStore>(store: &S) {
     let key = content_blob(&owner, &ContentId::generate());
     let expected = Checksum::crc32c(&bytes);
     let result = store
-        .assemble(&key, &sources, Bytes::new(), &expected)
+        .assemble(&key, &sources, Vec::new(), &expected)
         .await
         .expect("chained compose");
     assert_eq!(result.attestation, Some(expected));

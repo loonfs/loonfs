@@ -583,11 +583,11 @@ where
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         let start = sample_clock();
-        let bytes_in = tail.len() as u64;
+        let bytes_in = tail.iter().map(|piece| piece.len() as u64).sum();
         let (result, attempts) =
             counting_attempts(self.inner.assemble(key, sources, tail, expected)).await;
         let mut sample = ObjectStoreMetricSample::new(

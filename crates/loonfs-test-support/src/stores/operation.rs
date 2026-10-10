@@ -146,7 +146,7 @@ impl<'a> OperationContext<'a> {
             } => RecordedOperation::Assemble {
                 key: self.key.to_owned(),
                 sources: sources.to_vec(),
-                bytes: tail.len(),
+                bytes: tail.iter().map(Bytes::len).sum(),
                 expected: (*expected).clone(),
             },
             OperationKind::CompareAndSwap { bytes, .. } => RecordedOperation::CompareAndSwap {
@@ -197,7 +197,7 @@ pub enum OperationKind<'a> {
         /// Selected objects and ranges.
         sources: &'a [AssemblySource],
         /// Bytes following the sources.
-        tail: &'a Bytes,
+        tail: &'a [Bytes],
         /// Whole result checksum.
         expected: &'a Checksum,
     },

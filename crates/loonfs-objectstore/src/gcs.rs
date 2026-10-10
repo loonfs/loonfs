@@ -269,7 +269,7 @@ impl MultipartController for GcsRequestSigner {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
         self.assemble_objects(key, sources, tail, expected).await

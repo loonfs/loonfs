@@ -10,8 +10,8 @@ use bytes::Bytes;
 use futures::stream::{BoxStream, StreamExt};
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, ImmutableWriteError, MultipartPart, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -109,7 +109,10 @@ impl<S> BufferWatchStore<S> {
     }
 
     /// Replaces each chunk with one whose release is observable.
-    fn watch(&self, body: ByteStream) -> ByteStream {
+    fn watch<'a>(
+        &self,
+        body: BoxStream<'a, Result<Bytes, ObjectStoreError>>,
+    ) -> BoxStream<'a, Result<Bytes, ObjectStoreError>> {
         let peaks = Arc::clone(&self.peaks);
         body.map(move |chunk| {
             chunk.map(|bytes| {
@@ -219,6 +222,25 @@ impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
         }
         self.inner.put_streamed(key, self.watch(body), mode).await
     }
+
+    async fn put_immutable_verified_stream(
+        &self,
+        key: &str,
+        size_bytes: u64,
+        sha256: Option<&Checksum>,
+        body: BoxStream<'_, Result<Bytes, ObjectStoreError>>,
+    ) -> Result<ObjectMetadata, ImmutableWriteError> {
+        let body = if self.matches(key) {
+            self.watch(body)
+        } else {
+            body
+        };
+        self.inner
+            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .await
+    }
+
+    crate::delegate_object_store! { self => self.inner; assemble }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
         self.inner.delete(key).await

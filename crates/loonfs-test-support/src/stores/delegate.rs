@@ -442,7 +442,7 @@ macro_rules! __delegate_object_store_method {
             &'store $receiver,
             key: &'key str,
             sources: &'sources [::loonfs_objectstore::AssemblySource],
-            tail: ::bytes::Bytes,
+            tail: Vec<::bytes::Bytes>,
             expected: &'expected ::loonfs_types::Checksum,
         ) -> ::core::pin::Pin<::std::boxed::Box<
             dyn ::core::future::Future<Output = Result<::loonfs_objectstore::ObjectMetadata, ::loonfs_objectstore::ImmutableWriteError>> + Send + 'future,

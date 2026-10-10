@@ -109,7 +109,7 @@ here rather than advertised as a capability.
 | Other S3-compatible endpoints | Yes, provider multipart | One part, whatever the object's size |
 | Google Cloud Storage | Yes, a resumable upload for a create, provider multipart otherwise | One part, whatever the object's size |
 | Azure Blob Storage | Yes, provider multipart | One part, whatever the object's size |
-| Local filesystem | Yes, staging file | One chunk as it arrives |
+| Local filesystem | Yes, staging file for uploads and assemblies | One chunk; assembly reads are at most 8 MiB |
 
 Every built-in provider has a real incremental write path. Cloud providers
 regroup the incoming stream into provider multipart parts, while the local
@@ -120,7 +120,7 @@ part or chunk for a proxied upload, independent of the object's total size.
 
 The local provider is a development and test provider supported on Unix-family platforms. It stages each replacement in the destination directory, makes the staged bytes durable, and atomically renames the staged file over the destination. A concurrent reader therefore observes either the complete prior object or the complete replacement, never a missing or partial object. Construction fails on other platforms rather than claiming a weaker replacement contract.
 
-The local provider reports the SHA-256 of each file as the object's attestation, as its ETag already does. Its stored checksum is a CRC-64/NVME computed from the file, the S3-family shape, so the fold can combine source checksums before an assembly. An assembly reads the selected ranges of its sources and the tail bytes, checks the expected checksum, and writes the result through the same staged, create-only put as any other object. Nothing is appended in place.
+The local provider reports the SHA-256 of each file as the object's attestation, as its ETag already does. Its stored checksum is a CRC-64/NVME computed from the file, the S3-family shape, so the fold can combine source checksums before an assembly. An assembly reads source ranges in chunks of at most 8 MiB and writes the ordered tail pieces into the same staging file used for proxied uploads. It hashes the bytes as it writes and checks the expected checksum before publishing with the create-only link. The assembly and its checksum HEADs each hold at most one read chunk.
 
 ## 6. LoonFS Design Implications
 

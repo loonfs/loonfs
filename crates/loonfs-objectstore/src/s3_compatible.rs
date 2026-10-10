@@ -433,7 +433,7 @@ impl MultipartController for S3RequestSigner {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
         let assembled = self.assemble_parts(key, sources, tail, expected).await;
@@ -993,7 +993,14 @@ mod tests {
                 } else {
                     Checksum::crc64nvme(b"wrong")
                 };
-                let result = signer.assemble(KEY, &sources, tail.clone(), &claim).await;
+                let result = signer
+                    .assemble(
+                        KEY,
+                        &sources,
+                        vec![tail.slice(..2), tail.slice(2..)],
+                        &claim,
+                    )
+                    .await;
                 if correct {
                     assert_eq!(
                         result.expect("assembly").attestation,

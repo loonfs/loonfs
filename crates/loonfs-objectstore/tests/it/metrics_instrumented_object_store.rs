@@ -124,7 +124,7 @@ async fn records_an_assembly_with_its_tail_as_bytes_in() {
                 range: None,
                 checksum: Checksum::sha256(b"base"),
             }],
-            bytes(b" more"),
+            vec![bytes(b" "), bytes(b"more")],
             &Checksum::sha256(b"base more"),
         )
         .await

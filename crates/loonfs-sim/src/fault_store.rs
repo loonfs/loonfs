@@ -421,7 +421,7 @@ where
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata, ImmutableWriteError> {
         let op = self.next_object_op(ObjectOperationKind::PutIfAbsent, key);

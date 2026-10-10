@@ -287,7 +287,7 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
         let failed = |source| ImmutableWriteError::Transport {
@@ -331,7 +331,9 @@ impl<S: ObjectStore> ObjectStore for FakeMultipartStore<S> {
             }
             bytes.extend_from_slice(&selected);
         }
-        bytes.extend_from_slice(&tail);
+        for piece in tail {
+            bytes.extend_from_slice(&piece);
+        }
         if !expected.matches(&bytes) {
             return Err(failed(ObjectStoreError::ChecksumMismatch {
                 object_key: key.to_owned(),

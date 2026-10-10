@@ -15,7 +15,7 @@ impl S3RequestSigner {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
         if expected.algorithm == ChecksumAlgorithm::Crc32c {
@@ -37,10 +37,11 @@ impl S3RequestSigner {
             .iter()
             .map(|range| range.end_exclusive - range.start_inclusive)
             .collect();
-        let size_bytes = lengths.iter().sum::<u64>() + tail.len() as u64;
+        let size_bytes =
+            lengths.iter().sum::<u64>() + tail.iter().map(|piece| piece.len() as u64).sum::<u64>();
         let plan = plan_parts(
             &lengths,
-            tail.len() as u64,
+            tail.iter().map(|piece| piece.len() as u64).sum::<u64>(),
             self.kind == ConfiguredObjectStoreKind::CloudflareR2,
         );
         if plan.len() > MAX_PROVIDER_MULTIPART_PARTS {
@@ -116,7 +117,7 @@ impl S3RequestSigner {
         sources: &[AssemblySource],
         ranges: &[ByteRange],
         etags: &[String],
-        tail: &Bytes,
+        tail: &[Bytes],
         part: &ByteRange,
     ) -> Result<Bytes> {
         let mut bytes = Vec::with_capacity((part.end_exclusive - part.start_inclusive) as usize);
@@ -140,11 +141,14 @@ impl S3RequestSigner {
             }
             start = end;
         }
-        if part.end_exclusive > start {
-            bytes.extend_from_slice(
-                &tail[(part.start_inclusive.saturating_sub(start)) as usize
-                    ..(part.end_exclusive - start) as usize],
-            );
+        for piece in tail {
+            let end = start + piece.len() as u64;
+            let first = start.max(part.start_inclusive);
+            let last = end.min(part.end_exclusive);
+            if first < last {
+                bytes.extend_from_slice(&piece[(first - start) as usize..(last - start) as usize]);
+            }
+            start = end;
         }
         Ok(bytes.into())
     }

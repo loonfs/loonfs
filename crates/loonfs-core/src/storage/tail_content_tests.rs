@@ -4,7 +4,8 @@ use super::*;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{
-    FakeMultipartStore, KeyPredicate, MetadataMapStore, RecordedOperation, RecordingStore,
+    BlockingStore, BufferWatchStore, FakeMultipartStore, KeyPredicate, MetadataMapStore,
+    OperationClass, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{ChangeSeq, ContentId, ContentRef, NamespaceId};
@@ -225,4 +226,88 @@ async fn reading_an_extent_checks_its_crc_attestation() {
         read_extent(&store, &located, &mut Vec::new()).await,
         Err(CoreError::NamespaceCorrupt(_))
     ));
+}
+
+#[tokio::test]
+async fn local_large_tail_streams_pieces_without_merge_permits() {
+    let directory = tempfile::tempdir().expect("directory");
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    let watched = std::sync::Arc::new(BufferWatchStore::new(local, KeyPredicate::any()));
+    let store = RecordingStore::new(watched.clone(), KeyPredicate::any());
+    let (layout, _, mut reference) = fixture(&store, &[], false, 0).await;
+    let piece = vec![b'z'; 4 * 1024 * 1024];
+    let mut tail = ProjectedWalTail::default();
+    for index in 0..13 {
+        let offset = index * piece.len() as u64;
+        reference.size_bytes += piece.len() as u64;
+        reference.checksum = reference
+            .checksum
+            .crc_combine(&Checksum::crc64nvme(&piece), piece.len() as u64)
+            .expect("combine");
+        tail.insert_piece(
+            &reference,
+            &None,
+            &WalInlineContent {
+                content_id: reference.content_id.clone(),
+                offset,
+                bytes: piece.clone(),
+            },
+            ChangeSeq(index + 2),
+        );
+    }
+    let content = tail.content(&reference).expect("content");
+    let pieces = assemble_tail_content(content).expect("pieces");
+    assert_eq!(pieces.len(), 13);
+    for (actual, resident) in pieces.iter().zip(&content.pieces) {
+        assert_eq!(actual.as_ptr(), resident.bytes.as_ptr());
+    }
+    let pool = Semaphore::new(0);
+    let written = write_tail_content(&store, &layout, &tail, content, pieces, &pool)
+        .await
+        .expect("streamed tail");
+    let peaks = watched.peaks();
+    assert_eq!(peaks.total_bytes, 52 * 1024 * 1024);
+    assert_eq!(peaks.largest_buffer_bytes, piece.len() as u64);
+    assert!(peaks.peak_live_bytes <= CONTENT_READ_CHUNK_BYTES);
+    assert!(matches!(
+        store.snapshot().as_slice(),
+        [RecordedOperation::PutImmutableStream { .. }]
+    ));
+    let stored = store
+        .head_stored_checksum(&extent_object_key(&written.layout.extents[0]))
+        .await
+        .expect("checksum")
+        .expect("object");
+    assert_eq!(stored.size_bytes, reference.size_bytes);
+    assert_eq!(stored.checksum, reference.checksum);
+}
+
+#[tokio::test]
+async fn in_memory_merge_reserves_extents_and_tail_before_reading() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+        OperationClass::Head,
+    );
+    let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
+    let content = tail.content(&reference).expect("content");
+    let pool = Semaphore::new(10);
+    store.arm();
+    let write = write_tail_content(
+        &store,
+        &layout,
+        &tail,
+        content,
+        assemble_tail_content(content).expect("pieces"),
+        &pool,
+    );
+    let check = async {
+        store.wait_until_blocked().await;
+        assert_eq!(pool.available_permits(), 0);
+        store.release();
+    };
+    let (written, ()) = tokio::join!(write, check);
+    assert_eq!(written.expect("merged").layout.extents[0].length, 10);
+    assert_eq!(pool.available_permits(), 10);
 }

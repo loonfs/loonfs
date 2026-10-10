@@ -182,7 +182,7 @@ impl GcsRequestSigner {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
         if expected.algorithm == ChecksumAlgorithm::Crc64nvme {
@@ -255,7 +255,7 @@ impl GcsRequestSigner {
         key: &str,
         sources: &[AssemblySource],
         resolved: Vec<(ObjectMetadata, Option<Checksum>, ByteRange)>,
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
         namespace_id: &NamespaceId,
         temporary: &mut Vec<(String, AbortUploadOnDrop)>,
@@ -282,9 +282,11 @@ impl GcsRequestSigner {
                 })?;
             objects.push(self.compose_source(&name, &metadata)?);
         }
-        checksum = checksum
-            .crc_combine(&Checksum::crc32c(&tail), tail.len() as u64)
-            .expect("CRC-32C values should combine");
+        for piece in &tail {
+            checksum = checksum
+                .crc_combine(&Checksum::crc32c(piece), piece.len() as u64)
+                .expect("CRC-32C values should combine");
+        }
         if expected.algorithm == ChecksumAlgorithm::Crc32c {
             check_expected(key, expected, &checksum)?;
         }
@@ -292,7 +294,7 @@ impl GcsRequestSigner {
             let name = temporary_object(namespace_id);
             temporary.push((name.clone(), self.temporary_cleanup(&name)));
             let mut reader = PartReader::new(
-                stream::once(async { Ok(tail) }).boxed(),
+                stream::iter(tail.into_iter().map(Ok)).boxed(),
                 READ_BYTES as usize,
             );
             let head = reader.next_part().await?.unwrap_or_default();

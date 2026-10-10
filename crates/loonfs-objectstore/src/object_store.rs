@@ -649,14 +649,14 @@ pub trait ObjectStore: Send + Sync + Debug {
         crate::immutable_write::decide_created(self, key, sha256, created).await
     }
 
-    /// Creates `key` from `sources` in order followed by `tail`.
+    /// Creates `key` from `sources` in order followed by the pieces in `tail`.
     /// An occupied key succeeds only with an equal `expected` attestation.
     /// Missing or short sources fail the precondition before completion.
     async fn assemble(
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         crate::assembly::put_buffered(self, key, sources, tail, expected).await
@@ -795,7 +795,7 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         self.as_ref().assemble(key, sources, tail, expected).await
@@ -924,7 +924,7 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         (*self).assemble(key, sources, tail, expected).await

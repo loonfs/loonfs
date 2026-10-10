@@ -247,7 +247,7 @@ pub(crate) trait MultipartController: Send + Sync {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata>;
 }
@@ -1091,7 +1091,7 @@ impl ObjectStore for ProviderObjectStore {
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         let Some(controller) = &self.multipart_controller else {
@@ -2934,7 +2934,7 @@ mod tests {
             &self,
             _key: &str,
             _sources: &[AssemblySource],
-            _tail: Bytes,
+            _tail: Vec<Bytes>,
             _expected: &Checksum,
         ) -> Result<ObjectMetadata> {
             Err(ObjectStoreError::Unsupported("test assembly"))

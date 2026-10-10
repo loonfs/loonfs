@@ -308,7 +308,7 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         &self,
         key: &str,
         sources: &[AssemblySource],
-        tail: Bytes,
+        tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata, ImmutableWriteError> {
         let failed = |source| ImmutableWriteError::Transport {

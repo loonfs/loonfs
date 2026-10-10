@@ -5,7 +5,8 @@ use crate::{
     AssemblySource, ByteRange, ImmutableWriteError, ObjectMetadata, ObjectStore, ObjectStoreError,
 };
 use bytes::Bytes;
-use loonfs_types::{Checksum, ChecksumAlgorithm};
+use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
+use loonfs_types::{Checksum, ChecksumAlgorithm, StreamingChecksum};
 
 pub(crate) const READ_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const R2_PART_BYTES: u64 = 64 * 1024 * 1024;
@@ -42,32 +43,59 @@ pub(crate) fn check_expected(key: &str, expected: &Checksum, actual: &Checksum) 
 pub(crate) fn combined_checksum<'a>(
     algorithm: ChecksumAlgorithm,
     sources: impl Iterator<Item = (&'a Checksum, u64)>,
-    tail: &[u8],
+    tail: &[Bytes],
 ) -> Option<Checksum> {
     let mut checksum = Checksum::compute(algorithm, &[]);
     for (next, length) in sources {
         checksum = checksum.crc_combine(next, length)?;
     }
-    checksum.crc_combine(&Checksum::compute(algorithm, tail), tail.len() as u64)
+    for piece in tail {
+        checksum =
+            checksum.crc_combine(&Checksum::compute(algorithm, piece), piece.len() as u64)?;
+    }
+    Some(checksum)
 }
 
-pub(crate) async fn read_sources<S: ObjectStore + ?Sized>(
-    store: &S,
-    sources: &[AssemblySource],
-    tail: Bytes,
-    expected: &Checksum,
-    key: &str,
-) -> Result<Bytes> {
-    let mut bytes = Vec::new();
-    for source in sources {
-        let metadata = store
-            .head(&source.key)
-            .await?
-            .ok_or_else(|| missing_source(&source.key))?;
-        let range = source_range(source, metadata.size_bytes)?;
-        let start = bytes.len();
-        let mut offset = range.start_inclusive;
-        while offset < range.end_exclusive {
+pub(crate) fn stream_sources<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    sources: &'a [AssemblySource],
+    tail: Vec<Bytes>,
+) -> BoxStream<'a, Result<Bytes>> {
+    stream::iter(sources)
+        .then(move |source| async move { source_stream(store, source).await })
+        .try_flatten()
+        .chain(stream::iter(tail).flat_map(|piece| {
+            stream::iter(
+                (0..piece.len())
+                    .step_by(READ_BYTES as usize)
+                    .map(move |start| {
+                        Ok(piece.slice(start..(start + READ_BYTES as usize).min(piece.len())))
+                    }),
+            )
+        }))
+        .boxed()
+}
+
+async fn source_stream<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    source: &'a AssemblySource,
+) -> Result<BoxStream<'a, Result<Bytes>>> {
+    let metadata = store
+        .head(&source.key)
+        .await?
+        .ok_or_else(|| missing_source(&source.key))?;
+    let range = source_range(source, metadata.size_bytes)?;
+    let checksum = StreamingChecksum::for_algorithm(source.checksum.algorithm);
+    Ok(stream::try_unfold(
+        (range.start_inclusive, Some(checksum)),
+        move |(offset, checksum)| async move {
+            let Some(mut checksum) = checksum else {
+                return Ok(None);
+            };
+            if offset == range.end_exclusive {
+                check_expected(&source.key, &source.checksum, &checksum.finish())?;
+                return Ok(None);
+            }
             let end = (offset + READ_BYTES).min(range.end_exclusive);
             let chunk = store
                 .get(
@@ -82,16 +110,31 @@ pub(crate) async fn read_sources<S: ObjectStore + ?Sized>(
             if chunk.len() as u64 != end - offset {
                 return Err(missing_source(&source.key));
             }
-            bytes.extend_from_slice(&chunk);
-            offset = end;
-        }
-        check_expected(
-            &source.key,
-            &source.checksum,
-            &Checksum::compute(source.checksum.algorithm, &bytes[start..]),
-        )?;
+            checksum.update(&chunk);
+            let checksum = if end == range.end_exclusive {
+                check_expected(&source.key, &source.checksum, &checksum.finish())?;
+                None
+            } else {
+                Some(checksum)
+            };
+            Ok(Some((chunk, (end, checksum))))
+        },
+    )
+    .boxed())
+}
+
+pub(crate) async fn read_sources<S: ObjectStore + ?Sized>(
+    store: &S,
+    sources: &[AssemblySource],
+    tail: Vec<Bytes>,
+    expected: &Checksum,
+    key: &str,
+) -> Result<Bytes> {
+    let mut bytes = Vec::new();
+    let mut body = stream_sources(store, sources, tail);
+    while let Some(chunk) = body.next().await {
+        bytes.extend_from_slice(&chunk?);
     }
-    bytes.extend_from_slice(&tail);
     check_expected(
         key,
         expected,
@@ -104,7 +147,7 @@ pub(crate) async fn put_buffered<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     sources: &[AssemblySource],
-    tail: Bytes,
+    tail: Vec<Bytes>,
     expected: &Checksum,
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
     let bytes = read_sources(store, sources, tail, expected, key)
@@ -168,6 +211,60 @@ pub(crate) fn plan_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_fs_assembly_matches_buffered_sources_and_tail() {
+        use crate::local_fs_store::LocalFsStore;
+
+        let directory = tempfile::tempdir().expect("directory");
+        let local = LocalFsStore::new(directory.path()).expect("store");
+        let first = Bytes::from(vec![b'a'; READ_BYTES as usize + 7]);
+        let second = Bytes::from_static(b"second");
+        local
+            .put_immutable_verified("source/first", first.clone())
+            .await
+            .expect("first");
+        local
+            .put_immutable_verified("source/second", second.clone())
+            .await
+            .expect("second");
+        let sources = [
+            AssemblySource {
+                key: "source/first".to_owned(),
+                range: Some(ByteRange {
+                    start_inclusive: 1,
+                    end_exclusive: first.len() as u64 - 1,
+                }),
+                checksum: Checksum::crc64nvme(&first[1..first.len() - 1]),
+            },
+            AssemblySource {
+                key: "source/second".to_owned(),
+                range: None,
+                checksum: Checksum::crc64nvme(&second),
+            },
+        ];
+        let tail = vec![Bytes::from_static(b"ta"), Bytes::from_static(b"il")];
+        let expected = combined_checksum(
+            ChecksumAlgorithm::Crc64nvme,
+            sources
+                .iter()
+                .zip([first.len() as u64 - 2, second.len() as u64])
+                .map(|(source, length)| (&source.checksum, length)),
+            &tail,
+        )
+        .expect("checksum");
+        local
+            .assemble("streamed", &sources, tail.clone(), &expected)
+            .await
+            .expect("assembly");
+        put_buffered(&local, "buffered", &sources, tail, &expected)
+            .await
+            .expect("buffered assembly");
+        assert_eq!(
+            local.get("streamed", None).await.expect("streamed"),
+            local.get("buffered", None).await.expect("buffered")
+        );
+    }
 
     #[test]
     fn multipart_plans_pad_small_runs_and_copy_only_contained_r2_chunks() {
