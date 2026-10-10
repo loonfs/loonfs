@@ -21,16 +21,17 @@ import (
 )
 
 type streamCase struct {
-	Name           string  `json:"name"`
-	Content        string  `json:"content"`
-	Algorithm      string  `json:"algorithm"`
-	Checksum       string  `json:"checksum"`
-	SizeBytes      int     `json:"size_bytes"`
-	Range          *string `json:"range"`
-	Error          bool    `json:"error"`
-	TransportError bool    `json:"transport_error"`
-	RangeError     bool    `json:"range_error"`
-	Ranges         []struct {
+	Name               string   `json:"name"`
+	Content            string   `json:"content"`
+	Algorithm          string   `json:"algorithm"`
+	Checksum           string   `json:"checksum"`
+	SizeBytes          int      `json:"size_bytes"`
+	Range              *string  `json:"range"`
+	TransportError     bool     `json:"transport_error"`
+	ErrorMessage       string   `json:"error_message"`
+	DirectErrorMessage string   `json:"direct_error_message"`
+	ObjectRequests     []string `json:"object_requests"`
+	Ranges             []struct {
 		StartOffset int64  `json:"start_offset"`
 		Length      int64  `json:"length"`
 		Range       string `json:"range"`
@@ -51,15 +52,17 @@ func streamingCases(t *testing.T) []streamCase {
 	return cases
 }
 
-func streamTestServer(t *testing.T, fixture streamCase, direct bool, content func(http.ResponseWriter, *http.Request)) *httptest.Server {
+func streamTestClient(t *testing.T, fixture streamCase, direct bool, content func(http.ResponseWriter, *http.Request), requests chan<- string) *http.Client {
 	t.Helper()
-	var host *httptest.Server
 	claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
 	var signed []string
 	if fixture.Range != nil {
 		signed = []string{*fixture.Range}
 	}
-	host = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests != nil {
+			requests <- r.URL.Path
+		}
 		if strings.HasPrefix(r.URL.Path, "/object/") {
 			index, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/object/"))
 			if err != nil {
@@ -97,16 +100,16 @@ func streamTestServer(t *testing.T, fixture streamCase, direct bool, content fun
 		case strings.HasSuffix(r.URL.Path, "/capabilities"):
 			json.NewEncoder(w).Encode(map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.downloads.direct_get": direct}})
 		case strings.HasSuffix(r.URL.Path, "/downloads"):
-			access := map[string]any{"kind": "presigned_url", "url": host.URL + "/object", "method": "GET", "expires_at_ms": 2000000000000}
+			access := map[string]any{"kind": "presigned_url", "url": "http://objects.test/object", "method": "GET", "expires_at_ms": 2000000000000}
 			if fixture.Range != nil {
 				access["headers"] = map[string]string{"range": *fixture.Range}
 			}
 			ranges := []any{map[string]any{"start_offset": 0, "length": fixture.SizeBytes, "access": access}}
-			if len(fixture.Ranges) > 0 {
-				ranges = nil
+			if fixture.Ranges != nil {
+				ranges = make([]any, 0, len(fixture.Ranges))
 				for index, part := range fixture.Ranges {
 					ranges = append(ranges, map[string]any{"start_offset": part.StartOffset, "length": part.Length,
-						"access": map[string]any{"kind": "presigned_url", "method": "GET", "url": host.URL + "/object/" + strconv.Itoa(index), "headers": map[string]string{"range": part.Range}, "expires_at_ms": 2000000000000}})
+						"access": map[string]any{"kind": "presigned_url", "method": "GET", "url": "http://objects.test/object/" + strconv.Itoa(index), "headers": map[string]string{"range": part.Range}, "expires_at_ms": 2000000000000}})
 				}
 			}
 			json.NewEncoder(w).Encode(map[string]any{"namespace_id": "demo", "path": "/file", "revision_no": 1, "content_ref": claim, "ranges": ranges})
@@ -125,40 +128,80 @@ func streamTestServer(t *testing.T, fixture streamCase, direct bool, content fun
 			t.Errorf("unexpected request %s", r.URL)
 			http.NotFound(w, r)
 		}
-	}))
-	return host
+	})
+	return &http.Client{Transport: transferTransport(func(request *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		response := recorder.Result()
+		if fixture.TransportError && (request.URL.Path == "/object" || strings.HasSuffix(request.URL.Path, "/content")) {
+			response.Body = io.NopCloser(io.MultiReader(response.Body, failingReader{}))
+		}
+		return response, nil
+	})}
 }
+
+type transferTransport func(*http.Request) (*http.Response, error)
+
+func (transport transferTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 
 func TestStreamingDownloadConformance(t *testing.T) {
 	for _, direct := range []bool{false, true} {
 		for _, fixture := range streamingCases(t) {
 			t.Run(fixture.Name+map[bool]string{false: "_proxy", true: "_direct"}[direct], func(t *testing.T) {
-				host := streamTestServer(t, fixture, direct, func(w http.ResponseWriter, r *http.Request) {
+				requests := make(chan string, 32)
+				httpClient := streamTestClient(t, fixture, direct, func(w http.ResponseWriter, r *http.Request) {
 					if fixture.TransportError {
 						w.Header().Set("Content-Length", "10")
 					}
 					io.WriteString(w, fixture.Content)
-				})
-				defer host.Close()
-				client := server.NewClient(option.WithBaseURL(host.URL), option.WithToken("private-token"), option.WithHTTPHeader(http.Header{"X-Private": {"secret"}}), option.WithHTTPClient(host.Client()))
+				}, requests)
+				client := server.NewClient(option.WithBaseURL("http://api.test"), option.WithToken("private-token"), option.WithHTTPHeader(http.Header{"X-Private": {"secret"}}), option.WithHTTPClient(httpClient))
 				opened, err := client.Files.DownloadStream(context.Background(), files.DownloadInput{NamespaceID: loonfs.NamespaceID("demo"), Path: loonfs.AbsolutePath("/file")})
-				if err != nil {
-					t.Fatal(err)
+				var data []byte
+				if err == nil {
+					defer opened.Content.Close()
+					data, err = io.ReadAll(opened.Content)
 				}
-				defer opened.Content.Close()
-				data, err := io.ReadAll(opened.Content)
-				if fixture.Error || (direct && fixture.RangeError) {
-					if err == nil {
-						t.Fatal("invalid body passed verification")
+				expectedError := fixture.ErrorMessage
+				if direct {
+					expectedError = fixture.DirectErrorMessage
+				}
+				if fixture.TransportError {
+					if !errors.Is(err, io.ErrUnexpectedEOF) {
+						t.Fatalf("transport error = %v", err)
 					}
-					return
+				} else if expectedError != "" {
+					if err == nil || err.Error() != expectedError {
+						t.Fatalf("error = %v, want %s", err, expectedError)
+					}
+				} else if err != nil || string(data) != fixture.Content {
+					t.Fatalf("content = %q, error = %v", data, err)
 				}
-				if err != nil {
-					t.Fatal(err)
+				paths := []string{}
+				for len(requests) > 0 {
+					path := <-requests
+					if direct {
+						if strings.HasPrefix(path, "/object") {
+							paths = append(paths, path)
+						}
+					} else {
+						paths = append(paths, path[strings.LastIndex(path, "/")+1:])
+					}
 				}
-				if string(data) != fixture.Content {
-					t.Fatalf("got %q", data)
+				expectedPaths := fixture.ObjectRequests
+				if !direct {
+					expectedPaths = []string{"capabilities", "entry", "content"}
 				}
+				if !reflect.DeepEqual(paths, expectedPaths) {
+					t.Fatalf("requests = %v, want %v", paths, expectedPaths)
+				}
+
 			})
 		}
 	}
@@ -167,17 +210,25 @@ func TestStreamingDownloadConformance(t *testing.T) {
 func TestStreamingDownloadsStartBeforeEOFAndCancelPendingReads(t *testing.T) {
 	fixture := streamingCases(t)[0]
 	for _, direct := range []bool{false, true} {
-		host := streamTestServer(t, fixture, direct, func(w http.ResponseWriter, r *http.Request) {
-			io.WriteString(w, "1")
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
+		httpClient := streamTestClient(t, fixture, direct, func(http.ResponseWriter, *http.Request) {}, nil)
+		metadata := httpClient.Transport
+		httpClient.Transport = transferTransport(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Path != "/object" && !strings.HasSuffix(request.URL.Path, "/content") {
+				return metadata.RoundTrip(request)
+			}
+			reader, writer := io.Pipe()
+			go func() {
+				writer.Write([]byte("1"))
+				<-request.Context().Done()
+				writer.CloseWithError(request.Context().Err())
+			}()
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: reader}, nil
 		})
-		client := server.NewClient(option.WithBaseURL(host.URL), option.WithToken("private-token"))
+		client := server.NewClient(option.WithBaseURL("http://api.test"), option.WithToken("private-token"), option.WithHTTPClient(httpClient))
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		opened, err := client.Files.DownloadStream(ctx, files.DownloadInput{NamespaceID: "demo", Path: "/file"})
 		if err != nil {
 			cancel()
-			host.Close()
 			t.Fatal(err)
 		}
 		first := make([]byte, 1)
@@ -189,6 +240,5 @@ func TestStreamingDownloadsStartBeforeEOFAndCancelPendingReads(t *testing.T) {
 			t.Fatalf("expected cancellation, got %v", err)
 		}
 		opened.Content.Close()
-		host.Close()
 	}
 }

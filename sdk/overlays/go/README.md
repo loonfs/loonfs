@@ -63,11 +63,18 @@ and body reads; without one, the operation has a 60-second deadline. Direct and
 proxied transfers use the configured HTTP client and the same context. Direct
 requests carry only the presigned headers, and do not follow redirects.
 
-Direct download grants contain ordered `ranges`. Each range carries its revision
-`start_offset`, `length`, and signed `access`. The helpers send each range's
-headers unchanged, check its length, and verify one checksum across the complete
-file. To resume through the grant API, request a new grant from the held byte
-count and include the held prefix when verifying the complete file.
+Direct grants contain ordered `ranges`. Each range has a revision `start_offset`,
+`length`, and signed `access`. Helpers validate the range list before any object
+request, read ranges in order, and check each length before opening the next.
+They send the signed headers unchanged. The object Range header can differ from
+the revision offset. An empty file needs no object request. Successful EOF checks
+the total length, then the checksum of the complete file.
+
+The download helpers read complete files. To resume through the generated grant
+API, pin `revision_no`, retain the bytes already read, and request a new grant
+with `start_offset` equal to that prefix's length. Verify prefix plus suffix
+against the content reference. Checking only the suffix cannot verify the file.
+A complete local file needs no new grant.
 
 `client.Files.Download` collects that stream into memory. `client.Files.Upload`
 accepts an in-memory byte slice through the same transfer path.
@@ -76,18 +83,50 @@ accepts an in-memory byte slice through the same transfer path.
 for an unknown size. Small sources are prepared inline when advertised, up to the
 smaller of the server limit and 64 KiB. Lookahead consumes at most that limit plus
 one byte and preserves the prefix when continuing through an upload. Larger
-unknown-size sources use multipart, retaining one provider-sized part plus the
+unknown-size sources use multipart when available, retaining one provider-sized part plus the
 lookahead prefix.
 
 Preparation returns `files.PreparedFile`, either `*files.InlinePreparedContent`
-(immutable bytes with no upload or expiry) or the existing `*files.PreparedContent`
+(immutable bytes with no upload or expiry) or `*files.PreparedContent`
 (uploaded reference and token). Pass either to `UploadPrepared`. Use a type switch
-before inspecting staged fields; existing staged struct literals remain supported.
+before inspecting staged fields.
 `client.Files.UploadStream(ctx, files.StreamUploadInput{...})` prepares and
 publishes in one operation. The context covers metadata, bytes and publication;
-source and payload failures abort without replaying bytes. The caller owns and
+source and payload failures abort without replaying bytes. A failed completion
+response leaves the session available for inspection. The caller owns and
 closes the reader, including interrupting any blocking source read. See [reference.md](./reference.md) for the
 generated API reference.
+
+## Transfer helpers
+
+The `client.Files` helpers are:
+
+| Helper | Behavior |
+| --- | --- |
+| `Prepare` | Prepare bytes for publication. |
+| `PrepareStream` | Prepare a source once. |
+| `Upload` | Prepare and publish bytes. |
+| `UploadStream` | Prepare and publish a stream. |
+| `UploadPrepared` | Publish retained prepared content. |
+| `Download` | Read and verify a file in memory. |
+| `DownloadStream` | Read a file with bounded memory and verify at EOF. |
+| `Append` | Append 1 byte to 256 KiB in one commit. |
+
+Each deployment uses one content checksum algorithm: `crc64nvme` or `crc32c`.
+Every open upload session names the required `checksum_algorithm`, including
+`service_proxied`. Callers do not choose the algorithm. Store capabilities offer
+a fixed set of upload modes. S3 offers PUT and multipart; GCS offers PUT; local
+storage uses proxied uploads. Helpers select from the advertised capabilities
+and limits. Unknown sizes use multipart when available, otherwise proxied upload.
+
+Append uses `append_file` in one commit, without an upload or content token.
+Empty content and content over 256 KiB fail before any request. Supply a stable
+commit ID and identical inputs for retries. Inode and revision preconditions are
+optional; a path revision precondition requires the inode precondition. The
+generated commit API also accepts `append_file_by_inode`.
+
+`Append` takes `files.AppendInput`, including `Content`, `CommitID`,
+`ExpectedInodeID`, and `ExpectedRevisionNo`.
 
 ## Proxy
 

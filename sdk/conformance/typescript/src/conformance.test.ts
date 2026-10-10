@@ -2491,7 +2491,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(directBegin.mode, "direct_put");
     assert.ok(directBegin.status === "open");
-    assert.ok(directBegin.access && directBegin.checksum_algorithm);
+    assert.ok(directBegin.access);
     await uploadPresigned(directBegin.access, payload, "proxy direct PUT");
     const directClaim: LoonFS.UploadContentClaim = {
         size_bytes: payload.byteLength,
@@ -2809,7 +2809,7 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
     assert.equal(begin.status, expected.begin_status);
     assert.ok(begin.status === "open");
     const directPut = begin;
-    assert.ok(directPut.access && directPut.checksum_algorithm);
+    assert.ok(directPut.access);
     assert.equal(directPut.checksum_algorithm, expected.checksum_algorithm);
 
     await uploadPresigned(directPut.access, payload, "direct PUT");
@@ -2874,7 +2874,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     assert.equal(begin.status, expected.begin_status);
     assert.ok(begin.status === "open");
     const multipart = begin;
-    assert.ok(multipart.part_size_bytes !== undefined && multipart.checksum_algorithm);
+    assert.ok(multipart.part_size_bytes !== undefined);
     assert.equal(multipart.part_size_bytes, request.part_size_bytes);
     assert.equal(multipart.checksum_algorithm, expected.checksum_algorithm);
 
@@ -2882,7 +2882,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     assert.equal(chunks.length, expected.part_count);
     const claims: LoonFS.UploadPartChecksumClaim[] = chunks.map((chunk, index) => ({
         part_number: index + 1,
-        checksum: checksum(multipart.checksum_algorithm!, chunk),
+        checksum: checksum(multipart.checksum_algorithm, chunk),
     }));
     const signed = await activeHarness.client.uploads.signParts({
         namespace_id: request.namespace_id,
@@ -2912,7 +2912,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         });
     }
     completedParts.sort((left, right) => left.part_number - right.part_number);
-    const wholeChecksum = checksum(multipart.checksum_algorithm!, payload);
+    const wholeChecksum = checksum(multipart.checksum_algorithm, payload);
     const completion: LoonFS.CompleteUploadBody = {
         mode: "direct_multipart",
         content: {
@@ -2984,9 +2984,8 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         path: helperPath,
     });
     assert.deepEqual(helperRead.content, payload);
-    // Content ids are random per upload and the helper may choose a different
-    // checksum algorithm; the comparable content fact is the size.
     assert.equal(helperRead.content_ref.size_bytes, first.content_ref.size_bytes);
+    assert.deepEqual(helperRead.content_ref.checksum, first.content_ref.checksum);
 });
 
 conformanceTest("upload_abort", async (activeHarness, testCase) => {

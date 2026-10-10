@@ -14,6 +14,7 @@ type Fixture = {
     size_bytes: number;
     size: number | null;
     mode: string;
+    store_shape: "local" | "s3" | "gcs";
     fault?: string;
     error: boolean;
     inline_limit?: number;
@@ -47,9 +48,9 @@ for (const browser of [false, true])
             const counts = { payload: 0, abort: 0, complete: 0 };
             const bodies: Uint8Array[] = [];
             const claim = {
-                kind: "blob",
+                kind: "blob_v1",
                 owner_namespace_id: "demo",
-                content_id: "cnt_00000000000000000000000000000001",
+                content_id: "con_00000000000000000000000000000001",
                 size_bytes: fixture.size_bytes,
                 checksum: { algorithm: fixture.algorithm, value: fixture.checksum },
             };
@@ -89,14 +90,18 @@ for (const browser of [false, true])
                         api_groups: ["filesystem/v0"],
                         features: {
                             "filesystem.commits.inline_content": fixture.inline_limit !== undefined,
-                            "filesystem.uploads.direct_put": fixture.mode === "direct_put",
-                            "filesystem.uploads.direct_multipart": fixture.mode === "direct_multipart",
+                            "filesystem.uploads.direct_put": fixture.store_shape !== "local",
+                            "filesystem.uploads.direct_multipart": fixture.store_shape === "s3",
                         },
                         limits: {
-                            ...(fixture.mode === "direct_put" ? { "upload.service_proxied.max_content_bytes": 0 } : {}),
+                            ...(fixture.mode === "direct_put"
+                                ? { "upload.service_proxied.max_content_bytes": 0 }
+                                : {}),
                             ...(fixture.inline_limit === undefined
                                 ? {}
-                                : { "commit.max_inline_content_bytes_per_operation": fixture.inline_limit }),
+                                : {
+                                      "commit.max_inline_content_bytes_per_operation": fixture.inline_limit,
+                                  }),
                         },
                     };
                 else if (path.endsWith("/uploads")) {
@@ -106,14 +111,17 @@ for (const browser of [false, true])
                         status: "open",
                         expires_at_ms: 2000000000000,
                         checksum_algorithm: fixture.algorithm,
-                        part_size_bytes: 4,
-                        access,
+                        ...(fixture.mode === "direct_multipart" ? { part_size_bytes: 4 } : {}),
+                        ...(fixture.mode === "direct_put" ? { access } : {}),
                     };
                 } else if (path.endsWith("/parts")) {
                     const { parts } = await request.json();
                     assert.equal(parts.length, 1);
                     assert.ok(position <= bodies.length * 4 + 4, "send a part before reading the next");
-                    value = { ...session, parts: [{ part_number: parts[0].part_number, access }] };
+                    value = {
+                        ...session,
+                        parts: [{ part_number: parts[0].part_number, access }],
+                    };
                 } else if (path === "/object" || path.endsWith("/content")) {
                     counts.payload++;
                     if (fixture.size !== null)
@@ -132,7 +140,13 @@ for (const browser of [false, true])
                         });
                     if (fixture.fault === "payload_error") return new Response(null, { status: 503 });
                     return Response.json(
-                        { ...session, status: "open", expires_at_ms: 2000000000000, content_ref: claim },
+                        {
+                            ...session,
+                            status: "open",
+                            expires_at_ms: 2000000000000,
+                            checksum_algorithm: fixture.algorithm,
+                            content_ref: claim,
+                        },
                         { headers: { ETag: "test-etag" } },
                     );
                 } else if (path.endsWith("/abort")) {
@@ -170,11 +184,19 @@ for (const browser of [false, true])
             };
             const result = browser
                 ? new BrowserClient(options).files.prepareStream(
-                      { namespace_alias: "demo", content: source, size_bytes: fixture.size ?? undefined },
+                      {
+                          namespace_alias: "demo",
+                          content: source,
+                          size_bytes: fixture.size ?? undefined,
+                      },
                       requestOptions,
                   )
                 : new LoonFSClient(options).files.prepareStream(
-                      { namespace_id: "demo", content: source, size_bytes: fixture.size ?? undefined },
+                      {
+                          namespace_id: "demo",
+                          content: source,
+                          size_bytes: fixture.size ?? undefined,
+                      },
                       requestOptions,
                   );
             if (fixture.error) {

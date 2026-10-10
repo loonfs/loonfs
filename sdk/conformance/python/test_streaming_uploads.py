@@ -1,10 +1,11 @@
+import asyncio
 import io
 import json
 from pathlib import Path
 
 import httpx
 import pytest
-from loonfs.server import LoonFS
+from loonfs.server import AsyncLoonFS, LoonFS
 from loonfs.core.api_error import ApiError
 
 CASES = json.loads(
@@ -28,16 +29,17 @@ class Source(io.BytesIO):
         return result
 
 
+@pytest.mark.parametrize("source_type", ["sync", "async_reader", "async_iterator"])
 @pytest.mark.parametrize("fixture", CASES, ids=lambda c: c["name"])
-def test_streaming_uploads(fixture):
+def test_streaming_uploads(fixture, source_type):
     source = Source(fixture)
     mode, fault = fixture["mode"], fixture.get("fault")
     counts = {"payload": 0, "abort": 0, "complete": 0}
     bodies = []
     claim = {
-        "kind": "blob",
+        "kind": "blob_v1",
         "owner_namespace_id": "demo",
-        "content_id": "cnt_00000000000000000000000000000001",
+        "content_id": "con_00000000000000000000000000000001",
         "size_bytes": fixture["size_bytes"],
         "checksum": {"algorithm": fixture["algorithm"], "value": fixture["checksum"]},
     }
@@ -67,8 +69,9 @@ def test_streaming_uploads(fixture):
                 "protocol_version": "v0",
                 "api_groups": ["filesystem/v0"],
                 "features": {
-                    "filesystem.uploads.direct_put": mode == "direct_put",
-                    "filesystem.uploads.direct_multipart": mode == "direct_multipart",
+                    "filesystem.uploads.direct_put": fixture["store_shape"] != "local",
+                    "filesystem.uploads.direct_multipart": fixture["store_shape"]
+                    == "s3",
                 },
                 "limits": {"upload.service_proxied.max_content_bytes": 0}
                 if mode == "direct_put"
@@ -76,7 +79,9 @@ def test_streaming_uploads(fixture):
             }
             if "inline_limit" in fixture:
                 value["features"]["filesystem.commits.inline_content"] = True
-                value["limits"]["commit.max_inline_content_bytes_per_operation"] = fixture["inline_limit"]
+                value["limits"]["commit.max_inline_content_bytes_per_operation"] = (
+                    fixture["inline_limit"]
+                )
         elif path.endswith("/uploads"):
             assert json.loads(request.content)["mode"] == mode
             value = {
@@ -84,8 +89,8 @@ def test_streaming_uploads(fixture):
                 "status": "open",
                 "expires_at_ms": 2000000000000,
                 "checksum_algorithm": fixture["algorithm"],
-                "part_size_bytes": 4,
-                "access": access,
+                **({"part_size_bytes": 4} if mode == "direct_multipart" else {}),
+                **({"access": access} if mode == "direct_put" else {}),
             }
         elif path.endswith("/parts"):
             parts = json.loads(request.content)["parts"]
@@ -141,34 +146,54 @@ def test_streaming_uploads(fixture):
             raise AssertionError(str(request.url))
         return httpx.Response(200, json=value)
 
-    with httpx.Client(
-        transport=httpx.MockTransport(handle),
-        headers={"X-Private": "secret"},
-        cookies={"private": "secret"},
-    ) as http:
-        client = LoonFS(
-            base_url="http://api.test", token="private-token", httpx_client=http
-        )
+    http_options = {
+        "transport": httpx.MockTransport(handle),
+        "headers": {"X-Private": "secret"},
+        "cookies": {"private": "secret"},
+    }
+    options = {"timeout": 7, "max_retries": 3}
 
-        def prepare():
+    async def chunks():
+        while chunk := source.read(2):
+            yield chunk
+
+    async def prepare_async():
+        async with httpx.AsyncClient(**http_options) as http:
+            client = AsyncLoonFS(
+                base_url="http://api.test", token="private-token", httpx_client=http
+            )
+            return await client.files.prepare_stream(
+                "demo",
+                content=chunks() if source_type == "async_iterator" else source,
+                size_bytes=fixture["size"],
+                request_options=options,
+            )
+
+    def prepare():
+        if source_type != "sync":
+            return asyncio.run(prepare_async())
+        with httpx.Client(**http_options) as http:
+            client = LoonFS(
+                base_url="http://api.test", token="private-token", httpx_client=http
+            )
             return client.files.prepare_stream(
                 "demo",
                 content=source,
                 size_bytes=fixture["size"],
-                request_options={"timeout": 7, "max_retries": 3},
+                request_options=options,
             )
 
-        if fixture["error"]:
-            with pytest.raises((OSError, ValueError, httpx.HTTPError, ApiError)):
-                prepare()
-            assert counts["abort"] == (0 if fault == "completion_error" else 1)
-            assert counts["complete"] == (1 if fault == "completion_error" else 0)
-            if fault == "payload_error":
-                assert counts["payload"] == 1
-        else:
-            prepared = prepare()
-            assert prepared.content_ref.size_bytes == len(fixture["content"])
-            assert prepared.content_token.token == "retained-token"
-            assert b"".join(bodies) == fixture["content"].encode()
-            assert counts["complete"] == 1 and counts["abort"] == 0
-        assert not source.closed, "callers own their source"
+    if fixture["error"]:
+        with pytest.raises((OSError, ValueError, httpx.HTTPError, ApiError)):
+            prepare()
+        assert counts["abort"] == (0 if fault == "completion_error" else 1)
+        assert counts["complete"] == (1 if fault == "completion_error" else 0)
+        if fault == "payload_error":
+            assert counts["payload"] == 1
+    else:
+        prepared = prepare()
+        assert prepared.content_ref.size_bytes == len(fixture["content"])
+        assert prepared.content_token.token == "retained-token"
+        assert b"".join(bodies) == fixture["content"].encode()
+        assert counts["complete"] == 1 and counts["abort"] == 0
+    assert not source.closed, "callers own their source"

@@ -1,5 +1,4 @@
-/** Shared by server and browser transfers; no Node-only APIs or whole-file hashing. */
-type ChecksumAlgorithm = "crc32c" | "crc64nvme";
+import type { ChecksumAlgorithm, ContentRef, DownloadRange } from "./api/index.js";
 const TRANSFER_CHUNK_BYTES = 64 * 1024;
 const MAX_INLINE_BYTES = 64 * 1024;
 const MAX_APPEND_BYTES = 256 * 1024;
@@ -9,7 +8,6 @@ interface TransferRequestOptions {
     abortSignal?: AbortSignal;
 }
 
-/** One deadline and cancellation signal, retained until the body is finished. */
 export class TransferScope {
     readonly controller = new AbortController();
     readonly signal = this.controller.signal;
@@ -23,7 +21,10 @@ export class TransferScope {
             throw new Error("transfer timeout must be positive and finite");
         this.parent = options.abortSignal;
         if (this.parent?.aborted) this.onParentAbort();
-        else this.parent?.addEventListener("abort", this.onParentAbort, { once: true });
+        else
+            this.parent?.addEventListener("abort", this.onParentAbort, {
+                once: true,
+            });
         this.timer = setTimeout(
             () => this.controller.abort(new DOMException("transfer timed out", "TimeoutError")),
             seconds * 1000,
@@ -52,13 +53,11 @@ const CRC64 = crcTable(0x9a6c9329ac4bc9b5n);
 export class IncrementalChecksum {
     private crc32 = 0xffffffff;
     private crc64 = 0xffffffffffffffffn;
-    private result?: string;
     constructor(readonly algorithm: ChecksumAlgorithm) {
         if (algorithm !== "crc32c" && algorithm !== "crc64nvme")
             throw new Error(`unsupported checksum algorithm ${algorithm}`);
     }
     update(bytes: Uint8Array): void {
-        if (this.result !== undefined) throw new Error("checksum already finalized");
         if (this.algorithm === "crc32c") {
             for (const byte of bytes) this.crc32 = CRC32[(this.crc32 ^ byte) & 255]! ^ (this.crc32 >>> 8);
         } else {
@@ -67,33 +66,33 @@ export class IncrementalChecksum {
         }
     }
     finish(): { algorithm: ChecksumAlgorithm; value: string } {
-        this.result ??=
+        const value =
             this.algorithm === "crc32c"
                 ? ((this.crc32 ^ 0xffffffff) >>> 0).toString(16).padStart(8, "0")
                 : (this.crc64 ^ 0xffffffffffffffffn).toString(16).padStart(16, "0");
-        return { algorithm: this.algorithm, value: this.result };
+        return { algorithm: this.algorithm, value };
     }
 }
 
-interface DownloadRange {
-    start_offset: number;
-    length: number;
-    access: { method: string; url: string; headers?: Record<string, string> };
-}
-
-export async function downloadRanges(
+export function downloadRanges(
     ranges: DownloadRange[],
     sizeBytes: number,
     send: typeof fetch,
     scope: TransferScope,
-): Promise<ReadableStream<Uint8Array>> {
+): ReadableStream<Uint8Array> {
     let offset = 0;
     if (ranges.length === 0 || (sizeBytes === 0 && ranges.length !== 1))
         throw new Error("download grant has invalid ranges");
     for (const range of ranges) {
+        if (
+            range.start_offset !== offset ||
+            !Number.isSafeInteger(range.length) ||
+            range.length < 0 ||
+            (range.length === 0 && sizeBytes !== 0) ||
+            range.length > sizeBytes - offset
+        )
+            throw new Error("download grant has invalid ranges");
         if (range.access.method !== "GET") throw new Error("download grant must use GET");
-        if (range.start_offset !== offset || !Number.isSafeInteger(range.length) || range.length < 0 ||
-            (range.length === 0 && sizeBytes !== 0)) throw new Error("download grant has invalid ranges");
         offset += range.length;
     }
     if (!Number.isSafeInteger(offset) || offset !== sizeBytes)
@@ -113,68 +112,74 @@ export async function downloadRanges(
                 headers: range.access.headers,
                 signal: scope.signal,
             });
-            if (cancelled) { await response.body?.cancel(); return false; }
-            if (!response.ok || !response.body) {
+            if (cancelled) {
                 await response.body?.cancel();
-                throw new Error(`download failed with HTTP ${response.status}`);
+                return false;
             }
+            if (!response.ok) {
+                await response.body?.cancel();
+                throw new Error(`presigned request failed with HTTP ${response.status}`);
+            }
+            if (!response.body) throw new Error("download response has no body");
             reader = response.body.getReader();
             remaining = range.length;
             return true;
         }
         return false;
     };
-    await openNext();
-    return new ReadableStream<Uint8Array>({
-        async pull(controller) {
-            try {
-                while (!cancelled) {
-                    scope.check();
-                    if (!reader && !await openNext()) {
-                        if (!cancelled) controller.close();
+    return new ReadableStream<Uint8Array>(
+        {
+            async pull(controller) {
+                try {
+                    while (!cancelled) {
+                        scope.check();
+                        if (!reader && !(await openNext())) {
+                            if (!cancelled) controller.close();
+                            return;
+                        }
+                        const next = await reader!.read();
+                        if (cancelled) return;
+                        if (next.done) {
+                            reader!.releaseLock();
+                            reader = undefined;
+                            if (remaining !== 0)
+                                throw new Error("download range ended before its declared length");
+                            continue;
+                        }
+                        remaining -= next.value.length;
+                        if (remaining < 0) throw new Error("download range exceeded its declared length");
+                        controller.enqueue(next.value);
                         return;
                     }
-                    const next = await reader!.read();
-                    if (cancelled) return;
-                    if (next.done) {
-                        reader!.releaseLock();
-                        reader = undefined;
-                        if (remaining !== 0) throw new Error("download range ended before its declared length");
-                        continue;
-                    }
-                    remaining -= next.value.length;
-                    if (remaining < 0) throw new Error("download range exceeded its declared length");
-                    controller.enqueue(next.value);
-                    return;
+                } catch (error) {
+                    await reader?.cancel(error).catch(() => {});
+                    reader?.releaseLock();
+                    reader = undefined;
+                    if (!cancelled) controller.error(error);
                 }
-            } catch (error) {
-                await reader?.cancel(error).catch(() => {});
+            },
+            async cancel(reason) {
+                cancelled = true;
+                scope.controller.abort(reason);
+                await reader?.cancel(reason).catch(() => {});
                 reader?.releaseLock();
                 reader = undefined;
-                if (!cancelled) controller.error(error);
-            }
+            },
         },
-        async cancel(reason) {
-            cancelled = true;
-            scope.controller.abort(reason);
-            await reader?.cancel(reason).catch(() => {});
-            reader?.releaseLock();
-            reader = undefined;
-        },
-    }, { highWaterMark: 0 });
+        { highWaterMark: 0 },
+    );
 }
 
-/** Verification belongs to EOF, on the same stream as the bytes it checks. */
 export function verifiedDownload(
     body: ReadableStream<Uint8Array> | null,
-    claim: { size_bytes: number; checksum: { algorithm: ChecksumAlgorithm; value: string } },
+    claim: ContentRef,
     scope: TransferScope,
 ): ReadableStream<Uint8Array> {
     if (!body) throw new Error("download response has no body");
-    const digest = new IncrementalChecksum(claim.checksum.algorithm);
     const expectedSize = claim.size_bytes,
         expectedChecksum = claim.checksum.value;
     if (!Number.isSafeInteger(expectedSize) || expectedSize < 0) throw new Error("invalid download size");
+    const digest = new IncrementalChecksum(claim.checksum.algorithm);
     const reader = body.getReader();
     let count = 0,
         offset = 0,
@@ -266,7 +271,7 @@ function streamIterator(stream: ReadableStream<Uint8Array>): AsyncIterator<Uint8
                 closed = true;
                 reader.releaseLock();
             }
-            return next;
+            return next.done ? { done: true, value: undefined } : next;
         },
         async return() {
             if (!closed) {
@@ -296,7 +301,6 @@ async function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
     }
 }
 
-/** Bounded inline lookahead plus the current source chunk. */
 export class UploadSource {
     readonly expected?: number;
     private readonly iterator: AsyncIterator<Uint8Array>;
@@ -316,7 +320,7 @@ export class UploadSource {
     ) {
         this.expected = size ?? ("size" in content ? content.size : undefined);
         if (this.expected !== undefined && (!Number.isSafeInteger(this.expected) || this.expected < 0))
-            throw new Error("upload size must be a nonnegative safe integer");
+            throw new Error("invalid upload size");
         this.iterator =
             "size" in content && "stream" in content
                 ? streamIterator(content.stream())
@@ -325,7 +329,6 @@ export class UploadSource {
                   : content[Symbol.asyncIterator]();
     }
 
-    /** Inspect only the inline limit plus one byte, retaining overflow for staging. */
     async tryInline(limit: number): Promise<string | undefined> {
         const bytes = new Uint8Array(limit + 1);
         let length = 0;
@@ -372,7 +375,10 @@ export class UploadSource {
         } else {
             await this.fill();
             if (this.ended) return undefined;
-            chunk = this.pending!.subarray(this.offset, this.offset + Math.min(maximum, TRANSFER_CHUNK_BYTES));
+            chunk = this.pending!.subarray(
+                this.offset,
+                this.offset + Math.min(maximum, TRANSFER_CHUNK_BYTES),
+            );
             this.offset += chunk.length;
         }
         this.count += chunk.length;
@@ -422,7 +428,6 @@ function base64(bytes: Uint8Array): string {
     return btoa(binary);
 }
 
-/** Base64 of the 1 byte to 256 KiB one append carries; anything else is refused before sending. */
 export function appendContent(bytes: Uint8Array): string {
     if (bytes.length === 0) throw new Error("append content is empty");
     if (bytes.length > MAX_APPEND_BYTES)
@@ -438,7 +443,6 @@ export function bytesSource(bytes: Uint8Array): UploadContent {
     };
 }
 
-/** Preserve streaming request bodies through the generated passthrough transport. */
 export function streamingFetch(send: typeof fetch): typeof fetch {
     return (input, init) =>
         send(
@@ -447,7 +451,6 @@ export function streamingFetch(send: typeof fetch): typeof fetch {
         );
 }
 
-/** Small known sources use a portable fixed body; large/unknown ones stream. */
 export async function uploadBody(source: UploadSource): Promise<BodyInit> {
     if (source.expected === undefined || source.expected > 8 * 1024 * 1024) return source.stream();
     const bytes = new Uint8Array(source.expected);
@@ -460,7 +463,6 @@ export async function uploadBody(source: UploadSource): Promise<BodyInit> {
     }
 }
 
-/** The convenience helpers retain at most 64 KiB inline, within the server limit. */
 export function inlineContentLimit(capabilities: {
     features?: Record<string, boolean>;
     limits?: Record<string, number>;
