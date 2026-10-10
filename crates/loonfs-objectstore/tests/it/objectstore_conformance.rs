@@ -810,7 +810,8 @@ async fn assert_assembly<S: ObjectStore>(
                 ..
             })
         ));
-        assert!(store.head(&wrong_key).await.expect("absent").is_none());
+        // A provider that verifies after completion leaves the rejected object
+        // for collection; nothing names it, and no writer deletes it.
         let ranged = content_blob(&namespace_id, &ContentId::generate());
         sources[0].range = Some(ByteRange {
             start_inclusive: 1,

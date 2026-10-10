@@ -11,7 +11,6 @@ use crate::{
 };
 use bytes::Bytes;
 use loonfs_types::{Checksum, ChecksumAlgorithm};
-use object_store::client::HttpRequestBody;
 
 impl S3RequestSigner {
     pub(super) async fn assemble_parts(
@@ -148,12 +147,9 @@ impl S3RequestSigner {
                 object_key: key.to_owned(),
             },
         };
-        let signed = self
-            .request_signer
-            .presign_delete(key, MULTIPART_CONTROL_TTL, Self::signing_time())
-            .await?;
-        self.send_checked(key, signed, HttpRequestBody::empty())
-            .await?;
+        // The object stays for collection. A writer never deletes an immutable
+        // key: another writer with the correct expectation may already have
+        // accepted this object, and nothing names an unaccepted one.
         Err(error)
     }
 

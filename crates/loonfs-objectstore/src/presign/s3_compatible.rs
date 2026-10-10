@@ -164,23 +164,6 @@ impl S3CompatiblePresigner {
         )
     }
 
-    pub(crate) async fn presign_delete(
-        &self,
-        object_key: &str,
-        expires_in: Duration,
-        now: SystemTime,
-    ) -> Result<PresignedUrl> {
-        let credentials = self.signing_credentials(expires_in, now).await?;
-        self.presign(
-            &credentials,
-            "DELETE",
-            object_key,
-            BTreeMap::new(),
-            expires_in,
-            now,
-        )
-    }
-
     /// Signs `CreateMultipartUpload` for an object whose checksum will cover
     /// the whole assembly.
     pub(crate) async fn presign_create_multipart(

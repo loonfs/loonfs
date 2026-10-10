@@ -1235,13 +1235,18 @@ mod tests {
                     ));
                     let mut operations = vec!["head", "head", "create", "copy", "get", "upload"];
                     if kind == ConfiguredObjectStoreKind::CloudflareR2 {
-                        operations.extend(["complete", "head", "delete"]);
+                        // R2 verifies after completion and leaves the rejected
+                        // object for collection; no writer deletes it.
+                        operations.extend(["complete", "head"]);
                     } else {
                         provider.aborted.notified().await;
                         operations.push("abort");
                     }
                     assert_eq!(provider.operations(), operations);
-                    assert!(provider.objects.lock().expect("objects").is_empty());
+                    assert_eq!(
+                        provider.objects.lock().expect("objects").is_empty(),
+                        kind != ConfiguredObjectStoreKind::CloudflareR2
+                    );
                 }
             }
         }
