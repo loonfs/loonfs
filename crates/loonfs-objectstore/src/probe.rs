@@ -16,7 +16,7 @@ use crate::{
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_types::api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse};
-use loonfs_types::{Checksum, ChecksumAlgorithm};
+use loonfs_types::Checksum;
 
 /// Prefix for objects created by store probes.
 pub const PROBE_RUN_PREFIX: &str = "probe-runs";
@@ -696,38 +696,23 @@ async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckR
     Ok(())
 }
 
-/// Direct-put completion decides whether to publish an object from one
-/// checksum-bearing metadata request, so a store that reports a checksum
-/// must report an honest one.
-///
-/// Which algorithm comes back is the provider's business, and the providers
-/// disagree: AWS S3 reports the SHA-256 this adapter attaches to uploads,
-/// while Cloudflare R2 reports a CRC-64/NVME of its own. So this pins what
-/// must be true everywhere — the size, the algorithm's own encoding rules,
-/// and a SHA-256 that actually matches when SHA-256 is what is reported.
 async fn stored_checksum_readback(store: &dyn ObjectStore, run: &ProbeRun) -> CheckResult {
     let key = run.key("stored-checksum");
     let payload = Bytes::from_static(b"stored checksum readback payload");
 
-    // A store that cannot ask the question at all says so plainly. Those
-    // are exactly the providers that cannot offer `direct_put`, so no
-    // completion path depends on them.
     let absent = ok_optional(
         "stored-checksum read of a missing object",
-        store.head_stored_checksum(&key).await,
+        store.head(&key).await,
     )?;
     if absent.is_some() {
         return Err(wrong("an object that does not exist reports a checksum"));
     }
 
     ok("write", store.put_if_absent(&key, payload.clone()).await)?;
-    let stored = match store.head_stored_checksum(&key).await {
-        Ok(stored) => present("a present object's checksum", stored)?,
-        // A provider that stores no checksum for this object must say so
-        // rather than invent an answer.
-        Err(ObjectStoreError::StoredChecksumMissing { .. }) => return Ok(()),
-        Err(error) => return Err(failed("stored-checksum read", &error)),
-    };
+    let stored = present(
+        "a present object's checksum",
+        ok("head", store.head(&key).await)?,
+    )?;
 
     if stored.size_bytes != payload.len() as u64 {
         return Err(wrong(format!(
@@ -736,13 +721,15 @@ async fn stored_checksum_readback(store: &dyn ObjectStore, run: &ProbeRun) -> Ch
             stored.size_bytes
         )));
     }
-    let checksum = stored.checksum;
+    let checksum = stored
+        .checksum
+        .ok_or_else(|| wrong("the provider reports no stored checksum"))?;
     checksum
         .validate()
         .map_err(|_| wrong("the provider returned an invalid stored checksum"))?;
-    if checksum.algorithm == ChecksumAlgorithm::Sha256 && checksum != Checksum::sha256(&payload) {
+    if checksum != Checksum::compute(store.checksum_algorithm(), &payload) {
         return Err(wrong(
-            "a reported sha256 does not describe the bytes actually stored",
+            "the stored checksum does not describe the bytes actually stored",
         ));
     }
     Ok(())
@@ -805,6 +792,10 @@ mod tests {
 
     #[async_trait]
     impl ObjectStore for PoisonPermissionStore {
+        fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+            loonfs_types::ChecksumAlgorithm::Crc64nvme
+        }
+
         async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
             Err(Self::denied(key))
         }
@@ -968,6 +959,10 @@ mod tests {
 
     #[async_trait]
     impl ObjectStore for StaleCompareAndSwapAcceptingStore {
+        fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+            self.inner.checksum_algorithm()
+        }
+
         async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
             self.inner.head(key).await
         }
@@ -1054,65 +1049,6 @@ mod tests {
             .is_empty());
     }
 
-    /// A store that cannot report stored checksums — Azure Blob Storage and
-    /// the local filesystem's provider-less path are this case, and it is an
-    /// answer rather than a fault.
-    #[derive(Debug)]
-    struct NoStoredChecksumStore {
-        inner: LocalFsStore,
-    }
-
-    #[async_trait]
-    impl ObjectStore for NoStoredChecksumStore {
-        async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
-            self.inner.head(key).await
-        }
-
-        async fn head_stored_checksum(
-            &self,
-            _key: &str,
-        ) -> StoreResult<Option<crate::StoredObjectChecksum>> {
-            Err(ObjectStoreError::Unsupported(
-                "stored full-object checksum readback",
-            ))
-        }
-
-        async fn get_with_metadata(&self, key: &str) -> StoreResult<Option<ObjectBody>> {
-            self.inner.get_with_metadata(key).await
-        }
-
-        async fn get(&self, key: &str, range: Option<ByteRange>) -> StoreResult<Option<Bytes>> {
-            self.inner.get(key, range).await
-        }
-
-        async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> StoreResult<ObjectMetadata> {
-            self.inner.put(key, bytes, mode).await
-        }
-
-        async fn delete(&self, key: &str) -> StoreResult<()> {
-            self.inner.delete(key).await
-        }
-
-        fn list_entries_from_stream(
-            &self,
-            prefix: &str,
-            start_after: Option<&str>,
-        ) -> BoxStream<'static, StoreResult<ListedObject>> {
-            self.inner.list_entries_from_stream(prefix, start_after)
-        }
-
-        async fn list_child_prefixes(
-            &self,
-            prefix: &str,
-            start_after: Option<&str>,
-            limit: EffectiveLimit,
-        ) -> StoreResult<Page<String, String>> {
-            self.inner
-                .list_child_prefixes(prefix, start_after, limit)
-                .await
-        }
-    }
-
     /// A checksum-capable provider may encounter an object written without
     /// a stored checksum. That per-object answer is distinct from the store
     /// lacking the readback capability altogether.
@@ -1123,20 +1059,15 @@ mod tests {
 
     #[async_trait]
     impl ObjectStore for MissingStoredChecksumStore {
-        async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
-            self.inner.head(key).await
+        fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+            self.inner.checksum_algorithm()
         }
 
-        async fn head_stored_checksum(
-            &self,
-            key: &str,
-        ) -> StoreResult<Option<crate::StoredObjectChecksum>> {
-            match self.inner.head(key).await? {
-                Some(_) => Err(ObjectStoreError::StoredChecksumMissing {
-                    object_key: key.to_owned(),
-                }),
-                None => Ok(None),
-            }
+        async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
+            Ok(self.inner.head(key).await?.map(|mut metadata| {
+                metadata.checksum = None;
+                metadata
+            }))
         }
 
         async fn get_with_metadata(&self, key: &str) -> StoreResult<Option<ObjectBody>> {
@@ -1185,6 +1116,10 @@ mod tests {
 
     #[async_trait]
     impl ObjectStore for EpochLastModifiedStore {
+        fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+            self.inner.checksum_algorithm()
+        }
+
         async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
             Ok(self.inner.head(key).await?.map(|mut metadata| {
                 metadata.last_modified_ms = Some(0);
@@ -1245,23 +1180,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_optional_capability_is_an_answer_not_a_failure() {
-        let temp_dir = TempDir::new().expect("tempdir");
-        let store = NoStoredChecksumStore {
-            inner: LocalFsStore::new(temp_dir.path()).expect("create local object store"),
-        };
-
-        let report = run_store_contract_probe(&store, "probe_test_unsupported").await;
-
-        assert_eq!(
-            outcome(&report, "stored_checksum_readback"),
-            &StoreProbeOutcome::Unsupported
-        );
-        assert!(report.all_passed());
-    }
-
-    #[tokio::test]
-    async fn a_present_object_without_a_stored_checksum_is_matched_structurally() {
+    async fn a_present_object_without_a_stored_checksum_fails_the_probe() {
         let temp_dir = TempDir::new().expect("tempdir");
         let store = MissingStoredChecksumStore {
             inner: LocalFsStore::new(temp_dir.path()).expect("create local object store"),
@@ -1269,10 +1188,10 @@ mod tests {
 
         let report = run_store_contract_probe(&store, "probe_test_missing_checksum").await;
 
-        assert_eq!(
+        assert!(matches!(
             outcome(&report, "stored_checksum_readback"),
-            &StoreProbeOutcome::Passed
-        );
-        assert!(report.all_passed());
+            StoreProbeOutcome::Failed { .. }
+        ));
+        assert!(!report.all_passed());
     }
 }

@@ -30,6 +30,24 @@ pub(crate) fn missing_source(key: &str) -> ObjectStoreError {
     }
 }
 
+pub(crate) fn check_algorithms(
+    algorithm: ChecksumAlgorithm,
+    key: &str,
+    sources: &[AssemblySource],
+    expected: &Checksum,
+) -> Result<()> {
+    if expected.algorithm != algorithm
+        || sources
+            .iter()
+            .any(|source| source.checksum.algorithm != algorithm)
+    {
+        return Err(ObjectStoreError::ChecksumMismatch {
+            object_key: key.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn check_expected(key: &str, expected: &Checksum, actual: &Checksum) -> Result<()> {
     if expected == actual {
         Ok(())
@@ -130,6 +148,7 @@ pub(crate) async fn read_sources<S: ObjectStore + ?Sized>(
     expected: &Checksum,
     key: &str,
 ) -> Result<Bytes> {
+    check_algorithms(store.checksum_algorithm(), key, sources, expected)?;
     let mut bytes = Vec::new();
     let mut body = stream_sources(store, sources, tail);
     while let Some(chunk) = body.next().await {
@@ -263,6 +282,66 @@ mod tests {
         assert_eq!(
             local.get("streamed", None).await.expect("streamed"),
             local.get("buffered", None).await.expect("buffered")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_verified_puts_and_assemblies_share_object_identity() {
+        use crate::local_fs_store::LocalFsStore;
+        let directory = tempfile::tempdir().expect("directory");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let bytes = Bytes::from_static(b"source tail");
+        let expected = Checksum::crc64nvme(&bytes);
+        store
+            .put_immutable_verified("destination", bytes.clone())
+            .await
+            .expect("verified put");
+        store
+            .put_immutable_verified("source", Bytes::from_static(b"source"))
+            .await
+            .expect("source");
+        let sources = [AssemblySource {
+            key: "source".to_owned(),
+            range: None,
+            checksum: Checksum::crc64nvme(b"source"),
+        }];
+        let assembled = store
+            .assemble(
+                "destination",
+                &sources,
+                vec![Bytes::from_static(b" tail")],
+                &expected,
+            )
+            .await
+            .expect("same object");
+        assert_eq!(assembled.checksum, Some(expected.clone()));
+        assert_eq!(
+            assembled.etag,
+            Some(format!("local-fs-v1:crc64nvme:{}", expected.value))
+        );
+        assert!(matches!(
+            store
+                .assemble(
+                    "destination",
+                    &sources,
+                    vec![Bytes::from_static(b" other")],
+                    &Checksum::crc64nvme(b"source other")
+                )
+                .await,
+            Err(ImmutableWriteError::DifferentObject { .. })
+        ));
+        let streamed = store
+            .put_immutable_verified_stream(
+                "destination",
+                bytes.len() as u64,
+                stream::iter(vec![Ok(bytes.slice(..3)), Ok(bytes.slice(3..))]).boxed(),
+            )
+            .await
+            .expect("streamed retry");
+        assert_eq!(streamed.checksum, Some(expected));
+        assert_eq!(
+            store.get("destination", None).await.expect("get"),
+            Some(bytes)
         );
     }
 

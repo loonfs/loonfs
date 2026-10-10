@@ -10,7 +10,7 @@ use futures::Stream;
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     AssemblySource, ByteRange, ByteStream, ImmutableWriteError, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::collections::HashMap;
@@ -217,20 +217,14 @@ impl<S> ObjectStore for FaultInjectingObjectStore<S>
 where
     S: ObjectStore,
 {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.inner.checksum_algorithm()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let op = self.next_object_op(ObjectOperationKind::Head, key);
         let result = self.inner.head(key).await;
         self.push_trace(op, "head", None, result_class(&result));
-        result
-    }
-
-    async fn head_stored_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
-        let op = self.next_object_op(ObjectOperationKind::Head, key);
-        let result = self.inner.head_stored_checksum(key).await;
-        self.push_trace(op, "head_stored_checksum", None, result_class(&result));
         result
     }
 
@@ -395,13 +389,12 @@ where
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Option<&Checksum>,
         body: BoxStream<'_, Result<Bytes, ObjectStoreError>>,
     ) -> Result<ObjectMetadata, ImmutableWriteError> {
         let op = self.next_object_op(ObjectOperationKind::PutIfAbsent, key);
         let result = self
             .inner
-            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .put_immutable_verified_stream(key, size_bytes, body)
             .await;
         let class = match &result {
             Ok(_) => {

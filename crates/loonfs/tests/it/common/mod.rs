@@ -7,12 +7,12 @@
 use loonfs::publish::{CommitCandidate, CommitRequest};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
-    ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, Commit,
-    ContentRef, DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes,
-    FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs,
-    LoonFsBuilder, Maintenance, MetadataMaintenanceOptions, MetadataMaintenanceResponse, Namespace,
-    NamespaceDiagnostics, NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly,
-    SharedObjectStore, UploadId, UploadSession, Writable,
+    ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, Commit, ContentRef, DeleteOptions,
+    DirectoryPageCursor, Error, ErrorCode, FileBytes, FileRevisionsPager, FoldWalResponse,
+    InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance,
+    MetadataMaintenanceOptions, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics,
+    NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly, SharedObjectStore,
+    UploadId, UploadSession, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::first_page;
@@ -378,12 +378,9 @@ impl TestRuntime {
     pub(crate) async fn create_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
-        checksum_algorithm: ChecksumAlgorithm,
     ) -> loonfs::Result<loonfs::uploads::DirectPutUploadTarget> {
         let namespace = self.namespace_writer(namespace_id)?;
-        namespace
-            .create_direct_put_upload_target(checksum_algorithm)
-            .await
+        namespace.create_direct_put_upload_target().await
     }
 
     pub(crate) async fn complete_direct_put(

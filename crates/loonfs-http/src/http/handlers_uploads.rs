@@ -198,14 +198,9 @@ async fn begin_direct_put_upload(
         .with_param("/size_bytes"));
     }
 
-    let checksum_algorithm = issuer.stored_checksum_algorithm();
-    let mut prepared = namespace
-        .create_direct_put_upload_target(checksum_algorithm)
-        .await
-        .map_err(ApiResponseError::for_namespace_writer(
-            &state.namespaces,
-            &namespace_id,
-        ))?;
+    let mut prepared = namespace.create_direct_put_upload_target().await.map_err(
+        ApiResponseError::for_namespace_writer(&state.namespaces, &namespace_id),
+    )?;
     fill_direct_put_access(issuer.as_ref(), &prepared.object_key, &mut prepared.session).await?;
     Ok(Json(prepared.session))
 }

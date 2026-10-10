@@ -38,7 +38,7 @@ use loonfs_types::options::{DirectMultipartUploadOptions, ListOptions, StatOptio
 use loonfs_types::CompactorEpoch;
 use loonfs_types::EffectiveLimit;
 use loonfs_types::{
-    AdvanceRetentionResponse, ChangeSeq, Checkpoint, ChecksumAlgorithm, CommitId, ContentRef,
+    AdvanceRetentionResponse, ChangeSeq, Checkpoint, CommitId, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
     FileBytes, FileRevision, FileRevisionsPageCursor, FoldWalResponse, InodeId, NamespaceAccess,
     NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo, Subject,
@@ -1005,13 +1005,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn begin_direct_put_upload_target(
         &self,
         subject: Option<&Subject>,
-        checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<DirectPutUploadTarget> {
         crate::protocol::begin_direct_put_upload_target(
             &self.store,
             &self.namespace_id,
             subject,
-            checksum_algorithm,
             &self.mutation_context()?,
         )
         .await

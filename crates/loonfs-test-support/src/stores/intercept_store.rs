@@ -7,7 +7,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     AssemblySource, ByteRange, ByteStream, ImmutableWriteError, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt::Debug;
@@ -115,6 +115,10 @@ impl<S, I: Interceptor> InterceptStore<S, I> {
 
 #[async_trait]
 impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for InterceptStore<S, I> {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.inner.checksum_algorithm()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let context = OperationContext::new(key, OperationKind::Head);
         let intercept = match self.interceptor.before(&context).await {
@@ -122,20 +126,6 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
             intercept => intercept,
         };
         let result = self.inner.head(key).await;
-        let outcome = result_outcome(&result);
-        Self::finish(&self.interceptor, &context, intercept, result, outcome)
-    }
-
-    async fn head_stored_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
-        let context = OperationContext::new(key, OperationKind::Head);
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(error),
-            intercept => intercept,
-        };
-        let result = self.inner.head_stored_checksum(key).await;
         let outcome = result_outcome(&result);
         Self::finish(&self.interceptor, &context, intercept, result, outcome)
     }
@@ -250,21 +240,20 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Option<&Checksum>,
         body: BoxStream<'_, Result<Bytes, ObjectStoreError>>,
     ) -> Result<ObjectMetadata, ImmutableWriteError> {
         let failed = |source| ImmutableWriteError::Transport {
             object_key: key.to_owned(),
             source,
         };
-        let context = OperationContext::new(key, OperationKind::PutImmutableStream { sha256 });
+        let context = OperationContext::new(key, OperationKind::PutImmutableStream);
         let intercept = match self.interceptor.before(&context).await {
             Intercept::FailBefore(error) => return Err(failed(error)),
             intercept => intercept,
         };
         let result = self
             .inner
-            .put_immutable_verified_stream(key, size_bytes, sha256, body)
+            .put_immutable_verified_stream(key, size_bytes, body)
             .await;
         if intercept.calls_after() {
             let outcome = match &result {

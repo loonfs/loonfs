@@ -209,11 +209,6 @@ fn profile_location(profile: &ProfileConfig) -> String {
         | StoreConfig::GcpGcs {
             bucket, key_prefix, ..
         } => (format!("bucket {bucket}"), key_prefix),
-        StoreConfig::AzureAbs {
-            container_name,
-            key_prefix,
-            ..
-        } => (format!("container {container_name}"), key_prefix),
     };
     let prefix = key_prefix
         .as_deref()

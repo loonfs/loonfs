@@ -344,8 +344,7 @@ async fn embedded_health_check(
                 StoreConfig::LocalFs { key_prefix, .. }
                 | StoreConfig::AwsS3 { key_prefix, .. }
                 | StoreConfig::CloudflareR2 { key_prefix, .. }
-                | StoreConfig::GcpGcs { key_prefix, .. }
-                | StoreConfig::AzureAbs { key_prefix, .. } => key_prefix,
+                | StoreConfig::GcpGcs { key_prefix, .. } => key_prefix,
             };
             let message = match key_prefix
                 .as_deref()

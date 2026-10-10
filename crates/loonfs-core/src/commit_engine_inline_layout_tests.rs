@@ -230,7 +230,7 @@ async fn a_merged_span_must_match_its_objects_attestation() {
         store.clone(),
         KeyPredicate::exact(key.clone()),
         |mut metadata| {
-            metadata.attestation = Some(Checksum::sha256(b"bad"));
+            metadata.checksum = Some(Checksum::sha256(b"bad"));
             metadata
         },
     );

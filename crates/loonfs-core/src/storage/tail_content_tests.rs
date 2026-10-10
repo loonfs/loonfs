@@ -1,4 +1,4 @@
-//! Contracts for provider assembly and extent attestations.
+//! Contracts for provider assembly and extent checksums.
 
 use super::*;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -130,7 +130,7 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     );
     let key = extent_object_key(extent);
     let metadata = store.head(&key).await.expect("head").expect("span");
-    assert_eq!(metadata.attestation, Some(reference.checksum.clone()));
+    assert_eq!(metadata.checksum, Some(reference.checksum.clone()));
     local.reset();
     let retried = write_tail_content(
         &store,
@@ -182,50 +182,64 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
 }
 
 #[tokio::test]
-async fn reading_an_extent_checks_its_crc_attestation() {
-    let directory = tempfile::tempdir().expect("directory");
-    let local = LocalFsStore::new(directory.path()).expect("store");
-    let expected = Checksum::crc32c(b"whole object");
-    let store = MetadataMapStore::new(local, KeyPredicate::any(), move |mut metadata| {
-        metadata.attestation = Some(expected.clone());
-        metadata
-    });
-    let extent = ContentExtent {
-        owner_namespace_id: NamespaceId::parse("demo").expect("owner"),
-        content_id: ContentId::generate(),
-        object: ExtentObject::Whole,
-        offset: 0,
-        length: 12,
-    };
-    let located = LocatedExtent {
-        object_key: extent_object_key(&extent),
-        extent,
-    };
-    store
-        .put(
-            &located.object_key,
-            Bytes::from_static(b"whole object"),
-            PutMode::Overwrite,
-        )
-        .await
-        .expect("put");
-    let mut bytes = Vec::new();
-    read_extent(&store, &located, &mut bytes)
-        .await
-        .expect("verified CRC");
-    assert_eq!(bytes, b"whole object");
-    store
-        .put(
-            &located.object_key,
-            Bytes::from_static(b"wrong object"),
-            PutMode::Overwrite,
-        )
-        .await
-        .expect("corrupt");
-    assert!(matches!(
-        read_extent(&store, &located, &mut Vec::new()).await,
-        Err(CoreError::NamespaceCorrupt(_))
-    ));
+async fn whole_extent_reads_require_the_store_checksum_and_ranges_stay_unverified() {
+    for algorithm in [ChecksumAlgorithm::Crc64nvme, ChecksumAlgorithm::Crc32c] {
+        let directory = tempfile::tempdir().expect("directory");
+        let local = LocalFsStore::new(directory.path()).expect("store");
+        let extent = ContentExtent {
+            owner_namespace_id: NamespaceId::parse("demo").expect("owner"),
+            content_id: ContentId::generate(),
+            object: ExtentObject::Whole,
+            offset: 0,
+            length: 12,
+        };
+        let mut located = LocatedExtent {
+            object_key: extent_object_key(&extent),
+            extent,
+        };
+        local
+            .put(
+                &located.object_key,
+                Bytes::from_static(b"whole object"),
+                PutMode::Overwrite,
+            )
+            .await
+            .expect("put");
+        for expected in [
+            Some(Checksum::compute(algorithm, b"whole object")),
+            Some(Checksum::compute(algorithm, b"wrong object")),
+            Some(Checksum::sha256(b"whole object")),
+            None,
+        ] {
+            let correct = expected == Some(Checksum::compute(algorithm, b"whole object"));
+            let missing = expected.is_none();
+            let store = MetadataMapStore::new(&local, KeyPredicate::any(), move |mut metadata| {
+                metadata.checksum = expected.clone();
+                metadata
+            })
+            .algorithm(algorithm);
+            let mut bytes = Vec::new();
+            let result = read_extent(&store, &located, &mut bytes).await;
+            if correct {
+                result.expect("correct checksum");
+                assert_eq!(bytes, b"whole object");
+            } else {
+                assert!(matches!(result, Err(CoreError::NamespaceCorrupt(_))));
+            }
+            located.extent.offset = 1;
+            located.extent.length = 3;
+            let mut bytes = Vec::new();
+            let result = read_extent(&store, &located, &mut bytes).await;
+            if missing {
+                assert!(matches!(result, Err(CoreError::NamespaceCorrupt(_))));
+            } else {
+                result.expect("range");
+                assert_eq!(bytes, b"hol");
+            }
+            located.extent.offset = 0;
+            located.extent.length = 12;
+        }
+    }
 }
 
 #[tokio::test]
@@ -274,12 +288,12 @@ async fn local_large_tail_streams_pieces_without_merge_permits() {
         [RecordedOperation::PutImmutableStream { .. }]
     ));
     let stored = store
-        .head_stored_checksum(&extent_object_key(&written.layout.extents[0]))
+        .head(&extent_object_key(&written.layout.extents[0]))
         .await
         .expect("checksum")
         .expect("object");
     assert_eq!(stored.size_bytes, reference.size_bytes);
-    assert_eq!(stored.checksum, reference.checksum);
+    assert_eq!(stored.checksum, Some(reference.checksum));
 }
 
 #[tokio::test]

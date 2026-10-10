@@ -7,8 +7,8 @@ use crate::uploads::{
 };
 use crate::ByteStream;
 use crate::Result;
-use crate::{ChecksumAlgorithm, UploadMode, UploadSession};
 use crate::{Namespace, Writable};
+use crate::{UploadMode, UploadSession};
 use loonfs_types::api::v0::UploadPartChecksumClaim;
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::UploadId;
@@ -49,14 +49,11 @@ impl Namespace<Writable> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn create_direct_put_upload_target(
-        &self,
-        checksum_algorithm: ChecksumAlgorithm,
-    ) -> Result<DirectPutUploadTarget> {
+    pub async fn create_direct_put_upload_target(&self) -> Result<DirectPutUploadTarget> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine()
-            .begin_direct_put_upload_target(self.core.subject.as_ref(), checksum_algorithm)
+            .begin_direct_put_upload_target(self.core.subject.as_ref())
             .await?)
     }
 

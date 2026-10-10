@@ -11,25 +11,23 @@ use crate::presign::{
     GcsV4Presigner, CHECKSUM_HEAD_TTL,
 };
 use crate::provider_object_store::{
-    attested_sha256, map_provider_error, AbortUploadOnDrop, CompareToken, MultipartController,
-    PartReader, StoredChecksumReader, SHA256_METADATA_KEY,
+    map_provider_error, AbortUploadOnDrop, CompareToken, MultipartController, PartReader,
+    StoredChecksumReader,
 };
-use crate::signed_request::{
-    classify_signed_response, send, send_signed, stored_checksum_from_signed_head, SignedResponse,
-};
+use crate::signed_request::{classify_signed_response, send, send_signed, SignedResponse};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
     AssemblySource, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
-    ProviderObjectStoreConfig, StoredObjectChecksum,
+    ProviderObjectStoreConfig,
 };
 use async_trait::async_trait;
+use base64::Engine as _;
 use bytes::Bytes;
 use futures::FutureExt;
 use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
-use loonfs_types::Checksum;
+use loonfs_types::{Checksum, ChecksumAlgorithm, StreamingChecksum};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -102,6 +100,13 @@ pub(crate) fn gcp_gcs_with_issuers(
         .with_credentials(Arc::clone(&credentials))
         .build()
         .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
+    let signer = Arc::new(GcsRequestSigner {
+        request_signer: Arc::clone(&request_signer),
+        http,
+        credentials,
+        bucket: config.bucket,
+        key_prefix,
+    });
     let store = ProviderObjectStore::new(
         Arc::clone(&provider) as Arc<dyn object_store::ObjectStore>,
         Arc::new(one_attempt),
@@ -112,14 +117,8 @@ pub(crate) fn gcp_gcs_with_issuers(
         },
         ConfiguredObjectStoreKind::GcpGcs,
         io_runtime,
+        signer.clone(),
     )?;
-    let signer = Arc::new(GcsRequestSigner {
-        request_signer: Arc::clone(&request_signer),
-        http,
-        credentials,
-        bucket: config.bucket,
-        key_prefix,
-    });
     let direct_transfers = DirectTransferIssuers {
         get: request_signer.clone(),
         put: Some(request_signer),
@@ -128,7 +127,6 @@ pub(crate) fn gcp_gcs_with_issuers(
 
     let store = store
         .compare_token(CompareToken::Generation)
-        .checksum_reader(signer.clone())
         .multipart_controller(signer);
     Ok((store, direct_transfers))
 }
@@ -167,16 +165,13 @@ impl GcsRequestSigner {
 #[async_trait]
 impl StoredChecksumReader for GcsRequestSigner {
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        let signed = self.request_signer.presign_head_stored_checksum(
-            key,
-            CHECKSUM_HEAD_TTL,
-            Self::signing_time(),
-        )?;
+        let signed =
+            self.request_signer
+                .presign_head(key, CHECKSUM_HEAD_TTL, Self::signing_time())?;
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         let mut metadata = crate::signed_request::metadata_from_signed_head(
             key,
             &response,
-            "x-goog-meta-sha256",
             "x-goog-generation",
             stored_crc32c_from_headers,
         )?;
@@ -184,16 +179,6 @@ impl StoredChecksumReader for GcsRequestSigner {
             metadata.etag.clone_from(&metadata.version);
         }
         Ok(metadata)
-    }
-
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        let signed = self.request_signer.presign_head_stored_checksum(
-            key,
-            CHECKSUM_HEAD_TTL,
-            Self::signing_time(),
-        )?;
-        let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-        stored_checksum_from_signed_head(key, &response, stored_crc32c_from_headers)
     }
 }
 
@@ -208,18 +193,37 @@ impl MultipartController for GcsRequestSigner {
         key: &str,
         head: Bytes,
         mut rest: PartReader<'_>,
-        sha256: Option<&Checksum>,
         _part_window: usize,
     ) -> Result<ObjectMetadata> {
+        if rest.exhausted() {
+            let checksum = Checksum::crc32c(&head);
+            let url = format!(
+                "{GCS_JSON_UPLOADS}/{}/o?uploadType=media&ifGenerationMatch=0&name={}",
+                percent_encode_segment(&self.bucket),
+                self.object_name(key)?
+            );
+            let request = http::Request::post(url)
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .header("x-goog-hash", crc32c_header(&checksum));
+            let response = self.send_authorized(key, request, head.into()).await?;
+            return gcs_object(key, &response.body);
+        }
         let url = format!(
             "{GCS_JSON_UPLOADS}/{}/o?uploadType=resumable&ifGenerationMatch=0&name={}",
             percent_encode_segment(&self.bucket),
             self.object_name(key)?,
         );
         let request = http::Request::post(url).header(CONTENT_TYPE, "application/json");
-        let started = self
-            .send_authorized(key, request, attested(sha256).to_string().into())
-            .await?;
+        let started = match self
+            .send_authorized(key, request, Bytes::from_static(b"{}").into())
+            .await
+        {
+            Err(error @ ObjectStoreError::PreconditionFailed { .. }) => {
+                while rest.next_part().await?.is_some() {}
+                return Err(error);
+            }
+            result => result?,
+        };
         let session = started
             .headers
             .get(LOCATION)
@@ -237,9 +241,11 @@ impl MultipartController for GcsRequestSigner {
         };
         let mut abort_on_drop = AbortUploadOnDrop::new(key, cancel.boxed());
 
+        let mut checksum = StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc32c);
         let mut offset = 0;
         let mut chunk = head;
         loop {
+            checksum.update(&chunk);
             let end = offset + chunk.len() as u64;
             let last = chunk.is_empty() || rest.exhausted();
             let content_range = match (chunk.is_empty(), last) {
@@ -247,12 +253,20 @@ impl MultipartController for GcsRequestSigner {
                 (false, true) => format!("bytes {offset}-{}/{end}", end - 1),
                 (false, false) => format!("bytes {offset}-{}/*", end - 1),
             };
-            let request = http::Request::put(&session).header(CONTENT_RANGE, content_range);
+            let mut request = http::Request::put(&session).header(CONTENT_RANGE, content_range);
+            if last {
+                let full = std::mem::replace(
+                    &mut checksum,
+                    StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc32c),
+                )
+                .finish();
+                request = request.header("x-goog-hash", crc32c_header(&full));
+            }
             let response = send(&self.http, key, request, chunk.into()).await?;
             if response.status.as_u16() != 308 {
                 let finished = succeeded(key, response)?;
                 abort_on_drop.disarm();
-                return gcs_object(key, &finished.body).map(|(metadata, _)| metadata);
+                return gcs_object(key, &finished.body);
             }
             if last || persisted_bytes(&response.headers) != Some(end) {
                 return Err(ObjectStoreError::transport(
@@ -287,13 +301,12 @@ fn precondition_failed_when_missing(error: ObjectStoreError) -> ObjectStoreError
     }
 }
 
-/// The JSON object-resource body that records `sha256` as the attestation.
-fn attested(sha256: Option<&Checksum>) -> serde_json::Value {
-    let metadata: BTreeMap<&str, &str> = sha256
-        .map(|sha256| (SHA256_METADATA_KEY, sha256.value.as_str()))
-        .into_iter()
-        .collect();
-    serde_json::json!({ "metadata": metadata })
+fn crc32c_header(checksum: &Checksum) -> String {
+    let value = u32::from_str_radix(&checksum.value, 16).expect("computed CRC-32C should be valid");
+    format!(
+        "crc32c={}",
+        base64::engine::general_purpose::STANDARD.encode(value.to_be_bytes())
+    )
 }
 
 fn succeeded(key: &str, response: SignedResponse) -> Result<SignedResponse> {
@@ -319,12 +332,11 @@ struct GcsObject {
     generation: String,
     size: String,
     crc32c: Option<String>,
-    metadata: Option<BTreeMap<String, String>>,
 }
 
 /// Reads a JSON API object resource: its metadata, with the generation as
 /// the compare token, and its stored CRC-32C.
-fn gcs_object(key: &str, body: &[u8]) -> Result<(ObjectMetadata, Option<Checksum>)> {
+fn gcs_object(key: &str, body: &[u8]) -> Result<ObjectMetadata> {
     let unreadable = || ObjectStoreError::transport(key, "unreadable object resource");
     let object: GcsObject = serde_json::from_slice(body).map_err(|_| unreadable())?;
     let crc32c = object
@@ -336,14 +348,9 @@ fn gcs_object(key: &str, body: &[u8]) -> Result<(ObjectMetadata, Option<Checksum
         etag: Some(object.generation.clone()),
         version: Some(object.generation),
         last_modified_ms: None,
-        attestation: object
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get(SHA256_METADATA_KEY))
-            .and_then(|value| attested_sha256(value))
-            .or_else(|| crc32c.clone()),
+        checksum: crc32c,
     };
-    Ok((metadata, crc32c))
+    Ok(metadata)
 }
 
 /// Finds the stored CRC-32C among a metadata response's hash headers.
@@ -370,28 +377,123 @@ mod tests {
     use loonfs_types::Checksum;
 
     #[test]
-    fn a_json_object_resource_reads_as_its_generation_attestation_and_crc32c() {
-        let sha256 = Checksum::sha256(b"hello");
-        let mut body = serde_json::json!({
+    fn a_json_object_resource_reports_its_generation_and_stored_crc32c() {
+        let body = serde_json::json!({
             "kind": "storage#object",
             "generation": "1700000000000001",
             "size": "5",
             "crc32c": "mnG7TA==",
-            "metadata": { "sha256": sha256.value },
         });
-
-        let (metadata, crc32c) =
-            gcs_object("key", body.to_string().as_bytes()).expect("object resource");
-
+        let metadata = gcs_object("key", body.to_string().as_bytes()).expect("object resource");
         assert_eq!(metadata.etag.as_deref(), Some("1700000000000001"));
         assert_eq!(metadata.version, metadata.etag);
         assert_eq!(metadata.size_bytes, 5);
-        assert_eq!(metadata.attestation, Some(sha256));
-        assert_eq!(crc32c, Some(Checksum::crc32c(b"hello")));
-        body.as_object_mut().expect("object").remove("metadata");
-        let (metadata, _) =
-            gcs_object("key", body.to_string().as_bytes()).expect("composed object");
-        assert_eq!(metadata.attestation, Some(Checksum::crc32c(b"hello")));
+        assert_eq!(metadata.checksum, Some(Checksum::crc32c(b"hello")));
+    }
+
+    type UploadRequest = (String, http::HeaderMap, Bytes);
+
+    #[derive(Debug, Clone, Default)]
+    struct UploadRequests(std::sync::Arc<std::sync::Mutex<Vec<UploadRequest>>>);
+
+    #[async_trait::async_trait]
+    impl object_store::client::HttpService for UploadRequests {
+        async fn call(
+            &self,
+            request: object_store::client::HttpRequest,
+        ) -> Result<object_store::client::HttpResponse, object_store::client::HttpError> {
+            use http_body_util::BodyExt as _;
+            let (parts, body) = request.into_parts();
+            let bytes = body.collect().await?.to_bytes();
+            self.0.lock().expect("requests").push((
+                parts.uri.to_string(),
+                parts.headers.clone(),
+                bytes,
+            ));
+            let response = http::Response::builder();
+            let response = if parts
+                .uri
+                .query()
+                .is_some_and(|query| query.contains("uploadType=resumable"))
+            {
+                response
+                    .header(http::header::LOCATION, "https://upload.invalid/session")
+                    .body(Bytes::new())
+            } else if parts
+                .headers
+                .get("content-range")
+                .is_some_and(|range| range.to_str().expect("range").ends_with("/*"))
+            {
+                let range = parts.headers["content-range"].to_str().expect("range");
+                let end = range
+                    .split('-')
+                    .nth(1)
+                    .expect("end")
+                    .split('/')
+                    .next()
+                    .expect("length");
+                response
+                    .status(308)
+                    .header(http::header::RANGE, format!("bytes=0-{end}"))
+                    .body(Bytes::new())
+            } else {
+                response.body(Bytes::from_static(
+                    br#"{"generation":"1","size":"5","crc32c":"mnG7TA=="}"#,
+                ))
+            };
+            Ok(response
+                .expect("response")
+                .map(object_store::client::HttpResponseBody::from))
+        }
+    }
+
+    #[tokio::test]
+    async fn media_and_resumable_uploads_send_the_full_object_crc32c() {
+        use super::*;
+        use futures::{stream, StreamExt};
+        let (_directory, path) = gcs_fixture_service_account_key_file("gcs-checksum");
+        for part_bytes in [3, 5, 8] {
+            let requests = UploadRequests::default();
+            let signer = GcsRequestSigner {
+                request_signer: Arc::new(
+                    GcsV4Presigner::new(GcsPresignerConfig {
+                        bucket: "bucket".to_owned(),
+                        service_account_key_path: path.display().to_string(),
+                        key_prefix: None,
+                    })
+                    .expect("signer"),
+                ),
+                http: HttpClient::new(requests.clone()),
+                credentials: Arc::new(object_store::StaticCredentialProvider::new(
+                    object_store::gcp::GcpCredential {
+                        bearer: "test".to_owned(),
+                    },
+                )),
+                bucket: "bucket".to_owned(),
+                key_prefix: None,
+            };
+            let mut parts = PartReader::new(
+                stream::iter(vec![
+                    Ok(Bytes::from_static(b"he")),
+                    Ok(Bytes::from_static(b"llo")),
+                ])
+                .boxed(),
+                part_bytes,
+            );
+            let head = parts.next_part().await.expect("head").expect("bytes");
+            let metadata = signer
+                .put_if_absent("key", head, parts, 1)
+                .await
+                .expect("upload");
+            assert_eq!(metadata.checksum, Some(Checksum::crc32c(b"hello")));
+            let requests = requests.0.lock().expect("requests");
+            assert!(requests[0].0.contains("ifGenerationMatch=0"));
+            let (_, headers, _) = requests.last().expect("completion");
+            assert_eq!(headers["x-goog-hash"], "crc32c=mnG7TA==");
+            if part_bytes <= 5 {
+                assert_eq!(requests[0].2, b"{}"[..]);
+            }
+        }
     }
 
     #[tokio::test]

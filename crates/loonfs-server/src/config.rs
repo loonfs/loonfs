@@ -1566,32 +1566,11 @@ access_key_id = "access"
 secret_access_key = "secret"
 "#,
         );
-        let azure_path = write_config(&format!(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[store]
-kind = "azure-abs"
-account_name = "devstoreaccount1"
-container_name = "container"
-endpoint_url = "not a url"
-key_prefix = "demo"
-
-[store.credentials]
-kind = "access-key"
-access_key = "{AZURITE_ACCOUNT_KEY}"
-"#
-        ));
-
         let aws_error = load_server_config(&aws_path).expect_err("invalid aws endpoint");
         let r2_error = load_server_config(&r2_path).expect_err("invalid r2 endpoint");
-        let azure_error = load_server_config(&azure_path).expect_err("invalid azure endpoint");
 
         assert_invalid_field(aws_error, "store.endpoint_url");
         assert_invalid_field(r2_error, "store.endpoint_url");
-        assert_invalid_field(azure_error, "store.endpoint_url");
     }
 
     #[test]
@@ -1619,7 +1598,7 @@ path = "/tmp/service-account.json"
     }
 
     #[test]
-    fn load_accepts_azure_abs_store() {
+    fn load_rejects_azure_abs_store() {
         let path = write_config(&format!(
             r#"
 bind = "127.0.0.1:9400"
@@ -1639,31 +1618,10 @@ access_key = "{AZURITE_ACCOUNT_KEY}"
 "#
         ));
 
-        load_server_config(&path).expect("load azure config");
-    }
-
-    #[test]
-    fn load_rejects_blank_azure_account_name() {
-        let path = write_config(&format!(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-
-[store]
-kind = "azure-abs"
-account_name = " "
-container_name = "container"
-
-[store.credentials]
-kind = "access-key"
-access_key = "{AZURITE_ACCOUNT_KEY}"
-"#
+        let error = load_server_config(&path).expect_err("unsupported Azure adapter");
+        assert!(error.to_string().contains(
+            "Azure Blob Storage is not supported yet: it stores no full-object checksum"
         ));
-
-        let error = load_server_config(&path).expect_err("blank azure account name");
-
-        assert_missing_field(error, "store.account_name");
     }
 
     #[test]
@@ -2899,8 +2857,8 @@ root = "/tmp/loonfs-server"
             examples += 1;
         }
         assert!(
-            examples >= 5,
-            "expected at least 5 server example configs, found {examples}"
+            examples >= 4,
+            "expected at least 4 server example configs, found {examples}"
         );
     }
 

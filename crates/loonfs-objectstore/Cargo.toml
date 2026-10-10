@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "The LoonFS object-store boundary: contract, key layout, and providers."
 repository.workspace = true
 homepage.workspace = true
-keywords = ["object-storage", "s3", "gcs", "azure-blob", "r2"]
+keywords = ["object-storage", "s3", "gcs", "r2"]
 categories = ["filesystem"]
 
 [dependencies]
@@ -34,6 +34,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+http-body-util.workspace = true
 loonfs-test-support.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

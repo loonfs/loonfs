@@ -526,13 +526,6 @@ mod tests {
                 }),
                 "gcp-gcs, bucket files, key prefix team",
             ),
-            (
-                serde_json::json!({
-                    "kind": "azure-abs", "account_name": "account", "container_name": "files",
-                    "key_prefix": "team", "credentials": { "kind": "access-key", "access_key": "secret-key" }
-                }),
-                "azure-abs, container files, key prefix team",
-            ),
         ] {
             let profile = serde_json::json!({ "mode": "embedded", "store": store });
             let output = CommandOutput {

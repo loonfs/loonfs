@@ -1314,6 +1314,10 @@ impl ReadRecorderStore {
 
 #[async_trait]
 impl ObjectStore for ReadRecorderStore {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.inner.checksum_algorithm()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key).await
     }

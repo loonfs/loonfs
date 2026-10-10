@@ -21,12 +21,10 @@ pub enum ImmutableWriteError {
         /// Durable key whose existing bytes violated immutability.
         object_key: String,
     },
-    /// Whether the key holds the supplied bytes is undecided: the object
-    /// there carries no attestation, or the write had none to
-    /// compare with it.
-    #[error("immutable object `{object_key}` already exists without an attestation")]
-    Unattested {
-        /// Durable key whose existing object carries no attestation.
+    /// The provider reports no stored checksum for the occupied key.
+    #[error("immutable object `{object_key}` already exists without a stored checksum")]
+    StoredChecksumMissing {
+        /// Durable key whose existing object has no stored checksum.
         object_key: String,
     },
     /// The storage boundary failed before byte identity could be established.
@@ -45,7 +43,7 @@ impl ImmutableWriteError {
     pub fn object_key(&self) -> &str {
         match self {
             Self::DifferentObject { object_key }
-            | Self::Unattested { object_key }
+            | Self::StoredChecksumMissing { object_key }
             | Self::Transport { object_key, .. } => object_key,
         }
     }
@@ -62,9 +60,6 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Runs `create`, a create-if-absent of `bytes` under `key` that attests
-/// their SHA-256, under one retry deadline, and decides an occupied key by
-/// one `head` of its attestation.
 pub(crate) async fn put_with<S, F, Fut>(
     store: &S,
     key: &str,
@@ -91,28 +86,29 @@ where
     match written {
         Ok(metadata) => Ok(metadata),
         Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => {
-            decide_occupied(store, key, &Checksum::sha256(bytes), conflict).await
+            decide_occupied(
+                store,
+                key,
+                &Checksum::compute(store.checksum_algorithm(), bytes),
+                conflict,
+            )
+            .await
         }
         Err(error) => Err(transport(key, error)),
     }
 }
 
-/// Decides a create that attested `expected` when given: a key found
-/// occupied holds this object only when its attestation equals `expected`.
 pub(crate) async fn decide_created<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
-    expected: Option<&Checksum>,
+    expected: &Checksum,
     created: crate::object_store::Result<ObjectMetadata>,
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
     match created {
         Ok(metadata) => Ok(metadata),
-        Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => match expected {
-            Some(expected) => decide_occupied(store, key, expected, conflict).await,
-            None => Err(ImmutableWriteError::Unattested {
-                object_key: key.to_owned(),
-            }),
-        },
+        Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => {
+            decide_occupied(store, key, expected, conflict).await
+        }
         Err(error) => Err(transport(key, error)),
     }
 }
@@ -135,12 +131,12 @@ pub(crate) fn decide_attestation(
     expected: &Checksum,
     existing: ObjectMetadata,
 ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
-    match &existing.attestation {
+    match &existing.checksum {
         Some(actual) if actual == expected => Ok(existing),
         Some(_) => Err(ImmutableWriteError::DifferentObject {
             object_key: key.to_owned(),
         }),
-        None => Err(ImmutableWriteError::Unattested {
+        None => Err(ImmutableWriteError::StoredChecksumMissing {
             object_key: key.to_owned(),
         }),
     }
@@ -162,12 +158,12 @@ mod tests {
     #[test]
     fn occupied_keys_require_an_equal_attestation_in_the_same_algorithm() {
         let expected = Checksum::crc64nvme(b"bytes");
-        let metadata = |attestation| ObjectMetadata {
+        let metadata = |checksum| ObjectMetadata {
             etag: None,
             version: None,
             size_bytes: 5,
             last_modified_ms: None,
-            attestation,
+            checksum,
         };
         assert!(decide_attestation("key", &expected, metadata(Some(expected.clone()))).is_ok());
         for actual in [
@@ -182,7 +178,7 @@ mod tests {
         }
         assert!(matches!(
             decide_attestation("key", &expected, metadata(None)),
-            Err(ImmutableWriteError::Unattested { .. })
+            Err(ImmutableWriteError::StoredChecksumMissing { .. })
         ));
     }
 

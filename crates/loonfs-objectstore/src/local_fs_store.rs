@@ -15,7 +15,7 @@ use crate::object_store::Result;
 use crate::ListedObject;
 use crate::{
     AssemblySource, ByteRange, ByteStream, ImmutableWriteError, ObjectBody, ObjectMetadata,
-    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
+    ObjectStore, ObjectStoreError, PutMode,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -124,17 +124,18 @@ impl LocalFsStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_error(key, err)),
         };
-        let Some(stored) = Self::file_checksum(key, path, ChecksumAlgorithm::Sha256).await? else {
+        let Some(stored) = Self::file_checksum(key, path, ChecksumAlgorithm::Crc64nvme).await?
+        else {
             return Ok(None);
         };
-        Self::metadata_from_fs_metadata(key, &metadata, stored.checksum, path).map(Some)
+        Self::metadata_from_fs_metadata(key, &metadata, stored, path).map(Some)
     }
 
     async fn file_checksum(
         key: &str,
         path: &Path,
         algorithm: ChecksumAlgorithm,
-    ) -> Result<Option<StoredObjectChecksum>> {
+    ) -> Result<Option<Checksum>> {
         let mut file = match File::open(path).await {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -147,7 +148,6 @@ impl LocalFsStore {
             .map_err(|err| io_error(key, err))?
             .len();
         let mut buffer = vec![0; size.clamp(1, crate::assembly::READ_BYTES) as usize];
-        let mut size_bytes = 0;
         loop {
             let length = file
                 .read(&mut buffer)
@@ -157,18 +157,14 @@ impl LocalFsStore {
                 break;
             }
             state.update(&buffer[..length]);
-            size_bytes += length as u64;
         }
-        Ok(Some(StoredObjectChecksum {
-            size_bytes,
-            checksum: state.finish(),
-        }))
+        Ok(Some(state.finish()))
     }
 
     fn metadata_from_fs_metadata(
         key: &str,
         metadata: &std::fs::Metadata,
-        sha256: Checksum,
+        checksum: Checksum,
         path: &Path,
     ) -> Result<ObjectMetadata> {
         if !metadata.is_file() {
@@ -179,11 +175,11 @@ impl LocalFsStore {
         }
 
         Ok(ObjectMetadata {
-            etag: Some(etag(&sha256)),
+            etag: Some(etag(&checksum)),
             version: None,
             size_bytes: metadata.len(),
             last_modified_ms: last_modified_ms(metadata),
-            attestation: Some(sha256),
+            checksum: Some(checksum),
         })
     }
 
@@ -384,7 +380,7 @@ impl LocalFsStore {
             .map_err(|err| io_error(key, err))?;
 
         let metadata =
-            Self::metadata_from_fs_metadata(key, &fs_metadata, Checksum::sha256(&bytes), &path)?;
+            Self::metadata_from_fs_metadata(key, &fs_metadata, Checksum::crc64nvme(&bytes), &path)?;
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
@@ -482,7 +478,7 @@ impl LocalFsStore {
             }
             Err(err) => return Err(io_error(key, err)),
         };
-        Self::metadata_from_fs_metadata(key, &metadata, Checksum::sha256(bytes), &path)
+        Self::metadata_from_fs_metadata(key, &metadata, Checksum::crc64nvme(bytes), &path)
     }
 
     async fn delete_object(&self, key: &str) -> Result<()> {
@@ -511,23 +507,12 @@ impl LocalFsStore {
 
 #[async_trait]
 impl ObjectStore for LocalFsStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        self.head_object(&self.scoped(key)?).await
+    fn checksum_algorithm(&self) -> ChecksumAlgorithm {
+        ChecksumAlgorithm::Crc64nvme
     }
 
-    /// The reference provider stores no checksum, so it computes one from
-    /// the bytes it holds. It reports CRC-64/NVME, the S3-family shape, because
-    /// the fold's assembly combines source checksums and SHA-256 cannot be
-    /// combined. This provides the same guarantee as a cloud provider's
-    /// stored checksum: the provider attests to the bytes it actually holds.
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        let scoped = self.scoped(key)?;
-        Self::file_checksum(
-            &scoped,
-            &self.resolve_key(&scoped)?,
-            ChecksumAlgorithm::Crc64nvme,
-        )
-        .await
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+        self.head_object(&self.scoped(key)?).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
@@ -549,19 +534,24 @@ impl ObjectStore for LocalFsStore {
             .await
     }
 
-    /// Streams the body through a staging file, as [`Self::put_streamed`]
-    /// does. This store attests every object by reading it, so `sha256`
-    /// only decides an occupied key.
     async fn put_immutable_verified_stream(
         &self,
         key: &str,
         size_bytes: u64,
-        sha256: Option<&Checksum>,
         body: BoxStream<'_, Result<Bytes>>,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
+    ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
         let _ = size_bytes;
+        let mut checksum = StreamingChecksum::for_algorithm(self.checksum_algorithm());
+        let mut complete = false;
         let created = async {
             let scoped = self.scoped(key)?;
+            let body = body
+                .inspect_ok(|chunk| checksum.update(chunk))
+                .chain(stream::once(async {
+                    complete = true;
+                    Ok(Bytes::new())
+                }))
+                .boxed();
             self.put_streamed_object(&scoped, body, PutMode::CreateIfAbsent, None)
                 .await?;
             self.head_object(&scoped)
@@ -569,7 +559,13 @@ impl ObjectStore for LocalFsStore {
                 .ok_or_else(|| ObjectStoreError::transport(key, "object disappeared after write"))
         }
         .await;
-        crate::immutable_write::decide_created(self, key, sha256, created).await
+        if !complete {
+            return created.map_err(|source| crate::ImmutableWriteError::Transport {
+                object_key: key.to_owned(),
+                source,
+            });
+        }
+        crate::immutable_write::decide_created(self, key, &checksum.finish(), created).await
     }
 
     async fn assemble(
@@ -579,12 +575,11 @@ impl ObjectStore for LocalFsStore {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
-        let mut sha256 = StreamingChecksum::for_algorithm(ChecksumAlgorithm::Sha256);
         let mut complete = false;
         let created = async {
+            crate::assembly::check_algorithms(self.checksum_algorithm(), key, sources, expected)?;
             let scoped = self.scoped(key)?;
             let body = crate::assembly::stream_sources(self, sources, tail)
-                .inspect_ok(|chunk| sha256.update(chunk))
                 .chain(stream::once(async {
                     complete = true;
                     Ok(Bytes::new())
@@ -603,7 +598,7 @@ impl ObjectStore for LocalFsStore {
                 source,
             });
         }
-        crate::immutable_write::decide_created(self, key, Some(&sha256.finish()), created).await
+        crate::immutable_write::decide_created(self, key, expected, created).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
@@ -996,8 +991,8 @@ fn temp_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{file_name}.tmp-{}-{stamp}", std::process::id()))
 }
 
-fn etag(sha256: &Checksum) -> String {
-    format!("local-fs-v1:sha256:{}", sha256.value)
+fn etag(checksum: &Checksum) -> String {
+    format!("local-fs-v1:crc64nvme:{}", checksum.value)
 }
 
 fn map_create_error(key: &str, err: std::io::Error) -> ObjectStoreError {
@@ -1124,7 +1119,7 @@ mod tests {
         let answer = LocalFsStore::file_checksum(
             "namespaces/ns-1/hint.json",
             &vanished,
-            loonfs_types::ChecksumAlgorithm::Sha256,
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         )
         .await
         .expect("a vanished object is an answer, not an error");
@@ -1140,7 +1135,7 @@ mod tests {
         let error = LocalFsStore::file_checksum(
             "namespaces/ns-1/hint.json",
             &directory,
-            loonfs_types::ChecksumAlgorithm::Sha256,
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
         )
         .await
         .expect_err("reading a directory is not a missing object");

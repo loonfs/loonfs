@@ -1,18 +1,15 @@
 //! Builds provider-specific profile configurations and applies validated updates.
 
 use crate::args::{
-    ProfileCreateActorArgs, ProfileCreateAzureArgs, ProfileCreateCommand, ProfileCreateGcsArgs,
-    ProfileCreateLocalArgs, ProfileCreateR2Args, ProfileCreateRemoteArgs, ProfileCreateS3Args,
-    ProfileUpdateActorArgs, ProfileUpdateAzureArgs, ProfileUpdateCommand, ProfileUpdateGcsArgs,
-    ProfileUpdateLocalArgs, ProfileUpdateR2Args, ProfileUpdateRemoteArgs, ProfileUpdateS3Args,
-    RuntimeBehavior,
+    ProfileCreateActorArgs, ProfileCreateCommand, ProfileCreateGcsArgs, ProfileCreateLocalArgs,
+    ProfileCreateR2Args, ProfileCreateRemoteArgs, ProfileCreateS3Args, ProfileUpdateActorArgs,
+    ProfileUpdateCommand, ProfileUpdateGcsArgs, ProfileUpdateLocalArgs, ProfileUpdateR2Args,
+    ProfileUpdateRemoteArgs, ProfileUpdateS3Args, RuntimeBehavior,
 };
 use crate::config::{absolute_env_path, validate_remote_client_config, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
-use loonfs_objectstore::{
-    AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials, GcpGcsCredentials,
-};
+use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
 use loonfs_types::{ActorId, PrincipalId, PrincipalScope, SecretString, SubjectId};
 use std::path::{Path, PathBuf};
 
@@ -52,7 +49,6 @@ pub(super) enum ProfileProvider {
     S3,
     R2,
     Gcs,
-    Azure,
     Local,
     Remote,
 }
@@ -74,7 +70,6 @@ pub(super) fn profile_update_spec(command: ProfileUpdateCommand) -> ProfileUpdat
         ProfileUpdateCommand::S3(args) => update_s3_spec(args),
         ProfileUpdateCommand::R2(args) => update_r2_spec(args),
         ProfileUpdateCommand::Gcs(args) => update_gcs_spec(args),
-        ProfileUpdateCommand::Azure(args) => update_azure_spec(args),
         ProfileUpdateCommand::Local(args) => update_local_spec(args),
         ProfileUpdateCommand::Remote(args) => update_remote_spec(args),
     }
@@ -120,20 +115,6 @@ fn update_gcs_spec(args: ProfileUpdateGcsArgs) -> ProfileUpdateSpec {
         provider: CreateProviderSpec::Gcs(ProfileCreateGcsSpec {
             bucket: args.bucket,
             service_account_key_path: args.service_account_key_path,
-            key_prefix: args.key_prefix,
-        }),
-        actor: update_actor_spec(args.actor),
-    }
-}
-
-fn update_azure_spec(args: ProfileUpdateAzureArgs) -> ProfileUpdateSpec {
-    ProfileUpdateSpec {
-        name: args.name,
-        provider: CreateProviderSpec::Azure(ProfileCreateAzureSpec {
-            account_name: args.account_name,
-            container_name: args.container_name,
-            access_key: args.access_key,
-            endpoint_url: args.endpoint_url,
             key_prefix: args.key_prefix,
         }),
         actor: update_actor_spec(args.actor),
@@ -203,13 +184,6 @@ pub(super) fn has_update_flags(spec: &ProfileUpdateSpec) -> bool {
                     || args.service_account_key_path.is_some()
                     || args.key_prefix.is_some()
             }
-            CreateProviderSpec::Azure(args) => {
-                args.account_name.is_some()
-                    || args.container_name.is_some()
-                    || args.access_key.is_some()
-                    || args.endpoint_url.is_some()
-                    || args.key_prefix.is_some()
-            }
             CreateProviderSpec::Local(args) => args.root.is_some() || args.key_prefix.is_some(),
             CreateProviderSpec::Remote(args) => {
                 args.server_url.is_some()
@@ -258,7 +232,6 @@ enum CreateProviderSpec {
     S3(ProfileCreateS3Spec),
     R2(ProfileCreateR2Spec),
     Gcs(ProfileCreateGcsSpec),
-    Azure(ProfileCreateAzureSpec),
     Local(ProfileCreateLocalSpec),
     Remote(ProfileCreateRemoteSpec),
 }
@@ -269,7 +242,6 @@ impl CreateProviderSpec {
             Self::S3(_) => ProfileProvider::S3,
             Self::R2(_) => ProfileProvider::R2,
             Self::Gcs(_) => ProfileProvider::Gcs,
-            Self::Azure(_) => ProfileProvider::Azure,
             Self::Local(_) => ProfileProvider::Local,
             Self::Remote(_) => ProfileProvider::Remote,
         }
@@ -324,15 +296,6 @@ struct ProfileCreateGcsSpec {
 }
 
 #[derive(Debug, Clone, Default)]
-struct ProfileCreateAzureSpec {
-    account_name: Option<String>,
-    container_name: Option<String>,
-    access_key: Option<String>,
-    endpoint_url: Option<String>,
-    key_prefix: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
 struct ProfileCreateLocalSpec {
     root: Option<String>,
     key_prefix: Option<String>,
@@ -352,7 +315,6 @@ pub(super) fn create_profile_spec_from_create(
         ProfileCreateCommand::S3(args) => create_s3_spec(args),
         ProfileCreateCommand::R2(args) => create_r2_spec(args),
         ProfileCreateCommand::Gcs(args) => create_gcs_spec(args),
-        ProfileCreateCommand::Azure(args) => create_azure_spec(args),
         ProfileCreateCommand::Local(args) => create_local_spec(args),
         ProfileCreateCommand::Remote(args) => create_remote_spec(args),
     }
@@ -413,23 +375,6 @@ fn create_gcs_spec(args: ProfileCreateGcsArgs) -> (String, CreateProfileSpec) {
     )
 }
 
-fn create_azure_spec(args: ProfileCreateAzureArgs) -> (String, CreateProfileSpec) {
-    let spec = ProfileCreateAzureSpec {
-        account_name: args.account_name,
-        container_name: args.container_name,
-        access_key: args.access_key,
-        endpoint_url: args.endpoint_url,
-        key_prefix: args.key_prefix,
-    };
-    (
-        args.name,
-        CreateProfileSpec {
-            provider: CreateProviderSpec::Azure(spec),
-            actor: args.actor.into(),
-        },
-    )
-}
-
 fn create_local_spec(args: ProfileCreateLocalArgs) -> (String, CreateProfileSpec) {
     let spec = ProfileCreateLocalSpec {
         root: args.root,
@@ -468,33 +413,31 @@ pub(super) fn build_profile_interactive(
             "`loonfs init` is interactive; use `loonfs profile create <provider>` for scripted setup",
         ));
     }
-    let provider =
-        match prompt::prompt_choice("provider", &["s3", "r2", "gcs", "azure", "local", "remote"])?
-            .as_str()
-        {
-            "s3" => CreateProviderSpec::S3(ProfileCreateS3Spec::default()),
-            "r2" => CreateProviderSpec::R2(ProfileCreateR2Spec::default()),
-            "gcs" => CreateProviderSpec::Gcs(ProfileCreateGcsSpec::default()),
-            "azure" => CreateProviderSpec::Azure(ProfileCreateAzureSpec::default()),
-            "local" => {
-                let root = prompt::prompt_line("root")?;
-                let path = match root.strip_prefix("~/") {
-                    Some(relative) => absolute_env_path("HOME")
-                        .ok_or_else(|| {
-                            CliError::invalid_config(
+    let provider = match prompt::prompt_choice("provider", &["s3", "r2", "gcs", "local", "remote"])?
+        .as_str()
+    {
+        "s3" => CreateProviderSpec::S3(ProfileCreateS3Spec::default()),
+        "r2" => CreateProviderSpec::R2(ProfileCreateR2Spec::default()),
+        "gcs" => CreateProviderSpec::Gcs(ProfileCreateGcsSpec::default()),
+        "local" => {
+            let root = prompt::prompt_line("root")?;
+            let path = match root.strip_prefix("~/") {
+                Some(relative) => absolute_env_path("HOME")
+                    .ok_or_else(|| {
+                        CliError::invalid_config(
                             "unable to determine the home directory; enter an absolute root path",
                         )
-                        })?
-                        .join(relative.trim_start_matches('/')),
-                    None => PathBuf::from(root),
-                };
-                CreateProviderSpec::Local(ProfileCreateLocalSpec {
-                    root: Some(absolute_local_root(&path)?),
-                    key_prefix: None,
-                })
-            }
-            _ => CreateProviderSpec::Remote(ProfileCreateRemoteSpec::default()),
-        };
+                    })?
+                    .join(relative.trim_start_matches('/')),
+                None => PathBuf::from(root),
+            };
+            CreateProviderSpec::Local(ProfileCreateLocalSpec {
+                root: Some(absolute_local_root(&path)?),
+                key_prefix: None,
+            })
+        }
+        _ => CreateProviderSpec::Remote(ProfileCreateRemoteSpec::default()),
+    };
     build_profile_from_create_spec(
         name,
         CreateProfileSpec {
@@ -530,9 +473,6 @@ pub(super) fn build_profile_from_create_spec(
         CreateProviderSpec::S3(spec) => embedded_profile(s3_store(None, &spec, source)?, actor),
         CreateProviderSpec::R2(spec) => embedded_profile(r2_store(None, &spec, source)?, actor),
         CreateProviderSpec::Gcs(spec) => embedded_profile(gcs_store(None, &spec, source)?, actor),
-        CreateProviderSpec::Azure(spec) => {
-            embedded_profile(azure_store(None, &spec, source)?, actor)
-        }
         CreateProviderSpec::Remote(spec) => remote_profile(name, None, &spec, actor, source),
     }
 }
@@ -910,68 +850,6 @@ fn gcs_store(
     })
 }
 
-fn azure_store(
-    current: Option<&StoreConfig>,
-    args: &ProfileCreateAzureSpec,
-    source: FieldSource,
-) -> Result<StoreConfig, CliError> {
-    let current = current
-        .map(|store| {
-            let StoreConfig::AzureAbs {
-                account_name,
-                container_name,
-                credentials: AzureAbsCredentials::AccessKey { access_key },
-                endpoint_url,
-                key_prefix,
-            } = store
-            else {
-                return None;
-            };
-            Some((
-                account_name,
-                container_name,
-                access_key,
-                endpoint_url.as_ref(),
-                key_prefix.as_ref(),
-            ))
-        })
-        .map(|current| current.expect("azure store builder should receive an azure current store"));
-    Ok(StoreConfig::AzureAbs {
-        account_name: required_field(
-            args.account_name.as_ref(),
-            current.map(|value| value.0),
-            "account-name",
-            source,
-        )?,
-        container_name: required_field(
-            args.container_name.as_ref(),
-            current.map(|value| value.1),
-            "container-name",
-            source,
-        )?,
-        credentials: AzureAbsCredentials::AccessKey {
-            access_key: required_secret(
-                args.access_key.as_ref(),
-                current.map(|value| value.2),
-                "access-key",
-                source,
-            )?,
-        },
-        endpoint_url: optional_field(
-            args.endpoint_url.as_ref(),
-            current.and_then(|value| value.3),
-            "endpoint url",
-            source,
-        )?,
-        key_prefix: optional_field(
-            args.key_prefix.as_ref(),
-            current.and_then(|value| value.4),
-            "key prefix",
-            source,
-        )?,
-    })
-}
-
 fn remote_profile(
     name: &str,
     current: Option<&ProfileConfig>,
@@ -1135,10 +1013,6 @@ fn profile_provider(profile: &ProfileConfig) -> ProfileProvider {
             ..
         } => ProfileProvider::Gcs,
         ProfileConfig::Embedded {
-            store: StoreConfig::AzureAbs { .. },
-            ..
-        } => ProfileProvider::Azure,
-        ProfileConfig::Embedded {
             store: StoreConfig::LocalFs { .. },
             ..
         } => ProfileProvider::Local,
@@ -1151,7 +1025,6 @@ fn provider_name(provider: ProfileProvider) -> &'static str {
         ProfileProvider::S3 => "s3",
         ProfileProvider::R2 => "r2",
         ProfileProvider::Gcs => "gcs",
-        ProfileProvider::Azure => "azure",
         ProfileProvider::Local => "local",
         ProfileProvider::Remote => "remote",
     }
@@ -1189,9 +1062,6 @@ pub(super) fn apply_update_flags(
                 }
                 (StoreConfig::GcpGcs { .. }, CreateProviderSpec::Gcs(args)) => {
                     gcs_store(Some(&store), args, FieldSource::Fail)?
-                }
-                (StoreConfig::AzureAbs { .. }, CreateProviderSpec::Azure(args)) => {
-                    azure_store(Some(&store), args, FieldSource::Fail)?
                 }
                 _ => return Err(provider_mismatch(name, stored_provider, requested_provider)),
             };
@@ -1391,11 +1261,6 @@ pub(super) fn apply_update_interactive(
                     &ProfileCreateGcsSpec::default(),
                     FieldSource::Prompt,
                 )?,
-                StoreConfig::AzureAbs { .. } => azure_store(
-                    Some(&store),
-                    &ProfileCreateAzureSpec::default(),
-                    FieldSource::Prompt,
-                )?,
             };
             Ok(ProfileConfig::Embedded {
                 store,
@@ -1502,14 +1367,13 @@ mod tests {
 
     use super::{
         apply_update_flags, build_profile_from_create_spec, has_update_flags, profile_update_spec,
-        CreateActorSpec, CreateProfileSpec, CreateProviderSpec, ProfileCreateAzureSpec,
-        ProfileCreateLocalSpec, ProfileCreateR2Spec, ProfileCreateRemoteSpec, ProfileCreateS3Spec,
-        ProfileUpdateSpec,
+        CreateActorSpec, CreateProfileSpec, CreateProviderSpec, ProfileCreateLocalSpec,
+        ProfileCreateR2Spec, ProfileCreateRemoteSpec, ProfileCreateS3Spec, ProfileUpdateSpec,
     };
     use crate::args::{Cli, Command, ProfileCommand, RuntimeBehavior};
     use crate::config::{ProfileConfig, StoreConfig};
     use clap::Parser;
-    use loonfs_objectstore::{AwsS3Credentials, AzureAbsCredentials, CloudflareR2Credentials};
+    use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
 
     #[cfg(unix)]
     #[test]
@@ -1530,55 +1394,6 @@ mod tests {
                 .expect("utf-8 root"),
         );
         assert!(!missing_root.exists());
-    }
-
-    #[test]
-    fn create_profile_supports_azure_abs() {
-        let profile = build_profile_from_create_spec(
-            "default",
-            CreateProfileSpec {
-                provider: CreateProviderSpec::Azure(ProfileCreateAzureSpec {
-                    account_name: Some("devstoreaccount1".to_owned()),
-                    container_name: Some("container".to_owned()),
-                    access_key: Some("account-key".to_owned()),
-                    endpoint_url: Some("https://devstoreaccount1.blob.core.windows.net".to_owned()),
-                    key_prefix: Some("tenant-a".to_owned()),
-                }),
-                actor: empty_actor(),
-            },
-            non_interactive_runtime(),
-        )
-        .expect("build azure profile");
-
-        assert!(matches!(
-            profile,
-            ProfileConfig::Embedded {
-                store: StoreConfig::AzureAbs { .. },
-                ..
-            }
-        ));
-        if let ProfileConfig::Embedded {
-            store:
-                StoreConfig::AzureAbs {
-                    account_name,
-                    container_name,
-                    credentials,
-                    endpoint_url,
-                    key_prefix,
-                },
-            ..
-        } = profile
-        {
-            assert_eq!(account_name, "devstoreaccount1");
-            assert_eq!(container_name, "container");
-            let AzureAbsCredentials::AccessKey { access_key } = credentials;
-            assert_eq!(access_key.expose(), "account-key");
-            assert_eq!(
-                endpoint_url.as_deref(),
-                Some("https://devstoreaccount1.blob.core.windows.net")
-            );
-            assert_eq!(key_prefix.as_deref(), Some("tenant-a"));
-        }
     }
 
     #[test]

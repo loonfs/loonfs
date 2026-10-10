@@ -19,7 +19,7 @@ use futures::stream::BoxStream;
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, StoredObjectChecksum,
+    ObjectStoreError, PutMode,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -105,17 +105,13 @@ impl<S> ConcurrencyWatchStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.inner.checksum_algorithm()
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let _in_flight = self.enter(key, &self.reads).await;
         self.inner.head(key).await
-    }
-
-    async fn head_stored_checksum(
-        &self,
-        key: &str,
-    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
-        let _in_flight = self.enter(key, &self.reads).await;
-        self.inner.head_stored_checksum(key).await
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String, ObjectStoreError> {

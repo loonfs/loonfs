@@ -41,7 +41,7 @@ image from this crate's `Dockerfile`.
 ## Configuration
 
 `config/` holds one example per object store: `local-fs`, `aws-s3`,
-`gcp-gcs`, `cloudflare-r2`, and `azure-abs`. Each one documents the provider
+`gcp-gcs`, and `cloudflare-r2`. Each one documents the provider
 credentials and the optional server settings. Copy the one you need and edit
 it.
 

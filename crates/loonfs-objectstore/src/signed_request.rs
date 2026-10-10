@@ -2,7 +2,7 @@
 
 use crate::object_store::Result;
 use crate::presign::PresignedUrl;
-use crate::{ObjectStoreError, StoredObjectChecksum};
+use crate::ObjectStoreError;
 use loonfs_types::Checksum;
 use object_store::client::{HttpClient, HttpRequestBody};
 
@@ -92,7 +92,6 @@ pub(crate) fn object_length_from_signed_head(
 pub(crate) fn metadata_from_signed_head(
     key: &str,
     response: &SignedResponse,
-    sha256_header: &str,
     version_header: &str,
     stored_checksum: impl FnOnce(&http::HeaderMap) -> Option<Checksum>,
 ) -> Result<Option<crate::ObjectMetadata>> {
@@ -105,9 +104,7 @@ pub(crate) fn metadata_from_signed_head(
             .get(name)
             .and_then(|value| value.to_str().ok())
     };
-    let attestation = header(sha256_header)
-        .and_then(crate::provider_object_store::attested_sha256)
-        .or_else(|| stored_checksum(&response.headers));
+    let checksum = stored_checksum(&response.headers);
     let last_modified_ms = header("last-modified")
         .and_then(|value| httpdate::parse_http_date(value).ok())
         .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
@@ -117,39 +114,6 @@ pub(crate) fn metadata_from_signed_head(
         etag: Some(etag),
         version: header(version_header).map(str::to_owned),
         last_modified_ms,
-        attestation,
-    }))
-}
-
-/// Reads an object's size and checksum from a signed `HEAD` response.
-pub(crate) fn stored_checksum_from_signed_head(
-    key: &str,
-    response: &SignedResponse,
-    stored_checksum: impl FnOnce(&http::HeaderMap) -> Option<Checksum>,
-) -> Result<Option<StoredObjectChecksum>> {
-    if let Some(error) = classify_signed_response(key, response.status, None) {
-        return match error {
-            ObjectStoreError::NotFound { .. } => Ok(None),
-            error => Err(error),
-        };
-    }
-
-    let Some(checksum) = stored_checksum(&response.headers) else {
-        return Err(ObjectStoreError::StoredChecksumMissing {
-            object_key: key.to_owned(),
-        });
-    };
-    let size_bytes = response
-        .headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| {
-            ObjectStoreError::transport(key, "checksum head reported no content length")
-        })?;
-
-    Ok(Some(StoredObjectChecksum {
-        size_bytes,
         checksum,
     }))
 }
@@ -235,41 +199,24 @@ mod tests {
     }
 
     #[test]
-    fn a_head_prefers_writer_sha256_then_stored_crc_and_preserves_object_age() {
-        let sha256 = Checksum::sha256(b"bytes");
-        let crc = Checksum::crc64nvme(b"bytes");
-        let headers = [
-            ("content-length", "5"),
-            ("etag", "version"),
-            ("last-modified", "Thu, 01 Jan 1970 00:00:01 GMT"),
-        ];
-        let mut response = head(200, &headers);
-        for expected in [Some(crc.clone()), None] {
-            let metadata = metadata_from_signed_head(
-                "key",
-                &response,
-                "x-amz-meta-sha256",
-                "x-amz-version-id",
-                |_| expected.clone(),
-            )
+    fn a_head_reports_the_stored_checksum_and_object_age() {
+        let response = head(
+            200,
+            &[
+                ("content-length", "5"),
+                ("etag", "version"),
+                ("last-modified", "Thu, 01 Jan 1970 00:00:01 GMT"),
+            ],
+        );
+        for expected in [Some(Checksum::crc64nvme(b"bytes")), None] {
+            let metadata = metadata_from_signed_head("key", &response, "x-amz-version-id", |_| {
+                expected.clone()
+            })
             .expect("head")
             .expect("object");
-            assert_eq!(metadata.attestation, expected);
+            assert_eq!(metadata.checksum, expected);
             assert_eq!(metadata.last_modified_ms, Some(1000));
         }
-        response
-            .headers
-            .insert("x-amz-meta-sha256", sha256.value.parse().expect("header"));
-        let metadata = metadata_from_signed_head(
-            "key",
-            &response,
-            "x-amz-meta-sha256",
-            "x-amz-version-id",
-            |_| Some(crc),
-        )
-        .expect("head")
-        .expect("object");
-        assert_eq!(metadata.attestation, Some(sha256));
     }
 
     #[test]

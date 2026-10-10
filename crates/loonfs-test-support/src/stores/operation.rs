@@ -134,9 +134,8 @@ impl<'a> OperationContext<'a> {
                 mode: (*mode).clone(),
                 bytes: outcome.streamed_bytes(),
             },
-            OperationKind::PutImmutableStream { sha256 } => RecordedOperation::PutImmutableStream {
+            OperationKind::PutImmutableStream => RecordedOperation::PutImmutableStream {
                 key: self.key.to_owned(),
-                sha256: sha256.cloned(),
                 bytes: outcome.streamed_bytes(),
             },
             OperationKind::Assemble {
@@ -188,10 +187,7 @@ pub enum OperationKind<'a> {
         mode: &'a PutMode,
     },
     /// A `put_immutable_verified_stream` call.
-    PutImmutableStream {
-        /// Attestation supplied by the caller.
-        sha256: Option<&'a Checksum>,
-    },
+    PutImmutableStream,
     /// A create from source ranges and tail bytes.
     Assemble {
         /// Selected objects and ranges.
@@ -240,12 +236,8 @@ pub enum RecordedOperation {
         mode: PutMode,
         bytes: Option<u64>,
     },
-    /// A streamed create-if-absent with the attestation it asked for.
-    PutImmutableStream {
-        key: String,
-        sha256: Option<Checksum>,
-        bytes: Option<u64>,
-    },
+    /// A streamed create-if-absent.
+    PutImmutableStream { key: String, bytes: Option<u64> },
     /// A create from source ranges and tail bytes.
     Assemble {
         key: String,

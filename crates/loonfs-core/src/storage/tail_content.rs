@@ -201,7 +201,6 @@ async fn write_candidate<S: ObjectStore + ?Sized>(
             .assemble(object_key, &sources, pieces, &expected)
             .await
     } else if candidate_length > MAX_MERGED_EXTENT_BYTES {
-        let sha256 = checksum_pieces(&pieces, ChecksumAlgorithm::Sha256);
         let body = stream::iter(pieces)
             .flat_map(|piece| {
                 stream::iter(
@@ -216,7 +215,7 @@ async fn write_candidate<S: ObjectStore + ?Sized>(
             })
             .boxed();
         store
-            .put_immutable_verified_stream(object_key, candidate_length, Some(&sha256), body)
+            .put_immutable_verified_stream(object_key, candidate_length, body)
             .await
     } else {
         let mut bytes = Vec::with_capacity(candidate_length as usize);
@@ -232,9 +231,9 @@ async fn write_candidate<S: ObjectStore + ?Sized>(
         tracing::error!(object_key, %error, "content write failed");
         return Err(match error {
             ImmutableWriteError::DifferentObject { .. }
-            | ImmutableWriteError::Unattested { .. } => CoreError::NamespaceCorrupt(format!(
-                "content object `{object_key}` requires an equal attestation"
-            )),
+            | ImmutableWriteError::StoredChecksumMissing { .. } => CoreError::NamespaceCorrupt(
+                format!("content object `{object_key}` requires an equal stored checksum"),
+            ),
             ImmutableWriteError::Transport {
                 object_key,
                 source: ObjectStoreError::Transport { message, .. },
@@ -321,23 +320,27 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
             ))
         };
         let stored = store
-            .head_stored_checksum(source_key)
+            .head(source_key)
             .await
             .map_err(|error| CoreError::store(source_key, &error))?
             .ok_or_else(corrupt)?;
         if located.extent.offset != 0 || stored.size_bytes != located.extent.length {
             return Err(corrupt());
         }
+        let checksum = stored
+            .checksum
+            .filter(|checksum| checksum.algorithm == store.checksum_algorithm())
+            .ok_or_else(corrupt)?;
         expected = Some(match expected {
-            None => stored.checksum.clone(),
-            Some(checksum) => checksum
-                .crc_combine(&stored.checksum, stored.size_bytes)
+            None => checksum.clone(),
+            Some(previous) => previous
+                .crc_combine(&checksum, stored.size_bytes)
                 .ok_or_else(corrupt)?,
         });
         sources.push(AssemblySource {
             key: source_key.clone(),
             range: None,
-            checksum: stored.checksum,
+            checksum,
         });
     }
     let expected = expected.expect("an assembly merge should have source extents");
@@ -352,7 +355,6 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
     Ok((sources, expected))
 }
 
-// Attestations cover the whole object, including bytes outside a shared prefix.
 async fn read_extent<S: ObjectStore + ?Sized>(
     store: &S,
     located: &LocatedExtent,
@@ -361,7 +363,7 @@ async fn read_extent<S: ObjectStore + ?Sized>(
     let key = &located.object_key;
     let corrupt = || {
         CoreError::NamespaceCorrupt(format!(
-            "content object `{key}` does not hold its attested extent bytes"
+            "content object `{key}` does not hold its stored extent bytes"
         ))
     };
     let metadata = store
@@ -373,15 +375,10 @@ async fn read_extent<S: ObjectStore + ?Sized>(
     if metadata.size_bytes < extent.offset + extent.length {
         return Err(corrupt());
     }
-    let (mut offset, end) = if metadata.attestation.is_some() {
-        (0, metadata.size_bytes)
-    } else {
-        (extent.offset, extent.offset + extent.length)
-    };
-    let mut state = metadata
-        .attestation
-        .as_ref()
-        .map(|checksum| StreamingChecksum::for_algorithm(checksum.algorithm));
+    let expected = metadata.checksum.ok_or_else(corrupt)?;
+    let (mut offset, end) = (extent.offset, extent.offset + extent.length);
+    let mut state = (offset == 0 && end == metadata.size_bytes)
+        .then(|| StreamingChecksum::for_algorithm(store.checksum_algorithm()));
     while offset < end {
         let chunk_end = end.min(offset + CONTENT_READ_CHUNK_BYTES);
         let chunk = store
@@ -408,7 +405,7 @@ async fn read_extent<S: ObjectStore + ?Sized>(
         }
         offset = chunk_end;
     }
-    if let (Some(expected), Some(state)) = (metadata.attestation, state) {
+    if let Some(state) = state {
         if state.finish() != expected {
             return Err(corrupt());
         }

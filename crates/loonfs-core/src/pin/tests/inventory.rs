@@ -286,6 +286,10 @@ struct DeleteOnCheckpointLoadStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for DeleteOnCheckpointLoadStore<S> {
+    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
+        self.inner.checksum_algorithm()
+    }
+
     async fn head(
         &self,
         key: &str,

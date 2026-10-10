@@ -7,7 +7,6 @@
 //! and kebab-case. Each binary ships the examples that document it, in the
 //! `config/` directory of its own crate.
 
-use crate::abs::AzureAbsStoreConfig;
 use crate::configured::{
     endpoint_host_is_proven, AWS_S3_PROVEN_DOMAINS, CLOUDFLARE_R2_PROVEN_DOMAINS,
 };
@@ -70,24 +69,18 @@ pub enum GcpGcsCredentials {
     },
 }
 
-/// Azure Blob Storage credential source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum AzureAbsCredentials {
-    /// Uses a stored shared account key.
-    AccessKey {
-        /// Shared account key used for request authentication.
-        access_key: SecretString,
-    },
-}
-
 /// Provider selection, settings, and an explicit credential source, as written in config files.
 ///
 /// Serialization is transparent for secret fields and therefore writes the
 /// real credentials; only serialize a [`StoreConfig::redacted`] copy into
 /// display output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    deny_unknown_fields,
+    remote = "Self"
+)]
 pub enum StoreConfig {
     /// Stores objects beneath a Unix-family directory using atomic filesystem replacement.
     LocalFs {
@@ -139,21 +132,24 @@ pub enum StoreConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
-    /// Connects to Azure Blob Storage through its native shared-key API.
-    AzureAbs {
-        /// Azure storage account used for addressing and signing.
-        account_name: String,
-        /// Blob container that acts as the physical store root.
-        container_name: String,
-        /// Credential source used for request authentication.
-        credentials: AzureAbsCredentials,
-        /// Azure-compatible endpoint override, or `None` for the public service.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        endpoint_url: Option<String>,
-        /// Logical prefix applied inside the container, or `None` to expose its root.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-    },
+}
+
+impl serde::Serialize for StoreConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StoreConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("kind").and_then(serde_json::Value::as_str) == Some("azure-abs") {
+            return Err(serde::de::Error::custom(
+                "Azure Blob Storage is not supported yet: it stores no full-object checksum",
+            ));
+        }
+        Self::deserialize(value).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Validation failure for a [`StoreConfig`].
@@ -197,7 +193,6 @@ impl StoreConfig {
             StoreConfig::AwsS3 { .. } => ConfiguredObjectStoreKind::AwsS3,
             StoreConfig::CloudflareR2 { .. } => ConfiguredObjectStoreKind::CloudflareR2,
             StoreConfig::GcpGcs { .. } => ConfiguredObjectStoreKind::GcpGcs,
-            StoreConfig::AzureAbs { .. } => ConfiguredObjectStoreKind::AzureAbs,
         }
     }
 
@@ -214,7 +209,6 @@ impl StoreConfig {
                 CloudflareR2Credentials::Static { .. } => "static",
             }),
             StoreConfig::GcpGcs { .. } => Some("service-account-file"),
-            StoreConfig::AzureAbs { .. } => Some("access-key"),
         }
     }
 
@@ -272,23 +266,6 @@ impl StoreConfig {
                     ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
                         bucket: bucket.clone(),
                         service_account_key_path: path.clone(),
-                        key_prefix: key_prefix.clone(),
-                    })
-                }
-            },
-            StoreConfig::AzureAbs {
-                account_name,
-                container_name,
-                credentials,
-                endpoint_url,
-                key_prefix,
-            } => match credentials {
-                AzureAbsCredentials::AccessKey { access_key } => {
-                    ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
-                        account_name: account_name.clone(),
-                        container_name: container_name.clone(),
-                        access_key: access_key.clone(),
-                        endpoint_url: endpoint_url.clone(),
                         key_prefix: key_prefix.clone(),
                     })
                 }
@@ -351,24 +328,6 @@ impl StoreConfig {
                     }
                 }
             }
-            StoreConfig::AzureAbs {
-                account_name,
-                container_name,
-                credentials,
-                endpoint_url,
-                ..
-            } => {
-                require_non_empty("store.account_name", account_name)?;
-                require_non_empty("store.container_name", container_name)?;
-                match credentials {
-                    AzureAbsCredentials::AccessKey { access_key } => {
-                        require_non_empty("store.credentials.access_key", access_key.expose())?;
-                    }
-                }
-                if let Some(url) = endpoint_url {
-                    validate_absolute_http_url("store.endpoint_url", url)?;
-                }
-            }
         }
         Ok(())
     }
@@ -401,11 +360,6 @@ impl StoreConfig {
                     *secret_access_key = secret_access_key.masked();
                 }
             }
-            StoreConfig::AzureAbs { credentials, .. } => match credentials {
-                AzureAbsCredentials::AccessKey { access_key } => {
-                    *access_key = access_key.masked();
-                }
-            },
         }
         redacted
     }
@@ -571,7 +525,7 @@ mod tests {
 
     #[test]
     fn parses_all_provider_kinds_and_reports_their_kind() {
-        let cases: [(&str, ConfiguredObjectStoreKind); 5] = [
+        let cases: [(&str, ConfiguredObjectStoreKind); 4] = [
             (
                 "kind = \"local-fs\"\nroot = \"/tmp/store\"",
                 ConfiguredObjectStoreKind::LocalFs,
@@ -613,18 +567,6 @@ kind = "service-account-file"
 path = "/tmp/service-account.json"
 "#,
                 ConfiguredObjectStoreKind::GcpGcs,
-            ),
-            (
-                r#"
-kind = "azure-abs"
-account_name = "account"
-container_name = "container"
-
-[credentials]
-kind = "access-key"
-access_key = "key"
-"#,
-                ConfiguredObjectStoreKind::AzureAbs,
             ),
         ];
 
@@ -801,24 +743,15 @@ secret_access_key = "secret"
             }
             other => panic!("expected invalid endpoint_url, got {other:?}"),
         }
+    }
 
-        let blank_azure_account = parse(
-            r#"
-kind = "azure-abs"
-account_name = " "
-container_name = "container"
-
-[credentials]
-kind = "access-key"
-access_key = "key"
-"#,
-        );
-        assert_eq!(
-            blank_azure_account.validate(),
-            Err(StoreConfigError::MissingField {
-                field: "store.account_name"
-            })
-        );
+    #[test]
+    fn azure_configuration_is_rejected_with_the_missing_checksum_reason() {
+        let error = toml::from_str::<StoreConfig>(r#"kind = "azure-abs""#)
+            .expect_err("unsupported provider");
+        assert!(error.to_string().contains(
+            "Azure Blob Storage is not supported yet: it stores no full-object checksum"
+        ));
     }
 
     #[test]
