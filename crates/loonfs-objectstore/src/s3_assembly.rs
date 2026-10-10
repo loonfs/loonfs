@@ -3,7 +3,7 @@
 use super::{assembled_crc64nvme, S3RequestSigner, MULTIPART_CONTROL_TTL};
 use crate::assembly::{check_expected, plan_parts, source_range, READ_BYTES};
 use crate::provider_object_store::{
-    MAX_PROVIDER_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
+    StoredChecksumReader, MAX_PROVIDER_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use crate::{
     AssemblySource, ByteRange, ConfiguredObjectStoreKind, ObjectMetadata, ObjectStoreError,
@@ -11,6 +11,7 @@ use crate::{
 };
 use bytes::Bytes;
 use loonfs_types::{Checksum, ChecksumAlgorithm};
+use object_store::client::HttpRequestBody;
 
 impl S3RequestSigner {
     pub(super) async fn assemble_parts(
@@ -93,31 +94,67 @@ impl S3RequestSigner {
             };
             parts.push(part);
         }
-        let crc = assembled_crc64nvme(parts.iter().zip(&plan).map(|(part, planned)| {
-            (
-                &part.checksum,
-                planned.range.end_exclusive - planned.range.start_inclusive,
-            )
-        }))
-        .expect("nonempty multipart parts should have valid CRC-64/NVME checksums");
-        check_expected(key, expected, &crc)?;
+        if self.kind != ConfiguredObjectStoreKind::CloudflareR2 {
+            let crc = assembled_crc64nvme(parts.iter().zip(&plan).map(|(part, planned)| {
+                (
+                    part.checksum
+                        .as_ref()
+                        .expect("S3 parts should carry checksums"),
+                    planned.range.end_exclusive - planned.range.start_inclusive,
+                )
+            }))
+            .expect("nonempty multipart parts should have valid CRC-64/NVME checksums");
+            check_expected(key, expected, &crc)?;
+        }
         let etag = self
             .finish_upload(
                 key,
                 &upload_id,
                 &parts,
-                Some(&crc),
+                Some(expected),
                 &PutMode::CreateIfAbsent,
             )
             .await?;
         abort_on_drop.disarm();
+        if self.kind == ConfiguredObjectStoreKind::CloudflareR2 {
+            return self.verify_completed_assembly(key, expected).await;
+        }
         Ok(ObjectMetadata {
             etag: Some(etag),
             version: None,
             size_bytes,
             last_modified_ms: None,
-            checksum: Some(crc),
+            checksum: Some(expected.clone()),
         })
+    }
+
+    async fn verify_completed_assembly(
+        &self,
+        key: &str,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata> {
+        let metadata =
+            self.head_metadata(key)
+                .await?
+                .ok_or_else(|| ObjectStoreError::NotFound {
+                    object_key: key.to_owned(),
+                })?;
+        let error = match &metadata.checksum {
+            Some(actual) if actual == expected => return Ok(metadata),
+            Some(_) => ObjectStoreError::ChecksumMismatch {
+                object_key: key.to_owned(),
+            },
+            None => ObjectStoreError::StoredChecksumMissing {
+                object_key: key.to_owned(),
+            },
+        };
+        let signed = self
+            .request_signer
+            .presign_delete(key, MULTIPART_CONTROL_TTL, Self::signing_time())
+            .await?;
+        self.send_checked(key, signed, HttpRequestBody::empty())
+            .await?;
+        Err(error)
     }
 
     async fn create_assembly(

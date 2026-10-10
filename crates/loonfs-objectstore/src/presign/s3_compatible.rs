@@ -164,6 +164,23 @@ impl S3CompatiblePresigner {
         )
     }
 
+    pub(crate) async fn presign_delete(
+        &self,
+        object_key: &str,
+        expires_in: Duration,
+        now: SystemTime,
+    ) -> Result<PresignedUrl> {
+        let credentials = self.signing_credentials(expires_in, now).await?;
+        self.presign(
+            &credentials,
+            "DELETE",
+            object_key,
+            BTreeMap::new(),
+            expires_in,
+            now,
+        )
+    }
+
     /// Signs `CreateMultipartUpload` for an object whose checksum will cover
     /// the whole assembly.
     pub(crate) async fn presign_create_multipart(
@@ -284,10 +301,8 @@ impl S3CompatiblePresigner {
     ///
     /// AWS S3 treats that checksum as a precondition and refuses to assemble
     /// an object that does not match it. Cloudflare R2 accepts the request
-    /// and stores the true checksum instead, so a client-driven completion
-    /// reads the object's checksum back rather than trusting this call's
-    /// success, and an assembly from a base holds the claim to its parts'
-    /// checksums before it sends this request.
+    /// and stores the true checksum instead, so R2 completions read the
+    /// object's stored checksum before accepting it.
     pub(crate) async fn presign_complete_multipart(
         &self,
         object_key: &str,

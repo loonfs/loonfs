@@ -13,8 +13,8 @@ use loonfs_server::{ServerConfig, StoreConfig};
 use loonfs_test_support::http::raw_agent;
 use loonfs_types::{
     api::v0::{
-        CompleteUploadBody, ObjectTransferAccess, UploadContentClaim, UploadMode,
-        UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
+        CompleteUploadBody, CreateCheckpointRequest, ObjectTransferAccess, UploadContentClaim,
+        UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
     },
     ChangeSeq, Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, DestinationBehavior,
     FilesystemOperation, NamespaceId,
@@ -328,7 +328,8 @@ async fn assert_wrong_direct_put_bytes_rejected(
     signed_write: SignedWriteHeaders,
 ) {
     let bytes = b"expected direct put bytes\n";
-    let wrong_bytes = b"wrong direct put bytes\n";
+    let mut wrong_bytes = *bytes;
+    wrong_bytes[0] ^= 1;
     let begin = client
         .create_direct_put_upload(namespace_id, Some(bytes.len() as u64))
         .await
@@ -337,7 +338,7 @@ async fn assert_wrong_direct_put_bytes_rejected(
     assert_eq!(checksum_algorithm, signed_write.checksum_algorithm);
 
     client
-        .upload_via_presigned_url(access, wrong_bytes)
+        .upload_via_presigned_url(access, &wrong_bytes)
         .await
         .expect("the provider accepts a checksum-less direct PUT");
     expect_client_rejection(
@@ -653,6 +654,94 @@ async fn gcp_gcs_direct_put_real_provider_round_trip() {
         ),
     )
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires real GCP GCS credentials"]
+async fn gcp_gcs_append_keeps_crc32c_after_checkpoint() {
+    let store_config = GcpGcsDirectPutConfig::from_env()
+        .expect("load GCP GCS append environment")
+        .store();
+    let harness = start_server(test_config(
+        store_config.clone(),
+        AUTH_TOKEN,
+        CONTENT_TOKEN_SECRET,
+        "gcs-append",
+    ))
+    .await;
+    let namespace_id = NamespaceId::parse("gcs-append").expect("namespace");
+    let target = NamespacePath::parse(namespace_id.as_str(), "/append.bin").expect("path");
+    let actor = loonfs_test_support::test_actor();
+    harness
+        .client
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("namespace");
+    let mut payload = vec![b'a'; 9 * 1024 * 1024];
+    harness
+        .client
+        .put_file(&target, &payload, &actor)
+        .await
+        .expect("put base");
+    let base = harness.client.stat(&target).await.expect("stat base");
+    let base = base.content_ref().expect("base reference");
+    assert_eq!(base.checksum, Checksum::crc32c(&payload));
+
+    let tail = vec![b'b'; 4096];
+    harness
+        .client
+        .append_file(&target, &tail, &actor)
+        .await
+        .expect("append");
+    payload.extend_from_slice(&tail);
+    let appended = harness.client.stat(&target).await.expect("stat append");
+    let appended = appended.content_ref().expect("appended reference");
+    assert_eq!(appended.content_id, base.content_id);
+    assert_eq!(appended.size_bytes, payload.len() as u64);
+    assert_eq!(appended.checksum, Checksum::crc32c(&payload));
+    assert_eq!(
+        harness
+            .client
+            .read_file(&target)
+            .await
+            .expect("read append"),
+        payload
+    );
+
+    harness
+        .client
+        .create_checkpoint(
+            &namespace_id,
+            &CreateCheckpointRequest {
+                name: "appended".to_owned(),
+                ttl_ms: None,
+            },
+        )
+        .await
+        .expect("checkpoint append");
+    let folded = harness
+        .client
+        .stat(&target)
+        .await
+        .expect("stat after checkpoint");
+    assert_eq!(folded.content_ref(), Some(appended));
+    let grant = harness
+        .client
+        .create_download(&target)
+        .await
+        .expect("download grant");
+    assert_eq!(&grant.content_ref, appended);
+    let mut downloaded = Vec::new();
+    let written = harness
+        .client
+        .download_via_presigned_url(&grant, &mut downloaded)
+        .await
+        .expect("download appended extents");
+    assert_eq!(written, payload.len() as u64);
+    assert_eq!(downloaded, payload);
+
+    harness.server.abort();
+    delete_everything_under_the_run_prefix(&store_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
