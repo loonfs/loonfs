@@ -2,10 +2,9 @@
 
 use super::*;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{
-    BlockingStore, BufferWatchStore, FakeMultipartStore, KeyPredicate, MetadataMapStore,
-    OperationClass, RecordedOperation, RecordingStore,
+    BlockingStore, FakeMultipartStore, KeyPredicate, MetadataMapStore, OperationClass,
+    RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{ChangeSeq, ContentId, ContentRef, NamespaceId};
@@ -98,7 +97,7 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     let (layout, tail, reference) = fixture(&store, &[20 * mib, 20 * mib], false, 12 * mib).await;
     let content = tail.content(&reference).expect("content");
     store.reset();
-    let pool = Semaphore::new(0);
+    let pool = Semaphore::new(1);
     let written = write_tail_content(
         &store,
         &layout,
@@ -163,7 +162,7 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
         &tail,
         content,
         assemble_tail_content(content).expect("pieces"),
-        &Semaphore::new(0),
+        &Semaphore::new(1),
     )
     .await
     .expect("bounded layout");
@@ -181,78 +180,42 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
 }
 
 #[tokio::test]
-async fn whole_extent_reads_require_the_store_checksum_and_ranges_stay_unverified() {
+async fn assembly_sources_require_whole_extents_and_stored_checksums_in_the_store_algorithm() {
+    let directory = tempfile::tempdir().expect("directory");
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    let (layout, _, _) = fixture(&local, &[12], false, 0).await;
+    let extent = layout.0.layout.extents[0].clone();
     for algorithm in [ChecksumAlgorithm::Crc64nvme, ChecksumAlgorithm::Crc32c] {
-        let directory = tempfile::tempdir().expect("directory");
-        let local = LocalFsStore::new(directory.path()).expect("store");
-        let extent = ContentExtent {
-            owner_namespace_id: NamespaceId::parse("demo").expect("owner"),
-            content_id: ContentId::generate(),
-            object: ExtentObject::Whole,
-            offset: 0,
-            length: 12,
-        };
-        let mut located = LocatedExtent {
-            object_key: extent_object_key(&extent),
-            extent,
-        };
-        local
-            .put(
-                &located.object_key,
-                Bytes::from_static(b"whole object"),
-                PutMode::Overwrite,
-            )
-            .await
-            .expect("put");
-        for expected in [
-            Some(Checksum::compute(algorithm, b"whole object")),
-            Some(Checksum::compute(algorithm, b"wrong object")),
-            Some(Checksum::compute(
-                match algorithm {
-                    ChecksumAlgorithm::Crc64nvme => ChecksumAlgorithm::Crc32c,
-                    ChecksumAlgorithm::Crc32c => ChecksumAlgorithm::Crc64nvme,
-                },
-                b"whole object",
-            )),
-            None,
-        ] {
-            let correct = expected == Some(Checksum::compute(algorithm, b"whole object"));
-            let missing = expected.is_none();
+        for checksum in [Some(Checksum::compute(algorithm, &[b'a'; 12])), None] {
+            let valid = checksum.is_some() && algorithm == local.checksum_algorithm();
             let store = MetadataMapStore::new(&local, KeyPredicate::any(), move |mut metadata| {
-                metadata.checksum = expected.clone();
+                metadata.checksum = checksum.clone();
                 metadata
-            })
-            .algorithm(algorithm);
-            let mut bytes = Vec::new();
-            let result = read_extent(&store, &located, &mut bytes).await;
-            if correct {
-                result.expect("correct checksum");
-                assert_eq!(bytes, b"whole object");
-            } else {
-                assert!(matches!(result, Err(CoreError::NamespaceCorrupt(_))));
+            });
+            for offset in [0, 1] {
+                let mut extent = extent.clone();
+                extent.offset = offset;
+                extent.length -= offset;
+                let located = LocatedExtent {
+                    object_key: extent_object_key(&extent),
+                    extent,
+                };
+                let result = assembly_sources(&store, "destination", &[located], &[]).await;
+                if valid && offset == 0 {
+                    assert_eq!(result.expect("whole source").0.len(), 1);
+                } else {
+                    assert!(matches!(result, Err(CoreError::NamespaceCorrupt(_))));
+                }
             }
-            located.extent.offset = 1;
-            located.extent.length = 3;
-            let mut bytes = Vec::new();
-            let result = read_extent(&store, &located, &mut bytes).await;
-            if missing {
-                assert!(matches!(result, Err(CoreError::NamespaceCorrupt(_))));
-            } else {
-                result.expect("range");
-                assert_eq!(bytes, b"hol");
-            }
-            located.extent.offset = 0;
-            located.extent.length = 12;
         }
     }
 }
 
 #[tokio::test]
-async fn local_large_tail_streams_pieces_without_merge_permits() {
+async fn local_large_tail_assembles_without_sources() {
     let directory = tempfile::tempdir().expect("directory");
     let local = LocalFsStore::new(directory.path()).expect("store");
-    let watched = std::sync::Arc::new(BufferWatchStore::new(local, KeyPredicate::any()));
-    let store = RecordingStore::new(watched.clone(), KeyPredicate::any());
+    let store = RecordingStore::new(local, KeyPredicate::any());
     let (layout, _, mut reference) = fixture(&store, &[], false, 0).await;
     let piece = vec![b'z'; 4 * 1024 * 1024];
     let mut tail = ProjectedWalTail::default();
@@ -279,17 +242,13 @@ async fn local_large_tail_streams_pieces_without_merge_permits() {
     for (actual, resident) in pieces.iter().zip(&content.pieces) {
         assert_eq!(actual.as_ptr(), resident.bytes.as_ptr());
     }
-    let pool = Semaphore::new(0);
+    let pool = Semaphore::new(1);
     let written = write_tail_content(&store, &layout, &tail, content, pieces, &pool)
         .await
         .expect("streamed tail");
-    let peaks = watched.peaks();
-    assert_eq!(peaks.total_bytes, 52 * 1024 * 1024);
-    assert_eq!(peaks.largest_buffer_bytes, piece.len() as u64);
-    assert!(peaks.peak_live_bytes <= CONTENT_READ_CHUNK_BYTES);
     assert!(matches!(
         store.snapshot().as_slice(),
-        [RecordedOperation::PutImmutableStream { .. }]
+        [RecordedOperation::Assemble { sources, .. }] if sources.is_empty()
     ));
     let stored = store
         .head(&extent_object_key(&written.layout.extents[0]))
@@ -301,7 +260,51 @@ async fn local_large_tail_streams_pieces_without_merge_permits() {
 }
 
 #[tokio::test]
-async fn in_memory_merge_reserves_extents_and_tail_before_reading() {
+async fn materialized_tail_prefixes_keep_own_extents_whole() {
+    for (size, layout_size) in [(8, 8), (10, 10), (10, 8)] {
+        let directory = tempfile::tempdir().expect("directory");
+        let store = RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
+        );
+        let (mut layout, tail, reference) = fixture(&store, &[6], false, 4).await;
+        let extent = &mut layout.0.layout.extents[0];
+        extent.object = ExtentObject::Span {
+            start: 0,
+            end: size,
+        };
+        extent.length = layout_size;
+        let key = extent_object_key(extent);
+        let bytes = Bytes::from([b"aaaaaa".as_slice(), &b"zzzz"[..size as usize - 6]].concat());
+        store
+            .put_immutable_verified(&key, bytes)
+            .await
+            .expect("materialized prefix");
+        layout.0.size_bytes = layout_size;
+        store.reset();
+        let content = tail.content(&reference).expect("tail");
+        let written = write_tail_content(
+            &store,
+            &layout,
+            &tail,
+            content,
+            assemble_tail_content(content).expect("pieces"),
+            &Semaphore::new(1),
+        )
+        .await
+        .expect("write");
+        assert_eq!(written.layout.size_bytes(), reference.size_bytes);
+        assert_eq!(written.layout.extents[0].length, size);
+        let operations = store.snapshot();
+        assert!(
+            matches!(operations.last(), Some(RecordedOperation::Assemble { sources, bytes, .. })
+            if *bytes == 10 - size as usize && sources.len() == usize::from(size == 10))
+        );
+    }
+}
+
+#[tokio::test]
+async fn validation_materialization_holds_a_write_permit() {
     let directory = tempfile::tempdir().expect("directory");
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -309,23 +312,15 @@ async fn in_memory_merge_reserves_extents_and_tail_before_reading() {
         OperationClass::Head,
     );
     let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
-    let content = tail.content(&reference).expect("content");
-    let pool = Semaphore::new(10);
+    let pool = Semaphore::new(1);
     store.arm();
-    let write = write_tail_content(
-        &store,
-        &layout,
-        &tail,
-        content,
-        assemble_tail_content(content).expect("pieces"),
-        &pool,
-    );
+    let write = materialize_content_layout(&store, &layout, &tail, &reference, &pool);
     let check = async {
         store.wait_until_blocked().await;
         assert_eq!(pool.available_permits(), 0);
         store.release();
     };
     let (written, ()) = tokio::join!(write, check);
-    assert_eq!(written.expect("merged").layout.extents[0].length, 10);
-    assert_eq!(pool.available_permits(), 10);
+    assert_eq!(written.expect("merged").extents[0].length, 10);
+    assert_eq!(pool.available_permits(), 1);
 }

@@ -166,7 +166,7 @@ async fn commit_piece(
                 &view.projected_metadata_view(),
                 view.wal_tail(),
                 &base,
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                &tokio::sync::Semaphore::new(32),
             )
             .await
             .expect("base layout"),
@@ -500,7 +500,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             &engine.namespace_id,
             input,
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .expect("fold inline content");

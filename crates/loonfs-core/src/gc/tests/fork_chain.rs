@@ -45,7 +45,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
                 Arc::new(StdMonotonicTimer::default()),
                 Default::default(),
                 None,
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                &tokio::sync::Semaphore::new(32),
             )
             .await
             .expect("fork");
@@ -60,7 +60,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
             namespace_id,
             Default::default(),
             &setup,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await
         .expect("delete ancestor");
@@ -93,7 +93,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         &namespaces[2],
         Default::default(),
         &setup,
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .await
     .expect("delete leaf");

@@ -30,7 +30,7 @@ pub async fn append_wal_objects<S: loonfs_objectstore::ObjectStore + ?Sized>(
 ) -> crate::error::Result<()> {
     let mut engine = crate::publish::NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for _ in 0..count {
         let commit_id = loonfs_types::CommitId::generate();

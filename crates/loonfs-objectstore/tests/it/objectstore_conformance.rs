@@ -116,7 +116,7 @@ async fn aws_s3_assembly() {
     .expect("create AWS S3 object store");
     assert_assembly(
         &store,
-        &[(1024, 9 * MIB), (9 * MIB, 9 * MIB)],
+        &[(1024, 30), (1024, 9 * MIB), (9 * MIB, 9 * MIB)],
         ChecksumAlgorithm::Crc64nvme,
     )
     .await;
@@ -847,7 +847,7 @@ async fn assert_chained_compose<S: ObjectStore>(store: &S) {
     let mut sources = Vec::new();
     let mut bytes = Vec::new();
     for index in 0..40 {
-        let source = Bytes::from(vec![index; 17]);
+        let source = Bytes::from(vec![index; MIB / 4]);
         let key = content_blob(&owner, &ContentId::generate());
         store
             .put_immutable_verified(&key, source.clone())

@@ -45,6 +45,8 @@ pub struct LocalFsStore {
     /// Logical prefix every key is confined beneath, or `None` for the root.
     key_prefix: Option<String>,
     write_lock: Mutex<()>,
+    #[cfg(test)]
+    largest_staged_chunk: std::sync::atomic::AtomicU64,
 }
 
 impl LocalFsStore {
@@ -84,6 +86,8 @@ impl LocalFsStore {
             checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             key_prefix: normalize_key_prefix(key_prefix)?,
             write_lock: Mutex::new(()),
+            #[cfg(test)]
+            largest_staged_chunk: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -264,6 +268,9 @@ impl LocalFsStore {
                 expected.map(|expected| StreamingChecksum::for_algorithm(expected.algorithm));
             while let Some(chunk) = body.next().await {
                 let chunk = chunk?;
+                #[cfg(test)]
+                self.largest_staged_chunk
+                    .fetch_max(chunk.len() as u64, std::sync::atomic::Ordering::SeqCst);
                 if let Some(checksum) = &mut checksum {
                     checksum.update(&chunk);
                 }
@@ -1059,6 +1066,26 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
     use tokio::sync::Barrier;
+
+    #[tokio::test]
+    async fn large_tail_assembly_stages_at_most_one_read_chunk() {
+        let directory = tempfile::tempdir().expect("directory");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let tail = vec![Bytes::from(vec![b'a'; 52 * 1024 * 1024])];
+        let expected = loonfs_types::Checksum::crc64nvme(&tail[0]);
+        let written = store
+            .assemble("tail", &[], tail, &expected)
+            .await
+            .expect("assembly");
+        assert_eq!(written.size_bytes, 52 * 1024 * 1024);
+        assert_eq!(written.checksum, Some(expected));
+        assert_eq!(
+            store
+                .largest_staged_chunk
+                .load(std::sync::atomic::Ordering::SeqCst),
+            crate::assembly::READ_BYTES
+        );
+    }
 
     #[tokio::test]
     async fn a_failed_stream_removes_its_temporary_file_without_publishing() {

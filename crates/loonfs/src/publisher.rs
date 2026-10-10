@@ -1315,7 +1315,7 @@ impl NamespacePublisher {
                     .inner
                     .config
                     .execution_budget
-                    .content_merge_memory(),
+                    .content_writes(),
             )
             .monotonic_timer(Arc::clone(&self.timer))
             .segment_cache(self.runtime_core.metadata_segment_cache())
@@ -1515,7 +1515,7 @@ impl NamespacePublisher {
                 .inner
                 .config
                 .execution_budget
-                .content_merge_memory(),
+                .content_writes(),
         )
         .instrument(phase_span!(
             self.runtime_core,

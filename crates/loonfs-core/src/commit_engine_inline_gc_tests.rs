@@ -56,7 +56,7 @@ async fn assert_files_readable(
 
 #[tokio::test]
 async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = &engine.namespace_id.clone();
     let values = vec![
@@ -92,7 +92,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
         namespace_id,
         engine.wal_fold_input(),
         &deadline,
-        &merge_memory,
+        &content_writes,
     );
     let collect_during_fold = async {
         blocked.wait_until_blocked().await;
@@ -128,7 +128,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
 
 #[tokio::test]
 async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
-    let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+    let content_writes = tokio::sync::Semaphore::new(32);
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = &engine.namespace_id.clone();
     let values = vec![inline(namespace_id, Bytes::from_static(b"shared"))];
@@ -155,7 +155,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
         namespace_id,
         Some(input.clone()),
         &deadline,
-        &merge_memory,
+        &content_writes,
     );
     let winner = async {
         blocked.wait_until_blocked().await;
@@ -165,7 +165,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
             namespace_id,
             Some(input),
             &crate::time::Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            &merge_memory,
+            &content_writes,
         )
         .await
         .expect("winning fold");

@@ -25,7 +25,7 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: MetadataLsmPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
 ) -> Result<PinPayload> {
     validate_pin_owner(&owner)?;
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
@@ -38,7 +38,7 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
             deadline,
             policy,
             segment_cache,
-            merge_memory,
+            content_writes,
         )
         .await?
         {

@@ -75,11 +75,11 @@ pub(crate) fn commit_fingerprint(
 /// rejects namespace mismatches before admission).
 #[allow(
     clippy::too_many_arguments,
-    reason = "planning carries the store and shared content merge memory"
+    reason = "planning carries the store and shared content write permits"
 )]
 pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>(
     store: &S,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
     candidate: &CommitCandidate,
     semantic_identity: CommitFingerprint,
     head: &NamespaceReadState,
@@ -125,7 +125,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                 view: &resolution_view,
                 tail: Some(&pieces),
             };
-            plan_operation(store, merge_memory, operation, &view, allocation)
+            plan_operation(store, content_writes, operation, &view, allocation)
                 .await
                 .map_err(|error| error.at_operation(index))?
         };
@@ -183,7 +183,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     };
     carry_revision_layouts(
         store,
-        merge_memory,
+        content_writes,
         &resolved.view(),
         &base_view.with_overlay(&tail.rows, &tail.rows, head.seq),
         &pieces,
@@ -196,7 +196,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
 
 async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
     store: &S,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
     view: &MetadataView<'_, '_, S>,
     before: &MetadataView<'_, '_, S>,
     tail: &ProjectedWalTail,
@@ -256,7 +256,7 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
                     view,
                     tail,
                     &prefix,
-                    merge_memory,
+                    content_writes,
                 )
                 .await
                 .map_err(|error| error.at_operation(delta.semantic_operation_index as usize))?,
@@ -269,7 +269,7 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
 
 async fn plan_operation<S: ObjectStore + ?Sized>(
     store: &S,
-    merge_memory: &tokio::sync::Semaphore,
+    content_writes: &tokio::sync::Semaphore,
     operation: &FilesystemOperation,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     allocation: &mut CandidateAllocation,
@@ -355,7 +355,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 *expected_inode_id,
                 *expected_revision_no,
                 store,
-                merge_memory,
+                content_writes,
                 view,
             )
             .await
@@ -370,7 +370,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 inline_content,
                 *expected_revision_no,
                 store,
-                merge_memory,
+                content_writes,
                 view,
             )
             .await
@@ -740,7 +740,7 @@ mod tests {
             .collect();
         let validated = prepare_commit_against_publish_view(
             store,
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
             &CommitCandidate::prepared(request.clone(), content),
             serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
             view.head(),
@@ -1078,7 +1078,7 @@ mod tests {
                 set_owner("/docs/a.txt", "ada"),
             ))],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await
         .pop()

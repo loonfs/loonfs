@@ -828,7 +828,7 @@ impl ObjectStore for RivalFoldStore {
                 &loonfs_core::time::Deadline::start(Arc::new(
                     loonfs_types::StdMonotonicTimer::default(),
                 )),
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                &tokio::sync::Semaphore::new(32),
             )
             .await
             .expect("the rival folds");
@@ -1152,7 +1152,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     };
     loonfs_core::publish::NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .delete_namespace(store.as_ref(), Default::default(), &context)
     .await

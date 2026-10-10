@@ -1148,7 +1148,7 @@ async fn planned_appends_match_the_model() {
     ];
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for (index, operations) in requests.into_iter().enumerate() {
         let request = CommitRequest {
@@ -1260,7 +1260,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
     let deadline = || Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
-        std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for operation in operations {
         let request = CommitRequest {
@@ -1287,7 +1287,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
             &namespace_id,
             None,
             &deadline(),
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .expect("fold");

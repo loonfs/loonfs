@@ -57,12 +57,12 @@ impl PublishPlanningSession {
     /// validated plan that only awaits the accepted allocation position.
     #[allow(
         clippy::too_many_arguments,
-        reason = "planning carries the store and shared content merge memory"
+        reason = "planning carries the store and shared content write permits"
     )]
     pub(crate) async fn prepare_commit<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
-        merge_memory: &tokio::sync::Semaphore,
+        content_writes: &tokio::sync::Semaphore,
         candidate: &CommitCandidate,
         semantic_identity: CommitFingerprint,
         base_view: MetadataView<'_, '_, S>,
@@ -81,7 +81,7 @@ impl PublishPlanningSession {
         .await?;
         prepare_commit_against_publish_view(
             store,
-            merge_memory,
+            content_writes,
             candidate,
             semantic_identity,
             &self.head,
@@ -254,7 +254,7 @@ mod tests {
             let plan = session
                 .prepare_commit(
                     &store,
-                    &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                    &tokio::sync::Semaphore::new(32),
                     &CommitCandidate::new(request.clone()),
                     commit_fingerprint(&namespace_id, &request, &std::collections::BTreeMap::new())
                         .expect("fingerprint"),
@@ -295,7 +295,7 @@ mod tests {
                 staged.content_ref().clone(),
             )],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await
         .remove(0)
@@ -323,7 +323,7 @@ mod tests {
         session
             .prepare_commit(
                 &store,
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                &tokio::sync::Semaphore::new(32),
                 &CommitCandidate::new(first_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),
@@ -351,7 +351,7 @@ mod tests {
         session
             .prepare_commit(
                 &store,
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                &tokio::sync::Semaphore::new(32),
                 &CommitCandidate::new(second_request.clone()),
                 test_fingerprint(),
                 view.projected_metadata_view(),
@@ -387,7 +387,7 @@ mod tests {
                 put_file_candidate("create-wide-b", "/wide/b.txt", staged.content_ref().clone()),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await;
 
@@ -425,7 +425,7 @@ mod tests {
                 candidate_that_allocates_then_fails("reject-second"),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await;
 
@@ -453,7 +453,7 @@ mod tests {
                 create_directory_candidate("accept-second", "/kept"),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await;
 
@@ -492,7 +492,7 @@ mod tests {
                 ),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await;
 
@@ -533,7 +533,7 @@ mod tests {
                 )),
             ],
             &context,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await;
 

@@ -345,7 +345,7 @@ mod tests {
         let engine = NamespaceEngine::reader(
             &store,
             namespace_id,
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
 
         let caught_up = engine
@@ -406,7 +406,7 @@ mod tests {
                 &namespace_id,
                 vec![CommitCandidate::new(request)],
                 &context,
-                std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+                std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             )
             .await
             .pop()

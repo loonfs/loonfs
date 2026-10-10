@@ -2650,7 +2650,7 @@ mod tests {
             namespace_id,
             Default::default(),
             &context(3_000),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(32 * 1024 * 1024)),
+            std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         )
         .await
         .expect("delete namespace");

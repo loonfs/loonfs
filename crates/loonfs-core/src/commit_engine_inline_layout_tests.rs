@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::limits::MAX_MERGED_EXTENT_BYTES;
 use crate::storage::content::DurableContentValidationError;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
 use crate::GrantedRange;
@@ -112,9 +111,13 @@ async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
         store.reset();
         fold_wal(&store, &namespace_id).await.expect("fold");
         let operations = content_operations(&store);
-        assert!(operations
-            .iter()
-            .all(|operation| !matches!(operation, RecordedOperation::Assemble { .. })));
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::Assemble { .. }))
+                .count(),
+            1
+        );
         let row = layout(&store, &reference).await;
         assert_eq!(
             row.layout
@@ -287,7 +290,7 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
         &tail,
         content,
         assemble_tail_content(content).expect("pieces"),
-        &Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize),
+        &Semaphore::new(32),
     )
     .await
     .expect("first write");
@@ -329,7 +332,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
         &tail,
         content,
         assemble_tail_content(content).expect("pieces"),
-        &Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize),
+        &Semaphore::new(32),
     )
     .await
     .expect("whole before manifest");
@@ -341,7 +344,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
             None,
             0,
             &access,
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .expect("equal whole download")
@@ -374,7 +377,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
                 Some(revision),
                 0,
                 &access,
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+                &tokio::sync::Semaphore::new(32),
             )
             .await
             .expect("download revision");
@@ -499,7 +502,7 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
         .expect("fold shared base");
     let span = content_span(&namespace_id, &fresh.content_id, 105, 106);
     assert!(
-        matches!(content_operations(&store).as_slice(), [RecordedOperation::Put { key, bytes: 1, .. }] if key == &span)
+        matches!(content_operations(&store).as_slice(), [RecordedOperation::Assemble { key, bytes: 1, .. }] if key == &span)
     );
     let row = layout(&store, &fresh).await;
     row.layout.validate(106).expect("shared prefix layout");
@@ -536,10 +539,10 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("view");
-    let merge_memory = Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize);
+    let content_writes = Semaphore::new(32);
     store.reset();
     let target = view
-        .direct_download_target(&store, "/file-0", None, 105, &access, &merge_memory)
+        .direct_download_target(&store, "/file-0", None, 105, &access, &content_writes)
         .await
         .expect("resumed ranges");
     assert_eq!(
@@ -565,7 +568,7 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
             Some(RevisionNo(2)),
             105,
             &access,
-            &merge_memory,
+            &content_writes,
         )
         .await
         .expect("previous revision");
@@ -590,7 +593,7 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
             None,
             0,
             &access,
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
         )
         .await
         .expect("empty download");
@@ -680,7 +683,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         &namespace_id,
         vec![candidate],
         &context,
-        Arc::new(Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize)),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .await
     .pop()
@@ -996,23 +999,40 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         )
         .await
         .expect("append");
-        let view = load_current_metadata_view(&store, &namespace_id)
+        let blocked = loonfs_test_support::stores::BlockingStore::new(
+            store.clone(),
+            KeyPredicate::content_blob(),
+            loonfs_test_support::stores::OperationClass::Put,
+        );
+        let view = load_current_metadata_view(&blocked, &namespace_id)
             .await
             .expect("view");
         let access = ReadAccess::live(Authorizer::Unrestricted);
         for revision in revisions {
             let key = content_span(&namespace_id, &original.content_ref().content_id, 0, 10);
-            let target = view
-                .direct_download_target(
-                    &store,
-                    "/file-0",
-                    Some(revision),
-                    0,
-                    &access,
-                    &tokio::sync::Semaphore::new(32 * 1024 * 1024),
-                )
-                .await
-                .expect("download revision");
+            let pool = Semaphore::new(1);
+            let absent = store.head(&key).await.expect("head").is_none();
+            if absent {
+                blocked.block_next();
+            }
+            let mut download = std::pin::pin!(view.direct_download_target(
+                &blocked,
+                "/file-0",
+                Some(revision),
+                0,
+                &access,
+                &pool,
+            ));
+            if absent {
+                tokio::select! {
+                    () = blocked.wait_until_blocked() => {}
+                    result = &mut download => panic!("download finished before writing: {result:?}"),
+                }
+                assert_eq!(pool.available_permits(), 0);
+                blocked.release();
+            }
+            let target = download.await.expect("download revision");
+            assert_eq!(pool.available_permits(), 1);
             assert_eq!(target.ranges[0].object_key, key);
             assert_eq!(
                 target.content_ref.content_id,
@@ -1046,151 +1066,56 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
 }
 
 #[tokio::test]
-async fn two_large_merges_share_one_folds_memory_budget() {
+async fn two_chains_in_one_fold_share_one_write_permit() {
     use loonfs_test_support::stores::{BlockingStore, ConcurrencyWatchStore, OperationClass};
-    use loonfs_types::format::wal::{
-        MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
-    };
-
-    let (_directory, store, engine, context) = setup().await;
-    let namespace_id = engine.namespace_id;
-    let whole_length = 20 * 1024 * 1024;
-    let head_length = 30 * 1024 * 1024;
-    let mut chains = Vec::new();
-    for (index, byte) in b"ab".iter().copied().enumerate() {
-        let bytes = vec![byte; whole_length];
-        let path = format!("/file-{index}");
-        crate::test_support::ops::write_file_bytes(
-            &store,
-            &namespace_id,
-            &path,
-            &bytes,
-            &context,
-            None,
-        )
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace_id.clone();
+    let values = vec![
+        inline(&namespace_id, Bytes::from_static(b"first")),
+        inline(&namespace_id, Bytes::from_static(b"second")),
+    ];
+    publish(&mut engine, &store, &context, candidate("files", values))
         .await
-        .expect("upload whole");
-        let entry = load_current_metadata_view(&store, &namespace_id)
-            .await
-            .expect("view")
-            .resolve_path(
-                &path,
-                AttributeInclusion::Omit,
-                &ReadAccess::live(Authorizer::Unrestricted),
-            )
-            .await
-            .expect("file");
-        let content_id = entry
-            .content_ref()
-            .expect("file content")
-            .content_id
-            .clone();
-        chains.push((entry.inode_id, content_id, bytes));
-    }
-    let mut references = Vec::new();
-    for (inode_id, content_id, mut bytes) in chains {
-        let mut revision_no = RevisionNo(1);
-        while bytes.len() < head_length {
-            let offset = bytes.len();
-            bytes.resize(
-                head_length.min(offset + MAX_WAL_OBJECT_INLINE_CONTENT_BYTES),
-                b'c',
-            );
-            revision_no.0 += 1;
-            let content_ref = ContentRef::blob_v1(
-                namespace_id.clone(),
-                content_id.clone(),
-                &bytes,
-                store.checksum_algorithm(),
-            );
-            let view = load_current_metadata_view(&store, &namespace_id)
-                .await
-                .expect("base view");
-            let mut base = content_ref.clone();
-            base.size_bytes = offset as u64;
-            let layout = crate::storage::tail_content::materialize_content_layout(
-                &store,
-                &view.projected_metadata_view(),
-                view.wal_tail(),
-                &base,
-                &tokio::sync::Semaphore::new(32 * 1024 * 1024),
-            )
-            .await
-            .expect("base layout");
-            crate::test_support::ops::append_wal_commit(
-                &store,
-                &namespace_id,
-                vec![WalDelta::AppendFileRevision {
-                    delta_index: 0,
-                    inode_id,
-                    revision_no,
-                    content_ref: content_ref.clone(),
-                    layout: Some(layout),
-                }],
-                bytes[offset..]
-                    .chunks(MAX_WAL_INLINE_CONTENT_BYTES)
-                    .enumerate()
-                    .map(|(index, bytes)| WalInlineContent {
-                        content_id: content_id.clone(),
-                        offset: (offset + index * MAX_WAL_INLINE_CONTENT_BYTES) as u64,
-                        bytes: bytes.to_vec(),
-                    })
-                    .collect(),
-            )
-            .await
-            .expect("append pieces");
-            if bytes.len() == head_length {
-                references.push(content_ref);
-            }
-        }
-    }
-    assert!(2 * whole_length as u64 > MAX_MERGED_EXTENT_BYTES);
+        .expect("publish");
     let blocked = ConcurrencyWatchStore::new(
         BlockingStore::new(
             store.clone(),
             KeyPredicate::content_blob(),
-            OperationClass::Head,
+            OperationClass::Put,
         ),
         KeyPredicate::content_blob(),
     );
     blocked.inner().block_next();
     store.reset();
-    let mut fold = std::pin::pin!(fold_wal(&blocked, &namespace_id));
+    let pool = Semaphore::new(1);
+    let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
+    let mut fold = std::pin::pin!(fold_wal_tail(
+        &blocked,
+        None,
+        &namespace_id,
+        None,
+        &deadline,
+        &pool,
+    ));
     tokio::select! {
         () = blocked.inner().wait_until_blocked() => {}
-        result = &mut fold => panic!("fold finished before the merge read: {result:?}"),
+        _ = &mut fold => panic!("fold finished before the content write"),
     }
     assert!(futures::poll!(&mut fold).is_pending());
-    assert_eq!(blocked.reads().total, 1);
+    assert_eq!(pool.available_permits(), 0);
+    assert_eq!(blocked.puts().total, 1);
     blocked.inner().release();
-    fold.await.expect("both merges finish");
-    assert_eq!(blocked.reads().peak_in_flight, 1);
-    for reference in references {
-        let row = layout(&store, &reference).await;
-        assert_eq!(row.layout.extents.len(), 1);
-        let extent = &row.layout.extents[0];
-        assert_eq!(
-            extent.object,
-            ExtentObject::Span {
-                start: 0,
-                end: head_length as u64
-            }
-        );
-        let location = load_current_metadata_view(&store, &namespace_id)
-            .await
-            .expect("view")
-            .resolve_content_location(&reference)
-            .await
-            .expect("location");
-        assert_eq!(
-            location
-                .get_bytes(&store, &reference)
-                .await
-                .expect("merged bytes")
-                .len(),
-            head_length
-        );
-    }
+    fold.await.expect("both chains finish");
+    assert_eq!(blocked.puts().peak_in_flight, 1);
+    assert_eq!(blocked.puts().total, 2);
+    assert_eq!(pool.available_permits(), 1);
+    assert_eq!(
+        content_operations(&store)
+            .iter()
+            .filter(|operation| matches!(operation, RecordedOperation::Assemble { .. }))
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -1231,7 +1156,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     let plan = session
         .prepare_commit(
             &store,
-            &tokio::sync::Semaphore::new(32 * 1024 * 1024),
+            &tokio::sync::Semaphore::new(32),
             &candidate,
             candidate
                 .semantic_identity(&namespace_id)
@@ -1312,8 +1237,10 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
     let denied = FailStore::matching(
         store,
         |operation| {
-            matches!(operation.kind(), OperationKind::Put { .. })
-                && loonfs_objectstore::layout::content_id_of(operation.key()).is_some()
+            matches!(
+                operation.kind(),
+                OperationKind::Put { .. } | OperationKind::Assemble { .. }
+            ) && loonfs_objectstore::layout::content_id_of(operation.key()).is_some()
         },
         InjectedError::PermissionDenied("read-only store".to_owned()),
     );
@@ -1322,12 +1249,12 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
         .await
         .expect("view");
     let access = ReadAccess::live(Authorizer::Unrestricted);
-    let merge_memory = Semaphore::new(MAX_MERGED_EXTENT_BYTES as usize);
+    let content_writes = Semaphore::new(32);
     let store = denied.inner();
     store.reset();
     for path in ["/file-0", "/file-1"] {
         assert!(matches!(
-            view.direct_download_target(&denied, path, None, 10, &access, &merge_memory)
+            view.direct_download_target(&denied, path, None, 10, &access, &content_writes)
                 .await,
             Err(CoreError::ResumeOffsetOutOfRange { .. })
         ));
@@ -1335,7 +1262,7 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
     assert_eq!(denied.attempts(), 0);
     for path in ["/file-0", "/file-1"] {
         assert!(matches!(
-            view.direct_download_target(&denied, path, None, 0, &access, &merge_memory)
+            view.direct_download_target(&denied, path, None, 0, &access, &content_writes)
                 .await,
             Err(CoreError::ContentNotMaterialized { .. })
         ));
@@ -1429,11 +1356,11 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             },
         ));
         let session = PublishPlanningSession::new(view.head(), view.wal_tail());
-        let merge_memory = tokio::sync::Semaphore::new(32 * 1024 * 1024);
+        let content_writes = tokio::sync::Semaphore::new(32);
         let mut plan = session
             .prepare_commit(
                 &store,
-                &merge_memory,
+                &content_writes,
                 &candidate,
                 candidate
                     .semantic_identity(&namespace_id)
@@ -1507,7 +1434,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             &namespace_id,
             Some(fold),
             &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-            &merge_memory,
+            &content_writes,
         )
         .await
         .expect("fold captured source");
