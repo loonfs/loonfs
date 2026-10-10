@@ -211,6 +211,7 @@ function forwardedHeaders(source: Headers, extra: readonly string[]): Headers {
 
 // Do not forward application cookies to LoonFS.
 const REQUEST_STRIPPED_HEADERS = [
+    "host",
     "cookie",
     "loonfs-actor",
     "loonfs-subject",

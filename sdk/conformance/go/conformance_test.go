@@ -670,11 +670,10 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 	if !bytes.Equal(helperReadback.Content, payload) {
 		t.Error("helper multipart readback did not match payload")
 	}
-	// Content ids are random per upload and the helper may choose a different
-	// checksum algorithm; the comparable content fact is the size.
 	if helperReadback.ContentRef == nil || helperReadback.ContentRef.SizeBytes != firstStatus.ContentRef.SizeBytes {
-		t.Error("helper multipart size did not match the manual upload")
+		t.Fatal("helper multipart size did not match the manual upload")
 	}
+	assertChecksumEqual(t, helperReadback.ContentRef.Checksum, firstStatus.ContentRef.Checksum)
 }
 
 type abortRequest struct {

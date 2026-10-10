@@ -660,7 +660,7 @@ def test_server_client_rejects_a_partial_subject_context(options: dict[str, str]
     with pytest.raises(
         ValueError, match="principal_scope and principals must be configured together"
     ):
-        LoonFS(base_url="http://127.0.0.1", **options)
+        LoonFS(base_url="http://127.0.0.1", token="test", **options)
 
 
 def _checksum(algorithm: str, content: bytes) -> Checksum:
@@ -1710,7 +1710,6 @@ def test_proxy(
         )
         direct_access = direct_begin.access
         assert direct_access is not None
-        assert direct_begin.checksum_algorithm is not None
         assert direct_access.method.upper() == "PUT"
         direct_put_response = httpx.request(
             direct_access.method,
@@ -1964,7 +1963,6 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     assert isinstance(begin, UploadSession_Open)
     assert begin.status == expected.begin_status
     assert begin.mode == expected.mode
-    assert begin.checksum_algorithm is not None
     assert begin.checksum_algorithm == expected.checksum_algorithm
 
     assert begin.access is not None
@@ -2019,7 +2017,6 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     assert begin.status == expected.begin_status
     assert begin.mode == expected.mode
     assert begin.part_size_bytes == request.part_size_bytes
-    assert begin.checksum_algorithm is not None
     assert begin.checksum_algorithm == expected.checksum_algorithm
 
     part_size = begin.part_size_bytes
@@ -2131,9 +2128,8 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
         path=helper_path,
     )
     assert helper_read.content == payload
-    # Content ids are random per upload and the helper may choose a different
-    # checksum algorithm; the comparable content fact is the size.
     assert helper_read.content_ref.size_bytes == first_content_ref.size_bytes
+    assert helper_read.content_ref.checksum == first_content_ref.checksum
 
 
 def test_async_upload_download(cases: dict[str, ConformanceCase]) -> None:

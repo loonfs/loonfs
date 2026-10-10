@@ -16,7 +16,6 @@ import (
 	loonfs "github.com/loonfs/loonfs-sdk-go"
 	"github.com/loonfs/loonfs-sdk-go/commits"
 	"github.com/loonfs/loonfs-sdk-go/core"
-	"github.com/loonfs/loonfs-sdk-go/uploads"
 )
 
 const (
@@ -44,7 +43,6 @@ var (
 	}
 )
 
-// UploadInput describes one in-memory file write.
 type UploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
@@ -56,30 +54,23 @@ type UploadInput struct {
 	ExpectedRevisionNo *loonfs.RevisionNo
 }
 
-// PreparedContent is a completed upload retained for publication retries.
-// Preparation does not publish a file or extend the upload lifetime.
-// Treat its reference and token as immutable.
 type PreparedContent struct {
 	ContentRef   *loonfs.ContentRef
 	ContentToken *loonfs.ContentToken
 }
 
-// PreparedFile retains the original content representation for publication retries.
-// It is either *PreparedContent (an uploaded reference) or *InlinePreparedContent.
 type PreparedFile interface {
 	preparedFile()
 }
 
 func (*PreparedContent) preparedFile() {}
 
-// InlinePreparedContent retains immutable base64 bytes, without an upload or expiry.
 type InlinePreparedContent struct {
 	content string
 }
 
 func (*InlinePreparedContent) preparedFile() {}
 
-// PreparedUploadInput publishes completed content without uploading again.
 type PreparedUploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
@@ -91,7 +82,6 @@ type PreparedUploadInput struct {
 	ExpectedRevisionNo *loonfs.RevisionNo
 }
 
-// AppendInput describes bytes to add to the end of an existing file.
 type AppendInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
@@ -102,14 +92,12 @@ type AppendInput struct {
 	ExpectedRevisionNo *loonfs.RevisionNo
 }
 
-// DownloadInput describes one current or retained file revision to read.
 type DownloadInput struct {
 	NamespaceID loonfs.NamespaceID
 	Path        loonfs.AbsolutePath
 	RevisionNo  *loonfs.RevisionNo
 }
 
-// DownloadResult contains file bytes and the resolved revision facts.
 type DownloadResult struct {
 	Content     []byte
 	NamespaceID loonfs.NamespaceID
@@ -118,8 +106,6 @@ type DownloadResult struct {
 	ContentRef  *loonfs.ContentRef
 }
 
-// Pass CommitID explicitly if you may retry.
-// Retain Prepare output and use UploadPrepared with unchanged inputs for publication retries.
 func (c *Client) Upload(ctx context.Context, in UploadInput, opts ...core.RequestOption) (*loonfs.Commit, error) {
 	size := int64(len(in.Content))
 	return c.UploadStream(ctx, StreamUploadInput{
@@ -135,11 +121,10 @@ func (c *Client) Prepare(ctx context.Context, namespaceID loonfs.NamespaceID, co
 	return c.PrepareStream(ctx, namespaceID, bytes.NewReader(content), &size)
 }
 
-// Pass CommitID explicitly if you may retry. Reuse unchanged publication inputs.
 func (c *Client) UploadPrepared(ctx context.Context, in PreparedUploadInput, opts ...core.RequestOption) (*loonfs.Commit, error) {
 	ctx, cancel := transferContext(ctx)
 	defer cancel()
-	commitID, err := c.publicationIDs(in.CommitID)
+	commitID, err := c.publicationID(in.CommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -149,19 +134,19 @@ func (c *Client) UploadPrepared(ctx context.Context, in PreparedUploadInput, opt
 	switch prepared := in.Prepared.(type) {
 	case *InlinePreparedContent:
 		if prepared == nil {
-			return nil, fmt.Errorf("transfers: prepared content is required")
+			return nil, fmt.Errorf("prepared content is required")
 		}
 		inlineContent = &prepared.content
 	case *PreparedContent:
 		if prepared == nil || prepared.ContentRef == nil {
-			return nil, fmt.Errorf("transfers: prepared content is required")
+			return nil, fmt.Errorf("prepared content is required")
 		}
 		contentRef = prepared.ContentRef
 		if prepared.ContentToken != nil {
 			contentTokens = []*loonfs.ContentToken{prepared.ContentToken}
 		}
 	default:
-		return nil, fmt.Errorf("transfers: prepared content is required")
+		return nil, fmt.Errorf("prepared content is required")
 	}
 	commitsClient := commits.NewClient(c.options)
 	behavior := in.Behavior
@@ -187,22 +172,19 @@ func (c *Client) UploadPrepared(ctx context.Context, in PreparedUploadInput, opt
 		},
 	}, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("transfers: commit file: %w", err)
+		return nil, fmt.Errorf("commit file: %w", err)
 	}
 	return committed, nil
 }
 
-// Append adds 1 byte to 256 KiB to the end of an existing file as its next
-// revision, in one commit that carries the bytes. Pass CommitID explicitly if
-// you may retry.
 func (c *Client) Append(ctx context.Context, in AppendInput, opts ...core.RequestOption) (*loonfs.Commit, error) {
 	if len(in.Content) == 0 {
-		return nil, fmt.Errorf("transfers: append content is empty")
+		return nil, fmt.Errorf("append content is empty")
 	}
 	if len(in.Content) > maxAppendBytes {
-		return nil, fmt.Errorf("transfers: %d-byte append is larger than the %d-byte limit", len(in.Content), maxAppendBytes)
+		return nil, fmt.Errorf("%d-byte append is larger than the %d-byte limit", len(in.Content), maxAppendBytes)
 	}
-	commitID, err := c.publicationIDs(in.CommitID)
+	commitID, err := c.publicationID(in.CommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -224,14 +206,14 @@ func (c *Client) Append(ctx context.Context, in AppendInput, opts ...core.Reques
 		},
 	}, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("transfers: commit append: %w", err)
+		return nil, fmt.Errorf("commit append: %w", err)
 	}
 	return committed, nil
 }
 
-func (c *Client) publicationIDs(commitID loonfs.CommitID) (loonfs.CommitID, error) {
+func (c *Client) publicationID(commitID loonfs.CommitID) (loonfs.CommitID, error) {
 	if c == nil {
-		return "", fmt.Errorf("transfers: client is nil")
+		return "", fmt.Errorf("client is nil")
 	}
 	if commitID == "" {
 		var random [16]byte
@@ -243,7 +225,6 @@ func (c *Client) publicationIDs(commitID loonfs.CommitID) (loonfs.CommitID, erro
 	return commitID, nil
 }
 
-// Download collects DownloadStream for callers that want a whole byte slice.
 func (c *Client) Download(ctx context.Context, in DownloadInput) (*DownloadResult, error) {
 	stream, err := c.DownloadStream(ctx, in)
 	if err != nil {
@@ -257,13 +238,12 @@ func (c *Client) Download(ctx context.Context, in DownloadInput) (*DownloadResul
 	return &DownloadResult{Content: content, NamespaceID: stream.NamespaceID, Path: stream.Path, RevisionNo: stream.RevisionNo, ContentRef: stream.ContentRef}, nil
 }
 
-// fileProjection reads the file half of a path entry union.
 func fileProjection(entry *loonfs.PathEntry) (*loonfs.PathEntryFile, error) {
 	if entry == nil {
-		return nil, fmt.Errorf("transfers: path entry is nil")
+		return nil, fmt.Errorf("path entry is nil")
 	}
 	if entry.File == nil {
-		return nil, fmt.Errorf("transfers: path is a %s, not a file", entry.InodeKind)
+		return nil, fmt.Errorf("path is a %s, not a file", entry.InodeKind)
 	}
 	return entry.File, nil
 }
@@ -274,11 +254,11 @@ func createUploadRequest(
 	sizeBytes int64,
 ) (*loonfs.CreateUploadRequest, error) {
 	if capabilities == nil {
-		return nil, fmt.Errorf("transfers: capability response is nil")
+		return nil, fmt.Errorf("capability response is nil")
 	}
 	request := &loonfs.CreateUploadBody{}
-	worthCutting := sizeBytes >= multipartMinimumBytes
-	if worthCutting && capabilities.Features[featureDirectMultipart] {
+	largeUpload := sizeBytes >= multipartMinimumBytes
+	if largeUpload && capabilities.Features[featureDirectMultipart] {
 		request.DirectMultipart = &loonfs.CreateUploadBodyDirectMultipart{}
 	} else {
 		proxyLimit, hasProxyLimit := capabilities.Limits[limitUploadMaximumBytes]
@@ -286,17 +266,14 @@ func createUploadRequest(
 		directPutLimit, hasDirectPutLimit := capabilities.Limits[limitDirectPutMaximumBytes]
 		fitsDirectPut := !hasDirectPutLimit || sizeBytes <= directPutLimit
 		switch {
-		case (worthCutting || !fitsProxy) && capabilities.Features[featureDirectPut] && fitsDirectPut:
+		case (largeUpload || !fitsProxy) && capabilities.Features[featureDirectPut] && fitsDirectPut:
 			request.DirectPut = &loonfs.CreateUploadBodyDirectPut{
 				SizeBytes: &sizeBytes,
 			}
 		case fitsProxy:
 			request.ServiceProxied = &loonfs.CreateUploadBodyServiceProxied{}
 		default:
-			return nil, fmt.Errorf(
-				"transfers: %d-byte upload fits no advertised transport",
-				sizeBytes,
-			)
+			return nil, fmt.Errorf("source fits no advertised upload transport")
 		}
 	}
 	return &loonfs.CreateUploadRequest{
@@ -305,19 +282,12 @@ func createUploadRequest(
 	}, nil
 }
 
-func abortUpload(ctx context.Context, uploadsClient *uploads.Client, namespaceID loonfs.NamespaceID, uploadID loonfs.UploadID) {
-	_, _ = uploadsClient.Abort(ctx, &loonfs.AbortUploadRequest{
-		NamespaceID: string(namespaceID),
-		UploadID:    string(uploadID),
-	})
-}
-
 func completedUploadStatus(response *loonfs.UploadSession) (*loonfs.UploadSessionStatusCompleted, error) {
 	if response == nil {
-		return nil, fmt.Errorf("transfers: upload session response is nil")
+		return nil, fmt.Errorf("upload session response is nil")
 	}
 	if response.Completed == nil || response.Completed.ContentRef == nil {
-		return nil, fmt.Errorf("transfers: upload is %s, not completed", response.Status)
+		return nil, fmt.Errorf("upload is %s, not completed", response.Status)
 	}
 	return response.Completed, nil
 }
@@ -328,7 +298,11 @@ func sendPresignedWithClient(ctx context.Context, client core.HTTPClient, access
 	}
 	presigned := access.PresignedURL
 	if presigned.Method != expectedMethod {
-		return nil, fmt.Errorf("presigned request uses method %q, expected %q", presigned.Method, expectedMethod)
+		operation := "upload"
+		if expectedMethod == http.MethodGet {
+			operation = "download"
+		}
+		return nil, fmt.Errorf("%s grant must use %s", operation, expectedMethod)
 	}
 	request, err := http.NewRequestWithContext(ctx, expectedMethod, presigned.URL, body)
 	if err != nil {
@@ -352,26 +326,14 @@ func sendPresignedWithClient(ctx context.Context, client core.HTTPClient, access
 }
 
 func responseStatusError(response *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
-	detail := strings.TrimSpace(string(body))
-	if detail == "" {
-		return fmt.Errorf("presigned request returned %s", response.Status)
-	}
-	return fmt.Errorf("presigned request returned %s: %s", response.Status, detail)
+	return fmt.Errorf("presigned request failed with HTTP %d", response.StatusCode)
 }
 
 func computeChecksum(algorithm loonfs.ChecksumAlgorithm, payload []byte) (*loonfs.Checksum, error) {
-	var value string
-	switch algorithm {
-	case loonfs.ChecksumAlgorithmCrc64Nvme:
-		value = fmt.Sprintf("%016x", crc64.Checksum(payload, crc64NVMeTable))
-	case loonfs.ChecksumAlgorithmCrc32C:
-		value = fmt.Sprintf("%08x", crc32.Checksum(payload, crc32CTable))
-	default:
-		return nil, fmt.Errorf("unsupported checksum algorithm %q", algorithm)
+	digest, err := newChecksum(algorithm)
+	if err != nil {
+		return nil, err
 	}
-	return &loonfs.Checksum{
-		Algorithm: algorithm,
-		Value:     value,
-	}, nil
+	digest.Write(payload)
+	return &loonfs.Checksum{Algorithm: algorithm, Value: hex.EncodeToString(digest.Sum(nil))}, nil
 }

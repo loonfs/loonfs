@@ -10,7 +10,7 @@ import httpx
 import pytest
 from loonfs.server import AsyncLoonFS, InlinePreparedContent, LoonFS, PreparedContent
 from loonfs.core.api_error import ApiError
-from loonfs.transfers import _checksum
+from loonfs._transfer_runtime import _checksum
 
 CASES = json.loads(
     (Path(__file__).parents[1] / "fixtures/inline_uploads.json").read_text()
@@ -39,7 +39,7 @@ class Endpoint:
         self.claim = dict(
             kind="blob_v1",
             owner_namespace_id="demo",
-            content_id="con_test",
+            content_id="con_00000000000000000000000000000001",
             size_bytes=len(content),
             checksum=_checksum(fixture["algorithm"], content).model_dump(),
         )
@@ -47,7 +47,6 @@ class Endpoint:
             namespace_id="demo",
             upload_id="upl_test",
             mode="service_proxied",
-            checksum_algorithm=fixture["algorithm"],
         )
 
     def handle(self, request):
@@ -87,7 +86,12 @@ class Endpoint:
             assert json.loads(request.content)["mode"] == "service_proxied"
             return httpx.Response(
                 200,
-                json={**self.session, "status": "open", "expires_at_ms": 2000000000000},
+                json={
+                    **self.session,
+                    "status": "open",
+                    "expires_at_ms": 2000000000000,
+                    "checksum_algorithm": self.fixture["algorithm"],
+                },
             )
         if path.endswith("/content"):
             self.staged = request.read()
@@ -99,6 +103,7 @@ class Endpoint:
                 json={
                     **self.session,
                     "status": "open",
+                    "checksum_algorithm": self.fixture["algorithm"],
                     "expires_at_ms": 2000000000000,
                     "content_ref": self.claim,
                 },

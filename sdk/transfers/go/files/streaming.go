@@ -23,8 +23,6 @@ import (
 const defaultTransferTimeout = 60 * time.Second
 const transferChunkBytes = 64 * 1024
 
-// DownloadStream holds a live response. Read Content to successful EOF to
-// verify the size and checksum; Close releases it without asserting verification.
 type DownloadStream struct {
 	Content     io.ReadCloser
 	NamespaceID loonfs.NamespaceID
@@ -40,12 +38,9 @@ func transferContext(ctx context.Context) (context.Context, context.CancelFunc) 
 	return context.WithTimeout(ctx, defaultTransferTimeout)
 }
 
-// DownloadStream opens a verified stream with backpressure. The caller's context
-// covers discovery and the body; without a deadline the operation has 60 seconds.
-// Closing Content also cancels the operation. No failed body is replayed.
 func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*DownloadStream, error) {
 	if c == nil {
-		return nil, fmt.Errorf("transfers: client is nil")
+		return nil, fmt.Errorf("client is nil")
 	}
 	ctx, cancel := transferContext(ctx)
 	opened := false
@@ -65,14 +60,15 @@ func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*Downloa
 			return nil, err
 		}
 		if grant == nil || grant.ContentRef == nil {
-			return nil, fmt.Errorf("transfers: download grant has no content reference")
+			return nil, fmt.Errorf("download grant has no content reference")
 		}
-		result = &DownloadStream{Content: http.NoBody, NamespaceID: grant.NamespaceID, Path: grant.Path, RevisionNo: grant.RevisionNo, ContentRef: grant.ContentRef}
 		if err := validateDownloadRanges(grant.Ranges, grant.ContentRef.SizeBytes); err != nil {
 			return nil, err
 		}
-		result.Content = &downloadRangeReader{ctx: ctx, client: c.transferHTTPClient(), ranges: grant.Ranges}
-
+		result = &DownloadStream{
+			Content:     &downloadRangeReader{ctx: ctx, client: c.transferHTTPClient(), ranges: grant.Ranges},
+			NamespaceID: grant.NamespaceID, Path: grant.Path, RevisionNo: grant.RevisionNo, ContentRef: grant.ContentRef,
+		}
 	} else {
 		result, err = c.downloadProxiedStream(ctx, in)
 		if err != nil {
@@ -133,7 +129,7 @@ func (c *Client) downloadProxiedStream(ctx context.Context, in DownloadInput) (*
 		}
 	}
 	if claim == nil {
-		return nil, fmt.Errorf("transfers: revision not found for %s", in.Path)
+		return nil, fmt.Errorf("revision %d not found for %s", *revisionNo, in.Path)
 	}
 	query := url.Values{"path": {string(in.Path)}, "revision_no": {strconv.FormatInt(int64(*revisionNo), 10)}}
 	endpoint := strings.TrimRight(c.baseURL, "/") + "/v0/namespaces/" + url.PathEscape(string(in.NamespaceID)) + "/filesystem/content?" + query.Encode()
@@ -160,30 +156,34 @@ func newChecksum(algorithm loonfs.ChecksumAlgorithm) (hash.Hash, error) {
 	case loonfs.ChecksumAlgorithmCrc64Nvme:
 		return crc64.New(crc64NVMeTable), nil
 	default:
-		return nil, fmt.Errorf("unsupported checksum algorithm %q", algorithm)
+		return nil, fmt.Errorf("unsupported checksum algorithm %s", algorithm)
 	}
 }
 
 type verifiedReader struct {
-	ctx      context.Context
-	body     io.ReadCloser
-	cancel   context.CancelFunc
-	hash     hash.Hash
-	expected *loonfs.ContentRef
-	count    int64
-	terminal error
-	closed   bool
+	ctx              context.Context
+	body             io.ReadCloser
+	cancel           context.CancelFunc
+	hash             hash.Hash
+	expectedSize     int64
+	expectedChecksum string
+	count            int64
+	terminal         error
+	closed           bool
 }
 
 func newVerifiedReader(ctx context.Context, body io.ReadCloser, expected *loonfs.ContentRef, cancel context.CancelFunc) (*verifiedReader, error) {
-	if expected == nil || expected.Checksum == nil || expected.SizeBytes < 0 {
-		return nil, fmt.Errorf("transfers: invalid content reference")
+	if expected == nil || expected.Checksum == nil {
+		return nil, fmt.Errorf("invalid content reference")
+	}
+	if expected.SizeBytes < 0 {
+		return nil, fmt.Errorf("invalid download size")
 	}
 	digest, err := newChecksum(expected.Checksum.Algorithm)
 	if err != nil {
 		return nil, err
 	}
-	return &verifiedReader{ctx: ctx, body: body, cancel: cancel, hash: digest, expected: expected}, nil
+	return &verifiedReader{ctx: ctx, body: body, cancel: cancel, hash: digest, expectedSize: expected.SizeBytes, expectedChecksum: expected.Checksum.Value}, nil
 }
 
 func (r *verifiedReader) Read(buffer []byte) (int, error) {
@@ -202,18 +202,23 @@ func (r *verifiedReader) Read(buffer []byte) (int, error) {
 		buffer = buffer[:transferChunkBytes]
 	}
 	n, err := r.body.Read(buffer)
+	if err != nil && err != io.EOF {
+		r.terminal = err
+		r.Close()
+		return n, err
+	}
 	r.count += int64(n)
-	if r.count > r.expected.SizeBytes {
-		r.terminal = fmt.Errorf("transfers: download exceeded expected size %d", r.expected.SizeBytes)
+	if r.count > r.expectedSize {
+		r.terminal = fmt.Errorf("download exceeded expected size %d", r.expectedSize)
 		r.Close()
 		return 0, r.terminal
 	}
 	r.hash.Write(buffer[:n])
 	if err == io.EOF {
-		if r.count != r.expected.SizeBytes {
-			err = fmt.Errorf("transfers: download returned %d bytes, expected %d", r.count, r.expected.SizeBytes)
-		} else if hex.EncodeToString(r.hash.Sum(nil)) != r.expected.Checksum.Value {
-			err = fmt.Errorf("transfers: download checksum mismatch")
+		if r.count != r.expectedSize {
+			err = fmt.Errorf("download returned %d bytes, expected %d", r.count, r.expectedSize)
+		} else if hex.EncodeToString(r.hash.Sum(nil)) != r.expectedChecksum {
+			err = fmt.Errorf("download checksum mismatch")
 		}
 	}
 	if err != nil {
@@ -234,21 +239,21 @@ func (r *verifiedReader) Close() error {
 
 func validateDownloadRanges(ranges []*loonfs.DownloadRange, sizeBytes int64) error {
 	if len(ranges) == 0 || (sizeBytes == 0 && len(ranges) != 1) {
-		return fmt.Errorf("transfers: download grant has invalid ranges")
+		return fmt.Errorf("download grant has invalid ranges")
 	}
 	var offset int64
 	for _, part := range ranges {
 		if part == nil || part.StartOffset != offset || part.Length < 0 ||
 			(part.Length == 0 && sizeBytes != 0) || part.Length > sizeBytes-offset {
-			return fmt.Errorf("transfers: download grant has invalid ranges")
+			return fmt.Errorf("download grant has invalid ranges")
 		}
 		if part.Access == nil || part.Access.PresignedURL == nil || part.Access.PresignedURL.Method != http.MethodGet {
-			return fmt.Errorf("transfers: download grant must use GET")
+			return fmt.Errorf("download grant must use GET")
 		}
 		offset += part.Length
 	}
 	if offset != sizeBytes {
-		return fmt.Errorf("transfers: download grant has invalid ranges")
+		return fmt.Errorf("download grant has invalid ranges")
 	}
 	return nil
 }
@@ -290,15 +295,18 @@ func (r *downloadRangeReader) Read(buffer []byte) (int, error) {
 			r.body, r.remaining = response.Body, part.Length
 		}
 		n, err := r.body.Read(buffer)
+		if err != nil && err != io.EOF {
+			return n, err
+		}
 		r.remaining -= int64(n)
 		if r.remaining < 0 {
-			return 0, fmt.Errorf("transfers: download range exceeded its declared length")
+			return 0, fmt.Errorf("download range exceeded its declared length")
 		}
 		if err == io.EOF {
 			r.body.Close()
 			r.body = nil
 			if r.remaining != 0 {
-				return n, fmt.Errorf("transfers: download range ended before its declared length")
+				return n, fmt.Errorf("download range ended before its declared length")
 			}
 			if n == 0 {
 				continue

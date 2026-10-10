@@ -7,7 +7,8 @@
     "size_bytes": 9,
     "error": false,
     "mode": "service_proxied",
-    "size": 9
+    "size": 9,
+    "store_shape": "local"
   },
   {
     "name": "crc64nvme_direct_put",
@@ -17,7 +18,8 @@
     "size_bytes": 9,
     "error": false,
     "mode": "direct_put",
-    "size": 9
+    "size": 9,
+    "store_shape": "s3"
   },
   {
     "name": "crc64nvme_direct_multipart",
@@ -27,7 +29,8 @@
     "size_bytes": 9,
     "error": false,
     "mode": "direct_multipart",
-    "size": null
+    "size": null,
+    "store_shape": "s3"
   },
   {
     "name": "crc32c_service_proxied",
@@ -37,7 +40,8 @@
     "size_bytes": 9,
     "error": false,
     "mode": "service_proxied",
-    "size": 9
+    "size": 9,
+    "store_shape": "gcs"
   },
   {
     "name": "crc32c_direct_put",
@@ -47,17 +51,8 @@
     "size_bytes": 9,
     "error": false,
     "mode": "direct_put",
-    "size": 9
-  },
-  {
-    "name": "crc32c_direct_multipart",
-    "content": "123456789",
-    "algorithm": "crc32c",
-    "checksum": "e3069283",
-    "size_bytes": 9,
-    "error": false,
-    "mode": "direct_multipart",
-    "size": null
+    "size": 9,
+    "store_shape": "gcs"
   },
   {
     "name": "empty_service_proxied",
@@ -67,7 +62,8 @@
     "size_bytes": 0,
     "error": false,
     "mode": "service_proxied",
-    "size": 0
+    "size": 0,
+    "store_shape": "local"
   },
   {
     "name": "service_proxied_source_error",
@@ -78,7 +74,8 @@
     "error": true,
     "mode": "service_proxied",
     "size": 9,
-    "fault": "source_error"
+    "fault": "source_error",
+    "store_shape": "local"
   },
   {
     "name": "service_proxied_payload_error",
@@ -89,7 +86,8 @@
     "error": true,
     "mode": "service_proxied",
     "size": 9,
-    "fault": "payload_error"
+    "fault": "payload_error",
+    "store_shape": "local"
   },
   {
     "name": "service_proxied_completion_error",
@@ -100,7 +98,8 @@
     "error": true,
     "mode": "service_proxied",
     "size": 9,
-    "fault": "completion_error"
+    "fault": "completion_error",
+    "store_shape": "local"
   },
   {
     "name": "service_proxied_size_8",
@@ -110,7 +109,8 @@
     "size_bytes": 9,
     "error": true,
     "mode": "service_proxied",
-    "size": 8
+    "size": 8,
+    "store_shape": "local"
   },
   {
     "name": "service_proxied_size_10",
@@ -120,7 +120,8 @@
     "size_bytes": 9,
     "error": true,
     "mode": "service_proxied",
-    "size": 10
+    "size": 10,
+    "store_shape": "local"
   },
   {
     "name": "proxy_unknown",
@@ -130,7 +131,8 @@
     "size_bytes": 9,
     "error": false,
     "mode": "service_proxied",
-    "size": null
+    "size": null,
+    "store_shape": "local"
   },
   {
     "name": "direct_put_source_error",
@@ -141,7 +143,8 @@
     "error": true,
     "mode": "direct_put",
     "size": 9,
-    "fault": "source_error"
+    "fault": "source_error",
+    "store_shape": "s3"
   },
   {
     "name": "direct_put_payload_error",
@@ -152,7 +155,8 @@
     "error": true,
     "mode": "direct_put",
     "size": 9,
-    "fault": "payload_error"
+    "fault": "payload_error",
+    "store_shape": "s3"
   },
   {
     "name": "direct_put_completion_error",
@@ -163,7 +167,8 @@
     "error": true,
     "mode": "direct_put",
     "size": 9,
-    "fault": "completion_error"
+    "fault": "completion_error",
+    "store_shape": "s3"
   },
   {
     "name": "direct_put_size_8",
@@ -173,7 +178,8 @@
     "size_bytes": 9,
     "error": true,
     "mode": "direct_put",
-    "size": 8
+    "size": 8,
+    "store_shape": "s3"
   },
   {
     "name": "direct_put_size_10",
@@ -183,7 +189,8 @@
     "size_bytes": 9,
     "error": true,
     "mode": "direct_put",
-    "size": 10
+    "size": 10,
+    "store_shape": "s3"
   },
   {
     "name": "direct_multipart_source_error",
@@ -194,7 +201,8 @@
     "error": true,
     "mode": "direct_multipart",
     "size": null,
-    "fault": "source_error"
+    "fault": "source_error",
+    "store_shape": "s3"
   },
   {
     "name": "direct_multipart_payload_error",
@@ -205,7 +213,8 @@
     "error": true,
     "mode": "direct_multipart",
     "size": null,
-    "fault": "payload_error"
+    "fault": "payload_error",
+    "store_shape": "s3"
   },
   {
     "name": "direct_multipart_completion_error",
@@ -216,7 +225,8 @@
     "error": true,
     "mode": "direct_multipart",
     "size": null,
-    "fault": "completion_error"
+    "fault": "completion_error",
+    "store_shape": "s3"
   },
   {
     "name": "service_proxied_timeout",
@@ -227,7 +237,8 @@
     "error": true,
     "mode": "service_proxied",
     "size": 9,
-    "fault": "timeout"
+    "fault": "timeout",
+    "store_shape": "local"
   },
   {
     "name": "direct_put_timeout",
@@ -238,7 +249,8 @@
     "error": true,
     "mode": "direct_put",
     "size": 9,
-    "fault": "timeout"
+    "fault": "timeout",
+    "store_shape": "s3"
   },
   {
     "name": "direct_multipart_timeout",
@@ -249,7 +261,8 @@
     "error": true,
     "mode": "direct_multipart",
     "size": null,
-    "fault": "timeout"
+    "fault": "timeout",
+    "store_shape": "s3"
   },
   {
     "name": "inline_fallback_service_proxied",
@@ -260,7 +273,8 @@
     "error": false,
     "mode": "service_proxied",
     "size": 9,
-    "inline_limit": 2
+    "inline_limit": 2,
+    "store_shape": "local"
   },
   {
     "name": "inline_fallback_direct_put",
@@ -271,7 +285,8 @@
     "error": false,
     "mode": "direct_put",
     "size": 9,
-    "inline_limit": 2
+    "inline_limit": 2,
+    "store_shape": "s3"
   },
   {
     "name": "inline_fallback_direct_multipart",
@@ -282,6 +297,29 @@
     "error": false,
     "mode": "direct_multipart",
     "size": null,
-    "inline_limit": 2
+    "inline_limit": 2,
+    "store_shape": "s3"
+  },
+  {
+    "name": "s3_small_proxied",
+    "content": "123456789",
+    "algorithm": "crc64nvme",
+    "checksum": "ae8b14860a799888",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "service_proxied",
+    "size": 9,
+    "store_shape": "s3"
+  },
+  {
+    "name": "gcs_unknown_proxied",
+    "content": "123456789",
+    "algorithm": "crc32c",
+    "checksum": "e3069283",
+    "size_bytes": 9,
+    "error": false,
+    "mode": "service_proxied",
+    "size": null,
+    "store_shape": "gcs"
   }
 ]
