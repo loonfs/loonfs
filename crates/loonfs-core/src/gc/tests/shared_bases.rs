@@ -1,5 +1,7 @@
 use super::*;
 use crate::bloom_filter::BloomFilter;
+use crate::gc::content::ContentSweep;
+use crate::gc::live_set::LiveSet;
 use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::manifest::tests::{
     build_namespace_manifest_from_metadata_state, write_namespace_manifest, ManifestMetadataSource,
@@ -44,10 +46,22 @@ async fn shared_layout_manifest(
     namespace_id: &NamespaceId,
     rows: usize,
 ) -> (NamespaceManifestPayload, BTreeSet<String>) {
+    layout_manifest(
+        store,
+        namespace_id,
+        (0..rows).map(|index| shared_layout(namespace_id, index)),
+    )
+    .await
+}
+
+async fn layout_manifest(
+    store: &impl ObjectStore,
+    namespace_id: &NamespaceId,
+    rows: impl IntoIterator<Item = ContentLayoutRecord>,
+) -> (NamespaceManifestPayload, BTreeSet<String>) {
     let mut state = MetadataStateBuilder::default();
     let mut keys = BTreeSet::new();
-    for index in 0..rows {
-        let row = shared_layout(namespace_id, index);
+    for row in rows {
         for extent in &row.layout.extents {
             let key = extent_object_key(extent);
             store
@@ -191,10 +205,10 @@ async fn a_shared_base_false_positive_is_collected_with_a_later_pass_seed() {
     let (manifest, protected) = shared_layout_manifest(&store, &namespace_id, 1).await;
     publish_layout_manifest(&store, manifest).await;
     let base_key = extent_object_key(&shared_layout(&namespace_id, 0).layout.extents[0]);
-    let mut first = BloomFilter::new(4, GRACE_MS + 1).expect("filter");
-    let mut second = BloomFilter::new(4, GRACE_MS + 2).expect("filter");
-    first.insert(base_key.as_bytes());
-    second.insert(base_key.as_bytes());
+    let mut first = BloomFilter::new(1, GRACE_MS + 1).expect("filter");
+    let mut second = BloomFilter::new(1, GRACE_MS + 2).expect("filter");
+    first.insert(base_key.as_bytes()).expect("insert");
+    second.insert(base_key.as_bytes()).expect("insert");
     let orphan = (0..100_000)
         .map(|index| {
             content_blob(
@@ -258,7 +272,7 @@ async fn a_shared_filter_over_its_cap_skips_content_and_still_sweeps_other_famil
     );
     let namespace_id = NamespaceId::parse("shared-filter-cap").expect("namespace");
     let (mut manifest, _) = shared_layout_manifest(&store, &namespace_id, 1).await;
-    manifest.runs[0].segments[0].row_count = MAX_BLOOM_FILTER_BYTES as u64 / 5 + 1;
+    manifest.runs[0].segments[0].row_count = MAX_BLOOM_FILTER_BYTES as u64 * 8 / 10 + 1;
     publish_layout_manifest(&store, manifest).await;
     let orphan = content_blob(&namespace_id, &ContentId::generate());
     let temporary = temporary_object(&namespace_id);
@@ -294,5 +308,49 @@ async fn a_shared_filter_over_its_cap_skips_content_and_still_sweeps_other_famil
         if let RecordedOperation::Delete { key } = operation {
             assert_eq!(key, temporary);
         }
+    }
+}
+
+#[tokio::test]
+async fn shared_filter_growth_over_the_cap_skips_content_before_any_content_requests() {
+    let directory = tempdir().expect("directory");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("shared-filter-growth-cap").expect("namespace");
+    let mut row = shared_layout(&namespace_id, 0);
+    row.layout
+        .extents
+        .extend((1..16).map(|index| shared_layout(&namespace_id, index).layout.extents[0].clone()));
+    row.size_bytes = row.layout.extents.len() as u64;
+    let (manifest, _) = layout_manifest(&store, &namespace_id, [row]).await;
+    publish_layout_manifest(&store, manifest).await;
+    let context = context(GRACE_MS + 1);
+    let live = LiveSet::load(&store, None, &namespace_id, GRACE_MS, &context)
+        .await
+        .expect("roots");
+    for (byte_limit, expected_sweep) in [(40, true), (18, false)] {
+        store.reset();
+        let content = ContentSweep::load_with_byte_limit(
+            &store,
+            None,
+            &namespace_id,
+            &live,
+            128,
+            context.now_ms,
+            byte_limit,
+        )
+        .await
+        .expect("load content roots");
+        assert_eq!(content.is_some(), expected_sweep);
+        assert!(store.counts().gets > 0);
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.counts().deletes, 0);
+        let prefix = content_prefix(&namespace_id);
+        assert!(store
+            .snapshot()
+            .iter()
+            .all(|operation| !operation.key().starts_with(&prefix)));
     }
 }
