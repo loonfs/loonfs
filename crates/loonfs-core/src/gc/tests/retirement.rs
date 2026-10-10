@@ -223,6 +223,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         .expect("issued capability still writes after deletion");
     let options = GcOptions {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
+        ..Default::default()
     };
     let report = gc_namespace(
         &store,

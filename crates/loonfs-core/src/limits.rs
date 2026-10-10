@@ -146,6 +146,9 @@ pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 =
 /// Default age of an unreachable object before garbage collection may remove it.
 pub const GC_DEFAULT_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
 
+/// Layout rows one content shard covers; bounds the keys a pass holds for a shard.
+pub const GC_CONTENT_SHARD_ROWS: usize = 65_536;
+
 const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 
 /// Most parts one direct multipart upload may cut into. This is the

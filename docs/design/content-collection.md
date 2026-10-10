@@ -8,9 +8,9 @@ A base compaction keeps each file's revisions above the retention floor and its 
 
 ## The rule
 
-A content object owned by namespace `N` stays while one of these names its content ID:
+A content object owned by namespace `N` stays while a layout names that object or a tail or session root names its chain:
 
-1. A revision row in a manifest the pass already roots for its segments: `N`'s current manifest, a manifest a listed pin holds, or a manifest whose immediate successor is younger than `T`. The revision names a chain. The layout rows of the same views name the objects of the chains those revisions name.
+1. An extent owned by `N` in a layout row of a rooted view: `N`'s current manifest, a pinned manifest, or a manifest whose immediate successor is younger than `T` by its listed modification time. A successor listed without a time counts as young. An absent successor does not make the older manifest a root. A view whose layout segments are already covered adds no scan.
 2. A revision delta in `N`'s unfolded WAL tail, or an extent owned by `N` in the tail row state's layouts.
 3. An upload session record in `N`, whatever its status.
 
@@ -18,7 +18,7 @@ The pass deletes every other object under `namespaces/N/content/` whose provider
 
 One rule covers every way content becomes garbage. A completed session's cleanup removes only its record, after the content grace, and a later pass collects the object if nothing published it. An aborted session's cleanup deletes its object at once, and the pass collects anything a late write leaves after the record is gone. A retired namespace is the same rule with no roots and no age gate: the retirement sweep deletes its whole content prefix. A deleted namespace that has not retired keeps its content.
 
-The id set protects both the whole object and every span of a rooted chain. It also protects chains named only by another chain's layout. Superseded spans of a live chain remain until the sorted merge replaces the in-memory id set. An unreferenced layout does not root its objects.
+Layout roots protect exact object keys. A layout can name a shared base in another id shard; a separate shared-base set protects that key throughout the pass. Tail and session ids protect both the whole object and every span of their chains. An old span that no layout, tail, or session names can be collected even while its chain remains live.
 
 ## Why the roots are enough
 
@@ -26,14 +26,14 @@ A reader or writer works from a manifest that is current, pinned, or superseded 
 
 A fork's source pin roots its inherited revisions and layouts in the owner's namespace.
 
-The pass lists upload sessions before it reads the WAL tail and consults layout rows last. A session record is removed only after any admission evidence it could issue has expired. A session the pass does not list was either created after the listing or removed before it. Content of a session created later is younger than `T`. Every commit that names content of a removed session landed before the tail was read, so the tail or a rooted manifest names that content. In the other order, a commit of an upload's content could land after the tail read, and a concurrent collector could then remove the session record before the listing.
+The pass lists upload sessions before it reads the WAL tail and scans layout rows after loading the roots. A session record is removed only after any admission evidence it could issue has expired. A session the pass does not list was either created after the listing or removed before it. Content of a session created later is younger than `T`. Every commit that names content of a removed session landed before the tail was read, so the tail or a rooted manifest names that content. In the other order, a commit of an upload's content could land after the tail read, and a concurrent collector could then remove the session record before the listing.
 
 ## Costs
 
-- One scan of each of the `revisions` and `content_layouts` families for each distinct rooted manifest. A fork's scan also reads the segments it inherited.
-- One listing of the content prefix.
-- One listing of the upload sessions and one read of each record before the tail, besides the session sweep's own listing and reads.
-- One HEAD per unreferenced candidate, because the listing carries no timestamp.
-- The referenced content IDs, held in memory for the pass. Their table is charged to the shared read working memory, beside the blocks the scan reads through the shared segment cache, so a pass never holds more than the configured budget. A namespace whose live IDs do not fit fails the pass with an error that names the bytes and the limit, and is not collected until the limit is raised.
+- Two scans of the layout family per distinct layout view. The first collects shared bases. The second scans disjoint id ranges, one shard at a time. A fork's scans also read inherited segments.
+- One content listing per shard. The current manifest's layout segment row counts and `content_shard_rows` determine the shard count. The hex prefix width is the smallest `k` from 0 through 4 for which `rows / 16^k <= content_shard_rows`. There are `16^k` shards, visited in order. The default target is 65,536 rows per shard. Uneven id distribution can put more rows in one shard.
+- One listing of upload sessions and one read of each record before the tail, besides the session sweep's own listing and reads.
+- No HEAD requests during the sweep. Discovery keeps its HEAD probe for the current manifest's successor. Candidate ages and successor ages come from listing timestamps. Missing timestamps retain objects.
+- Memory for one shard's object keys, the shared-base keys, and the tail and session ids. All three sets are charged to the read working memory alongside scan blocks. A set that exceeds that budget fails the pass. The shard set is released before the next shard.
 
-A deleted namespace pays none of these.
+A deleted namespace pays none of these content-root costs.

@@ -20,6 +20,15 @@ pub type SharedObjectStore = Arc<dyn ObjectStore>;
 /// implementation cleans up whatever it had started.
 pub type ByteStream = BoxStream<'static, Result<Bytes>>;
 
+/// One object a listing reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedObject {
+    /// Object key relative to the store's configured prefix.
+    pub key: String,
+    /// Provider modification time, when the listing reports one.
+    pub last_modified_ms: Option<u64>,
+}
+
 /// Metadata returned by a successful `head`, full-object `get`, or `put` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectMetadata {
@@ -541,7 +550,24 @@ pub trait ObjectStore: Send + Sync + Debug {
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String>>;
+    ) -> BoxStream<'static, Result<String>> {
+        Box::pin(
+            self.list_entries_from_stream(prefix, start_after)
+                .map_ok(|entry| entry.key),
+        )
+    }
+
+    /// Streams objects under `prefix` strictly after `start_after` in ascending
+    /// key order, including modification times when the provider reports them.
+    ///
+    /// `start_after` is a durable key rather than a provider continuation
+    /// token. Invalid prefixes, invalid resume keys, and listing failures
+    /// arrive as stream items.
+    fn list_entries_from_stream(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> BoxStream<'static, Result<ListedObject>>;
 
     /// Collects every key under `prefix` in the order returned by the provider.
     ///
@@ -770,12 +796,12 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().list_prefix_stream(prefix)
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String>> {
-        self.as_ref().list_prefix_from_stream(prefix, start_after)
+    ) -> BoxStream<'static, Result<ListedObject>> {
+        self.as_ref().list_entries_from_stream(prefix, start_after)
     }
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
@@ -912,12 +938,12 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         (*self).list_prefix_stream(prefix)
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String>> {
-        (*self).list_prefix_from_stream(prefix, start_after)
+    ) -> BoxStream<'static, Result<ListedObject>> {
+        (*self).list_entries_from_stream(prefix, start_after)
     }
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
@@ -1072,13 +1098,16 @@ mod tests {
             Ok(())
         }
 
-        fn list_prefix_from_stream(
+        fn list_entries_from_stream(
             &self,
             _prefix: &str,
             _start_after: Option<&str>,
-        ) -> BoxStream<'static, Result<String>> {
+        ) -> BoxStream<'static, Result<ListedObject>> {
             self.resume_reached.store(true, Ordering::SeqCst);
-            Box::pin(stream::iter([Ok("resumed".to_owned())]))
+            Box::pin(stream::iter([Ok(ListedObject {
+                key: "resumed".to_owned(),
+                last_modified_ms: None,
+            })]))
         }
 
         async fn list_prefix(&self, _prefix: &str) -> Result<Vec<String>> {

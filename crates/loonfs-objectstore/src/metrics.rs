@@ -4,6 +4,7 @@
 use crate::attempts::counting_attempts;
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
+use crate::ListedObject;
 use crate::{
     ByteRange, ByteStream, ExtendBase, ExtendedObject, MultipartPart, ObjectBody, ObjectMetadata,
     ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, StoredObjectChecksum,
@@ -654,17 +655,17 @@ where
         result
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String>> {
+    ) -> BoxStream<'static, Result<ListedObject>> {
         // Streamed listings (WAL replay, GC) must not be invisible in the
         // metrics. The wrapper records one sample when the stream is
         // dropped — finished or abandoned — carrying the item count and
         // the first error's class.
         Box::pin(RecordedListStream {
-            inner: self.inner.list_prefix_from_stream(prefix, start_after),
+            inner: self.inner.list_entries_from_stream(prefix, start_after),
             recorder: Arc::clone(&self.recorder),
             store_kind: self.store_kind.clone(),
             prefix: prefix.to_owned(),
@@ -851,7 +852,7 @@ impl<S> InstrumentedObjectStore<S> {
 }
 
 struct RecordedListStream {
-    inner: BoxStream<'static, Result<String>>,
+    inner: BoxStream<'static, Result<ListedObject>>,
     recorder: Arc<dyn ObjectStoreMetricsRecorder>,
     store_kind: Option<String>,
     prefix: String,
@@ -861,7 +862,7 @@ struct RecordedListStream {
 }
 
 impl futures::Stream for RecordedListStream {
-    type Item = Result<String>;
+    type Item = Result<ListedObject>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,

@@ -4,6 +4,7 @@ use super::{OperationContext, OperationKind};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
+use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     ByteRange, ByteStream, ExtendBase, ExtendedObject, ImmutableWriteError, MultipartPart,
     ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
@@ -381,11 +382,11 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         Self::finish(&self.interceptor, &context, intercept, result, outcome)
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
         let prefix = prefix.to_owned();
         let start_after = start_after.map(str::to_owned);
         let inner = Arc::clone(&self.inner);
@@ -398,7 +399,8 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
                 match intercept {
                     Intercept::FailBefore(error) | Intercept::FailAfter(error) => Err(error),
                     Intercept::Continue | Intercept::ContinueWithAfter => {
-                        let stream = inner.list_prefix_from_stream(&prefix, start_after.as_deref());
+                        let stream =
+                            inner.list_entries_from_stream(&prefix, start_after.as_deref());
                         if calls_after {
                             interceptor.after(&context, &Outcome::Success);
                         }
@@ -409,7 +411,7 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
             .map(|result| match result {
                 Ok(stream) => stream,
                 Err(error) => Box::pin(stream::once(async move { Err(error) }))
-                    as BoxStream<'static, Result<String, ObjectStoreError>>,
+                    as BoxStream<'static, Result<ListedObject, ObjectStoreError>>,
             })
             .flatten(),
         )

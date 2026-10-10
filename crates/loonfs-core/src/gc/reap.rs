@@ -89,6 +89,15 @@ pub enum GraceAge {
 }
 
 impl GraceAge {
+    /// Compares a listed modification time with the pass's grace window.
+    pub fn of(last_modified_ms: Option<u64>, grace_window_ms: u64, now_ms: u64) -> Self {
+        match last_modified_ms {
+            None => Self::Unknown,
+            Some(modified) if now_ms.saturating_sub(modified) < grace_window_ms => Self::Young,
+            Some(_) => Self::Aged,
+        }
+    }
+
     /// The retention reason this outcome is, for a caller reporting why a
     /// pass kept what it kept. `None` for the two outcomes that retained
     /// nothing.
@@ -111,27 +120,9 @@ pub async fn grace_age<S: ObjectStore + ?Sized>(
     let Some(metadata) = store.head(key).await? else {
         return Ok(GraceAge::Gone);
     };
-    let Some(last_modified_ms) = metadata.last_modified_ms else {
-        return Ok(GraceAge::Unknown);
-    };
-    Ok(
-        match now_ms.saturating_sub(last_modified_ms) < grace_window_ms {
-            true => GraceAge::Young,
-            false => GraceAge::Aged,
-        },
-    )
-}
-
-/// Deletes an unreferenced object once its provider timestamp passes the age gate.
-pub async fn delete_if_aged<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    grace_window_ms: u64,
-    now_ms: u64,
-) -> std::result::Result<GraceAge, ObjectStoreError> {
-    let age = grace_age(store, key, grace_window_ms, now_ms).await?;
-    if age == GraceAge::Aged {
-        store.delete(key).await?;
-    }
-    Ok(age)
+    Ok(GraceAge::of(
+        metadata.last_modified_ms,
+        grace_window_ms,
+        now_ms,
+    ))
 }

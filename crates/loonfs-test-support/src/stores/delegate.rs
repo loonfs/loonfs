@@ -24,7 +24,7 @@ macro_rules! delegate_object_store {
             compare_and_swap,
             delete,
             list_prefix_stream,
-            list_prefix_from_stream,
+            list_entries_from_stream,
             list_prefix,
             list_child_prefixes,
         );
@@ -41,7 +41,7 @@ macro_rules! delegate_object_store {
             extend_object,
             delete,
             list_prefix_stream,
-            list_prefix_from_stream,
+            list_entries_from_stream,
             list_prefix,
             list_child_prefixes,
         );
@@ -65,7 +65,7 @@ macro_rules! delegate_object_store {
             compare_and_swap,
             delete,
             list_prefix_stream,
-            list_prefix_from_stream,
+            list_entries_from_stream,
             list_prefix,
             list_child_prefixes,
         );
@@ -329,16 +329,16 @@ macro_rules! __delegate_object_store_method {
             ::std::boxed::Box::pin(async move { $inner.delete(key).await })
         }
     };
-    (list_prefix_from_stream, $receiver:ident, $inner:expr) => {
-        fn list_prefix_from_stream(
+    (list_entries_from_stream, $receiver:ident, $inner:expr) => {
+        fn list_entries_from_stream(
             &$receiver,
             prefix: &str,
             start_after: Option<&str>,
         ) -> ::futures::stream::BoxStream<
             'static,
-            Result<String, ::loonfs_objectstore::ObjectStoreError>,
+            Result<::loonfs_objectstore::ListedObject, ::loonfs_objectstore::ObjectStoreError>,
         > {
-            $inner.list_prefix_from_stream(prefix, start_after)
+            $inner.list_entries_from_stream(prefix, start_after)
         }
     };
     (put_overwrite, $receiver:ident, $inner:expr) => {

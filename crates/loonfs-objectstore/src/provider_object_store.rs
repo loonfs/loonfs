@@ -10,6 +10,7 @@ use crate::object_store::{collect_stream, Result};
 use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
+use crate::ListedObject;
 use crate::{
     ByteRange, ByteStream, ConfiguredObjectStoreKind, ExtendBase, ExtendedObject, MultipartPart,
     ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
@@ -17,7 +18,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::{BoxFuture, FutureExt};
-use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt};
+use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt, TryStreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm};
 use loonfs_types::{EffectiveLimit, OperationDeadline, Page, TransportRetryPolicy};
 use object_store as provider_store;
@@ -374,19 +375,6 @@ impl ProviderObjectStore {
             object_key: key.to_owned(),
             message: err.to_string(),
         })
-    }
-
-    fn list_path(&self, prefix: &str) -> Result<Option<Path>> {
-        let scoped = scope_list_prefix(self.key_prefix.as_deref(), prefix)?;
-        if scoped.is_empty() {
-            return Ok(None);
-        }
-        Path::parse(scoped)
-            .map(Some)
-            .map_err(|err| ObjectStoreError::InvalidKey {
-                object_key: prefix.to_owned(),
-                message: err.to_string(),
-            })
     }
 
     fn unscoped(&self, scoped_key: &str) -> Option<String> {
@@ -1193,55 +1181,88 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String>> {
-        let prefix_path = match self.list_path(prefix) {
-            Ok(prefix_path) => prefix_path,
+    ) -> BoxStream<'static, Result<ListedObject>> {
+        let scoped_prefix = match scope_list_prefix(self.key_prefix.as_deref(), prefix) {
+            Ok(scoped_prefix) => scoped_prefix,
             Err(err) => return stream::once(async { Err(err) }).boxed(),
         };
+        if let Err(err) = Path::parse(&scoped_prefix) {
+            let error = ObjectStoreError::InvalidKey {
+                object_key: prefix.to_owned(),
+                message: err.to_string(),
+            };
+            return stream::once(async { Err(error) }).boxed();
+        }
         let offset = match start_after.map(|key| self.to_path(key)).transpose() {
-            Ok(offset) => offset,
+            Ok(offset) => offset.map(|path| path.to_string()),
             Err(err) => return stream::once(async { Err(err) }).boxed(),
         };
         let key_prefix = self.key_prefix.clone();
         let listed_prefix = prefix.to_owned();
         let start_after = start_after.map(str::to_owned);
-        let listed = match offset.as_ref() {
-            Some(offset) => self.inner.list_with_offset(prefix_path.as_ref(), offset),
-            None => self.inner.list(prefix_path.as_ref()),
+        let paginated = Arc::clone(&self.paginated);
+        let options = PaginatedListOptions {
+            offset,
+            ..Default::default()
         };
-        listed
-            .filter_map(move |result| {
-                let key_prefix = key_prefix.clone();
-                let listed_prefix = listed_prefix.clone();
-                let start_after = start_after.clone();
-                async move {
-                    match result {
-                        Ok(meta) => {
-                            let key = meta.location.as_ref();
-                            let key = match key_prefix.as_deref() {
-                                Some(prefix) => unscope_listed_key(Some(prefix), key).map(Ok),
-                                None => Some(Ok(key.to_owned())),
-                            };
-                            match key {
-                                Some(Ok(key))
-                                    if start_after
-                                        .as_deref()
-                                        .is_some_and(|start_after| key.as_str() <= start_after) =>
-                                {
-                                    None
-                                }
-                                other => other,
-                            }
+        stream::try_unfold(Some(options), move |options| {
+            let paginated = Arc::clone(&paginated);
+            let scoped_prefix = scoped_prefix.clone();
+            async move {
+                let Some(options) = options else {
+                    return Ok::<_, provider_store::Error>(None);
+                };
+                let next_options = options.clone();
+                let page = paginated
+                    .list_paginated(
+                        Some(scoped_prefix.as_str()).filter(|prefix| !prefix.is_empty()),
+                        options,
+                    )
+                    .await?;
+                let next = page.page_token.map(|page_token| PaginatedListOptions {
+                    page_token: Some(page_token),
+                    ..next_options
+                });
+                Ok(Some((page.result.objects, next)))
+            }
+        })
+        .map_ok(|objects| stream::iter(objects.into_iter().map(Ok)))
+        .try_flatten()
+        .filter_map(move |result| {
+            let key_prefix = key_prefix.clone();
+            let listed_prefix = listed_prefix.clone();
+            let start_after = start_after.clone();
+            async move {
+                match result {
+                    Ok(meta) => {
+                        let key = meta.location.as_ref();
+                        let key = match key_prefix.as_deref() {
+                            Some(prefix) => unscope_listed_key(Some(prefix), key)?,
+                            None => key.to_owned(),
+                        };
+                        if !key.starts_with(&listed_prefix)
+                            || start_after
+                                .as_deref()
+                                .is_some_and(|after| key.as_str() <= after)
+                        {
+                            return None;
                         }
-                        Err(err) => Some(Err(map_provider_error(&listed_prefix, err))),
+                        Some(Ok(ListedObject {
+                            key,
+                            last_modified_ms: last_modified_ms(
+                                meta.last_modified.timestamp_millis(),
+                            ),
+                        }))
                     }
+                    Err(err) => Some(Err(map_provider_error(&listed_prefix, err))),
                 }
-            })
-            .boxed()
+            }
+        })
+        .boxed()
     }
 
     async fn list_child_prefixes(
@@ -1600,7 +1621,7 @@ mod tests {
             Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&inner) as Arc<dyn provider_store::ObjectStore>,
             Arc::clone(&inner) as Arc<dyn MultipartStore>,
-            Arc::new(DelimiterPages(inner)),
+            Arc::new(MemoryPages(inner)),
             ProviderObjectStoreConfig {
                 key_prefix: Some("tenant-a".to_owned()),
             },
@@ -1610,25 +1631,20 @@ mod tests {
         .expect("provider store")
     }
 
-    /// Answers paged delimiter listings over an in-memory provider, which
-    /// does not offer them itself.
-    struct DelimiterPages(Arc<InMemory>);
+    struct MemoryPages(Arc<InMemory>);
 
     #[async_trait]
-    impl PaginatedListStore for DelimiterPages {
+    impl PaginatedListStore for MemoryPages {
         async fn list_paginated(
             &self,
             prefix: Option<&str>,
             options: PaginatedListOptions,
         ) -> provider_store::Result<PaginatedListResult> {
-            delimiter_page(&self.0, prefix, options).await
+            memory_page(&self.0, prefix, options).await
         }
     }
 
-    /// Builds one page the way S3 does: keys after `offset` roll up into a
-    /// common prefix at the first `/` past `prefix`, and objects and common
-    /// prefixes share `max_keys`.
-    async fn delimiter_page(
+    async fn memory_page(
         store: &InMemory,
         prefix: Option<&str>,
         options: PaginatedListOptions,
@@ -1642,18 +1658,25 @@ mod tests {
         let mut objects = Vec::new();
         let mut common_prefixes: Vec<String> = Vec::new();
         let mut truncated = false;
+        let mut last_key = None;
         for meta in listed {
             let key = meta.location.as_ref().to_owned();
             let after_offset = options
                 .offset
                 .as_deref()
                 .is_none_or(|offset| key.as_str() > offset);
-            if !key.starts_with(prefix) || !after_offset {
+            let after_page = options
+                .page_token
+                .as_deref()
+                .is_none_or(|token| key.as_str() > token);
+            if !key.starts_with(prefix) || !after_offset || !after_page {
                 continue;
             }
-            let common = key[prefix.len()..]
-                .find('/')
-                .map(|end| key[..prefix.len() + end + 1].to_owned());
+            let common = options.delimiter.as_deref().and_then(|delimiter| {
+                key[prefix.len()..]
+                    .find(delimiter)
+                    .map(|end| key[..prefix.len() + end + delimiter.len()].to_owned())
+            });
             if common.is_some() && common.as_ref() == common_prefixes.last() {
                 continue;
             }
@@ -1661,6 +1684,7 @@ mod tests {
                 truncated = true;
                 break;
             }
+            last_key = Some(key);
             match common {
                 Some(common) => common_prefixes.push(common),
                 None => objects.push(meta),
@@ -1675,7 +1699,7 @@ mod tests {
                 objects,
                 extensions: Default::default(),
             },
-            page_token: truncated.then(|| "more".to_owned()),
+            page_token: if truncated { last_key } else { None },
         })
     }
 
@@ -1831,6 +1855,44 @@ mod tests {
             store.list_prefix("namespaces/demo/").await.expect("list"),
             vec![key.to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn partial_key_prefixes_keep_times_and_resume_across_provider_pages() {
+        let store = memory_store();
+        let prefix = "objects/con_a";
+        let keys: Vec<_> = (0..1002)
+            .map(|index| format!("{prefix}{index:04x}/full"))
+            .collect();
+        for key in keys
+            .iter()
+            .map(String::as_str)
+            .chain(["objects/con_b/full"])
+        {
+            store
+                .put_overwrite(key, Bytes::from_static(b"listed"))
+                .await
+                .expect("put");
+        }
+        let entries: Vec<_> = store
+            .list_entries_from_stream(prefix, None)
+            .try_collect()
+            .await
+            .expect("list pages");
+        assert_eq!(
+            entries.iter().map(|entry| &entry.key).collect::<Vec<_>>(),
+            keys.iter().collect::<Vec<_>>()
+        );
+        for entry in entries {
+            let head = store.head(&entry.key).await.expect("head").expect("exists");
+            assert_eq!(entry.last_modified_ms, head.last_modified_ms);
+        }
+        let remaining: Vec<_> = store
+            .list_prefix_from_stream(prefix, Some(&keys[999]))
+            .try_collect()
+            .await
+            .expect("resume");
+        assert_eq!(remaining, keys[1000..]);
     }
 
     #[tokio::test]
@@ -2227,7 +2289,7 @@ mod tests {
             prefix: Option<&str>,
             options: PaginatedListOptions,
         ) -> provider_store::Result<PaginatedListResult> {
-            delimiter_page(&self.inner, prefix, options).await
+            memory_page(&self.inner, prefix, options).await
         }
     }
 

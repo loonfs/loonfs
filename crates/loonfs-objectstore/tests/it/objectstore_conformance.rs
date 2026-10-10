@@ -549,7 +549,7 @@ async fn child_page(
 /// Checks that every provider resumes after the given key in sorted order.
 async fn assert_start_after_contract(store: &dyn ObjectStore) {
     let run_id = loonfs_types::generated_id("list");
-    let prefix = format!("start-after/{run_id}/");
+    let prefix = format!("start-after/{run_id}/entry-");
     let keys = [
         format!("{prefix}a"),
         format!("{prefix}b"),
@@ -568,6 +568,28 @@ async fn assert_start_after_contract(store: &dyn ObjectStore) {
         .await
         .expect("list from prefix start");
     assert_eq!(all, keys);
+
+    let entries = store
+        .list_entries_from_stream(&prefix, None)
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("list entries with timestamps");
+    assert_eq!(
+        entries.iter().map(|entry| &entry.key).collect::<Vec<_>>(),
+        keys.iter().collect::<Vec<_>>()
+    );
+    for entry in entries {
+        let metadata = store
+            .head(&entry.key)
+            .await
+            .expect("head listed object")
+            .expect("listed object exists");
+        assert_eq!(
+            entry.last_modified_ms, metadata.last_modified_ms,
+            "{}",
+            entry.key
+        );
+    }
 
     let after_exact = store
         .list_prefix_from_stream(&prefix, Some(&keys[0]))

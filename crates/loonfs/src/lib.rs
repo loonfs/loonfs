@@ -120,7 +120,7 @@ pub mod engine {
     };
     pub use loonfs_core::time::{Deadline, Observation};
     pub use loonfs_core::{
-        delete_if_aged, grace_age, next_run_no_after, refill_iterators, select_next_iterator,
+        grace_age, next_run_no_after, refill_iterators, select_next_iterator,
         write_segments_in_waves, GraceAge, SegmentBlockLoader, SegmentRowIterator,
     };
 }

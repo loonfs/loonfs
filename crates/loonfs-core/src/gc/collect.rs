@@ -1,5 +1,6 @@
 //! One namespace collection call with a fixed clock and no durable progress.
 
+use super::content::ContentSweep;
 use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementState};
 use super::reclaim::reclaim_namespace;
@@ -13,7 +14,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::{GcResponse, NamespaceId};
 
 /// Collects one namespace. The root scan reads through `segment_cache`
-/// and charges the content ids it holds to that cache's read working
+/// and charges the content roots it holds to that cache's read working
 /// memory, so a pass never holds more than the configured budget.
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -40,6 +41,16 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         RetirementState::Retained { until_ms } => until_ms,
         _ => None,
     };
+    let content = ContentSweep::load(
+        store,
+        segment_cache,
+        namespace_id,
+        &live,
+        options.content_shard_rows,
+    )
+    .await?;
+    tracing::info!(namespace_id = %namespace_id, shard_width = content.shard_width,
+        layout_views = content.view_count(), "collecting namespace");
     let mut sweep = Sweep {
         store,
         namespace_id,
@@ -49,18 +60,21 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         report: &mut report,
     };
     for family in CandidateFamily::ALL {
-        if family == CandidateFamily::Content && live.namespace_deleted {
+        if family == CandidateFamily::Content {
+            if !live.namespace_deleted {
+                content.sweep(&mut sweep, segment_cache).await?;
+            }
             continue;
         }
         let prefix = family.prefix(namespace_id);
-        let mut listing = store.list_prefix_stream(&prefix);
-        while let Some(key) = listing
+        let mut listing = store.list_entries_from_stream(&prefix, None);
+        while let Some(entry) = listing
             .next()
             .await
             .transpose()
             .map_err(|error| CoreError::store(&prefix, &error))?
         {
-            sweep.candidate(family, &key).await?;
+            sweep.candidate(family, &entry).await?;
         }
     }
     reclaim_namespace(store, &live, &mut report).await?;

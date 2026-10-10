@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::Stream;
+use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     ByteRange, ByteStream, ExtendBase, ExtendedObject, ImmutableWriteError, ObjectBody,
     ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
@@ -607,11 +608,11 @@ where
         .await
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
         let op = self.next_object_op(ObjectOperationKind::ListPrefix, prefix);
         let scheduled = self.scheduled_fault(&op);
         let (operation, fault, omit_key, skipped_reason) =
@@ -639,7 +640,7 @@ where
             };
 
         Box::pin(TracedListStream {
-            inner: self.inner.list_prefix_from_stream(prefix, start_after),
+            inner: self.inner.list_entries_from_stream(prefix, start_after),
             trace: self.trace.clone(),
             op: Some(op),
             operation,
@@ -651,7 +652,7 @@ where
 }
 
 struct TracedListStream {
-    inner: BoxStream<'static, Result<String, ObjectStoreError>>,
+    inner: BoxStream<'static, Result<ListedObject, ObjectStoreError>>,
     trace: SharedSimTrace,
     op: Option<ObjectOperation>,
     operation: &'static str,
@@ -675,12 +676,14 @@ impl TracedListStream {
 }
 
 impl Stream for TracedListStream {
-    type Item = Result<String, ObjectStoreError>;
+    type Item = Result<ListedObject, ObjectStoreError>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match self.inner.as_mut().poll_next(context) {
-                Poll::Ready(Some(Ok(key))) if self.omit_key.as_deref() == Some(key.as_str()) => {
+                Poll::Ready(Some(Ok(entry)))
+                    if self.omit_key.as_deref() == Some(entry.key.as_str()) =>
+                {
                     self.omit_key = None;
                 }
                 Poll::Ready(Some(Ok(key))) => return Poll::Ready(Some(Ok(key))),

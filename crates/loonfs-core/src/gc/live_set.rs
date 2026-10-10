@@ -3,36 +3,29 @@
 //! while their successor is younger than the pass's grace window or has no
 //! provider timestamp.
 
-use super::reap::{grace_age, GraceAge};
+use super::charged_set::ChargedSet;
+use super::reap::GraceAge;
 use super::uploads::protect_session_content;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::heap_bytes::{hash_set_table_bytes, HeapBytes};
 use crate::limits::NAMESPACE_RETIREMENT_GRACE_MS;
 use crate::manifest::cache::read_working_memory;
-use crate::manifest::{
-    load_namespace_manifest_envelope_if_present, metadata_basis_from_manifest, MetadataSegmentCache,
-};
-use crate::metadata::row_decode::{content_layout_from_manifest_row, revision_from_manifest_row};
+use crate::manifest::{load_namespace_manifest_envelope_if_present, MetadataSegmentCache};
 use crate::namespace::control::{load_current_manifest_with_hint, CurrentManifest, LoadedManifest};
 use crate::namespace::read_anchor::{load_read_anchor_from_manifest, project_anchor_tail};
 use crate::pin::record::pin_key_ids;
-use crate::read_working_memory::ReadWorkingMemory;
 use crate::time::{Observation, StdMonotonicTimer};
 use crate::wal::{live_folded_wal_no, object_is_required};
 use futures::StreamExt;
 use loonfs_objectstore::keys::{
     metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key, pin_prefix,
 };
-use loonfs_objectstore::layout::{content_id_of, manifest_no_of};
+use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::{lookup_keys, MetadataRowFamily, NamespaceManifestPayload};
-use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
-use loonfs_types::{ContentId, ContentRef, ManifestNo, NamespaceId, WalNo};
-use std::collections::{BTreeSet, HashSet};
+use loonfs_types::format::manifest::{MetadataRowFamily, NamespaceManifestPayload};
+use loonfs_types::{ContentId, ManifestNo, NamespaceId, WalNo};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-
-const CONTENT_ROOT_PAGE_ROWS: usize = 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum RetirementState {
@@ -41,70 +34,18 @@ pub(super) enum RetirementState {
     Eligible,
 }
 
-/// Protects current and pinned manifests, plus superseded manifests whose
-/// successor is within the pass's grace window or has an unknown age. In an
-/// active namespace it also holds the owned content IDs those manifests, the
-/// WAL tail, and the upload sessions name.
 pub(super) struct LiveSet {
     pub(super) namespace_deleted: bool,
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
-    content_roots: ContentRoots,
-    manifests: Vec<LoadedManifest>,
+    pub(super) content_ids: ChargedSet<ContentId>,
+    pub(super) manifests: Vec<LoadedManifest>,
+    pub(super) content_layout_rows: u64,
     has_pins: bool,
     grace_window_ms: u64,
     now_ms: u64,
     live_folded_wal_no: Option<WalNo>,
-}
-
-/// The content ids the roots name. Their table is charged to the read
-/// working memory as it grows, beside the scan's own blocks, so a pass over
-/// a namespace with more live content than the budget holds fails instead
-/// of growing past it.
-struct ContentRoots {
-    namespace_id: NamespaceId,
-    ids: HashSet<ContentId>,
-    id_heap_bytes: usize,
-    memory: Arc<ReadWorkingMemory>,
-    reserved_bytes: usize,
-}
-
-impl ContentRoots {
-    fn new(namespace_id: &NamespaceId, memory: Arc<ReadWorkingMemory>) -> Self {
-        Self {
-            namespace_id: namespace_id.clone(),
-            ids: HashSet::new(),
-            id_heap_bytes: 0,
-            memory,
-            reserved_bytes: 0,
-        }
-    }
-
-    fn insert(&mut self, content_id: &ContentId) -> Result<()> {
-        if !self.ids.insert(content_id.clone()) {
-            return Ok(());
-        }
-        self.id_heap_bytes += content_id.heap_bytes();
-        let bytes = hash_set_table_bytes(&self.ids) + self.id_heap_bytes;
-        if bytes > self.reserved_bytes {
-            if !self.memory.try_reserve(bytes - self.reserved_bytes) {
-                return Err(CoreError::ContentRootsExceedReadMemory {
-                    namespace_id: self.namespace_id.clone(),
-                    bytes,
-                    limit: self.memory.limit(),
-                });
-            }
-            self.reserved_bytes = bytes;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for ContentRoots {
-    fn drop(&mut self) {
-        self.memory.release(self.reserved_bytes);
-    }
 }
 
 impl LiveSet {
@@ -124,10 +65,10 @@ impl LiveSet {
         // Sessions are listed before the WAL tail is read. A session this pass
         // misses is newer than the pass, or it ended before the tail read and
         // the tail or a rooted manifest names every commit of its content.
-        let mut content_roots = ContentRoots::new(namespace_id, read_working_memory(segment_cache));
+        let mut content_ids = ChargedSet::new(namespace_id, read_working_memory(segment_cache));
         if !manifest.state.envelope.payload().status.is_deleted() {
             protect_session_content(store, namespace_id, |content_id| {
-                content_roots.insert(&content_id)
+                content_ids.insert(content_id)
             })
             .await?;
         }
@@ -139,7 +80,14 @@ impl LiveSet {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
             objects: BTreeSet::new(),
-            content_roots,
+            content_ids,
+            content_layout_rows: head
+                .runs
+                .iter()
+                .flat_map(|run| &run.segments)
+                .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
+                .map(|segment| segment.row_count)
+                .sum(),
             manifests: Vec::new(),
             has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
@@ -148,17 +96,17 @@ impl LiveSet {
         };
         // A tombstone roots its runs like any current manifest: an import from
         // a deleted owner is still authorized against its final access state.
-        live.protect_manifest(store, segment_cache, &anchor.manifest)
-            .await?;
+        live.protect_manifest(&anchor.manifest);
         if !live.namespace_deleted {
             let tail = project_anchor_tail(store, segment_cache, &anchor).await?;
             for revision in tail.rows.revisions() {
-                live.protect_content(&revision.content_ref)?;
+                live.content_ids
+                    .insert(revision.content_ref.content_id.clone())?;
             }
             for row in tail.rows.content_layouts() {
                 for extent in &row.layout.extents {
-                    if extent.owner_namespace_id == live.content_roots.namespace_id {
-                        live.content_roots.insert(&extent.content_id)?;
+                    if extent.owner_namespace_id == *namespace_id {
+                        live.content_ids.insert(extent.content_id.clone())?;
                     }
                 }
             }
@@ -178,13 +126,7 @@ impl LiveSet {
             }
             let (_, pin_id) = pin_key_ids(&key).map_err(CoreError::ControlObjectLoad)?;
             if live
-                .load_manifest(
-                    store,
-                    segment_cache,
-                    namespace_id,
-                    pin_id.manifest_no(),
-                    &mut manifests,
-                )
+                .load_manifest(store, namespace_id, pin_id.manifest_no(), &mut manifests)
                 .await?
             {
                 continue;
@@ -208,42 +150,36 @@ impl LiveSet {
             }
         }
         let prefix = metadata_manifest_prefix(namespace_id);
-        let mut listing = store.list_prefix_stream(&prefix);
-        while let Some(key) = listing
+        let mut listing = store.list_entries_from_stream(&prefix, None);
+        let mut listed_manifests = BTreeMap::new();
+        while let Some(entry) = listing
             .next()
             .await
             .transpose()
             .map_err(|error| CoreError::store(&prefix, &error))?
         {
-            let Some(manifest_no) = manifest_no_of(&key) else {
-                continue;
-            };
+            if let Some(manifest_no) = manifest_no_of(&entry.key) {
+                listed_manifests.insert(manifest_no, entry.last_modified_ms);
+            }
+        }
+        for manifest_no in listed_manifests.keys().copied() {
             if manifest_no >= head.manifest_no || manifests.contains(&manifest_no) {
                 continue;
             }
-            let successor = metadata_manifest_object(namespace_id, &ManifestNo(manifest_no.0 + 1));
-            let age = grace_age(store, &successor, grace_window_ms, context.now_ms)
-                .await
-                .map_err(|error| CoreError::store(&successor, &error))?;
-            if matches!(age, GraceAge::Young | GraceAge::Unknown) {
-                live.load_manifest(
-                    store,
-                    segment_cache,
-                    namespace_id,
-                    manifest_no,
-                    &mut manifests,
-                )
-                .await?;
+            let Some(&successor_time) = listed_manifests.get(&ManifestNo(manifest_no.0 + 1)) else {
+                continue;
+            };
+            if GraceAge::of(successor_time, grace_window_ms, context.now_ms) != GraceAge::Aged {
+                live.load_manifest(store, namespace_id, manifest_no, &mut manifests)
+                    .await?;
             }
         }
-        live.protect_layouts(store, segment_cache).await?;
         Ok(live)
     }
 
     async fn load_manifest<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
-        segment_cache: Option<&MetadataSegmentCache>,
         namespace_id: &NamespaceId,
         manifest_no: ManifestNo,
         manifests: &mut BTreeSet<ManifestNo>,
@@ -267,18 +203,12 @@ impl LiveSet {
                 envelope: Arc::new(envelope),
             },
         };
-        self.protect_manifest(store, segment_cache, &manifest)
-            .await?;
+        self.protect_manifest(&manifest);
         manifests.insert(manifest_no);
         Ok(true)
     }
 
-    async fn protect_manifest<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        segment_cache: Option<&MetadataSegmentCache>,
-        manifest: &LoadedManifest,
-    ) -> Result<()> {
+    fn protect_manifest(&mut self, manifest: &LoadedManifest) {
         self.objects.insert(manifest.object_key.clone());
         self.objects.extend(
             manifest
@@ -290,96 +220,14 @@ impl LiveSet {
                 .flat_map(|run| &run.segments)
                 .map(metadata_segment_object_key),
         );
-        if self.namespace_deleted {
-            return Ok(());
+        if !self.namespace_deleted {
+            self.manifests.push(manifest.clone());
         }
-        let segments = metadata_basis_from_manifest(store, segment_cache, manifest).segments;
-        self.manifests.push(manifest.clone());
-        let family = MetadataRowFamily::Revisions;
-        let upper_bound = string_prefix_upper_bound(family.row_key_prefix());
-        let mut lower_bound = family.row_key_prefix().to_owned();
-        loop {
-            let rows = segments
-                .scan_range_page_with_keys(
-                    family,
-                    &lower_bound,
-                    upper_bound.as_deref(),
-                    CONTENT_ROOT_PAGE_ROWS,
-                )
-                .await
-                .map_err(MetadataProjectionLoadError::from)?;
-            let Some((last_key, _)) = rows.last() else {
-                break;
-            };
-            lower_bound = lookup_keys::after_row_key(last_key);
-            let exhausted = rows.len() < CONTENT_ROOT_PAGE_ROWS;
-            for (_, row) in rows {
-                self.protect_content(&revision_from_manifest_row(row)?.content_ref)?;
-            }
-            if exhausted {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    async fn protect_layouts<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        segment_cache: Option<&MetadataSegmentCache>,
-    ) -> Result<()> {
-        let family = MetadataRowFamily::ContentLayouts;
-        let upper_bound = string_prefix_upper_bound(family.row_key_prefix());
-        for manifest in &self.manifests {
-            let segments = metadata_basis_from_manifest(store, segment_cache, manifest).segments;
-            let mut lower_bound = family.row_key_prefix().to_owned();
-            loop {
-                let rows = segments
-                    .scan_range_page_with_keys(
-                        family,
-                        &lower_bound,
-                        upper_bound.as_deref(),
-                        CONTENT_ROOT_PAGE_ROWS,
-                    )
-                    .await
-                    .map_err(MetadataProjectionLoadError::from)?;
-                let Some((last_key, _)) = rows.last() else {
-                    break;
-                };
-                lower_bound = lookup_keys::after_row_key(last_key);
-                let exhausted = rows.len() < CONTENT_ROOT_PAGE_ROWS;
-                for (_, row) in rows {
-                    let row = content_layout_from_manifest_row(row)?;
-                    if self.content_roots.ids.contains(&row.content_id) {
-                        for extent in row.layout.extents {
-                            if extent.owner_namespace_id == self.content_roots.namespace_id {
-                                self.content_roots.insert(&extent.content_id)?;
-                            }
-                        }
-                    }
-                }
-                if exhausted {
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn protect_content(&mut self, content_ref: &ContentRef) -> Result<()> {
-        if content_ref.owner_namespace_id == self.content_roots.namespace_id {
-            self.content_roots.insert(&content_ref.content_id)?;
-        }
-        Ok(())
     }
 
     pub(super) fn protects_wal(&self, key: &str) -> bool {
         self.live_folded_wal_no
             .is_some_and(|folded_wal_no| object_is_required(key, folded_wal_no))
-    }
-
-    pub(super) fn protects_content(&self, key: &str) -> bool {
-        content_id_of(key).is_some_and(|content_id| self.content_roots.ids.contains(&content_id))
     }
 
     pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {

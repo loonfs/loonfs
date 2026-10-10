@@ -4,6 +4,8 @@ use super::KeyPredicate;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use futures::StreamExt;
+use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
     ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
     ObjectStoreError, PutMode, StoredObjectChecksum,
@@ -181,12 +183,31 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
         self.inner.delete(key).await
     }
 
-    fn list_prefix_from_stream(
+    fn list_entries_from_stream(
         &self,
         prefix: &str,
         start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_from_stream(prefix, start_after)
+    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
+        let keys = self.keys.clone();
+        let transform = Arc::clone(&self.transform);
+        self.inner
+            .list_entries_from_stream(prefix, start_after)
+            .map(move |result| {
+                result.map(|mut entry| {
+                    if keys.matches(&entry.key) {
+                        entry.last_modified_ms = transform(ObjectMetadata {
+                            last_modified_ms: entry.last_modified_ms,
+                            etag: None,
+                            version: None,
+                            size_bytes: 0,
+                            sha256: None,
+                        })
+                        .last_modified_ms;
+                    }
+                    entry
+                })
+            })
+            .boxed()
     }
     async fn list_child_prefixes(
         &self,

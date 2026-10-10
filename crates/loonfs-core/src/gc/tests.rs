@@ -53,6 +53,7 @@ use tempfile::tempdir;
 
 mod concurrent_retirement;
 mod fork_chain;
+mod listings;
 mod many_pins;
 mod retirement;
 mod superseded_roots;
@@ -62,6 +63,7 @@ const GRACE_MS: u64 = 60 * 60 * 1000;
 fn options() -> GcOptions {
     GcOptions {
         grace_window_ms: GRACE_MS,
+        ..Default::default()
     }
 }
 
@@ -181,6 +183,7 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
 
     let too_small = GcOptions {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS - 1,
+        ..Default::default()
     };
     let error = gc_namespace(&store, None, &namespace_id, &too_small, &context(1_000))
         .await
@@ -194,6 +197,16 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
         error.code(),
         crate::error::ErrorCode::InvalidRequest,
         "the rejection surfaces as invalid_request"
+    );
+    let no_rows = GcOptions {
+        content_shard_rows: 0,
+        ..Default::default()
+    };
+    let error = gc_namespace(&store, None, &namespace_id, &no_rows, &context(1_000))
+        .await
+        .expect_err("zero shard target");
+    assert!(
+        matches!(error, CoreError::InvalidGcOptions(message) if message == "content_shard_rows must be at least 1")
     );
 }
 
@@ -893,12 +906,34 @@ async fn put_file_content<S: ObjectStore>(
     path: &str,
     bytes: &[u8],
 ) -> ContentRef {
+    put_file_content_with_id(
+        store,
+        namespace_id,
+        path,
+        bytes,
+        loonfs_types::ContentId::generate(),
+    )
+    .await
+}
+
+async fn put_file_content_with_id<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    path: &str,
+    bytes: &[u8],
+    content_id: loonfs_types::ContentId,
+) -> ContentRef {
     let catalog = crate::namespace::catalog::load_namespace_catalog_entry(store, namespace_id)
         .await
         .expect("catalog");
-    let stored = crate::storage::content::store_bytes_as_content(store, namespace_id, bytes)
-        .await
-        .expect("content");
+    let stored = crate::storage::content::stage_bytes_under_content_id(
+        store,
+        namespace_id.clone(),
+        content_id,
+        bytes,
+    )
+    .await
+    .expect("content");
     let content_ref = stored.content_ref().clone();
     NamespaceCommitEngine::new(
         namespace_id.clone(),
@@ -1106,11 +1141,25 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     create(&store, &namespace_id, &context(1_000))
         .await
         .expect("bootstrap");
-    let first = put_file_content(&store, &namespace_id, "/file", b"first").await;
+    let first = put_file_content_with_id(
+        &store,
+        &namespace_id,
+        "/file",
+        b"first",
+        loonfs_types::ContentId::parse("con_00000000000000000000000000000001").expect("first id"),
+    )
+    .await;
     crate::manifest::fold_wal(&store, &namespace_id)
         .await
         .expect("fold the first revision into the base run");
-    let second = put_file_content(&store, &namespace_id, "/file", b"second").await;
+    let second = put_file_content_with_id(
+        &store,
+        &namespace_id,
+        "/file",
+        b"second",
+        loonfs_types::ContentId::parse("con_00000000000000000000000000000002").expect("second id"),
+    )
+    .await;
     compact_below_the_floor(&store, &namespace_id).await;
     let first_key = loonfs_objectstore::keys::content_blob(&namespace_id, &first.content_id);
 
@@ -1157,11 +1206,25 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
     create(&store, &namespace_id, &setup)
         .await
         .expect("bootstrap");
-    let pinned = put_file_content(&store, &namespace_id, "/file", b"pinned").await;
+    let pinned = put_file_content_with_id(
+        &store,
+        &namespace_id,
+        "/file",
+        b"pinned",
+        loonfs_types::ContentId::parse("con_00000000000000000000000000000001").expect("pinned id"),
+    )
+    .await;
     let checkpoint = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
-    put_file_content(&store, &namespace_id, "/file", b"current").await;
+    put_file_content_with_id(
+        &store,
+        &namespace_id,
+        "/file",
+        b"current",
+        loonfs_types::ContentId::parse("con_00000000000000000000000000000002").expect("current id"),
+    )
+    .await;
     compact_below_the_floor(&store, &namespace_id).await;
     let pinned_key = loonfs_objectstore::keys::content_blob(&namespace_id, &pinned.content_id);
 
@@ -1297,7 +1360,7 @@ async fn content_and_temporary_keys_the_layout_does_not_recognize_are_kept() {
         ),
         (1, 1)
     );
-    assert_eq!(report.retained.unrecognized_key, 3);
+    assert_eq!(report.retained.unrecognized_key, 1);
     for key in &collected {
         assert!(store.head(key).await.expect("head").is_none(), "{key}");
     }
@@ -2372,43 +2435,47 @@ async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTr
 
 #[tokio::test]
 async fn provider_age_reserves_the_clock_margin_before_deletion() {
-    use super::reap::{delete_if_aged, GraceAge};
     use crate::limits::GC_SAFETY_MARGIN_MS;
 
-    let dir = tempdir().expect("tempdir");
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("clock-margin").expect("namespace");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    create(&inner, &namespace_id, &context(1_000))
+        .await
+        .expect("namespace");
+    let key =
+        loonfs_objectstore::keys::content_blob(&namespace_id, &loonfs_types::ContentId::generate());
     let provider_stamp = 1_000_000;
     let store = RecordingStore::new(
-        MetadataMapStore::new(
-            LocalFsStore::new(dir.path()).expect("store"),
-            KeyPredicate::any(),
-            move |mut metadata| {
-                metadata.last_modified_ms = Some(provider_stamp);
-                metadata
-            },
-        ),
-        KeyPredicate::any(),
+        MetadataMapStore::new(inner, KeyPredicate::exact(&key), move |mut metadata| {
+            metadata.last_modified_ms = Some(provider_stamp);
+            metadata
+        }),
+        KeyPredicate::exact(&key),
     );
-    let key = "orphan";
     store
-        .put_if_absent(key, Bytes::from_static(b"orphan"))
+        .put_if_absent(&key, Bytes::from_static(b"orphan"))
         .await
-        .expect("write orphan");
+        .expect("orphan");
+    store.reset();
+    let options = GcOptions {
+        grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
+        ..Default::default()
+    };
     let publication_bound = GC_MIN_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
-    let collector = context(provider_stamp + publication_bound - 1 + GC_SAFETY_MARGIN_MS);
-    assert_eq!(
-        delete_if_aged(&store, key, GC_MIN_GRACE_WINDOW_MS, collector.now_ms)
-            .await
-            .expect("age before cutoff"),
-        GraceAge::Young,
-    );
+    let now_ms = provider_stamp + publication_bound - 1 + GC_SAFETY_MARGIN_MS;
+    let retained = gc_namespace(&store, None, &namespace_id, &options, &context(now_ms))
+        .await
+        .expect("pass before cutoff");
+    assert_eq!(retained.deleted.content_objects, 0);
+    assert_eq!(retained.retained.within_grace_window, 1);
     assert_eq!(store.counts().deletes, 0);
-    assert_eq!(
-        delete_if_aged(&store, key, GC_MIN_GRACE_WINDOW_MS, collector.now_ms + 1)
-            .await
-            .expect("age at cutoff"),
-        GraceAge::Aged,
-    );
+    let collected = gc_namespace(&store, None, &namespace_id, &options, &context(now_ms + 1))
+        .await
+        .expect("pass at cutoff");
+    assert_eq!(collected.deleted.content_objects, 1);
     assert_eq!(store.counts().deletes, 1);
+    assert_eq!(store.counts().heads, 0);
 }
 
 async fn retired_content_namespace<S: ObjectStore>(

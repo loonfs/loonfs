@@ -10,12 +10,12 @@ use crate::manifest::{
 use crate::{GrepError, GrepWorker, Result};
 use futures::StreamExt as _;
 use loonfs::engine::{
-    delete_if_aged, grace_age, GraceAge, Observation, METADATA_PUBLICATION_BUDGET_MS,
+    grace_age, GraceAge, Observation, METADATA_PUBLICATION_BUDGET_MS,
     UNREFERENCED_SEGMENT_MIN_AGE_MS,
 };
 use loonfs::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
 use loonfs_objectstore::timing::StdMonotonicTimer;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::{ErrorCode, ManifestNo, NamespaceId, RunMaintenanceResponse};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -72,12 +72,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let mut report = GrepGcReport::default();
         if gone {
             let prefix = grep_prefix(namespace_id);
-            let mut keys = self.store().list_prefix_stream(&prefix);
-            while let Some(key) = keys.next().await {
-                let key = key.map_err(|error| GrepError::store(&prefix, &error))?;
+            let mut keys = self.store().list_entries_from_stream(&prefix, None);
+            while let Some(entry) = keys.next().await {
+                let entry = entry.map_err(|error| GrepError::store(&prefix, &error))?;
                 collect_candidate(
                     self.store(),
-                    &key,
+                    &entry,
                     GREP_GC_GRACE_WINDOW_MS,
                     now_ms,
                     &mut report,
@@ -123,10 +123,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }
         }
         let prefix = manifests_prefix(namespace_id);
-        let mut keys = self.store().list_prefix_stream(&prefix);
-        while let Some(key) = keys.next().await {
-            let key = key.map_err(|error| GrepError::store(&prefix, &error))?;
-            let Some(parsed) = parse_key(&key) else {
+        let mut keys = self.store().list_entries_from_stream(&prefix, None);
+        while let Some(entry) = keys.next().await {
+            let entry = entry.map_err(|error| GrepError::store(&prefix, &error))?;
+            let key = &entry.key;
+            let Some(parsed) = parse_key(key) else {
                 report.retained_candidates += 1;
                 continue;
             };
@@ -139,7 +140,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }
             collect_candidate(
                 self.store(),
-                &key,
+                &entry,
                 GREP_GC_GRACE_WINDOW_MS,
                 now_ms,
                 &mut report,
@@ -147,16 +148,17 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await?;
         }
         let prefix = segments_prefix(namespace_id);
-        let mut keys = self.store().list_prefix_stream(&prefix);
-        while let Some(key) = keys.next().await {
-            let key = key.map_err(|error| GrepError::store(&prefix, &error))?;
-            if live_segments.contains(&key) || parse_key(&key).is_none() {
+        let mut keys = self.store().list_entries_from_stream(&prefix, None);
+        while let Some(entry) = keys.next().await {
+            let entry = entry.map_err(|error| GrepError::store(&prefix, &error))?;
+            let key = &entry.key;
+            if live_segments.contains(key) || parse_key(key).is_none() {
                 report.retained_candidates += 1;
                 continue;
             }
             collect_candidate(
                 self.store(),
-                &key,
+                &entry,
                 UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
                 now_ms,
                 &mut report,
@@ -169,16 +171,19 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 
 async fn collect_candidate<S: ObjectStore + ?Sized>(
     store: &S,
-    key: &str,
+    entry: &ListedObject,
     minimum_age_ms: u64,
     now_ms: u64,
     report: &mut GrepGcReport,
 ) -> Result<()> {
-    let age = delete_if_aged(store, key, minimum_age_ms, now_ms)
-        .await
-        .map_err(|error| GrepError::store(key, &error))?;
+    let key = &entry.key;
+    let age = GraceAge::of(entry.last_modified_ms, minimum_age_ms, now_ms);
     match age {
         GraceAge::Aged => {
+            store
+                .delete(key)
+                .await
+                .map_err(|error| GrepError::store(key, &error))?;
             if parse_key(key)
                 .is_some_and(|parsed| matches!(parsed.kind, GrepKeyKind::Segment { .. }))
             {

@@ -15,7 +15,7 @@ pub(super) async fn delete_source_pin<S: ObjectStore + ?Sized>(
     let key =
         loonfs_objectstore::keys::pin(&basis.manifest.owner_namespace_id, &basis.source_pin_id);
     let present = store
-        .head(&key)
+        .get_with_metadata(&key)
         .await
         .map_err(|error| CoreError::store(&key, &error))?
         .is_some();
