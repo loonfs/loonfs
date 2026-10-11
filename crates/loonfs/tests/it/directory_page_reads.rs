@@ -159,4 +159,9 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
         assert_eq!(entry.created_at_ms, stat.created_at_ms);
         assert_eq!(entry.kind, stat.kind);
     }
+    let stat_reads = recording.take_get_keys();
+    assert!(
+        stat_reads.is_empty(),
+        "stats after the listing read metadata segments: {stat_reads:?}"
+    );
 }

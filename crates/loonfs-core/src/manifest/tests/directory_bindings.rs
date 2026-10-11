@@ -10,7 +10,7 @@ use loonfs_test_support::stores::ConcurrencyWatchStore;
 use loonfs_types::{AttributeInclusion, DirectoryPageCursor, PageRequest};
 
 #[tokio::test]
-async fn a_cold_path_walk_reads_only_the_leaf_inode() {
+async fn a_cold_path_walk_reads_no_inode() {
     let directory = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("path-binding-reads").expect("namespace id");
@@ -80,7 +80,10 @@ async fn a_cold_path_walk_reads_only_the_leaf_inode() {
             .into_iter()
             .filter_map(|(key, _)| inode_segments.get(&key).cloned())
             .collect::<Vec<_>>();
-        assert_eq!(inode_reads, vec![lookup_keys::inode_key(resolved.inode_id)]);
+        assert!(
+            inode_reads.is_empty(),
+            "the walk read inode rows {inode_reads:?}"
+        );
     }
 }
 

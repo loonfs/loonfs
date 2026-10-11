@@ -173,7 +173,7 @@ struct Questions {
 }
 
 impl Questions {
-    fn new(paths: &[&str], commits: &[Vec<WalDelta>]) -> Self {
+    fn new<'a>(paths: &[&str], deltas: impl IntoIterator<Item = &'a WalDelta>) -> Self {
         let mut questions = Self {
             inodes: vec![ROOT_INODE_ID],
             directories: vec![ROOT_INODE_ID],
@@ -182,7 +182,7 @@ impl Questions {
                 .map(|path| AbsolutePath::parse(path).expect("valid path"))
                 .collect(),
         };
-        for delta in commits.iter().flatten() {
+        for delta in deltas {
             if let WalDelta::CreateInode {
                 inode_id,
                 inode_kind,
@@ -210,6 +210,13 @@ fn position(seq: u64, delta_index: u32) -> DeltaPosition {
     }
 }
 
+fn commit_attribution(index: usize) -> (ActorId, u64) {
+    (
+        ActorId::parse(format!("scenario-actor-{index}")).expect("valid actor id"),
+        4_200 + u64::try_from(index).expect("timestamp offset"),
+    )
+}
+
 fn name_key(naming: NamespaceNaming, display_name: &str) -> NameKey {
     NameKey::parse(loonfs_types::name_key_for_display_name(
         naming,
@@ -224,6 +231,7 @@ fn create_directory(
     inode_id: InodeId,
     parent_inode_id: InodeId,
     display_name: &str,
+    created_in: usize,
 ) -> Vec<WalDelta> {
     vec![
         WalDelta::CreateInode {
@@ -238,6 +246,7 @@ fn create_directory(
             InodeKind::Directory,
             parent_inode_id,
             display_name,
+            created_in,
         ),
     ]
 }
@@ -249,6 +258,7 @@ fn create_file(
     parent_inode_id: InodeId,
     display_name: &str,
     content_ref: ContentRef,
+    created_in: usize,
 ) -> Vec<WalDelta> {
     vec![
         WalDelta::CreateInode {
@@ -263,6 +273,7 @@ fn create_file(
             InodeKind::File,
             parent_inode_id,
             display_name,
+            created_in,
         ),
         WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),
@@ -296,7 +307,9 @@ fn bind(
     kind: InodeKind,
     parent_inode_id: InodeId,
     display_name: &str,
+    created_in: usize,
 ) -> WalDelta {
+    let (child_created_by, child_created_at_ms) = commit_attribution(created_in);
     WalDelta::BindDirentry {
         delta_index,
         parent_inode_id,
@@ -304,13 +317,17 @@ fn bind(
         display_name: DisplayName::parse(display_name).expect("valid display name"),
         child_inode_id: inode_id,
         child_kind: kind,
-        child_created_by: ActorId::loonfs(),
-        child_created_at_ms: 4_200,
+        child_created_by,
+        child_created_at_ms,
     }
 }
 
 /// Retires the bind recorded at `bound_at`, the first delta of a rename or a
 /// delete.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the delta names its slot, its child, the position it targets, and the commit that created the child"
+)]
 fn unbind(
     naming: NamespaceNaming,
     delta_index: u32,
@@ -319,7 +336,9 @@ fn unbind(
     parent_inode_id: InodeId,
     display_name: &str,
     bound_at: DeltaPosition,
+    created_in: usize,
 ) -> WalDelta {
+    let (child_created_by, child_created_at_ms) = commit_attribution(created_in);
     WalDelta::UnbindDirentry {
         delta_index,
         parent_inode_id,
@@ -327,14 +346,18 @@ fn unbind(
         display_name: DisplayName::parse(display_name).expect("valid display name"),
         child_inode_id: inode_id,
         child_kind: kind,
-        child_created_by: ActorId::loonfs(),
-        child_created_at_ms: 4_200,
+        child_created_by,
+        child_created_at_ms,
         target: bound_at,
     }
 }
 
 /// A delete by path as the commit path materializes it: retire the binding,
 /// then record a tombstone that keeps the binding it removed.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the delta names its slot, its child, the position it targets, and the commit that created the child"
+)]
 fn delete(
     naming: NamespaceNaming,
     delta_index: u32,
@@ -343,6 +366,7 @@ fn delete(
     parent_inode_id: InodeId,
     display_name: &str,
     bound_at: DeltaPosition,
+    created_in: usize,
 ) -> Vec<WalDelta> {
     vec![
         unbind(
@@ -353,6 +377,7 @@ fn delete(
             parent_inode_id,
             display_name,
             bound_at,
+            created_in,
         ),
         WalDelta::TombstoneSubtree {
             delta_index: delta_index.saturating_add(1),
@@ -412,6 +437,10 @@ fn update_access(
 
 /// Undelete as the commit path materializes it: revoke the exact deletion
 /// position, then re-bind the recovered inode.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the delta names its slot, its child, the position it targets, and the commit that created the child"
+)]
 fn undelete(
     naming: NamespaceNaming,
     delta_index: u32,
@@ -420,6 +449,7 @@ fn undelete(
     parent_inode_id: InodeId,
     display_name: &str,
     target: DeltaPosition,
+    created_in: usize,
 ) -> Vec<WalDelta> {
     vec![
         WalDelta::RevokeSubtreeTombstone {
@@ -434,6 +464,7 @@ fn undelete(
             kind,
             parent_inode_id,
             display_name,
+            created_in,
         ),
     ]
 }
@@ -450,7 +481,7 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
             "/docs/readme.txt/notes",
         ],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
             create_file(
                 CaseInsensitive,
                 0,
@@ -458,6 +489,7 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
                 InodeId(2),
                 "readme.txt",
                 content_ref("content-1"),
+                1,
             ),
             append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
         ],
@@ -470,7 +502,7 @@ fn metadata_apply_matches_model_for_rename() {
         CaseInsensitive,
         &["/docs", "/docs/readme.txt", "/README.txt", "/readme.txt"],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
             create_file(
                 CaseInsensitive,
                 0,
@@ -478,6 +510,7 @@ fn metadata_apply_matches_model_for_rename() {
                 InodeId(2),
                 "readme.txt",
                 content_ref("content-1"),
+                1,
             ),
             vec![
                 unbind(
@@ -488,6 +521,7 @@ fn metadata_apply_matches_model_for_rename() {
                     InodeId(2),
                     "readme.txt",
                     position(2, 1),
+                    1,
                 ),
                 bind(
                     CaseInsensitive,
@@ -496,6 +530,7 @@ fn metadata_apply_matches_model_for_rename() {
                     InodeKind::File,
                     InodeId(1),
                     "README.txt",
+                    1,
                 ),
             ],
         ],
@@ -516,7 +551,7 @@ fn metadata_apply_matches_model_for_case_sensitive_siblings_and_a_case_only_rena
             "/docs/REPORT.txt",
         ],
         &[
-            create_directory(CaseSensitive, 0, docs, InodeId(1), "docs"),
+            create_directory(CaseSensitive, 0, docs, InodeId(1), "docs", 0),
             create_file(
                 CaseSensitive,
                 0,
@@ -524,6 +559,7 @@ fn metadata_apply_matches_model_for_case_sensitive_siblings_and_a_case_only_rena
                 docs,
                 "Report.txt",
                 content_ref("content-1"),
+                1,
             ),
             create_file(
                 CaseSensitive,
@@ -532,6 +568,7 @@ fn metadata_apply_matches_model_for_case_sensitive_siblings_and_a_case_only_rena
                 docs,
                 "report.txt",
                 content_ref("content-2"),
+                2,
             ),
             // Changing only the case moves the file to a free slot.
             vec![
@@ -543,8 +580,9 @@ fn metadata_apply_matches_model_for_case_sensitive_siblings_and_a_case_only_rena
                     docs,
                     "Report.txt",
                     position(2, 1),
+                    1,
                 ),
-                bind(CaseSensitive, 1, InodeId(3), file, docs, "REPORT.txt"),
+                bind(CaseSensitive, 1, InodeId(3), file, docs, "REPORT.txt", 1),
             ],
         ],
     );
@@ -556,7 +594,7 @@ fn metadata_apply_matches_model_for_restore_revision() {
         CaseInsensitive,
         &["/docs", "/docs/readme.txt"],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
             create_file(
                 CaseInsensitive,
                 0,
@@ -564,6 +602,7 @@ fn metadata_apply_matches_model_for_restore_revision() {
                 InodeId(2),
                 "readme.txt",
                 content_ref("content-1"),
+                1,
             ),
             append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
             append_revision(0, InodeId(3), RevisionNo(3), content_ref("content-1")),
@@ -577,7 +616,7 @@ fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
         CaseInsensitive,
         &["/docs", "/docs/readme.txt"],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
             create_file(
                 CaseInsensitive,
                 0,
@@ -585,6 +624,7 @@ fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
                 InodeId(2),
                 "readme.txt",
                 content_ref("content-1"),
+                1,
             ),
             append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-1")),
         ],
@@ -601,7 +641,7 @@ fn metadata_apply_matches_model_for_delete_file() {
         CaseInsensitive,
         &["/docs", "/docs/Readme.TXT"],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
             create_file(
                 CaseInsensitive,
                 0,
@@ -609,6 +649,7 @@ fn metadata_apply_matches_model_for_delete_file() {
                 InodeId(2),
                 "Readme.TXT",
                 content_ref("content-1"),
+                1,
             ),
             delete(
                 CaseInsensitive,
@@ -618,6 +659,7 @@ fn metadata_apply_matches_model_for_delete_file() {
                 InodeId(2),
                 "Readme.TXT",
                 position(2, 1),
+                1,
             ),
         ],
     );
@@ -629,8 +671,8 @@ fn metadata_apply_matches_model_for_delete_subtree() {
         CaseInsensitive,
         &["/Docs", "/Docs/nested"],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "Docs"),
-            create_directory(CaseInsensitive, 0, InodeId(3), InodeId(2), "nested"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "Docs", 0),
+            create_directory(CaseInsensitive, 0, InodeId(3), InodeId(2), "nested", 1),
             delete(
                 CaseInsensitive,
                 0,
@@ -639,6 +681,7 @@ fn metadata_apply_matches_model_for_delete_subtree() {
                 InodeId(1),
                 "Docs",
                 position(1, 1),
+                0,
             ),
         ],
     );
@@ -650,7 +693,7 @@ fn metadata_apply_matches_model_for_undelete() {
         CaseInsensitive,
         &["/docs", "/docs/Readme.TXT"],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
             create_file(
                 CaseInsensitive,
                 0,
@@ -658,6 +701,7 @@ fn metadata_apply_matches_model_for_undelete() {
                 InodeId(2),
                 "Readme.TXT",
                 content_ref("content-1"),
+                1,
             ),
             delete(
                 CaseInsensitive,
@@ -667,6 +711,7 @@ fn metadata_apply_matches_model_for_undelete() {
                 InodeId(2),
                 "Readme.TXT",
                 position(2, 1),
+                1,
             ),
             // The revoke names the delete's own position — the third commit,
             // second delta — which differs from where the revoke itself lands.
@@ -678,6 +723,7 @@ fn metadata_apply_matches_model_for_undelete() {
                 InodeId(2),
                 "Readme.TXT",
                 position(3, 1),
+                1,
             ),
         ],
     );
@@ -689,7 +735,7 @@ fn metadata_apply_matches_model_for_attribute_writes_and_removals() {
         CaseInsensitive,
         &["/docs", "/docs/readme.txt"],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
             create_file(
                 CaseInsensitive,
                 0,
@@ -697,6 +743,7 @@ fn metadata_apply_matches_model_for_attribute_writes_and_removals() {
                 InodeId(2),
                 "readme.txt",
                 content_ref("content-1"),
+                1,
             ),
             // Set, then overwrite one key while adding another, then remove one:
             // each delta carries the whole resulting map.
@@ -738,8 +785,8 @@ fn metadata_apply_matches_model_for_access_updates() {
         CaseInsensitive,
         &["/docs", "/other"],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs"),
-            create_directory(CaseInsensitive, 0, InodeId(3), InodeId(1), "other"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
+            create_directory(CaseInsensitive, 0, InodeId(3), InodeId(1), "other", 1),
             update_access(0, InodeId(2), 1, true, first),
             update_access(0, InodeId(2), 2, false, second),
             update_access(0, InodeId(3), 1, false, AccessGrants::default()),
@@ -753,7 +800,7 @@ fn metadata_apply_matches_model_for_a_cleared_attribute_map() {
         CaseInsensitive,
         &["/docs"],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "docs", 0),
             update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
             update_attributes(0, InodeId(2), 2, Attributes::default()),
         ],
@@ -773,6 +820,7 @@ fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
                 InodeId(1),
                 "source.txt",
                 content_ref("content-1"),
+                0,
             ),
             update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
             {
@@ -783,6 +831,7 @@ fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
                     InodeId(1),
                     "copy.txt",
                     content_ref("content-1"),
+                    2,
                 );
                 deltas.extend(update_attributes(
                     3,
@@ -809,6 +858,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
                 InodeId(1),
                 "Readme.TXT",
                 content_ref("content-1"),
+                0,
             ),
             update_attributes(0, InodeId(2), 1, attribute_map(&[("owner", "ada")])),
             delete(
@@ -819,6 +869,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
                 InodeId(1),
                 "Readme.TXT",
                 position(1, 1),
+                0,
             ),
             undelete(
                 CaseInsensitive,
@@ -828,6 +879,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
                 InodeId(1),
                 "Readme.TXT",
                 position(3, 1),
+                0,
             ),
         ],
     );
@@ -848,7 +900,7 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
             "/docs/old.txt",
         ],
         &[
-            create_directory(CaseInsensitive, 0, docs, InodeId(1), "docs"),
+            create_directory(CaseInsensitive, 0, docs, InodeId(1), "docs", 0),
             create_file(
                 CaseInsensitive,
                 0,
@@ -856,6 +908,7 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
                 docs,
                 "report.txt",
                 content_ref("content-1"),
+                1,
             ),
             vec![
                 unbind(
@@ -866,8 +919,9 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
                     docs,
                     "report.txt",
                     position(2, 1),
+                    1,
                 ),
-                bind(CaseInsensitive, 1, InodeId(3), file, docs, "draft.txt"),
+                bind(CaseInsensitive, 1, InodeId(3), file, docs, "draft.txt", 1),
             ],
             vec![
                 unbind(
@@ -878,8 +932,9 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
                     docs,
                     "draft.txt",
                     position(3, 1),
+                    1,
                 ),
-                bind(CaseInsensitive, 1, InodeId(3), file, docs, "final.txt"),
+                bind(CaseInsensitive, 1, InodeId(3), file, docs, "final.txt", 1),
             ],
             delete(
                 CaseInsensitive,
@@ -889,6 +944,7 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
                 docs,
                 "final.txt",
                 position(4, 1),
+                1,
             ),
             // A new file takes the freed slot under a spelling with the same
             // name key.
@@ -899,6 +955,7 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
                 docs,
                 "Final.TXT",
                 content_ref("content-2"),
+                5,
             ),
             // The undelete takes the slot the first rename freed.
             undelete(
@@ -909,6 +966,7 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
                 docs,
                 "report.txt",
                 position(5, 1),
+                1,
             ),
             // One commit unbinds `final.txt` and binds it again; the later
             // delta wins.
@@ -921,8 +979,9 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
                     docs,
                     "Final.TXT",
                     position(6, 1),
+                    5,
                 ),
-                bind(CaseInsensitive, 1, InodeId(4), file, docs, "old.txt"),
+                bind(CaseInsensitive, 1, InodeId(4), file, docs, "old.txt", 5),
                 unbind(
                     CaseInsensitive,
                     2,
@@ -931,8 +990,9 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
                     docs,
                     "report.txt",
                     position(7, 1),
+                    1,
                 ),
-                bind(CaseInsensitive, 3, InodeId(3), file, docs, "final.txt"),
+                bind(CaseInsensitive, 3, InodeId(3), file, docs, "final.txt", 1),
             ],
         ],
     );
@@ -970,8 +1030,8 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
             "/archive/alpha/notes.txt",
         ],
         &[
-            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "projects"),
-            create_directory(CaseInsensitive, 0, InodeId(3), InodeId(2), "alpha"),
+            create_directory(CaseInsensitive, 0, InodeId(2), InodeId(1), "projects", 0),
+            create_directory(CaseInsensitive, 0, InodeId(3), InodeId(2), "alpha", 1),
             create_file(
                 CaseInsensitive,
                 0,
@@ -979,6 +1039,7 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
                 InodeId(3),
                 "notes.txt",
                 content_ref("content-1"),
+                2,
             ),
             delete(
                 CaseInsensitive,
@@ -988,8 +1049,9 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
                 InodeId(1),
                 "projects",
                 position(1, 1),
+                0,
             ),
-            create_directory(CaseInsensitive, 0, InodeId(5), InodeId(1), "projects"),
+            create_directory(CaseInsensitive, 0, InodeId(5), InodeId(1), "projects", 4),
             undelete(
                 CaseInsensitive,
                 0,
@@ -998,6 +1060,7 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
                 InodeId(1),
                 "archive",
                 position(4, 1),
+                0,
             ),
         ],
     );
@@ -1037,6 +1100,7 @@ fn repeated_content_in_one_commit_emits_one_publication() {
         InodeId(1),
         "one",
         content.clone(),
+        0,
     );
     deltas.extend(create_file(
         CaseInsensitive,
@@ -1045,6 +1109,7 @@ fn repeated_content_in_one_commit_emits_one_publication() {
         InodeId(1),
         "two",
         content,
+        0,
     ));
     assert_core_matches_model(CaseInsensitive, &["/one", "/two"], &[deltas]);
 }
@@ -1077,6 +1142,7 @@ fn appends_record_revision_checksums_and_the_chain_head() {
             b"one",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         ),
+        0,
     );
     first.push(appended(3, 2, b"one two"));
     assert_core_matches_model(
@@ -1191,15 +1257,20 @@ async fn planned_appends_match_the_model() {
         let bytes = store.get(&key, None).await.expect("get").expect("WAL");
         let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
         commits.extend(wal.payload().records.iter().map(|record| {
-            record
-                .deltas
-                .iter()
-                .map(|delta| delta.delta.clone())
-                .collect::<Vec<_>>()
+            (
+                record.committed_by.clone(),
+                record.committed_at_ms,
+                record
+                    .deltas
+                    .iter()
+                    .map(|delta| delta.delta.clone())
+                    .collect::<Vec<_>>(),
+            )
         }));
     }
     assert_eq!(commits.len(), 6);
-    let model = assert_core_matches_model(CaseInsensitive, &["/log", "/copy"], &commits);
+    let model =
+        assert_attributed_commits_match_model(CaseInsensitive, &["/log", "/copy"], &commits);
     let chains: BTreeSet<_> = model
         .revisions
         .iter()
@@ -1303,16 +1374,20 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         let bytes = store.get(&key, None).await.expect("get").expect("WAL");
         let wal = decode_wal_object_envelope_zstd(&bytes).expect("decode WAL");
         commits.extend(wal.payload().records.iter().map(|record| {
-            record
-                .deltas
-                .iter()
-                .map(|delta| delta.delta.clone())
-                .collect::<Vec<_>>()
+            (
+                record.committed_by.clone(),
+                record.committed_at_ms,
+                record
+                    .deltas
+                    .iter()
+                    .map(|delta| delta.delta.clone())
+                    .collect::<Vec<_>>(),
+            )
         }));
     }
     let published: Vec<_> = commits
         .iter()
-        .flatten()
+        .flat_map(|(_, _, deltas)| deltas)
         .filter_map(|delta| match delta {
             WalDelta::AppendFileRevision { content_ref, .. } => {
                 Some((content_ref.size_bytes, content_ref.checksum.clone()))
@@ -1331,7 +1406,7 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
             (17, Checksum::crc64nvme(b"direct+three+four")),
         ]
     );
-    assert_core_matches_model(CaseInsensitive, &["/log"], &commits);
+    assert_attributed_commits_match_model(CaseInsensitive, &["/log"], &commits);
 }
 
 fn core_bootstrap_state() -> CoreMetadataState {
@@ -1352,27 +1427,41 @@ fn model_bootstrap_state() -> ModelMetadataState {
     loonfs_model::bootstrap_metadata_state(4_000)
 }
 
-/// Replays `commits` through core and the model, compares their visibility
-/// answers and their rows, and returns the model's final state.
 fn assert_core_matches_model(
     naming: NamespaceNaming,
     paths: &[&str],
     commits: &[Vec<WalDelta>],
 ) -> ModelMetadataState {
-    let questions = Questions::new(paths, commits);
+    let commits: Vec<_> = commits
+        .iter()
+        .enumerate()
+        .map(|(index, deltas)| {
+            let (actor, committed_at_ms) = commit_attribution(index);
+            (actor, committed_at_ms, deltas.clone())
+        })
+        .collect();
+    assert_attributed_commits_match_model(naming, paths, &commits)
+}
+
+/// Replays `commits` through core and the model, compares their visibility
+/// answers and their rows, and returns the model's final state.
+fn assert_attributed_commits_match_model(
+    naming: NamespaceNaming,
+    paths: &[&str],
+    commits: &[(ActorId, u64, Vec<WalDelta>)],
+) -> ModelMetadataState {
+    let questions = Questions::new(paths, commits.iter().flat_map(|(_, _, deltas)| deltas));
     let mut core_state = core_bootstrap_state();
     let mut model_state = model_bootstrap_state();
 
-    for (index, deltas) in commits.iter().enumerate() {
+    for (index, (actor, committed_at_ms, deltas)) in commits.iter().enumerate() {
         let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
-        let actor = ActorId::parse(format!("scenario-actor-{index}")).expect("valid actor id");
-        let committed_at_ms = 4_200 + u64::try_from(index).expect("timestamp offset");
         let commit_id =
             CommitId::parse(format!("c_differential_{index}")).expect("valid commit id");
         core_state =
-            core_state.apply_committed_wal_deltas(seq, &commit_id, &actor, committed_at_ms, deltas);
+            core_state.apply_committed_wal_deltas(seq, &commit_id, actor, *committed_at_ms, deltas);
         model_state = model_state
-            .apply_committed_wal_deltas(seq, &commit_id, &actor, committed_at_ms, deltas)
+            .apply_committed_wal_deltas(seq, &commit_id, actor, *committed_at_ms, deltas)
             .expect("the scenario should keep the model's binding rules");
         assert_answers_match(naming, &core_state, &model_state, &questions, seq);
     }

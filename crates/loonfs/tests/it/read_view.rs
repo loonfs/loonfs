@@ -313,8 +313,8 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
         .runs
         .iter()
         .flat_map(|run| &run.segments)
-        .find(|segment| segment.family == MetadataRowFamily::Inodes)
-        .expect("inode segment");
+        .find(|segment| segment.family == MetadataRowFamily::DirentryBinds)
+        .expect("direntry segment");
     store
         .delete(&keys::metadata_segment_object_key(segment))
         .await
@@ -414,8 +414,8 @@ async fn checkpoint_and_snapshot_views_report_their_deleted_pin_when_a_segment_i
         .runs
         .iter()
         .flat_map(|run| &run.segments)
-        .find(|segment| segment.family == MetadataRowFamily::Inodes)
-        .expect("inode segment");
+        .find(|segment| segment.family == MetadataRowFamily::DirentryBinds)
+        .expect("direntry segment");
     store
         .delete(&keys::metadata_segment_object_key(segment))
         .await

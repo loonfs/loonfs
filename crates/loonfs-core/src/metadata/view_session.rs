@@ -500,6 +500,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .map(|component| NameKey::for_display_name(naming, &component.to_display_name()))
             .collect();
 
+        let is_root_path = absolute_path.is_root();
         let mut current_inode_id = ROOT_INODE_ID;
         let mut pending_binding: Option<DirentryBindingRecord> = None;
         for wave in 0..=component_name_keys.len() {
@@ -516,7 +517,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             let base = &self.base;
             let (inode, tombstone, parent_binding, bound_child, revision) = futures::try_join!(
                 async {
-                    if !is_leaf_wave {
+                    if !is_root_path {
                         return Ok(None);
                     }
                     match self.cached_inode_at_seq(current_inode_id) {
@@ -561,7 +562,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 },
             )?;
 
-            if is_leaf_wave {
+            if is_root_path {
                 self.inode_at_seq_cache.insert(current_inode_id, inode);
             }
             self.active_tombstone_cache
