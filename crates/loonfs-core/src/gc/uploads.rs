@@ -1,7 +1,7 @@
 //! Garbage collection for upload sessions and their content.
 
-use super::live_set::RetirementState;
-use super::sweep::Sweep;
+use super::live_set::{LiveSet, RetirementState};
+use crate::context::MutationContext;
 use crate::control_update::{
     load_upload_session_state, try_update_upload_session, CasAttempt, UploadSessionUpdate,
 };
@@ -57,10 +57,13 @@ pub(super) enum UploadSessionSweep {
 }
 
 pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
-    sweep: &Sweep<'_, S>,
+    store: &S,
+    grace_window_ms: u64,
+    live: &LiveSet,
+    context: &MutationContext,
     state: &UploadSessionPayload,
 ) -> Result<UploadSessionSweep> {
-    match sweep.live.retirement_state() {
+    match live.retirement_state() {
         RetirementState::Retained { until_ms } => {
             return Ok(UploadSessionSweep::Retain {
                 reclaimable_at_ms: until_ms,
@@ -68,20 +71,18 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
         }
         RetirementState::Active | RetirementState::Eligible => {}
     }
-    let retired = sweep.live.retirement_state() == RetirementState::Eligible;
+    let retired = live.retirement_state() == RetirementState::Eligible;
     match &state.status {
         UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
-            abort_expired_session(sweep, state, *expires_at_ms).await
+            abort_expired_session(store, grace_window_ms, context, state, *expires_at_ms).await
         }
         UploadSessionRecordStatus::Aborted { aborted_at_ms } => {
-            if sweep.mutation.now_ms.saturating_sub(*aborted_at_ms) < sweep.grace_window_ms {
-                return Ok(retain_until(
-                    aborted_at_ms.saturating_add(sweep.grace_window_ms),
-                ));
+            if context.now_ms.saturating_sub(*aborted_at_ms) < grace_window_ms {
+                return Ok(retain_until(aborted_at_ms.saturating_add(grace_window_ms)));
             }
             // Repeat provider cleanup so a later pass completes work left by a crash
             // after the abort CAS.
-            if !AbandonedUpload::of(state).release(sweep.store).await {
+            if !AbandonedUpload::of(state).release(store).await {
                 return Ok(retain_undated());
             }
             // Abort cleanup runs even when no content object was written.
@@ -91,8 +92,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             completed_at_ms, ..
         } => {
             if !retired
-                && sweep.mutation.now_ms.saturating_sub(*completed_at_ms)
-                    < CONTENT_RECLAMATION_GRACE_MS
+                && context.now_ms.saturating_sub(*completed_at_ms) < CONTENT_RECLAMATION_GRACE_MS
             {
                 return Ok(retain_until(
                     completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_MS),
@@ -124,17 +124,17 @@ fn retain_undated() -> UploadSessionSweep {
 /// refused, so the grace only covers a completing host whose clock runs
 /// behind the collector's.
 async fn abort_expired_session<S: ObjectStore + ?Sized>(
-    sweep: &Sweep<'_, S>,
+    store: &S,
+    grace_window_ms: u64,
+    context: &MutationContext,
     state: &UploadSessionPayload,
     expires_at_ms: u64,
 ) -> Result<UploadSessionSweep> {
-    if sweep.mutation.now_ms.saturating_sub(expires_at_ms) < sweep.grace_window_ms {
-        return Ok(retain_until(
-            expires_at_ms.saturating_add(sweep.grace_window_ms),
-        ));
+    if context.now_ms.saturating_sub(expires_at_ms) < grace_window_ms {
+        return Ok(retain_until(expires_at_ms.saturating_add(grace_window_ms)));
     }
     let aborted = try_update_upload_session(
-        sweep.store,
+        store,
         &state.namespace_id,
         &state.upload_id,
         |mut state: UploadSessionPayload| async move {
@@ -143,7 +143,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
             }
             let abandoned = AbandonedUpload::of(&state);
             state.status = UploadSessionRecordStatus::Aborted {
-                aborted_at_ms: sweep.mutation.now_ms,
+                aborted_at_ms: context.now_ms,
             };
             Ok(UploadSessionUpdate::Replace {
                 next: Box::new(state),
@@ -161,10 +161,8 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     match aborted {
         // Keep the newly aborted record until its post-abort grace period expires.
         CasAttempt::Settled(Some(abandoned)) => {
-            let _ = abandoned.release(sweep.store).await;
-            Ok(retain_until(
-                sweep.mutation.now_ms.saturating_add(sweep.grace_window_ms),
-            ))
+            let _ = abandoned.release(store).await;
+            Ok(retain_until(context.now_ms.saturating_add(grace_window_ms)))
         }
         CasAttempt::Settled(None) => Ok(retain_undated()),
         CasAttempt::Contended(_) => {

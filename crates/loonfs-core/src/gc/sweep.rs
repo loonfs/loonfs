@@ -1,4 +1,5 @@
 //! Sweep candidates against the live set loaded for this call.
+use super::deletes::DeletedCounter;
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
 use super::reap::{sweep_pin, GraceAge, PinSweep};
@@ -9,7 +10,19 @@ use crate::error::{CoreError, Result};
 use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
 use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::{ListedObject, ObjectStore};
-use loonfs_types::{DeletedObjectCounts, GcResponse, NamespaceId, RetainedReason};
+use loonfs_types::{NamespaceId, RetainedReason};
+
+pub(super) enum Decision {
+    Retain {
+        reason: RetainedReason,
+        reclaimable_at_ms: Option<u64>,
+    },
+    Delete {
+        key: String,
+        counter: DeletedCounter,
+    },
+    Gone,
+}
 
 pub(super) struct Sweep<'a, S: ObjectStore + ?Sized> {
     pub(super) store: &'a S,
@@ -17,64 +30,55 @@ pub(super) struct Sweep<'a, S: ObjectStore + ?Sized> {
     pub(super) grace_window_ms: u64,
     pub(super) mutation: &'a MutationContext,
     pub(super) live: &'a LiveSet,
-    pub(super) report: &'a mut GcResponse,
 }
 
 impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
     pub(super) async fn candidate(
-        &mut self,
+        &self,
         family: CandidateFamily,
-        entry: &ListedObject,
-    ) -> Result<()> {
-        let key = entry.key.as_str();
-        if !family.recognizes(key) {
-            self.report.retain(RetainedReason::UnrecognizedKey);
-            return Ok(());
+        entry: ListedObject,
+    ) -> Result<Decision> {
+        if !family.recognizes(&entry.key) {
+            return Ok(self.retain(RetainedReason::UnrecognizedKey, None));
         }
-        match family {
+        Ok(match family {
             CandidateFamily::WalObjects => {
-                self.process_aged_family(family, entry, |counts| &mut counts.wal_objects)
-                    .await
+                self.process_aged_family(family, entry, |report| &mut report.deleted.wal_objects)
             }
             CandidateFamily::MetadataSegments => {
-                self.process_aged_family(family, entry, |counts| &mut counts.metadata_segments)
-                    .await
+                self.process_aged_family(family, entry, |report| {
+                    &mut report.deleted.metadata_segments
+                })
             }
             CandidateFamily::Manifests => {
-                self.process_aged_family(family, entry, |counts| &mut counts.manifests)
-                    .await
+                self.process_aged_family(family, entry, |report| &mut report.deleted.manifests)
             }
-            CandidateFamily::Pins => self.process_pin(key).await,
-            CandidateFamily::UploadSessions => self.process_upload_session(key).await,
-            CandidateFamily::Content => {
-                self.process_aged_family(family, entry, |counts| &mut counts.content_objects)
-                    .await
-            }
-            CandidateFamily::Temporary => {
-                self.process_aged_family(family, entry, |counts| &mut counts.temporary_objects)
-                    .await
-            }
-        }
+            CandidateFamily::Pins => self.process_pin(entry.key).await?,
+            CandidateFamily::UploadSessions => self.process_upload_session(entry.key).await?,
+            CandidateFamily::Content => self
+                .process_aged_family(family, entry, |report| &mut report.deleted.content_objects),
+            CandidateFamily::Temporary => self.process_aged_family(family, entry, |report| {
+                &mut report.deleted.temporary_objects
+            }),
+        })
     }
-    async fn process_aged_family(
-        &mut self,
+    fn process_aged_family(
+        &self,
         family: CandidateFamily,
-        entry: &ListedObject,
-        deleted: fn(&mut DeletedObjectCounts) -> &mut u64,
-    ) -> Result<()> {
+        entry: ListedObject,
+        deleted: DeletedCounter,
+    ) -> Decision {
         let key = entry.key.as_str();
         if family == CandidateFamily::Manifests
             && loonfs_objectstore::layout::manifest_no_of(key)
                 .is_some_and(|number| number >= self.live.discovery_start_manifest_no)
         {
-            self.report.retain(RetainedReason::Referenced);
-            return Ok(());
+            return self.retain(RetainedReason::Referenced, None);
         }
         if self.live.objects.contains(key)
             || (family == CandidateFamily::WalObjects && self.live.protects_wal(key))
         {
-            self.report.retain(RetainedReason::Referenced);
-            return Ok(());
+            return self.retain(RetainedReason::Referenced, None);
         }
         // A compaction may publish output that is exactly the minimum age
         // old, so a segment must be strictly older before it goes.
@@ -83,110 +87,102 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         } else {
             self.grace_window_ms
         };
-        if self.sweep_aged(entry, min_age_ms).await? {
-            *deleted(&mut self.report.deleted) += 1;
-        }
-        Ok(())
+        self.sweep_aged(entry, min_age_ms, deleted)
     }
-    async fn process_pin(&mut self, key: &str) -> Result<()> {
+    async fn process_pin(&self, key: String) -> Result<Decision> {
         let decision = sweep_pin(
             self.store,
-            key,
+            &key,
             self.grace_window_ms,
             self.live,
             self.mutation,
         )
         .await?;
-        let count = match decision {
-            PinSweep::DeleteFork => &mut self.report.deleted_checkpoints_by_owner.fork,
-            PinSweep::DeleteUser => &mut self.report.deleted_checkpoints_by_owner.user,
-            PinSweep::DeleteSnapshot => &mut self.report.deleted_checkpoints_by_owner.snapshot,
-            PinSweep::Gone => return Ok(()),
+        let counter: DeletedCounter = match decision {
+            PinSweep::DeleteFork => |report| &mut report.deleted_checkpoints_by_owner.fork,
+            PinSweep::DeleteUser => |report| &mut report.deleted_checkpoints_by_owner.user,
+            PinSweep::DeleteSnapshot => |report| &mut report.deleted_checkpoints_by_owner.snapshot,
+            PinSweep::Gone => return Ok(Decision::Gone),
             PinSweep::Retain { reclaimable_at_ms } => {
-                self.report.retain(RetainedReason::CheckpointNotDeletable);
-                self.note_reclamation_deadline(reclaimable_at_ms);
-                return Ok(());
+                return Ok(self.retain(RetainedReason::CheckpointNotDeletable, reclaimable_at_ms));
             }
         };
-        *count += 1;
-        self.delete_key(key).await?;
-        Ok(())
+        Ok(Decision::Delete { key, counter })
     }
 
-    async fn process_upload_session(&mut self, key: &str) -> Result<()> {
-        let Some(upload_id) = upload_id_of(key) else {
-            self.report.retain(RetainedReason::UnrecognizedKey);
-            return Ok(());
+    async fn process_upload_session(&self, key: String) -> Result<Decision> {
+        let Some(upload_id) = upload_id_of(&key) else {
+            return Ok(self.retain(RetainedReason::UnrecognizedKey, None));
         };
         let state = match load_upload_session_state(self.store, self.namespace_id, &upload_id).await
         {
             Ok(state) => state,
             Err(CoreError::UploadNotFound { .. }) => {
-                self.report.retain(RetainedReason::UploadSessionUndecided);
-                return Ok(());
+                return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
             }
             Err(error) => return Err(error),
         };
-        match sweep_upload_session(self, &state).await? {
-            UploadSessionSweep::Delete => {
-                self.delete_key(key).await?;
-                self.report.deleted.upload_sessions += 1;
-            }
-            UploadSessionSweep::Retain { reclaimable_at_ms } => {
-                self.report.retain(match reclaimable_at_ms {
-                    Some(_) => RetainedReason::UploadSessionWindow,
-                    None => RetainedReason::UploadSessionUndecided,
-                });
-                self.note_reclamation_deadline(reclaimable_at_ms);
-            }
-        }
-        Ok(())
+        Ok(
+            match sweep_upload_session(
+                self.store,
+                self.grace_window_ms,
+                self.live,
+                self.mutation,
+                &state,
+            )
+            .await?
+            {
+                UploadSessionSweep::Delete => Decision::Delete {
+                    key,
+                    counter: |report| &mut report.deleted.upload_sessions,
+                },
+                UploadSessionSweep::Retain { reclaimable_at_ms } => self.retain(
+                    match reclaimable_at_ms {
+                        Some(_) => RetainedReason::UploadSessionWindow,
+                        None => RetainedReason::UploadSessionUndecided,
+                    },
+                    reclaimable_at_ms,
+                ),
+            },
+        )
     }
 
-    pub(super) async fn content_candidate(
-        &mut self,
-        entry: &ListedObject,
-        protected: bool,
-    ) -> Result<()> {
+    pub(super) fn content_candidate(&self, entry: ListedObject, protected: bool) -> Decision {
         if !CandidateFamily::Content.recognizes(&entry.key) {
-            self.report.retain(RetainedReason::UnrecognizedKey);
+            self.retain(RetainedReason::UnrecognizedKey, None)
         } else if protected {
-            self.report.retain(RetainedReason::Referenced);
-        } else if self.sweep_aged(entry, self.grace_window_ms).await? {
-            self.report.deleted.content_objects += 1;
+            self.retain(RetainedReason::Referenced, None)
+        } else {
+            self.sweep_aged(entry, self.grace_window_ms, |report| {
+                &mut report.deleted.content_objects
+            })
         }
-        Ok(())
     }
 
-    async fn sweep_aged(&mut self, entry: &ListedObject, grace_window_ms: u64) -> Result<bool> {
+    fn sweep_aged(
+        &self,
+        entry: ListedObject,
+        grace_window_ms: u64,
+        counter: DeletedCounter,
+    ) -> Decision {
         let age = GraceAge::of(
             entry.last_modified_ms,
             grace_window_ms,
             self.mutation.now_ms,
         );
-        if let Some(reason) = age.retained_reason() {
-            self.report.retain(reason);
-            return Ok(false);
+        match age.retained_reason() {
+            Some(reason) => self.retain(reason, None),
+            None => Decision::Delete {
+                key: entry.key,
+                counter,
+            },
         }
-        self.delete_key(&entry.key).await?;
-        Ok(true)
     }
 
-    async fn delete_key(&self, key: &str) -> Result<()> {
-        self.store
-            .delete(key)
-            .await
-            .map_err(|error| CoreError::store(key, &error))
-    }
-
-    fn note_reclamation_deadline(&mut self, at_ms: Option<u64>) {
-        let Some(at_ms) = at_ms.filter(|at_ms| *at_ms > self.mutation.now_ms) else {
-            return;
-        };
-        self.report.next_reclamation_at_ms = Some(
-            self.report
-                .next_reclamation_at_ms
-                .map_or(at_ms, |soonest_ms| soonest_ms.min(at_ms)),
-        );
+    fn retain(&self, reason: RetainedReason, reclaimable_at_ms: Option<u64>) -> Decision {
+        Decision::Retain {
+            reason,
+            reclaimable_at_ms: reclaimable_at_ms.filter(|at_ms| *at_ms > self.mutation.now_ms),
+        }
     }
 }

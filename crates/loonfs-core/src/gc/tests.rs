@@ -18,6 +18,7 @@ use crate::manifest::MetadataCompactionPolicy;
 use crate::manifest::{advance_retention_floor, RetentionTarget};
 use crate::path::write::{CommitRequest, FilesystemOperation};
 use crate::pin::record::delete_pin;
+use crate::store_waves::STORE_WRITE_WAVE;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
 use futures::StreamExt;
@@ -45,8 +46,8 @@ use bytes::Bytes;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
-    OperationContext, OperationKind, RecordingStore,
+    BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
+    OperationClass, OperationContext, OperationKind, RecordingStore,
 };
 use loonfs_types::AttributeInclusion;
 use tempfile::tempdir;
@@ -2750,6 +2751,65 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
 }
 
 #[tokio::test]
+async fn unreferenced_segments_are_deleted_concurrently_within_the_write_wave() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("delete-wave").expect("namespace");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let setup = context(1_000);
+    create(&inner, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
+    write_test_file(&inner, &namespace_id, "/one", "one", &setup).await;
+    crate::manifest::fold_wal(&inner, &namespace_id)
+        .await
+        .expect("fold");
+    let protected = inner
+        .list_prefix(&metadata_segment_prefix(&namespace_id))
+        .await
+        .expect("segments");
+    let orphans: BTreeSet<_> = (1..=2 * STORE_WRITE_WAVE + 1)
+        .map(|number| {
+            metadata_segment(
+                &namespace_id,
+                &loonfs_types::MetadataSegmentId::parse(format!("seg_{number:032x}"))
+                    .expect("segment"),
+            )
+        })
+        .collect();
+    for key in &orphans {
+        inner
+            .put_if_absent(key, Bytes::from_static(b"unused"))
+            .await
+            .expect("orphan");
+    }
+    let watched = KeyPredicate::new({
+        let orphans = orphans.clone();
+        move |key| orphans.contains(key)
+    });
+    let store = ConcurrencyWatchStore::new(MetadataMapStore::aged(inner, watched.clone()), watched);
+    let report = gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &options(),
+        &context(UNREFERENCED_SEGMENT_MIN_AGE_MS + 1),
+    )
+    .await
+    .expect("gc pass");
+    let deletes = store.deletes();
+    assert!(deletes.peak_in_flight > 1);
+    assert!(deletes.peak_in_flight <= STORE_WRITE_WAVE);
+    assert_eq!(deletes.total, orphans.len());
+    assert_eq!(report.deleted.metadata_segments, orphans.len() as u64);
+    for key in &orphans {
+        assert!(store.head(key).await.expect("orphan").is_none());
+    }
+    for key in &protected {
+        assert!(store.head(key).await.expect("protected segment").is_some());
+    }
+}
+
+#[tokio::test]
 async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("owner-sweep").expect("namespace");
@@ -2788,14 +2848,14 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
     .await
     .expect("collect older manifests");
     store.inner().fail_next(1);
-    assert!(
-        gc_namespace(&store, None, &namespace_id, &options(), &deadline)
-            .await
-            .is_err()
-    );
+    match gc_namespace(&store, None, &namespace_id, &options(), &deadline).await {
+        Err(CoreError::Store { object_key, .. }) => assert_eq!(object_key, keys[0]),
+        other => panic!("expected the failed delete's store error, got {other:?}"),
+    }
     assert!(store.head(&keys[0]).await.expect("failed delete").is_some());
+    let content_prefix = format!("namespaces/{namespace_id}/content/");
     let remaining = store
-        .list_prefix(&format!("namespaces/{namespace_id}/content/"))
+        .list_prefix(&content_prefix)
         .await
         .expect("remaining content");
     let retried = gc_namespace(&store, None, &namespace_id, &options(), &deadline)
@@ -2805,6 +2865,11 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         retried.deleted.retired_content_objects,
         remaining.len() as u64
     );
+    assert!(store
+        .list_prefix(&content_prefix)
+        .await
+        .expect("content after the retry")
+        .is_empty());
     store
         .put_if_absent(&keys[0], Bytes::from_static(b"late write"))
         .await
