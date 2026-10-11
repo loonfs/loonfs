@@ -74,6 +74,13 @@ impl<S: ObjectStore + ?Sized> crate::storage::content_location::LayoutLookup
             .content_layout(content_id)
             .await
     }
+
+    fn content_has_other_size(&self, content_ref: &loonfs_types::ContentRef) -> bool {
+        self.tail_state.rows.revisions().iter().any(|revision| {
+            revision.content_ref.content_id == content_ref.content_id
+                && revision.content_ref.size_bytes != content_ref.size_bytes
+        })
+    }
 }
 
 /// Folds the visible WAL tail into segments and publishes the next manifest.
@@ -349,8 +356,7 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
             let layouts = &layouts;
             async move {
                 let layout =
-                    write_tail_content(store, projection, tail, content, pieces, content_writes)
-                        .await?;
+                    write_tail_content(store, projection, content, pieces, content_writes).await?;
                 {
                     layouts
                         .lock()

@@ -236,8 +236,8 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         candidate.validate_request_limits().expect("request limits");
         let estimate = candidate.wal_record_bytes_upper_bound() + WAL_OBJECT_OVERHEAD_BYTES;
         assert!(estimate <= MAX_WAL_OBJECT_BYTES, "{kind}");
-        let mut session =
-            PublishPlanningSession::new(&head, &crate::wal::ProjectedWalTail::default());
+        let tail = crate::wal::ProjectedWalTail::default();
+        let mut session = PublishPlanningSession::new(&head, &tail);
         let mut allocation = session.begin_candidate();
         let plan = session
             .prepare_commit(

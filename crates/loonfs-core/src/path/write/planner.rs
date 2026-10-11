@@ -15,7 +15,9 @@ use super::plan_create::{
 use super::plan_delete::plan_delete_path;
 use super::plan_restore::{plan_restore_revision, plan_restore_revision_by_inode};
 use super::plan_transfer::{plan_copy_by_inode, plan_copy_file_path, plan_move_path};
+use super::planned_pieces::CommitPieces;
 use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlanningView};
+use super::session::PublishPlanningSession;
 use crate::authorize::Authorizer;
 use crate::commit::{
     validate_ops, AppendedContent, CandidateAllocation, CommitFingerprint, CommitNumbering,
@@ -23,9 +25,7 @@ use crate::commit::{
 };
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
-use crate::metadata::MetadataView;
-use crate::namespace::state::NamespaceReadState;
-use crate::wal::ProjectedWalTail;
+use crate::metadata::{MetadataState, MetadataView};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
@@ -82,12 +82,12 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     content_writes: &tokio::sync::Semaphore,
     candidate: &CommitCandidate,
     semantic_identity: CommitFingerprint,
-    head: &NamespaceReadState,
+    session: &PublishPlanningSession<'_>,
     base_view: MetadataView<'_, '_, S>,
-    tail: &ProjectedWalTail,
     committed_at_ms: u64,
     allocation: &mut CandidateAllocation,
 ) -> Result<ValidatedCommitPlan> {
+    let head = session.head();
     let request = candidate.request();
     let committed_seq = next_public_ordinal(head.seq.0)
         .map(ChangeSeq)
@@ -99,11 +99,12 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
 
     let authorizer =
         Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
-    let mut resolved = PublishValidationView::new(base_view, &tail.rows, committed_seq);
+    let mut resolved =
+        PublishValidationView::new(base_view, session.accepted_rows(), committed_seq);
     let mut numbering = CommitNumbering::default();
     let mut deltas = Vec::new();
     let mut appended: Vec<AppendedContent> = Vec::new();
-    let mut pieces = tail.clone();
+    let mut pieces = CommitPieces::new(session);
     for value in candidate.inline_content() {
         pieces.insert_piece(
             value.content_ref(),
@@ -123,7 +124,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                 access: &head.access,
                 authorizer: &authorizer,
                 view: &resolution_view,
-                tail: Some(&pieces),
+                pieces: Some(&pieces),
             };
             plan_operation(store, content_writes, operation, &view, allocation)
                 .await
@@ -154,15 +155,6 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
         )
         .await
         .map_err(|error| error.at_operation(index))?;
-        for delta in &unit_deltas {
-            pieces.rows.apply_committed_wal_delta_mut(
-                committed_seq,
-                &request.commit_id,
-                &request.actor_id,
-                committed_at_ms,
-                &delta.delta,
-            );
-        }
         deltas.extend(unit_deltas);
     }
 
@@ -181,11 +173,12 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             .flat_map(|value| value.pieces)
             .collect(),
     };
+    let empty = MetadataState::default();
     carry_revision_layouts(
         store,
         content_writes,
         &resolved.view(),
-        &base_view.with_overlay(&tail.rows, &tail.rows, head.seq),
+        &base_view.with_overlay(&empty, session.accepted_rows(), head.seq),
         &pieces,
         candidate,
         &mut plan,
@@ -199,7 +192,7 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
     content_writes: &tokio::sync::Semaphore,
     view: &MetadataView<'_, '_, S>,
     before: &MetadataView<'_, '_, S>,
-    tail: &ProjectedWalTail,
+    pieces: &CommitPieces<'_>,
     candidate: &CommitCandidate,
     plan: &mut ValidatedCommitPlan,
 ) -> Result<()> {
@@ -254,7 +247,7 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
                 crate::storage::tail_content::materialize_content_layout(
                     store,
                     view,
-                    tail,
+                    pieces.content(&prefix),
                     &prefix,
                     content_writes,
                 )
@@ -553,7 +546,7 @@ fn prepared_reference<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{CandidateAllocation, InodeAllocator};
+    use crate::commit::CandidateAllocation;
     use crate::context::MutationContext;
     use crate::path::read::load_current_metadata_view;
     use crate::storage::content::store_bytes_as_content;
@@ -722,8 +715,8 @@ mod tests {
         let view = load_current_metadata_view(store, namespace_id)
             .await
             .expect("metadata view");
-        let allocator = InodeAllocator::new(view.head().next_inode_id);
-        let mut allocation = allocator.begin_candidate();
+        let session = PublishPlanningSession::new(view.head(), view.wal_tail());
+        let mut allocation = session.begin_candidate();
         let content = request
             .operations
             .iter()
@@ -743,9 +736,8 @@ mod tests {
             &tokio::sync::Semaphore::new(32),
             &CommitCandidate::prepared(request.clone(), content),
             serde_json::from_str(r#""v1:sha256:test""#).expect("fingerprint"),
-            view.head(),
+            &session,
             view.projected_metadata_view(),
-            view.wal_tail(),
             1,
             &mut allocation,
         )

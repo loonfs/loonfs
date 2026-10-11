@@ -3,6 +3,7 @@
 use super::frame::{ValidatedWalTail, WalTailLoadError};
 use super::reader::{load_wal_object, WalWalk};
 use super::replay::project_validated_wal_tail;
+use super::ProjectedWalTail;
 use crate::cache::WalTailProjectionCacheKey;
 use crate::control_object::ControlObjectLoadError;
 use crate::namespace::control::LoadedManifest;
@@ -139,21 +140,28 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             .validate(loaded.object_key, envelope)
             .map_err(wal_error)?;
         if state.wal_no == context.head.wal_no {
-            projected_tail = context.head_state.get_tail(&cache_key);
+            projected_tail = context
+                .head_state
+                .get_tail(&cache_key)
+                .map(|tail| ProjectedWalTail::clone(&tail));
         }
         let before = state.clone();
         state = state.after_wal_object(object.envelope().payload());
         if let Some(current) = projected_tail {
             let object_key = object.object_key().to_owned();
             let tail = ValidatedWalTail::new(vec![object]);
-            let replayed = project_validated_wal_tail(&before, &current, &tail)
-                .map_err(|error| corrupt(&object_key, error))?;
-            projected_tail = Some(Arc::new(replayed.projected_tail));
+            projected_tail = Some(
+                project_validated_wal_tail(&before, current, &tail)
+                    .map_err(|error| corrupt(&object_key, error))?
+                    .projected_tail,
+            );
         }
     }
     if let Some(projected_tail) = projected_tail {
         cache_key.head_seq = state.seq;
-        context.head_state.insert_tail(cache_key, projected_tail);
+        context
+            .head_state
+            .insert_tail(cache_key, Arc::new(projected_tail));
     }
     context.head = state;
     Ok(true)

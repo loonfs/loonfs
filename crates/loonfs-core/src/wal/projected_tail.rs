@@ -6,7 +6,7 @@ use crate::metadata::MetadataState;
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
 use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{ContentId, ContentRef, NamespaceId};
+use loonfs_types::{ChangeSeq, ContentId, ContentRef, NamespaceId};
 use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
 
@@ -30,8 +30,44 @@ pub struct ProjectedWalTail {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectedContent {
     pub(crate) content_ref: ContentRef,
-    pub(crate) committed_seq: loonfs_types::ChangeSeq,
+    pub(crate) committed_seq: ChangeSeq,
     pub(crate) pieces: Vec<ProjectedPiece>,
+}
+
+impl ProjectedContent {
+    pub(crate) fn new(content_ref: &ContentRef, committed_seq: ChangeSeq) -> Self {
+        Self {
+            content_ref: content_ref.clone(),
+            committed_seq,
+            pieces: Vec::new(),
+        }
+    }
+
+    pub(crate) fn insert_piece(
+        &mut self,
+        content_ref: &ContentRef,
+        entry: &WalInlineContent,
+        committed_seq: ChangeSeq,
+    ) -> Option<ProjectedPiece> {
+        if content_ref.size_bytes > self.content_ref.size_bytes {
+            self.content_ref = content_ref.clone();
+            self.committed_seq = committed_seq;
+        }
+        let piece = ProjectedPiece {
+            offset: entry.offset,
+            bytes: Bytes::copy_from_slice(&entry.bytes),
+        };
+        match self
+            .pieces
+            .binary_search_by_key(&piece.offset, |piece| piece.offset)
+        {
+            Ok(index) => Some(std::mem::replace(&mut self.pieces[index], piece)),
+            Err(index) => {
+                self.pieces.insert(index, piece);
+                None
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,42 +105,21 @@ impl ProjectedWalTail {
         Ok(())
     }
 
-    pub(crate) fn apply_pieces(&mut self, namespace_id: &NamespaceId, record: &WalCommitPayload) {
-        for entry in &record.inline_content {
-            let content_ref = record
-                .deltas
-                .iter()
-                .filter_map(|delta| match &delta.delta {
-                    WalDelta::AppendFileRevision { content_ref, .. }
-                        if content_ref.content_id == entry.content_id
-                            && &content_ref.owner_namespace_id == namespace_id =>
-                    {
-                        Some(content_ref)
-                    }
-                    _ => None,
-                })
-                .max_by_key(|content_ref| content_ref.size_bytes)
-                .expect("decoded inline content should have a same-commit reference");
+    fn apply_pieces(&mut self, namespace_id: &NamespaceId, record: &WalCommitPayload) {
+        for (content_ref, entry) in inline_content_refs(namespace_id, record) {
             self.insert_piece(content_ref, entry, record.committed_seq);
         }
     }
 
     /// The unfolded pieces of the content `content_ref` names, when the
     /// tail holds any.
-    #[cfg(test)]
     pub(crate) fn content(&self, content_ref: &ContentRef) -> Option<&ProjectedContent> {
-        self.content_by_id(&content_ref.owner_namespace_id, &content_ref.content_id)
-    }
-
-    pub(crate) fn content_by_id(
-        &self,
-        owner_namespace_id: &NamespaceId,
-        content_id: &ContentId,
-    ) -> Option<&ProjectedContent> {
         self.content_positions
-            .get(content_id)
+            .get(&content_ref.content_id)
             .map(|position| &self.contents[*position])
-            .filter(|content| &content.content_ref.owner_namespace_id == owner_namespace_id)
+            .filter(|content| {
+                content.content_ref.owner_namespace_id == content_ref.owner_namespace_id
+            })
     }
 
     /// Content ids with pieces, in the order the tail first named them.
@@ -130,48 +145,57 @@ impl ProjectedWalTail {
         &mut self,
         content_ref: &ContentRef,
         entry: &WalInlineContent,
-        committed_seq: loonfs_types::ChangeSeq,
+        committed_seq: ChangeSeq,
     ) {
         let position = match self.content_positions.entry(content_ref.content_id.clone()) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(vacant) => {
-                self.inline_entry_heap_bytes += content_ref.content_id.heap_bytes();
+                self.inline_entry_heap_bytes +=
+                    content_ref.content_id.heap_bytes() + content_ref.heap_bytes();
                 vacant.insert(self.contents.len());
-                self.contents.push(ProjectedContent {
-                    content_ref: content_ref.clone(),
-                    committed_seq,
-                    pieces: Vec::new(),
-                });
-                self.inline_entry_heap_bytes += content_ref.heap_bytes();
+                self.contents
+                    .push(ProjectedContent::new(content_ref, committed_seq));
                 self.contents.len() - 1
             }
         };
         let content = &mut self.contents[position];
-        if content_ref.size_bytes > content.content_ref.size_bytes {
-            self.inline_entry_heap_bytes -= content.content_ref.heap_bytes();
-            content.content_ref = content_ref.clone();
-            content.committed_seq = committed_seq;
-            self.inline_entry_heap_bytes += content_ref.heap_bytes();
-        }
-        let piece = ProjectedPiece {
-            offset: entry.offset,
-            bytes: Bytes::copy_from_slice(&entry.bytes),
-        };
-        self.inline_bytes += piece.bytes.len();
+        let reference_bytes = content.content_ref.heap_bytes();
         let slots = content.pieces.capacity();
-        match content
-            .pieces
-            .binary_search_by_key(&piece.offset, |piece| piece.offset)
-        {
-            Ok(index) => {
-                let previous = std::mem::replace(&mut content.pieces[index], piece);
-                self.inline_bytes -= previous.bytes.len();
-            }
-            Err(index) => content.pieces.insert(index, piece),
+        let replaced = content.insert_piece(content_ref, entry, committed_seq);
+        self.inline_entry_heap_bytes = self.inline_entry_heap_bytes
+            + content.content_ref.heap_bytes()
+            + (content.pieces.capacity() - slots) * size_of::<ProjectedPiece>()
+            - reference_bytes;
+        self.inline_bytes += entry.bytes.len();
+        if let Some(replaced) = replaced {
+            self.inline_bytes -= replaced.bytes.len();
         }
-        self.inline_entry_heap_bytes +=
-            (content.pieces.capacity() - slots) * size_of::<ProjectedPiece>();
     }
+}
+
+/// Pairs each inline entry of `record` with the largest same-commit
+/// reference `namespace_id` owns to its content.
+pub(crate) fn inline_content_refs<'r>(
+    namespace_id: &'r NamespaceId,
+    record: &'r WalCommitPayload,
+) -> impl Iterator<Item = (&'r ContentRef, &'r WalInlineContent)> + 'r {
+    record.inline_content.iter().map(move |entry| {
+        let content_ref = record
+            .deltas
+            .iter()
+            .filter_map(|delta| match &delta.delta {
+                WalDelta::AppendFileRevision { content_ref, .. }
+                    if content_ref.content_id == entry.content_id
+                        && &content_ref.owner_namespace_id == namespace_id =>
+                {
+                    Some(content_ref)
+                }
+                _ => None,
+            })
+            .max_by_key(|content_ref| content_ref.size_bytes)
+            .expect("decoded inline content should have a same-commit reference");
+        (content_ref, entry)
+    })
 }
 
 #[cfg(test)]

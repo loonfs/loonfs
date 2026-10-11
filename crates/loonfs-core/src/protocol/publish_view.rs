@@ -68,7 +68,7 @@ pub(crate) struct PublishTailPosition {
 }
 
 /// A position and the tail it names, held for one publication unit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PublishTailProjection {
     pub(crate) position: PublishTailPosition,
     pub(crate) tail_state: Arc<ProjectedWalTail>,
@@ -80,7 +80,7 @@ pub(crate) struct FoldInProgress {
     /// published manifest will fold through.
     from: NamespaceReadState,
     /// Rows and content pieces of every commit published since `from`.
-    since: Arc<ProjectedWalTail>,
+    since: ProjectedWalTail,
     wal_objects_since: u64,
 }
 
@@ -100,7 +100,7 @@ impl PublishTailPosition {
     pub(crate) fn begin_fold(&mut self) {
         self.fold = Some(FoldInProgress {
             from: self.head.clone(),
-            since: Arc::new(ProjectedWalTail::default()),
+            since: ProjectedWalTail::default(),
             wal_objects_since: 0,
         });
     }
@@ -120,7 +120,7 @@ impl PublishTailPosition {
         self.wal_tail_objects = fold.wal_objects_since;
         self.wal_tail_inline_bytes = fold.since.inline_bytes();
         self.head.folded_wal_no = fold.from.wal_no;
-        Some(fold.since)
+        Some(Arc::new(fold.since))
     }
 }
 
@@ -131,9 +131,8 @@ impl PublishTailProjection {
         records: &[WalCommitPayload],
     ) -> std::result::Result<(), WalObjectError> {
         if let Some(fold) = &mut self.position.fold {
-            let since = Arc::make_mut(&mut fold.since);
             for record in records {
-                since.apply_commit(namespace_id, record)?;
+                fold.since.apply_commit(namespace_id, record)?;
             }
             fold.wal_objects_since += 1;
         }

@@ -2,7 +2,7 @@
 
 use super::content::{content_object_key_for_ref, DurableContentValidationError};
 use crate::error::{CoreError, Result};
-use crate::wal::ProjectedWalTail;
+use crate::wal::ProjectedContent;
 use bytes::Bytes;
 use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_objectstore::{ByteRange, ObjectStore};
@@ -12,6 +12,9 @@ use loonfs_types::{ContentExtent, ContentId, ContentRef, ExtentObject};
 #[async_trait::async_trait]
 pub(crate) trait LayoutLookup: Sync {
     async fn content_layout(&self, content_id: &ContentId) -> Result<Option<ContentLayoutRecord>>;
+    /// Whether an unfolded revision names the content at a size other than
+    /// `content_ref.size_bytes`.
+    fn content_has_other_size(&self, content_ref: &ContentRef) -> bool;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,16 +45,12 @@ impl ContentLocation {
     /// A nonzero folded prefix without a layout is corruption.
     pub(crate) async fn resolve<L: LayoutLookup>(
         lookup: &L,
-        tail: Option<&ProjectedWalTail>,
+        content: Option<&ProjectedContent>,
         content_ref: &ContentRef,
     ) -> Result<Self> {
         let object_key = content_object_key_for_ref(content_ref)?;
         let mut end = content_ref.size_bytes;
-        let content = tail
-            .and_then(|tail| {
-                tail.content_by_id(&content_ref.owner_namespace_id, &content_ref.content_id)
-            })
-            .filter(|content| content.pieces[0].offset <= end);
+        let content = content.filter(|content| content.pieces[0].offset <= end);
         let mut pieces = Vec::new();
         if let Some(content) = content {
             let mut offset = content.pieces[0].offset;

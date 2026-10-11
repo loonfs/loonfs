@@ -11,6 +11,7 @@ mod plan_create;
 mod plan_delete;
 mod plan_restore;
 mod plan_transfer;
+mod planned_pieces;
 pub(crate) mod planner;
 mod preconditions;
 mod publish_path_planning;

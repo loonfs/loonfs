@@ -91,6 +91,15 @@ impl<S: ObjectStore + ?Sized> crate::storage::content_location::LayoutLookup
     ) -> crate::error::Result<Option<ContentLayoutRecord>> {
         self.content_layout(content_id).await
     }
+
+    fn content_has_other_size(&self, content_ref: &loonfs_types::ContentRef) -> bool {
+        self.row_states().any(|state| {
+            state.revisions().iter().any(|revision| {
+                revision.content_ref.content_id == content_ref.content_id
+                    && revision.content_ref.size_bytes != content_ref.size_bytes
+            })
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

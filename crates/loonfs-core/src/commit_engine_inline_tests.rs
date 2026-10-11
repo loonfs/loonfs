@@ -164,7 +164,7 @@ async fn commit_piece(
             crate::storage::tail_content::materialize_content_layout(
                 store,
                 &view.projected_metadata_view(),
-                view.wal_tail(),
+                view.wal_tail().content(&base),
                 &base,
                 &tokio::sync::Semaphore::new(32),
             )

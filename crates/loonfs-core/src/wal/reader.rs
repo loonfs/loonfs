@@ -208,7 +208,7 @@ pub(crate) fn replay_discovered_tail(
     let _span = tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
     Ok(project_validated_wal_tail(
         base_head,
-        &super::ProjectedWalTail::from_rows(base_metadata_state.clone()),
+        super::ProjectedWalTail::from_rows(base_metadata_state.clone()),
         tail,
     )?)
 }

@@ -404,7 +404,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         content_ref: &ContentRef,
     ) -> Result<ContentLocation> {
-        ContentLocation::resolve(&self.metadata_view(), Some(&self.wal_tail), content_ref).await
+        ContentLocation::resolve(
+            &self.metadata_view(),
+            self.wal_tail.content(content_ref),
+            content_ref,
+        )
+        .await
     }
 
     async fn download_ranges(
@@ -472,12 +477,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let extents = if location.has_pieces() {
             let content = self
                 .wal_tail
-                .content_by_id(&content_ref.owner_namespace_id, &content_ref.content_id)
+                .content(content_ref)
                 .expect("resident pieces should name a projected chain");
             write_tail_content(
                 store,
                 &self.metadata_view(),
-                &self.wal_tail,
                 content,
                 assemble_tail_content(content)?,
                 content_writes,
