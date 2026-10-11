@@ -124,7 +124,8 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         manifest_no: context.basis.manifest_no(),
         head_seq: state.seq,
     };
-    let mut projected_tail = None;
+    let mut tail = None;
+    let mut extended = false;
     let namespace_id = state.namespace_id.clone();
     let mut walk = WalWalk::after(&namespace_id, state.wal_no, state.seq, state.writer_epoch);
     while let Ok(wal_no) = state.wal_no.successor() {
@@ -139,21 +140,26 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
             .validate(loaded.object_key, envelope)
             .map_err(wal_error)?;
         if state.wal_no == context.head.wal_no {
-            projected_tail = context.head_state.get_tail(&cache_key);
+            tail = context.head_state.get_tail(&cache_key);
         }
         let before = state.clone();
         state = state.after_wal_object(object.envelope().payload());
-        if let Some(current) = projected_tail {
+        cache_key.head_seq = state.seq;
+        if let Some(cached) = context.head_state.get_tail(&cache_key) {
+            tail = Some(cached);
+            extended = false;
+        } else if let Some(current) = tail {
             let object_key = object.object_key().to_owned();
-            let tail = ValidatedWalTail::new(vec![object]);
-            let replayed = project_validated_wal_tail(&before, &current, &tail)
-                .map_err(|error| corrupt(&object_key, error))?;
-            projected_tail = Some(Arc::new(replayed.projected_tail));
+            let objects = ValidatedWalTail::new(vec![object]);
+            let replayed =
+                project_validated_wal_tail(&before, Arc::unwrap_or_clone(current), &objects)
+                    .map_err(|error| corrupt(&object_key, error))?;
+            tail = Some(Arc::new(replayed.projected_tail));
+            extended = true;
         }
     }
-    if let Some(projected_tail) = projected_tail {
-        cache_key.head_seq = state.seq;
-        context.head_state.insert_tail(cache_key, projected_tail);
+    if let Some(tail) = tail.filter(|_| extended) {
+        context.head_state.insert_tail(cache_key, tail);
     }
     context.head = state;
     Ok(true)

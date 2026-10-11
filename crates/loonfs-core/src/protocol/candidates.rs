@@ -102,7 +102,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     content_writes: &tokio::sync::Semaphore,
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
-    session: &PublishPlanningSession,
+    session: &PublishPlanningSession<'_>,
     candidate: &CommitCandidate,
     index: usize,
     time: CandidateTime,

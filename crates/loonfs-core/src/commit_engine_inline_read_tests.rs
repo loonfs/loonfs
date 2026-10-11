@@ -256,6 +256,34 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .key()
         .starts_with(&wal_prefix(&publisher.namespace_id))));
     assert_no_content_requests(&store);
+
+    let old_key = cache_key(&context);
+    let old_tail = Arc::as_ptr(&tail) as usize;
+    // Holding the tail here would make the publish copy it.
+    drop(tail);
+    let later = inline(&publisher.namespace_id, Bytes::from_static(b"later"));
+    let later = publisher
+        .publish_batch(
+            &store,
+            [candidate("later", vec![later])],
+            &mutation_context,
+            &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .resulting_read_state
+        .expect("later state");
+    let new_key = cache_key(&read_context(later.head, later.basis));
+    assert!(context.head_state.get_tail(&old_key).is_none());
+    assert_eq!(
+        Arc::as_ptr(
+            &context
+                .head_state
+                .get_tail(&new_key)
+                .expect("the publish moved its tail to the new head")
+        ) as usize,
+        old_tail,
+        "the publish extends the cached tail in place"
+    );
 }
 
 #[tokio::test]
@@ -320,6 +348,37 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
             .get_tail(&cache_key(&context))
             .expect("advanced tail"),
         publisher.wal_fold_input().expect("publish tail").tail_state
+    );
+
+    let later = inline(&publisher.namespace_id, Bytes::from_static(b"later"));
+    publish(
+        &mut publisher,
+        &store,
+        &mutation_context,
+        candidate("later", vec![later]),
+    )
+    .await
+    .expect("later publish");
+    let newest = publisher.wal_fold_input().expect("publish tail");
+    context.head_state.insert_tail(
+        WalTailProjectionCacheKey {
+            head_seq: newest.head.seq,
+            ..cache_key(&context)
+        },
+        Arc::clone(&newest.tail_state),
+    );
+    assert!(crate::wal::probe_namespace_wal(&store, &mut context)
+        .await
+        .expect("advance one object"));
+    assert!(
+        Arc::ptr_eq(
+            &context
+                .head_state
+                .get_tail(&cache_key(&context))
+                .expect("newest tail"),
+            &newest.tail_state
+        ),
+        "a reader one object behind takes the cached tail instead of replaying onto its own"
     );
 }
 

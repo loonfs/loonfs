@@ -287,7 +287,6 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
     let first = write_tail_content(
         &store,
         &view.projected_metadata_view(),
-        &tail,
         content,
         assemble_tail_content(content).expect("pieces"),
         &Semaphore::new(32),
@@ -329,7 +328,6 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     write_tail_content(
         &store,
         &view.projected_metadata_view(),
-        &tail,
         content,
         assemble_tail_content(content).expect("pieces"),
         &Semaphore::new(32),

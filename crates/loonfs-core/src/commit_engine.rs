@@ -755,6 +755,12 @@ impl NamespaceCommitEngine {
         }
     }
 
+    fn remove_tail(&self, position: &PublishTailPosition) {
+        if let Some(head_state) = &self.head_state {
+            head_state.remove_tail(&position.tail_key(&self.namespace_id));
+        }
+    }
+
     /// Takes the engine's position and the tail it names. A tail the cache no
     /// longer holds drops the position, so the unit reads the tail from the
     /// store.
@@ -983,7 +989,7 @@ impl NamespaceCommitEngine {
             acquired_anchor,
         )
         .await;
-        let (publish_view, projection) = match loaded {
+        let publish_view = match loaded {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate_projection();
@@ -1026,6 +1032,7 @@ impl NamespaceCommitEngine {
             &self.content_writes,
         )
         .await;
+        let projection = publish_view.into_projection();
         self.projection_observed = Some(projection_observed);
         let unknown_inline_bytes = published.unconfirmed_inline_bytes;
         let (wal_tail_objects, wal_tail_inline_bytes, resulting_read_state) =
@@ -1068,6 +1075,7 @@ impl NamespaceCommitEngine {
             }
             PublishViewEffect::Advanced { records, head } => {
                 projection.position.wal_tail_objects += 1;
+                self.remove_tail(&projection.position);
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
                 for record in &records {
                     if let Err(error) = tail_state.apply_commit(&self.namespace_id, record) {

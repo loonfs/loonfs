@@ -193,9 +193,13 @@ async fn append_to<S: ObjectStore + ?Sized>(
             materialize_content_layout(
                 store,
                 view.view,
-                view.tail.ok_or_else(|| {
-                    CoreError::Internal("append planning requires the publish tail".to_owned())
-                })?,
+                view.pieces
+                    .ok_or_else(|| {
+                        CoreError::Internal(
+                            "append planning requires the commit's pieces".to_owned(),
+                        )
+                    })?
+                    .content(base),
                 base,
                 content_writes,
             )

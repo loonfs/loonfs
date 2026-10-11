@@ -69,7 +69,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         writer_id: context.writer_id.clone(),
         writer_epoch: head.writer_epoch,
     };
-    let (_, projection) = crate::protocol::load_publish_metadata_view(
+    let projection = crate::protocol::load_publish_metadata_view(
         &store,
         None,
         &namespace_id,
@@ -78,7 +78,8 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         None,
     )
     .await
-    .expect("load publish projection");
+    .expect("load publish projection")
+    .into_projection();
 
     let input = crate::publish::WalFoldInput {
         wal_tail_inline_bytes: 0,

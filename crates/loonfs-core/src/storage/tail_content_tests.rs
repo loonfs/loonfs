@@ -1,6 +1,7 @@
 //! Contracts for provider assembly and extent checksums.
 
 use super::*;
+use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
     BlockingStore, FakeMultipartStore, KeyPredicate, MetadataMapStore, OperationClass,
@@ -15,6 +16,10 @@ struct Layout(ContentLayoutRecord);
 impl LayoutLookup for Layout {
     async fn content_layout(&self, _: &ContentId) -> Result<Option<ContentLayoutRecord>> {
         Ok(Some(self.0.clone()))
+    }
+
+    fn content_has_other_size(&self, _: &ContentRef) -> bool {
+        false
     }
 }
 
@@ -101,7 +106,6 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     let written = write_tail_content(
         &store,
         &layout,
-        &tail,
         content,
         assemble_tail_content(content).expect("pieces"),
         &pool,
@@ -133,7 +137,6 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     let retried = write_tail_content(
         &store,
         &layout,
-        &tail,
         content,
         assemble_tail_content(content).expect("pieces"),
         &pool,
@@ -159,7 +162,6 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
     let written = write_tail_content(
         &store,
         &layout,
-        &tail,
         content,
         assemble_tail_content(content).expect("pieces"),
         &Semaphore::new(1),
@@ -243,7 +245,7 @@ async fn local_large_tail_assembles_without_sources() {
         assert_eq!(actual.as_ptr(), resident.bytes.as_ptr());
     }
     let pool = Semaphore::new(1);
-    let written = write_tail_content(&store, &layout, &tail, content, pieces, &pool)
+    let written = write_tail_content(&store, &layout, content, pieces, &pool)
         .await
         .expect("streamed tail");
     assert!(matches!(
@@ -286,7 +288,6 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let written = write_tail_content(
             &store,
             &layout,
-            &tail,
             content,
             assemble_tail_content(content).expect("pieces"),
             &Semaphore::new(1),
@@ -314,7 +315,8 @@ async fn validation_materialization_holds_a_write_permit() {
     let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
     let pool = Semaphore::new(1);
     store.arm();
-    let write = materialize_content_layout(&store, &layout, &tail, &reference, &pool);
+    let write =
+        materialize_content_layout(&store, &layout, tail.content(&reference), &reference, &pool);
     let check = async {
         store.wait_until_blocked().await;
         assert_eq!(pool.available_permits(), 0);

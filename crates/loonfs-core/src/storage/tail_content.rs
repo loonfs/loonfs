@@ -4,7 +4,7 @@ use super::content::{content_object_key_for_ref, DurableContentValidationError};
 use super::content_location::{extent_object_key, ContentLocation, LayoutLookup, LocatedExtent};
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_LAYOUT_EXTENTS;
-use crate::wal::{ProjectedContent, ProjectedWalTail};
+use crate::wal::ProjectedContent;
 use bytes::Bytes;
 use loonfs_objectstore::{AssemblySource, ImmutableWriteError, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
@@ -56,20 +56,17 @@ pub(crate) fn assemble_tail_content(content: &ProjectedContent) -> Result<Vec<By
 pub(crate) async fn materialize_content_layout<S: ObjectStore + ?Sized, L: LayoutLookup>(
     store: &S,
     lookup: &L,
-    tail: &ProjectedWalTail,
+    content: Option<&ProjectedContent>,
     content_ref: &ContentRef,
     content_writes: &Semaphore,
 ) -> Result<ContentLayout> {
-    let location = ContentLocation::resolve(lookup, Some(tail), content_ref).await?;
+    let location = ContentLocation::resolve(lookup, content, content_ref).await?;
     let mut layout =
         if location.has_pieces() || (content_ref.size_bytes == 0 && location.is_resident()) {
-            let content = tail
-                .content_by_id(&content_ref.owner_namespace_id, &content_ref.content_id)
-                .expect("resident pieces should name a projected chain");
+            let content = content.expect("resident pieces should name a projected chain");
             write_tail_content(
                 store,
                 lookup,
-                tail,
                 content,
                 assemble_tail_content(content)?,
                 content_writes,
@@ -104,13 +101,12 @@ pub(crate) fn cut_layout(layout: &mut ContentLayout, size_bytes: u64) {
 pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>(
     store: &S,
     lookup: &L,
-    tail: &ProjectedWalTail,
     content: &ProjectedContent,
     pieces: Vec<Bytes>,
     content_writes: &Semaphore,
 ) -> Result<ContentLayoutRecord> {
     let newest = &content.content_ref;
-    let mut location = ContentLocation::resolve(lookup, Some(tail), newest).await?;
+    let mut location = ContentLocation::resolve(lookup, Some(content), newest).await?;
     if newest.size_bytes == 0 {
         location.extents.clear();
     }
@@ -159,11 +155,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
             .collect();
     }
     // The whole key can already hold the first reference after a failed fold.
-    let whole = location.extents.is_empty()
-        && tail.rows.revisions().iter().all(|revision| {
-            revision.content_ref.content_id != newest.content_id
-                || revision.content_ref.size_bytes == newest.size_bytes
-        });
+    let whole = location.extents.is_empty() && !lookup.content_has_other_size(newest);
     let mut extents = location.extents;
     let tail_length = candidate.iter().map(|piece| piece.len() as u64).sum();
     let MergePlan {

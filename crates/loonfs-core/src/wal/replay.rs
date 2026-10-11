@@ -2,7 +2,7 @@
 
 pub(crate) use super::frame::WalObjectError;
 use super::ProjectedWalTail;
-use super::{ReplayedWalTail, ValidatedWalObject, ValidatedWalTail};
+use super::{ReplayedWalTail, ValidatedWalTail};
 use crate::commit::next_inode_after;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{WalCommitDelta, WalDelta, WalObjectEnvelope};
@@ -10,43 +10,26 @@ use loonfs_types::{ChangeSeq, InodeId};
 
 pub(crate) fn project_validated_wal_tail(
     base_head: &NamespaceReadState,
-    base_tail: &ProjectedWalTail,
+    mut tail: ProjectedWalTail,
     wal_tail: &ValidatedWalTail,
 ) -> Result<ReplayedWalTail, WalObjectError> {
-    let mut replayed = ReplayedWalTail {
-        resulting_head: base_head.clone(),
-        projected_tail: base_tail.clone(),
-    };
+    let mut head = base_head.clone();
     for object in wal_tail.objects() {
-        replayed = replay_wal_records(&replayed.resulting_head, &replayed.projected_tail, object)?;
         let payload = object.envelope().payload();
-        if replayed.resulting_head.next_inode_id != payload.next_inode_id {
+        for record in &payload.records {
+            head.seq = record.committed_seq;
+            head.next_inode_id =
+                replay_next_inode_id_from_commit_deltas(head.next_inode_id, &record.deltas);
+            tail.apply_commit(&payload.namespace_id, record)?;
+        }
+        if head.next_inode_id != payload.next_inode_id {
             return Err(WalObjectError::SummaryMismatch);
         }
-        replayed.resulting_head = replayed.resulting_head.after_wal_object(payload);
+        head = head.after_wal_object(payload);
     }
-    Ok(replayed)
-}
-
-pub(crate) fn replay_wal_records(
-    base_head: &NamespaceReadState,
-    base_tail: &ProjectedWalTail,
-    object: &ValidatedWalObject,
-) -> Result<ReplayedWalTail, WalObjectError> {
-    let mut current_head = base_head.clone();
-    let mut current_tail = base_tail.clone();
-    let payload = object.envelope().payload();
-
-    for record in &payload.records {
-        current_head.seq = record.committed_seq;
-        current_head.next_inode_id =
-            replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
-        current_tail.apply_commit(&payload.namespace_id, record)?;
-    }
-
     Ok(ReplayedWalTail {
-        resulting_head: current_head,
-        projected_tail: current_tail,
+        resulting_head: head,
+        projected_tail: tail,
     })
 }
 

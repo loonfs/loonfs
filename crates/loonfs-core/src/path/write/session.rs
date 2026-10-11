@@ -1,6 +1,7 @@
 //! [`PublishPlanningSession`]: plans a batch's candidates in admission
 //! order, each seeing the rows earlier candidates would persist.
 
+use super::planned_pieces::PlannedPieces;
 use super::planner::prepare_commit_against_publish_view;
 use super::preconditions::evaluate_preconditions;
 use crate::commit::{
@@ -10,13 +11,14 @@ use crate::commit_engine::CommitCandidate;
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
-use crate::wal::ProjectedWalTail;
+use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalCommitPayload;
 #[cfg(test)]
 use loonfs_types::AbsolutePath;
 #[cfg(test)]
 use loonfs_types::CommitPrecondition;
+use loonfs_types::ContentRef;
 #[cfg(test)]
 use loonfs_types::NamespaceId;
 
@@ -24,24 +26,42 @@ use loonfs_types::NamespaceId;
 ///
 /// The session keeps accepted rows and resident pieces so later candidates
 /// can resolve earlier candidates and materialize references to them.
-pub(crate) struct PublishPlanningSession {
+pub(crate) struct PublishPlanningSession<'a> {
     head: NamespaceReadState,
     inode_allocator: InodeAllocator,
-    tail: ProjectedWalTail,
+    tail: &'a ProjectedWalTail,
+    accepted_rows: MetadataState,
+    accepted_pieces: PlannedPieces,
     /// Durable-layer lookups memoized across the whole batch attempt; the
     /// accepted-rows overlay is the only layer that changes between
     /// candidates and is composed per lookup.
     durable_cache: DurableVisibilityCache,
 }
 
-impl PublishPlanningSession {
-    pub(crate) fn new(head: &NamespaceReadState, tail: &ProjectedWalTail) -> Self {
+impl<'a> PublishPlanningSession<'a> {
+    pub(crate) fn new(head: &NamespaceReadState, tail: &'a ProjectedWalTail) -> Self {
         Self {
             head: head.clone(),
             inode_allocator: InodeAllocator::new(head.next_inode_id),
-            tail: tail.clone(),
+            tail,
+            accepted_rows: MetadataState::default(),
+            accepted_pieces: PlannedPieces::default(),
             durable_cache: DurableVisibilityCache::default(),
         }
+    }
+
+    pub(super) fn head(&self) -> &NamespaceReadState {
+        &self.head
+    }
+
+    pub(super) fn accepted_rows(&self) -> &MetadataState {
+        &self.accepted_rows
+    }
+
+    pub(super) fn content(&self, content_ref: &ContentRef) -> Option<&ProjectedContent> {
+        self.accepted_pieces
+            .content(content_ref)
+            .or_else(|| self.tail.content(content_ref))
     }
 
     #[cfg(test)]
@@ -71,7 +91,7 @@ impl PublishPlanningSession {
     ) -> Result<ValidatedCommitPlan> {
         let base_view = base_view.with_durable_cache(&self.durable_cache);
         let overlay = MetadataState::default();
-        let pre_state = base_view.with_overlay(&overlay, &self.tail.rows, self.head.seq);
+        let pre_state = base_view.with_overlay(&overlay, &self.accepted_rows, self.head.seq);
         evaluate_preconditions(
             &candidate.request().preconditions,
             candidate.authority(),
@@ -84,9 +104,8 @@ impl PublishPlanningSession {
             content_writes,
             candidate,
             semantic_identity,
-            &self.head,
+            self,
             base_view,
-            &self.tail,
             committed_at_ms,
             allocation,
         )
@@ -105,8 +124,15 @@ impl PublishPlanningSession {
     /// Folds an accepted commit into the session so later candidates in the
     /// same batch plan and validate against it.
     pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
-        self.tail.apply_pieces(&self.head.namespace_id, preview);
-        self.tail.rows.apply_committed_wal_record_mut(preview);
+        for (content_ref, entry) in inline_content_refs(&self.head.namespace_id, preview) {
+            self.accepted_pieces.insert_piece(
+                self.tail.content(content_ref),
+                content_ref,
+                entry,
+                preview.committed_seq,
+            );
+        }
+        self.accepted_rows.apply_committed_wal_record_mut(preview);
         self.head.seq = plan.assigned_seq;
         self.head.next_inode_id = plan.resulting_next_inode_id;
     }

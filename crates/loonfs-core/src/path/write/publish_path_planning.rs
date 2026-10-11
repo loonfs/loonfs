@@ -1,5 +1,6 @@
 //! Shared path-planning checks and visible-ancestor walks.
 
+use super::planned_pieces::CommitPieces;
 use crate::authorize::{Absence, Authorizer, Replacement};
 use crate::binding_version;
 use crate::commit::{AppendedContent, CandidateAllocation, CommitOp, ResolvedBinding};
@@ -60,7 +61,7 @@ pub(super) struct PublishPathPlanningView<'a, 'view, 'store, S: ObjectStore + ?S
     pub(super) access: &'a NamespaceAccess,
     pub(super) authorizer: &'a Authorizer<'a>,
     pub(super) view: &'a MetadataView<'view, 'store, S>,
-    pub(super) tail: Option<&'a crate::wal::ProjectedWalTail>,
+    pub(super) pieces: Option<&'a CommitPieces<'a>>,
 }
 
 /// Rejects the root, which only an access update may name as its target.
