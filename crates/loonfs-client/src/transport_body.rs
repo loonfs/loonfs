@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::time::Sleep;
+use tokio::time::{Instant, Sleep};
 
 #[derive(Debug)]
 pub(crate) struct RequestActivity {
@@ -59,6 +59,8 @@ pub(crate) struct TimedBody {
     total_timeout: Option<Pin<Box<Sleep>>>,
     read_timeout: BoxFuture<'static, ()>,
     activity: Arc<RequestActivity>,
+    created_at: Instant,
+    started: bool,
 }
 
 impl TimedBody {
@@ -73,6 +75,8 @@ impl TimedBody {
             total_timeout,
             read_timeout,
             activity,
+            created_at: transport_now(),
+            started: false,
         }
     }
 }
@@ -86,6 +90,15 @@ impl HttpBody for TimedBody {
         context: &mut Context<'_>,
     ) -> Poll<Option<std::result::Result<Frame<Bytes>, TransportError>>> {
         let this = self.get_mut();
+        if !this.started {
+            let held = transport_now() - this.created_at;
+            if let Some(timeout) = &mut this.total_timeout {
+                let deadline = timeout.deadline() + held;
+                timeout.as_mut().reset(deadline);
+            }
+            this.activity.touch();
+            this.started = true;
+        }
         if let Some(timeout) = &mut this.total_timeout {
             if timeout.as_mut().poll(context).is_ready() {
                 return Poll::Ready(Some(Err(timeout_error())));
@@ -108,6 +121,12 @@ impl HttpBody for TimedBody {
     fn size_hint(&self) -> SizeHint {
         self.body.size_hint()
     }
+}
+
+// This transport clock measures how long a response waited unread without changing protocol time.
+#[allow(clippy::disallowed_methods)]
+fn transport_now() -> Instant {
+    Instant::now()
 }
 
 pub(crate) async fn wait_for_timeout(timeout: &mut Option<Pin<Box<Sleep>>>) {

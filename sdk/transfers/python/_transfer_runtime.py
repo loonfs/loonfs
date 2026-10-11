@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextvars
 import typing
 
@@ -114,42 +115,67 @@ def _download_range_request(part, timeout):
     )
 
 
+def _send_download_range(client, part, timeout):
+    return client.send(
+        _download_range_request(part, timeout),
+        stream=True,
+        auth=None,
+        follow_redirects=False,
+    )
+
+
 def _download_ranges(client, ranges, timeout):
-    for part in ranges:
-        if part.length == 0:
-            continue
-        response = client.send(
-            _download_range_request(part, timeout),
-            stream=True,
-            auth=None,
-            follow_redirects=False,
-        )
+    parts = [part for part in ranges if part.length != 0]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        pending = None
+        if parts:
+            pending = executor.submit(_send_download_range, client, parts[0], timeout)
+        response = None
         try:
-            _require_success(response)
-            count = 0
-            for chunk in response.iter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES):
-                count += len(chunk)
-                if count > part.length:
-                    raise RuntimeError("download range exceeded its declared length")
-                yield chunk
-            if count != part.length:
-                raise RuntimeError("download range ended before its declared length")
+            for index, part in enumerate(parts):
+                response, pending = pending.result(), None
+                _require_success(response)
+                if index + 1 < len(parts):
+                    pending = executor.submit(
+                        _send_download_range, client, parts[index + 1], timeout
+                    )
+                count = 0
+                for chunk in response.iter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES):
+                    count += len(chunk)
+                    if count > part.length:
+                        raise RuntimeError(
+                            "download range exceeded its declared length"
+                        )
+                    yield chunk
+                if count != part.length:
+                    raise RuntimeError(
+                        "download range ended before its declared length"
+                    )
+                response.close()
         finally:
-            response.close()
+            if response is not None:
+                response.close()
+            if pending is not None:
+                try:
+                    pending.result().close()
+                except Exception:
+                    pass
 
 
 async def _async_download_ranges(client, ranges, timeout):
-    for part in ranges:
-        if part.length == 0:
-            continue
-        response = await client.send(
-            _download_range_request(part, timeout),
-            stream=True,
-            auth=None,
-            follow_redirects=False,
-        )
-        try:
+    parts = [part for part in ranges if part.length != 0]
+    pending = None
+    if parts:
+        pending = asyncio.create_task(_send_download_range(client, parts[0], timeout))
+    response = None
+    try:
+        for index, part in enumerate(parts):
+            response, pending = await pending, None
             _require_success(response)
+            if index + 1 < len(parts):
+                pending = asyncio.create_task(
+                    _send_download_range(client, parts[index + 1], timeout)
+                )
             count = 0
             async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES):
                 count += len(chunk)
@@ -158,8 +184,15 @@ async def _async_download_ranges(client, ranges, timeout):
                 yield chunk
             if count != part.length:
                 raise RuntimeError("download range ended before its declared length")
-        finally:
             await response.aclose()
+    finally:
+        if response is not None:
+            await response.aclose()
+        if pending is not None:
+            pending.cancel()
+            results = await asyncio.gather(pending, return_exceptions=True)
+            if isinstance(results[0], httpx.Response):
+                await results[0].aclose()
 
 
 class _AsyncReader:

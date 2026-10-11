@@ -275,3 +275,38 @@ test("verified streams bound chunks and stop reading when the consumer closes", 
     assert.ok(cancelled);
     assert.equal(reads, 1);
 });
+
+test("direct downloads request the next range while the current one is read", async () => {
+    const fixture: Fixture = {
+        name: "three_ranges",
+        content: "123456789",
+        algorithm: "crc64nvme",
+        checksum: "ae8b14860a799888",
+        size_bytes: 9,
+        range: null,
+        error_message: null,
+        direct_error_message: null,
+        object_requests: ["/object/0", "/object/1", "/object/2"],
+        ranges: [
+            { start_offset: 0, length: 3, range: "bytes=4-6", content: "123" },
+            { start_offset: 3, length: 3, range: "bytes=0-2", content: "456" },
+            { start_offset: 6, length: 3, range: "bytes=8-10", content: "789" },
+        ],
+    };
+    const requests: string[] = [];
+    const objects = () => requests.filter((path) => path.startsWith("/object"));
+    const stream = await new LoonFSClient({
+        baseUrl: "http://api.test",
+        token: "private-token",
+        fetch: fakeFetch(fixture, true, new ReadableStream(), requests),
+    }).files.downloadStream({ namespace_id: "demo", path: "/file" });
+    const reader = stream.content.getReader();
+    const text = async () => new TextDecoder().decode((await reader.read()).value);
+
+    assert.equal(await text(), "123");
+    assert.deepEqual(objects(), fixture.object_requests.slice(0, 2));
+    assert.equal(await text(), "456");
+    assert.deepEqual(objects(), fixture.object_requests);
+    assert.equal(await text(), "789");
+    assert.equal((await reader.read()).done, true);
+});

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -240,5 +241,76 @@ func TestStreamingDownloadsStartBeforeEOFAndCancelPendingReads(t *testing.T) {
 			t.Fatalf("expected cancellation, got %v", err)
 		}
 		opened.Content.Close()
+	}
+}
+
+func TestStreamingDownloadsRequestTheNextRangeWhileOneIsRead(t *testing.T) {
+	var fixture streamCase
+	if err := json.Unmarshal([]byte(`{"name": "three_ranges", "content": "123456789", "algorithm": "crc64nvme",
+		"checksum": "ae8b14860a799888", "size_bytes": 9, "ranges": [
+		{"start_offset": 0, "length": 3, "range": "bytes=4-6", "content": "123"},
+		{"start_offset": 3, "length": 3, "range": "bytes=0-2", "content": "456"},
+		{"start_offset": 6, "length": 3, "range": "bytes=8-10", "content": "789"}]}`), &fixture); err != nil {
+		t.Fatal(err)
+	}
+	reached := []chan struct{}{nil, make(chan struct{}), make(chan struct{})}
+	objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		index, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/object/"))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if index == 0 {
+			io.WriteString(w, fixture.Ranges[0].Content[:1])
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		close(reached[index])
+		io.WriteString(w, fixture.Ranges[index].Content)
+	}))
+	dialer := &net.Dialer{}
+	objectTransport := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, objects.Listener.Addr().String())
+	}}
+	httpClient := streamTestClient(t, fixture, true, func(http.ResponseWriter, *http.Request) {}, nil)
+	metadata := httpClient.Transport
+	httpClient.Transport = transferTransport(func(request *http.Request) (*http.Response, error) {
+		if strings.HasPrefix(request.URL.Path, "/object/") {
+			return objectTransport.RoundTrip(request)
+		}
+		return metadata.RoundTrip(request)
+	})
+	client := server.NewClient(option.WithBaseURL("http://api.test"), option.WithToken("private-token"), option.WithHTTPClient(httpClient))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	opened, err := client.Files.DownloadStream(ctx, files.DownloadInput{NamespaceID: "demo", Path: "/file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := make([]byte, 1)
+	if _, err := io.ReadFull(opened.Content, first); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reached[1]:
+	case <-time.After(5 * time.Second):
+		t.Fatal("range 1 was not requested while range 0 was read")
+	}
+	select {
+	case <-reached[2]:
+		t.Fatal("range 2 was requested before range 1 was read")
+	default:
+	}
+	opened.Content.Close()
+	shutdown := make(chan struct{})
+	go func() {
+		objects.Close()
+		close(shutdown)
+	}()
+	select {
+	case <-shutdown:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an object request outlived Close")
 	}
 }

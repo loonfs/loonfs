@@ -99,33 +99,51 @@ export function downloadRanges(
         throw new Error("download grant has invalid ranges");
     let index = 0;
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let pending: Promise<Response> | undefined;
     let remaining = 0;
     let cancelled = false;
-    const openNext = async (): Promise<boolean> => {
+    const request = (): Promise<Response> | undefined => {
         while (index < ranges.length && !cancelled) {
             scope.check();
             const range = ranges[index++]!;
             if (range.length === 0) continue;
-            const response = await send(range.access.url, {
+            const response = send(range.access.url, {
                 redirect: "error",
                 method: range.access.method,
                 headers: range.access.headers,
                 signal: scope.signal,
             });
-            if (cancelled) {
-                await response.body?.cancel();
-                return false;
-            }
-            if (!response.ok) {
-                await response.body?.cancel();
-                throw new Error(`presigned request failed with HTTP ${response.status}`);
-            }
-            if (!response.body) throw new Error("download response has no body");
-            reader = response.body.getReader();
-            remaining = range.length;
-            return true;
+            response.catch(() => {});
+            return response;
         }
-        return false;
+        return undefined;
+    };
+    const openNext = async (): Promise<boolean> => {
+        const next = pending ?? request();
+        pending = undefined;
+        if (!next) return false;
+        const length = ranges[index - 1]!.length;
+        const response = await next;
+        if (cancelled) {
+            await response.body?.cancel();
+            return false;
+        }
+        if (!response.ok) {
+            await response.body?.cancel();
+            throw new Error(`presigned request failed with HTTP ${response.status}`);
+        }
+        if (!response.body) throw new Error("download response has no body");
+        reader = response.body.getReader();
+        remaining = length;
+        pending = request();
+        return true;
+    };
+    const release = async (reason: unknown): Promise<void> => {
+        await reader?.cancel(reason).catch(() => {});
+        reader?.releaseLock();
+        reader = undefined;
+        pending?.then((response) => response.body?.cancel()).catch(() => {});
+        pending = undefined;
     };
     return new ReadableStream<Uint8Array>(
         {
@@ -152,18 +170,14 @@ export function downloadRanges(
                         return;
                     }
                 } catch (error) {
-                    await reader?.cancel(error).catch(() => {});
-                    reader?.releaseLock();
-                    reader = undefined;
+                    await release(error);
                     if (!cancelled) controller.error(error);
                 }
             },
             async cancel(reason) {
                 cancelled = true;
                 scope.controller.abort(reason);
-                await reader?.cancel(reason).catch(() => {});
-                reader?.releaseLock();
-                reader = undefined;
+                await release(reason);
             },
         },
         { highWaterMark: 0 },

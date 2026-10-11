@@ -141,7 +141,8 @@
     "error_message": null,
     "direct_error_message": "download range ended before its declared length",
     "object_requests": [
-      "/object/0"
+      "/object/0",
+      "/object/1"
     ]
   },
   {
@@ -168,7 +169,8 @@
     "error_message": null,
     "direct_error_message": "download range exceeded its declared length",
     "object_requests": [
-      "/object/0"
+      "/object/0",
+      "/object/1"
     ]
   },
   {

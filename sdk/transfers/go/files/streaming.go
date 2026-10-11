@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
@@ -66,7 +67,7 @@ func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*Downloa
 			return nil, err
 		}
 		result = &DownloadStream{
-			Content:     &downloadRangeReader{ctx: ctx, client: c.transferHTTPClient(), ranges: grant.Ranges},
+			Content:     newDownloadRangeReader(ctx, c.transferHTTPClient(), grant.Ranges),
 			NamespaceID: grant.NamespaceID, Path: grant.Path, RevisionNo: grant.RevisionNo, ContentRef: grant.ContentRef,
 		}
 	} else {
@@ -258,13 +259,43 @@ func validateDownloadRanges(ranges []*loonfs.DownloadRange, sizeBytes int64) err
 	return nil
 }
 
+type openedRange struct {
+	response *http.Response
+	err      error
+}
+
 type downloadRangeReader struct {
 	ctx       context.Context
+	cancel    context.CancelFunc
 	client    core.HTTPClient
 	ranges    []*loonfs.DownloadRange
 	body      io.ReadCloser
 	remaining int64
+	next      chan openedRange
+	requested bool
+	wait      sync.WaitGroup
 	closed    bool
+}
+
+func newDownloadRangeReader(ctx context.Context, client core.HTTPClient, ranges []*loonfs.DownloadRange) *downloadRangeReader {
+	ctx, cancel := context.WithCancel(ctx)
+	reader := &downloadRangeReader{ctx: ctx, cancel: cancel, client: client, next: make(chan openedRange, 1)}
+	for _, part := range ranges {
+		if part.Length != 0 {
+			reader.ranges = append(reader.ranges, part)
+		}
+	}
+	return reader
+}
+
+func (r *downloadRangeReader) request(part *loonfs.DownloadRange) {
+	r.requested = true
+	r.wait.Add(1)
+	go func() {
+		defer r.wait.Done()
+		response, err := sendPresignedWithClient(r.ctx, r.client, part.Access, http.MethodGet, nil, 0)
+		r.next <- openedRange{response: response, err: err}
+	}()
 }
 
 func (r *downloadRangeReader) Read(buffer []byte) (int, error) {
@@ -281,18 +312,23 @@ func (r *downloadRangeReader) Read(buffer []byte) (int, error) {
 			}
 			part := r.ranges[0]
 			r.ranges = r.ranges[1:]
-			if part.Length == 0 {
-				continue
+			if !r.requested {
+				r.request(part)
 			}
-			response, err := sendPresignedWithClient(r.ctx, r.client, part.Access, http.MethodGet, nil, 0)
-			if err != nil {
-				return 0, err
+			opened := <-r.next
+			r.requested = false
+			if opened.err != nil {
+				return 0, opened.err
 			}
+			response := opened.response
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
 				defer response.Body.Close()
 				return 0, responseStatusError(response)
 			}
 			r.body, r.remaining = response.Body, part.Length
+			if len(r.ranges) > 0 {
+				r.request(r.ranges[0])
+			}
 		}
 		n, err := r.body.Read(buffer)
 		if err != nil && err != io.EOF {
@@ -322,8 +358,18 @@ func (r *downloadRangeReader) Close() error {
 		return nil
 	}
 	r.closed = true
+	r.cancel()
+	var err error
 	if r.body != nil {
-		return r.body.Close()
+		err = r.body.Close()
 	}
-	return nil
+	r.wait.Wait()
+	select {
+	case opened := <-r.next:
+		if opened.response != nil {
+			opened.response.Body.Close()
+		}
+	default:
+	}
+	return err
 }

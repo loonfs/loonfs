@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import threading
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,8 @@ class Chunks(httpx.SyncByteStream, httpx.AsyncByteStream):
 
     async def __aiter__(self):
         for chunk in self:
+            # A network read yields to the event loop, so a pending request starts.
+            await asyncio.sleep(0)
             yield chunk
 
     async def aclose(self):
@@ -38,7 +41,7 @@ class Chunks(httpx.SyncByteStream, httpx.AsyncByteStream):
         self.closed = True
 
 
-def stream_client(fixture, direct, body, asynchronous=False):
+def stream_client(fixture, direct, body, asynchronous=False, range_body=None):
     claim = {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
@@ -54,12 +57,15 @@ def stream_client(fixture, direct, body, asynchronous=False):
         assert request.extensions["timeout"]["read"] == 7
         path = request.url.path
         if path.startswith("/object/"):
-            part = fixture["ranges"][int(path.rsplit("/", 1)[1])]
+            index = int(path.rsplit("/", 1)[1])
+            part = fixture["ranges"][index]
             assert "authorization" not in request.headers
             assert "x-private" not in request.headers
             assert "cookie" not in request.headers
             assert request.headers.get_list("range") == [part["range"]]
-            return httpx.Response(200, content=part["content"].encode())
+            if range_body is not None:
+                return httpx.Response(200, stream=range_body(index))
+            return httpx.Response(200, stream=Chunks([part["content"].encode()]))
         if path == "/object":
             assert "authorization" not in request.headers
             assert "x-private" not in request.headers
@@ -228,3 +234,74 @@ def test_streaming_download_backpressure_and_early_close(direct, asynchronous):
                 assert body.reads == 1
     assert body.closed
     assert body.reads == 1
+
+
+THREE_RANGES = {
+    "size_bytes": 9,
+    "algorithm": "crc64nvme",
+    "checksum": _checksum("crc64nvme", b"123456789").value,
+    "range": None,
+    "ranges": [
+        {"start_offset": 0, "length": 3, "range": "bytes=4-6", "content": "123"},
+        {"start_offset": 3, "length": 3, "range": "bytes=0-2", "content": "456"},
+        {"start_offset": 6, "length": 3, "range": "bytes=8-10", "content": "789"},
+    ],
+}
+
+
+def object_requests(requests):
+    return [r.url.path for r in requests if r.url.host == "objects.test"]
+
+
+def test_streaming_download_requests_the_next_range_while_one_is_read():
+    bodies = [Chunks([part["content"].encode()]) for part in THREE_RANGES["ranges"]]
+    second_requested = threading.Event()
+
+    def range_body(index):
+        if index == 1:
+            second_requested.set()
+        return bodies[index]
+
+    client, http, requests = stream_client(
+        THREE_RANGES, True, None, range_body=range_body
+    )
+    with http:
+        with client.files.download_stream(
+            "demo", path="/file", request_options={"timeout": 7}
+        ) as stream:
+            assert next(stream) == b"123"
+            assert second_requested.wait(5)
+            assert "/object/2" not in object_requests(requests)
+            assert b"".join(stream) == b"456789"
+    assert object_requests(requests) == ["/object/0", "/object/1", "/object/2"]
+    assert all(body.closed for body in bodies)
+
+
+def test_async_streaming_download_requests_the_next_range_while_one_is_read():
+    bodies = [Chunks([part["content"].encode()]) for part in THREE_RANGES["ranges"]]
+
+    async def read():
+        second_requested = asyncio.Event()
+
+        def range_body(index):
+            if index == 1:
+                second_requested.set()
+            return bodies[index]
+
+        client, http, requests = stream_client(
+            THREE_RANGES, True, None, True, range_body=range_body
+        )
+        async with http:
+            async with await client.files.download_stream(
+                "demo", path="/file", request_options={"timeout": 7}
+            ) as stream:
+                assert await stream.__anext__() == b"123"
+                await asyncio.wait_for(second_requested.wait(), 5)
+                assert second_requested.is_set()
+                assert "/object/2" not in object_requests(requests)
+                assert b"".join([chunk async for chunk in stream]) == b"456789"
+        return requests
+
+    requests = asyncio.run(read())
+    assert object_requests(requests) == ["/object/0", "/object/1", "/object/2"]
+    assert all(body.closed for body in bodies)

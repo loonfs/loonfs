@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
+use futures::future::BoxFuture;
 use loonfs_types::api::v0::DownloadRange;
 
 /// Options for a download of a file's content by path or by inode.
@@ -26,8 +27,12 @@ pub struct DownloadOptions {
 /// Verification completes only when [`Self::next_chunk`] returns `None`.
 /// A caller that stops earlier has received provisional bytes, just as with
 /// any streaming read whose digest cannot be known until the end.
+///
+/// The next range is requested while the current one is read, so at most
+/// two responses are open.
 pub struct DirectDownloadStream {
     body: payload::PayloadStream,
+    next: Option<NextRange>,
     client: Client,
     ranges: std::collections::VecDeque<DownloadRange>,
     range_remaining: u64,
@@ -41,6 +46,18 @@ pub struct DirectDownloadStream {
     /// Number of prefix bytes included in checksum verification so far.
     prefix_folded: u64,
     finished: bool,
+}
+
+enum NextRange {
+    Opening {
+        length: u64,
+        open: BoxFuture<'static, Result<payload::PayloadStream>>,
+    },
+    Open {
+        length: u64,
+        body: payload::PayloadStream,
+    },
+    Failed(ClientError),
 }
 
 impl DirectDownloadStream {
@@ -73,7 +90,24 @@ impl DirectDownloadStream {
             return Ok(None);
         }
         loop {
-            match self.body.next().await {
+            let polled = match &mut self.next {
+                Some(NextRange::Opening { length, open }) => {
+                    let length = *length;
+                    tokio::select! {
+                        biased;
+                        opened = open => {
+                            self.next = Some(match opened {
+                                Ok(body) => NextRange::Open { length, body },
+                                Err(error) => NextRange::Failed(error),
+                            });
+                            continue;
+                        }
+                        polled = self.body.next() => polled,
+                    }
+                }
+                _ => self.body.next().await,
+            };
+            match polled {
                 Some(Ok(chunk)) => {
                     let length = chunk.len() as u64;
                     if length > self.range_remaining {
@@ -103,11 +137,17 @@ impl DirectDownloadStream {
                             self.target, self.range_remaining
                         )));
                     }
-                    if let Some(range) = self.ranges.pop_front() {
+                    if let Some(next) = self.next.take() {
                         self.finished = true;
-                        self.body = self.client.open_download_range(&range).await?;
-                        self.range_remaining = range.length;
+                        let (length, body) = match next {
+                            NextRange::Opening { length, open } => (length, open.await?),
+                            NextRange::Open { length, body } => (length, body),
+                            NextRange::Failed(error) => return Err(error),
+                        };
+                        self.body = body;
+                        self.range_remaining = length;
                         self.finished = false;
+                        self.request_next_range();
                         continue;
                     }
                     self.finished = true;
@@ -138,6 +178,19 @@ impl DirectDownloadStream {
                     return Ok(None);
                 }
             }
+        }
+    }
+
+    fn request_next_range(&mut self) {
+        if self.next.is_some() {
+            return;
+        }
+        if let Some(range) = self.ranges.pop_front() {
+            let client = self.client.clone();
+            self.next = Some(NextRange::Opening {
+                length: range.length,
+                open: Box::pin(async move { client.open_download_range(&range).await }),
+            });
         }
     }
 }
@@ -358,8 +411,9 @@ impl Client {
             .split_first()
             .expect("validated grant should contain a range");
         let body = self.open_download_range(first).await?;
-        Ok(DirectDownloadStream {
+        let mut stream = DirectDownloadStream {
             body,
+            next: None,
             client: self.clone(),
             ranges: remaining.iter().cloned().collect(),
             range_remaining: first.length,
@@ -370,7 +424,9 @@ impl Client {
             resumed_from: start_offset,
             prefix_folded: 0,
             finished: false,
-        })
+        };
+        stream.request_next_range();
+        Ok(stream)
     }
 
     async fn open_download_range(&self, range: &DownloadRange) -> Result<payload::PayloadStream> {
