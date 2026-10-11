@@ -13,10 +13,9 @@ use crate::namespace::read_anchor::{load_read_anchor, NamespaceReadAnchor};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::ProjectedWalTail;
-use crate::wal::{replay_discovered_tail, ValidatedWalTail, WalObjectError};
+use crate::wal::{replay_discovered_tail, TailChunk, ValidatedWalTail, WalObjectError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::AcquiredWriter;
-use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{CommitId, NamespaceId};
 use std::sync::Arc;
 
@@ -133,13 +132,14 @@ impl PublishTailPosition {
 }
 
 impl PublishTailProjection {
-    pub(crate) fn apply_fold_records(
+    pub(crate) fn apply_fold_object(
         &mut self,
-        namespace_id: &NamespaceId,
-        records: &[WalCommitPayload],
+        chunk: Option<Arc<TailChunk>>,
     ) -> std::result::Result<(), WalObjectError> {
         if let Some(fold) = &mut self.position.fold {
-            fold.since.push_object(namespace_id, records)?;
+            if let Some(chunk) = chunk {
+                fold.since.push_chunk(chunk)?;
+            }
             fold.wal_objects_since += 1;
         }
         Ok(())

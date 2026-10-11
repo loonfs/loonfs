@@ -638,6 +638,10 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
             .push_object(&engine.namespace_id, &wal_object.payload().records)
             .expect("later rows");
     }
+    let cached = engine
+        .wal_fold_input()
+        .expect("the tail with the commits since the fold began")
+        .tail_state;
     let folded = fold_wal_tail(
         &store,
         None,
@@ -661,6 +665,15 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         .tail_state;
     assert_eq!(reanchored.merged_rows(), expected.merged_rows());
     assert_eq!(reanchored.contents(), expected.contents());
+    assert!(
+        reanchored.chunks().len() == 2
+            && reanchored
+                .chunks()
+                .iter()
+                .zip(&cached.chunks()[cached.chunks().len() - 2..])
+                .all(|(folded, cached)| Arc::ptr_eq(folded, cached)),
+        "the fold tail shares the cached tail's chunks for the commits since the fold began"
+    );
     let retained = engine.projection_observed.as_ref().expect("observation");
     let observed = observed.expect("tip observation before the fold");
     assert_eq!(retained.age_at(&observed), 0);

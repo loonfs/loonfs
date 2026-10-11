@@ -104,22 +104,28 @@ impl ProjectedWalTail {
         }
     }
 
-    /// Appends one WAL object of `namespace_id`'s WAL as a chunk.
+    /// Appends one WAL object of `namespace_id`'s WAL as a chunk and returns
+    /// that chunk, or `None` for an object with no records.
     pub(crate) fn push_object(
         &mut self,
         namespace_id: &NamespaceId,
         records: &[WalCommitPayload],
-    ) -> Result<(), WalObjectError> {
+    ) -> Result<Option<Arc<TailChunk>>, WalObjectError> {
         if records.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
-        let chunk = TailChunk::from_records(namespace_id, records)?;
+        let chunk = Arc::new(TailChunk::from_records(namespace_id, records)?);
+        self.push_chunk(Arc::clone(&chunk))?;
+        Ok(Some(chunk))
+    }
+
+    pub(crate) fn push_chunk(&mut self, chunk: Arc<TailChunk>) -> Result<(), WalObjectError> {
         self.activity = self
             .activity
             .checked_add(chunk.activity)
             .ok_or(WalObjectError::ActivityOverflow)?;
         self.inline_bytes += chunk.inline_bytes;
-        self.chunks.push(Arc::new(chunk));
+        self.chunks.push(chunk);
         Ok(())
     }
 
