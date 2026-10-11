@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use bytes::Bytes;
 use futures::FutureExt;
-use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
 use loonfs_types::{Checksum, ChecksumAlgorithm, StreamingChecksum};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
@@ -253,7 +253,9 @@ impl MultipartController for GcsRequestSigner {
                 (false, true) => format!("bytes {offset}-{}/{end}", end - 1),
                 (false, false) => format!("bytes {offset}-{}/*", end - 1),
             };
-            let mut request = http::Request::put(&session).header(CONTENT_RANGE, content_range);
+            let mut request = http::Request::put(&session)
+                .header(CONTENT_LENGTH, chunk.len())
+                .header(CONTENT_RANGE, content_range);
             if last {
                 let full = std::mem::replace(
                     &mut checksum,
@@ -455,7 +457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_and_resumable_uploads_send_the_full_object_crc32c() {
+    async fn media_and_resumable_uploads_send_crc32c_and_chunk_lengths() {
         use super::*;
         use futures::{stream, StreamExt};
         let (_directory, path) = gcs_fixture_service_account_key_file("gcs-checksum");
@@ -499,6 +501,16 @@ mod tests {
             assert_eq!(headers["x-goog-hash"], "crc32c=mnG7TA==");
             if part_bytes <= 5 {
                 assert_eq!(requests[0].2, b"{}"[..]);
+                for (_, headers, bytes) in requests.iter().skip(1) {
+                    assert_eq!(
+                        headers[CONTENT_LENGTH].to_str().expect("content length"),
+                        bytes.len().to_string()
+                    );
+                }
+            }
+            if part_bytes == 5 {
+                assert_eq!(headers[CONTENT_LENGTH], "0");
+                assert_eq!(headers[CONTENT_RANGE], "bytes */5");
             }
         }
     }

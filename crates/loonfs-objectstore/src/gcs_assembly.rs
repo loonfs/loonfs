@@ -350,7 +350,8 @@ impl GcsRequestSigner {
         let metadata = self.compose(key, objects).await?;
         let actual = metadata.checksum.as_ref();
         if actual != Some(expected) {
-            self.delete_temporary(key).await;
+            // The composed object stays for collection; no writer deletes an
+            // immutable key another writer may have accepted.
             return Err(ObjectStoreError::ChecksumMismatch {
                 object_key: key.to_owned(),
             });
