@@ -58,9 +58,10 @@ impl<'a> PublishPlanningSession<'a> {
         &self.accepted_rows
     }
 
-    pub(super) fn content(&self, content_ref: &ContentRef) -> Option<&ProjectedContent> {
+    pub(super) fn content(&self, content_ref: &ContentRef) -> Option<ProjectedContent> {
         self.accepted_pieces
             .content(content_ref)
+            .cloned()
             .or_else(|| self.tail.content(content_ref))
     }
 
@@ -126,7 +127,7 @@ impl<'a> PublishPlanningSession<'a> {
     pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
         for (content_ref, entry) in inline_content_refs(&self.head.namespace_id, preview) {
             self.accepted_pieces.insert_piece(
-                self.tail.content(content_ref),
+                self.tail.content(content_ref).as_ref(),
                 content_ref,
                 entry,
                 preview.committed_seq,

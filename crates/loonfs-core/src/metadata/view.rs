@@ -16,6 +16,7 @@ use crate::metadata::{
     RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::namespace::state::NamespaceReadState;
+use crate::wal::ProjectedWalTail;
 #[cfg(test)]
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -70,7 +71,7 @@ impl ActiveDeletionScan {
 pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
     overlay: Option<&'a MetadataState>,
     batch_accepted: Option<&'a MetadataState>,
-    wal_tail: Option<&'a MetadataState>,
+    wal_tail: Option<&'a ProjectedWalTail>,
     manifest: Option<&'a VerifiedMetadataSegments<'store, S>>,
     durable_cache: Option<&'a DurableVisibilityCache>,
 }
@@ -132,7 +133,7 @@ impl<S: ObjectStore + ?Sized> Clone for MetadataView<'_, '_, S> {
 #[cfg(test)]
 impl<'a> InMemoryMetadataView<'a> {
     pub(crate) fn in_memory(
-        base: &'a MetadataState,
+        base: &'a ProjectedWalTail,
         overlay: Option<&'a MetadataState>,
         visible_seq: ChangeSeq,
     ) -> Self {
@@ -154,7 +155,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) fn from_loaded_head(
         head: &'a NamespaceReadState,
         segments: &'a VerifiedMetadataSegments<'store, S>,
-        wal_tail_rows: &'a MetadataState,
+        wal_tail: &'a ProjectedWalTail,
     ) -> Self {
         Self {
             visible_seq: head.seq,
@@ -162,7 +163,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
-                wal_tail: Some(wal_tail_rows),
+                wal_tail: Some(wal_tail),
                 manifest: Some(segments),
                 durable_cache: None,
             },
@@ -233,13 +234,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     pub(super) fn row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
-        [
-            self.sources.overlay,
-            self.sources.batch_accepted,
-            self.sources.wal_tail,
-        ]
-        .into_iter()
-        .flatten()
+        self.overlay_states().chain(self.durable_row_states())
     }
 
     fn overlay_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
@@ -249,7 +244,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     fn durable_row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
-        self.sources.wal_tail.into_iter()
+        let visible_seq = self.visible_seq;
+        self.sources
+            .wal_tail
+            .into_iter()
+            .flat_map(move |tail| tail.row_states(visible_seq))
     }
 
     pub(super) fn manifest_segments(&self) -> Option<&'a VerifiedMetadataSegments<'store, S>> {

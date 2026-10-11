@@ -70,13 +70,13 @@ impl<S: ObjectStore + ?Sized> crate::storage::content_location::LayoutLookup
         &self,
         content_id: &ContentId,
     ) -> Result<Option<loonfs_types::format::manifest::ContentLayoutRecord>> {
-        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state.rows)
+        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state)
             .content_layout(content_id)
             .await
     }
 
     fn content_has_other_size(&self, content_ref: &loonfs_types::ContentRef) -> bool {
-        self.tail_state.rows.revisions().iter().any(|revision| {
+        self.tail_state.revisions().any(|revision| {
             revision.content_ref.content_id == content_ref.content_id
                 && revision.content_ref.size_bytes != content_ref.size_bytes
         })
@@ -346,8 +346,11 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
     let tail = projection.tail_state.as_ref();
     let assembled = tail
         .contents()
-        .iter()
-        .map(|content| Ok((content, assemble_tail_content(content)?)))
+        .into_iter()
+        .map(|content| {
+            let pieces = assemble_tail_content(&content)?;
+            Ok((content, pieces))
+        })
         .collect::<Result<Vec<_>>>()?;
     let layouts = Mutex::new(HashMap::new());
     // In a live namespace, failed folds leave committed content for the next fold.
@@ -356,7 +359,7 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
             let layouts = &layouts;
             async move {
                 let layout =
-                    write_tail_content(store, projection, content, pieces, content_writes).await?;
+                    write_tail_content(store, projection, &content, pieces, content_writes).await?;
                 {
                     layouts
                         .lock()
@@ -452,16 +455,11 @@ pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
-    pub(super) async fn tail_with_deletion_inodes(
-        &self,
-    ) -> Result<std::borrow::Cow<'_, MetadataState>> {
-        let mut tail = std::borrow::Cow::Borrowed(&self.tail_state.rows);
-        let view = MetadataView::from_loaded_head(
-            &self.head,
-            &self.manifest_segments,
-            &self.tail_state.rows,
-        );
-        for tombstone in self.tail_state.rows.subtree_tombstones() {
+    pub(super) async fn tail_with_deletion_inodes(&self) -> Result<MetadataState> {
+        let mut tail = self.tail_state.merged_rows();
+        let view =
+            MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state);
+        for tombstone in self.tail_state.subtree_tombstones() {
             if tail
                 .inode_at_seq(tombstone.root_inode_id, self.head.seq)
                 .is_some()
@@ -477,7 +475,7 @@ impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
                         tombstone.root_inode_id
                     ))
                 })?;
-            tail.to_mut().push_inode_record(inode);
+            tail.push_inode_record(inode);
         }
         Ok(tail)
     }
@@ -543,7 +541,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         .manifest()
         .payload()
         .activity
-        .checked_add(projection.tail_state.activity)
+        .checked_add(projection.tail_state.activity())
         .ok_or_else(|| {
             CoreError::NamespaceCorrupt(
                 "activity counter cannot exceed 9007199254740991".to_owned(),

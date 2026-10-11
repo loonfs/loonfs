@@ -117,7 +117,6 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
     assert_eq!(anchor.read_state.seq, ChangeSeq(9));
     assert_eq!(anchor.read_state.wal_no, WalNo(12));
     assert!(tail
-        .rows
         .find_commit_receipt(&CommitId::parse("data-8").expect("commit"))
         .is_some());
     let mut gets = store.take_get_keys();

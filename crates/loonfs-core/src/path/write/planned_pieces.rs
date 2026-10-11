@@ -1,7 +1,8 @@
 //! Pieces of commits that are planned or accepted but not yet in the WAL tail.
 
 use super::session::PublishPlanningSession;
-use crate::wal::ProjectedContent;
+use crate::wal::{ProjectedContent, ProjectedPiece};
+use bytes::Bytes;
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{ChangeSeq, ContentId, ContentRef};
 use std::collections::HashMap;
@@ -29,6 +30,10 @@ impl PlannedPieces {
         entry: &WalInlineContent,
         committed_seq: ChangeSeq,
     ) {
+        let piece = ProjectedPiece {
+            offset: entry.offset,
+            bytes: Bytes::copy_from_slice(&entry.bytes),
+        };
         self.contents
             .entry(content_ref.content_id.clone())
             .or_insert_with(|| {
@@ -36,7 +41,7 @@ impl PlannedPieces {
                     .cloned()
                     .unwrap_or_else(|| ProjectedContent::new(content_ref, committed_seq))
             })
-            .insert_piece(content_ref, entry, committed_seq);
+            .insert_piece(content_ref, piece, committed_seq);
     }
 }
 
@@ -55,9 +60,10 @@ impl<'a> CommitPieces<'a> {
         }
     }
 
-    pub(super) fn content(&self, content_ref: &ContentRef) -> Option<&ProjectedContent> {
+    pub(super) fn content(&self, content_ref: &ContentRef) -> Option<ProjectedContent> {
         self.own
             .content(content_ref)
+            .cloned()
             .or_else(|| self.session.content(content_ref))
     }
 
@@ -68,7 +74,7 @@ impl<'a> CommitPieces<'a> {
         committed_seq: ChangeSeq,
     ) {
         self.own.insert_piece(
-            self.session.content(content_ref),
+            self.session.content(content_ref).as_ref(),
             content_ref,
             entry,
             committed_seq,

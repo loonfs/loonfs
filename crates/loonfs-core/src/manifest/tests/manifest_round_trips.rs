@@ -129,7 +129,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     .await
     .expect("load delta run");
     assert!(metadata_states_equivalent(
-        &expected_tail.rows,
+        &expected_tail.merged_rows(),
         &actual_tail.finish()
     ));
 }

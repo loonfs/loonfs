@@ -72,8 +72,8 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
     let tail = crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor)
         .await
         .expect("tail");
-    assert_eq!(tail.rows.revisions().len(), 3);
-    let rows = tail.rows.content_layouts();
+    assert_eq!(tail.revisions().count(), 3);
+    let rows: Vec<_> = tail.content_layouts().collect();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].layout.extents[0].object, ExtentObject::Whole);
     assert_eq!(rows[0].size_bytes, 8);
@@ -287,8 +287,8 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
     let first = write_tail_content(
         &store,
         &view.projected_metadata_view(),
-        content,
-        assemble_tail_content(content).expect("pieces"),
+        &content,
+        assemble_tail_content(&content).expect("pieces"),
         &Semaphore::new(32),
     )
     .await
@@ -328,8 +328,8 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     write_tail_content(
         &store,
         &view.projected_metadata_view(),
-        content,
-        assemble_tail_content(content).expect("pieces"),
+        &content,
+        assemble_tail_content(&content).expect("pieces"),
         &Semaphore::new(32),
     )
     .await
@@ -350,7 +350,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
             .object_key,
         content_blob(&namespace_id, &original.content_ref().content_id)
     );
-    let inode_id = tail.rows.revisions()[0].inode_id;
+    let inode_id = tail.revisions().next().expect("revision").inode_id;
     let reference = commit_piece(
         &store,
         &namespace_id,

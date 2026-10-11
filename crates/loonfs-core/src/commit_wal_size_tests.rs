@@ -237,6 +237,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         let estimate = candidate.wal_record_bytes_upper_bound() + WAL_OBJECT_OVERHEAD_BYTES;
         assert!(estimate <= MAX_WAL_OBJECT_BYTES, "{kind}");
         let tail = crate::wal::ProjectedWalTail::default();
+        let base = crate::wal::ProjectedWalTail::from_rows(state.clone());
         let mut session = PublishPlanningSession::new(&head, &tail);
         let mut allocation = session.begin_candidate();
         let plan = session
@@ -247,7 +248,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 candidate
                     .semantic_identity(&namespace_id)
                     .expect("fingerprint"),
-                InMemoryMetadataView::in_memory(&state, None, head.seq),
+                InMemoryMetadataView::in_memory(&base, None, head.seq),
                 u64::MAX,
                 &mut allocation,
             )

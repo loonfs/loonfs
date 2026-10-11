@@ -33,7 +33,7 @@ fn assert_overlay_matches_replay(committed_seq: ChangeSeq, deltas: &[WalDelta]) 
 }
 
 fn overlay_rows(committed_seq: ChangeSeq, deltas: &[WalDelta]) -> MetadataState {
-    let base = MetadataState::default();
+    let base = crate::wal::ProjectedWalTail::from_rows(MetadataState::default());
     let accepted = MetadataState::default();
     let mut view = PublishValidationView::new(
         InMemoryMetadataView::in_memory(&base, None, ChangeSeq(0)),

@@ -39,7 +39,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         MetadataView::from_loaded_head(
             &self.head,
             &self.manifest_segments,
-            &self.projection.tail_state.rows,
+            &self.projection.tail_state,
         )
     }
 
@@ -139,9 +139,7 @@ impl PublishTailProjection {
         records: &[WalCommitPayload],
     ) -> std::result::Result<(), WalObjectError> {
         if let Some(fold) = &mut self.position.fold {
-            for record in records {
-                fold.since.apply_commit(namespace_id, record)?;
-            }
+            fold.since.push_object(namespace_id, records)?;
             fold.wal_objects_since += 1;
         }
         Ok(())

@@ -139,10 +139,11 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
         let projection = load_manifest_projection(&store, &namespace_id, None)
             .await
             .expect("projection");
+        let tail_rows = projection.tail_state.merged_rows();
         let expected = MANIFEST_ROW_FAMILIES
             .into_iter()
             .flat_map(|family| {
-                manifest_rows_for_family(&projection.tail_state.rows, family)
+                manifest_rows_for_family(&tail_rows, family)
                     .chunks(rows_per_segment)
                     .map(|rows| (family, rows.to_vec()))
                     .collect::<Vec<_>>()

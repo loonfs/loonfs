@@ -103,6 +103,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
 ) -> crate::error::Result<(NamespaceReadState, MetadataState)> {
     let projection = super::fold::load_manifest_projection(store, namespace_id, None).await?;
     let tail_state = projection.tail_with_deletion_inodes().await?;
+    let tail_rows = projection.tail_state.merged_rows();
     let mut metadata_state = MetadataStateBuilder::default();
     for family in MANIFEST_ROW_FAMILIES {
         let mut rows = projection
@@ -113,9 +114,9 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
         let state = if family == ApiMetadataRowFamily::ActiveDeletions {
-            tail_state.as_ref()
+            &tail_state
         } else {
-            &projection.tail_state.rows
+            &tail_rows
         };
         rows.extend(manifest_rows_for_family(state, family));
         rows.sort_by_key(|row| row.row_key_for_family(family));

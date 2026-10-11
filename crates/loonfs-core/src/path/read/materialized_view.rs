@@ -404,12 +404,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         content_ref: &ContentRef,
     ) -> Result<ContentLocation> {
-        ContentLocation::resolve(
-            &self.metadata_view(),
-            self.wal_tail.content(content_ref),
-            content_ref,
-        )
-        .await
+        let content = self.wal_tail.content(content_ref);
+        ContentLocation::resolve(&self.metadata_view(), content.as_ref(), content_ref).await
     }
 
     async fn download_ranges(
@@ -482,8 +478,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             write_tail_content(
                 store,
                 &self.metadata_view(),
-                content,
-                assemble_tail_content(content)?,
+                &content,
+                assemble_tail_content(&content)?,
                 content_writes,
             )
             .await
@@ -1221,7 +1217,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.segments, &self.wal_tail.rows)
+        MetadataView::from_loaded_head(&self.head, &self.segments, &self.wal_tail)
     }
 }
 

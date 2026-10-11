@@ -635,7 +635,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
             .expect("WAL object");
         let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("WAL decode");
         expected
-            .apply_commit(&engine.namespace_id, &wal_object.payload().records[0])
+            .push_object(&engine.namespace_id, &wal_object.payload().records)
             .expect("later rows");
     }
     let folded = fold_wal_tail(
@@ -655,13 +655,12 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     assert_eq!(position.basis(), &folded.basis);
     assert_eq!(position.wal_tail_objects, 2);
     assert_eq!(position.head.folded_wal_no, input.head.wal_no);
-    assert_eq!(
-        *engine
-            .wal_fold_input()
-            .expect("the reanchored tail is cached")
-            .tail_state,
-        expected
-    );
+    let reanchored = engine
+        .wal_fold_input()
+        .expect("the reanchored tail is cached")
+        .tail_state;
+    assert_eq!(reanchored.merged_rows(), expected.merged_rows());
+    assert_eq!(reanchored.contents(), expected.contents());
     let retained = engine.projection_observed.as_ref().expect("observation");
     let observed = observed.expect("tip observation before the fold");
     assert_eq!(retained.age_at(&observed), 0);

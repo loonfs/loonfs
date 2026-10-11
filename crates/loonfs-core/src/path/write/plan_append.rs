@@ -189,21 +189,15 @@ async fn append_to<S: ObjectStore + ?Sized>(
     let layout = if extends_base || base.size_bytes == 0 {
         None
     } else {
+        let content = view
+            .pieces
+            .ok_or_else(|| {
+                CoreError::Internal("append planning requires the commit's pieces".to_owned())
+            })?
+            .content(base);
         Some(
-            materialize_content_layout(
-                store,
-                view.view,
-                view.pieces
-                    .ok_or_else(|| {
-                        CoreError::Internal(
-                            "append planning requires the commit's pieces".to_owned(),
-                        )
-                    })?
-                    .content(base),
-                base,
-                content_writes,
-            )
-            .await?,
+            materialize_content_layout(store, view.view, content.as_ref(), base, content_writes)
+                .await?,
         )
     };
     let pieces = vec![WalInlineContent {

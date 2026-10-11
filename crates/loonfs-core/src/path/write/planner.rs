@@ -243,11 +243,12 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
             ))
             .at_operation(delta.semantic_operation_index as usize));
         } else {
+            let content = pieces.content(&prefix);
             *layout = Some(
                 crate::storage::tail_content::materialize_content_layout(
                     store,
                     view,
-                    pieces.content(&prefix),
+                    content.as_ref(),
                     &prefix,
                     content_writes,
                 )
