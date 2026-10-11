@@ -3,9 +3,9 @@
 //! A batched fetch's or a write wave's whole promise is that its round trips
 //! overlap, and the only place that is visible is the store boundary: request
 //! counts and call order both look identical whether a path issued its
-//! requests one at a time or all at once. This wrapper counts matching reads
-//! and puts as they enter and leave, and records the high-water mark, so a
-//! test can pin the width of a wave rather than only its size.
+//! requests one at a time or all at once. This wrapper counts matching reads,
+//! puts, and deletes as they enter and leave, and records the high-water mark,
+//! so a test can pin the width of a wave rather than only its size.
 //!
 //! Each watched request yields once before it delegates. That is what makes
 //! the mark a measurement rather than a race: a batch polled onto the same
@@ -49,13 +49,14 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
-/// Measures concurrency separately for reads and puts.
+/// Measures concurrency separately for reads, puts, and deletes.
 #[derive(Debug)]
 pub struct ConcurrencyWatchStore<S> {
     inner: S,
     keys: KeyPredicate,
     reads: InFlight,
     puts: InFlight,
+    deletes: InFlight,
 }
 
 impl<S> ConcurrencyWatchStore<S> {
@@ -66,6 +67,7 @@ impl<S> ConcurrencyWatchStore<S> {
             keys,
             reads: InFlight::default(),
             puts: InFlight::default(),
+            deletes: InFlight::default(),
         }
     }
 
@@ -82,6 +84,14 @@ impl<S> ConcurrencyWatchStore<S> {
         StoreConcurrency {
             peak_in_flight: self.puts.peak.load(Ordering::SeqCst),
             total: self.puts.total.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Includes cancelled and failed deletes in `total`.
+    pub fn deletes(&self) -> StoreConcurrency {
+        StoreConcurrency {
+            peak_in_flight: self.deletes.peak.load(Ordering::SeqCst),
+            total: self.deletes.total.load(Ordering::SeqCst),
         }
     }
 
@@ -195,6 +205,7 @@ impl<S: ObjectStore> ObjectStore for ConcurrencyWatchStore<S> {
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        let _in_flight = self.enter(key, &self.deletes).await;
         self.inner.delete(key).await
     }
 

@@ -3,6 +3,7 @@
 mod charged_set;
 mod collect;
 mod content;
+mod deletes;
 mod families;
 mod fork_pins;
 mod live_set;

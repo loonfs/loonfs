@@ -1,10 +1,11 @@
 //! Content and source-pin cleanup for an eligible tombstone.
 
+use super::deletes::apply_decisions;
 use super::fork_pins::delete_source_pin;
 use super::live_set::{LiveSet, RetirementState};
+use super::sweep::Decision;
 use crate::error::{CoreError, Result};
-use crate::store_waves::STORE_WRITE_WAVE;
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -37,19 +38,12 @@ async fn sweep_content<S: ObjectStore + ?Sized>(
     report: &mut GcResponse,
 ) -> Result<()> {
     let prefix = content_prefix(&tombstone.namespace_id);
-    let mut deletions = store
+    let decisions = store
         .list_prefix_stream(&prefix)
         .map_err(|error| CoreError::store(&prefix, &error))
-        .map(|key| async move {
-            let key = key?;
-            store
-                .delete(&key)
-                .await
-                .map_err(|error| CoreError::store(&key, &error))
-        })
-        .buffer_unordered(STORE_WRITE_WAVE);
-    while deletions.try_next().await?.is_some() {
-        report.deleted.retired_content_objects += 1;
-    }
-    Ok(())
+        .map_ok(|key| Decision::Delete {
+            key,
+            counter: |report| &mut report.deleted.retired_content_objects,
+        });
+    apply_decisions(store, decisions, report).await
 }

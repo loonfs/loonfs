@@ -1,6 +1,7 @@
 //! Content roots from layout views, held one id shard at a time.
 
 use super::charged_set::ChargedSet;
+use super::deletes::apply_decisions;
 use super::live_set::LiveSet;
 use super::sweep::Sweep;
 use crate::bloom_filter::BloomFilter;
@@ -11,13 +12,13 @@ use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::metadata::row_decode::content_layout_from_manifest_row;
 use crate::namespace::control::LoadedManifest;
 use crate::storage::content_location::extent_object_key;
-use futures::StreamExt;
+use futures::TryStreamExt;
 use loonfs_objectstore::keys::{content_prefix, metadata_segment_object_key};
 use loonfs_objectstore::layout::content_id_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{lookup_keys, ContentLayoutRecord, MetadataRowFamily};
 use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
-use loonfs_types::{ContentExtent, NamespaceId};
+use loonfs_types::{ContentExtent, GcResponse, NamespaceId};
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
@@ -122,7 +123,8 @@ impl<'a> ContentSweep<'a> {
 
     pub(super) async fn sweep<S: ObjectStore + ?Sized>(
         &self,
-        sweep: &mut Sweep<'_, S>,
+        sweep: &Sweep<'_, S>,
+        report: &mut GcResponse,
         cache: Option<&MetadataSegmentCache>,
     ) -> Result<()> {
         for shard in 0..16_u32.pow(self.shard_width) {
@@ -147,19 +149,18 @@ impl<'a> ContentSweep<'a> {
             )
             .await?;
             let prefix = format!("{}{id_prefix}", content_prefix(sweep.namespace_id));
-            let mut listing = sweep.store.list_entries_from_stream(&prefix, None);
-            while let Some(entry) = listing
-                .next()
-                .await
-                .transpose()
-                .map_err(|error| CoreError::store(&prefix, &error))?
-            {
-                let protected = keys.contains(entry.key.as_str())
-                    || self.shared.may_contain(entry.key.as_bytes())
-                    || content_id_of(&entry.key)
-                        .is_some_and(|id| sweep.live.content_ids.contains(&id));
-                sweep.content_candidate(&entry, protected).await?;
-            }
+            let decisions = sweep
+                .store
+                .list_entries_from_stream(&prefix, None)
+                .map_err(|error| CoreError::store(&prefix, &error))
+                .map_ok(|entry| {
+                    let protected = keys.contains(entry.key.as_str())
+                        || self.shared.may_contain(entry.key.as_bytes())
+                        || content_id_of(&entry.key)
+                            .is_some_and(|id| sweep.live.content_ids.contains(&id));
+                    sweep.content_candidate(entry, protected)
+                });
+            apply_decisions(sweep.store, decisions, report).await?;
         }
         Ok(())
     }
