@@ -489,6 +489,12 @@ impl HeadStateCache {
             }
         }
     }
+
+    pub fn remove_tail(&self, key: &WalTailProjectionCacheKey) {
+        self.shared
+            .entries
+            .remove(&(self.scope, HeadStateKey::Tail(key.clone())));
+    }
 }
 
 #[cfg(test)]

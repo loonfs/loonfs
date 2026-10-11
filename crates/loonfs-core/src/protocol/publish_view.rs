@@ -26,7 +26,7 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     /// The tip observation starts with this load rather than a retained view.
     pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
-    tail_state: Arc<ProjectedWalTail>,
+    projection: PublishTailProjection,
     /// The WAL tail length when it has reached the write-stop bound, so the
     /// tail this publish would extend stays inside it. New commits are refused
     /// with that count; a commit id the namespace already knows is still
@@ -36,11 +36,19 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state.rows)
+        MetadataView::from_loaded_head(
+            &self.head,
+            &self.manifest_segments,
+            &self.projection.tail_state.rows,
+        )
     }
 
     pub(crate) fn wal_tail(&self) -> &ProjectedWalTail {
-        &self.tail_state
+        &self.projection.tail_state
+    }
+
+    pub(crate) fn into_projection(self) -> PublishTailProjection {
+        self.projection
     }
 
     pub(super) fn write_stop(&self) -> Option<u64> {
@@ -163,7 +171,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     acquired_writer: AcquiredWriter,
     cached_projection: Option<PublishTailProjection>,
     acquired_anchor: Option<NamespaceReadAnchor>,
-) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
+) -> Result<PublishMetadataView<'a, S>> {
     let source = if let Some(anchor) = acquired_anchor {
         ViewSource::Cold(Box::new(anchor))
     } else if let Some(cached) = cached_projection {
@@ -200,20 +208,16 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     };
 
     let manifest_segments = loaded_basis.segments;
-    let tail_state = Arc::clone(&projection.tail_state);
-
-    Ok((
-        PublishMetadataView {
-            head,
-            acquired_writer,
-            tail_discovered,
-            manifest_segments,
-            tail_state,
-            write_stop: (projection.position.wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS)
-                .then_some(projection.position.wal_tail_objects),
-        },
+    let write_stop = (projection.position.wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS)
+        .then_some(projection.position.wal_tail_objects);
+    Ok(PublishMetadataView {
+        head,
+        acquired_writer,
+        tail_discovered,
+        manifest_segments,
         projection,
-    ))
+        write_stop,
+    })
 }
 
 fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
