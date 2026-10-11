@@ -367,19 +367,19 @@ where
         });
     }
 
-    let mut current_inode_id = root_inode_id;
-    let mut current_inode_kind = InodeKind::Directory;
+    let mut last: Option<DirentryBindingRecord> = None;
     let mut current_absolute_path = AbsolutePath::root();
-    let mut current_parent_inode_id = None;
-    let mut current_display_name = String::new();
-    let mut current_binding_version = None;
 
     for component in absolute_path.components() {
-        if current_inode_kind != InodeKind::Directory {
+        let (parent_inode_id, parent_kind) = match &last {
+            None => (root_inode_id, InodeKind::Directory),
+            Some(binding) => (binding.child_inode_id, binding.child_kind),
+        };
+        if parent_kind != InodeKind::Directory {
             return Err(VisiblePathError::PathComponentNotDirectory {
                 absolute_path: current_absolute_path.to_string(),
-                inode_id: current_inode_id,
-                inode_kind: current_inode_kind,
+                inode_id: parent_inode_id,
+                inode_kind: parent_kind,
             }
             .into());
         }
@@ -390,39 +390,36 @@ where
         };
         let name_key = NameKey::for_display_name(naming, &display_name);
         let direntry = reads
-            .active_child_binding(current_inode_id, &name_key)
+            .active_child_binding(parent_inode_id, &name_key)
             .await?
             .ok_or_else(not_found)?;
         let direntry = visible_page_child(reads, direntry)
             .await?
             .ok_or_else(not_found)?;
 
-        current_inode_id = direntry.child_inode_id;
-        current_inode_kind = direntry.child_kind;
-        current_parent_inode_id = Some(direntry.parent_inode_id);
-        let bound_display_name = direntry
-            .display_name()
-            .expect("visible binding should be bound");
-        current_absolute_path = current_absolute_path.join(bound_display_name);
-        current_display_name = bound_display_name.to_string();
-        current_binding_version = Some(direntry.position());
+        current_absolute_path = current_absolute_path.join(
+            direntry
+                .display_name()
+                .expect("visible binding should be bound"),
+        );
+        last = Some(direntry);
     }
 
-    let inode = reads
-        .visible_inode(current_inode_id)
-        .await?
-        .ok_or_else(|| VisiblePathError::PathNotFound {
-            absolute_path: current_absolute_path.to_string(),
-        })?;
+    let last = last.expect("a non-root path should have a component");
+    let display_name = last
+        .display_name()
+        .expect("visible binding should be bound")
+        .to_string();
+    let binding_version = Some(last.position());
     Ok(ResolvedVisiblePath {
         absolute_path: current_absolute_path,
-        inode_id: current_inode_id,
-        inode_kind: inode.inode_kind,
-        created_by: inode.committed_by,
-        created_at_ms: inode.committed_at_ms,
-        parent_inode_id: current_parent_inode_id,
-        display_name: current_display_name,
-        binding_version: current_binding_version,
+        inode_id: last.child_inode_id,
+        inode_kind: last.child_kind,
+        created_by: last.child_created_by,
+        created_at_ms: last.child_created_at_ms,
+        parent_inode_id: Some(last.parent_inode_id),
+        display_name,
+        binding_version,
     })
 }
 
