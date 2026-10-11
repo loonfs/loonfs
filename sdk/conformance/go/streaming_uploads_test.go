@@ -23,6 +23,8 @@ import (
 
 type uploadCase struct {
 	streamCase
+	Error       bool   `json:"error"`
+	StoreShape  string `json:"store_shape"`
 	Mode        string `json:"mode"`
 	Size        *int64 `json:"size"`
 	Fault       string `json:"fault"`
@@ -64,9 +66,8 @@ func TestStreamingUploads(t *testing.T) {
 			source := &uploadSource{reader: strings.NewReader(fixture.Content), fault: fixture.Fault == "source_error"}
 			var payload, abort, complete atomic.Int64
 			var bodies bytes.Buffer // server handlers complete before their response is consumed
-			claim := map[string]any{"kind": "blob", "owner_namespace_id": "demo", "content_id": "cnt_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
-			var host *httptest.Server
-			host = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claim := map[string]any{"kind": "blob_v1", "owner_namespace_id": "demo", "content_id": "con_00000000000000000000000000000001", "size_bytes": fixture.SizeBytes, "checksum": map[string]any{"algorithm": fixture.Algorithm, "value": fixture.Checksum}}
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				path := r.URL.Path
 				if path == "/object" {
 					if r.Header.Get("Authorization") != "" || r.Header.Get("X-Private") != "" {
@@ -80,7 +81,7 @@ func TestStreamingUploads(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				session := map[string]any{"namespace_id": "demo", "upload_id": "upl_test", "mode": fixture.Mode}
-				access := map[string]any{"kind": "presigned_url", "method": "PUT", "url": host.URL + "/object", "expires_at_ms": 2000000000000}
+				access := map[string]any{"kind": "presigned_url", "method": "PUT", "url": "http://objects.test/object", "expires_at_ms": 2000000000000}
 				var value any
 				switch {
 				case strings.HasSuffix(path, "/capabilities"):
@@ -91,7 +92,7 @@ func TestStreamingUploads(t *testing.T) {
 					if fixture.InlineLimit != nil {
 						limits["commit.max_inline_content_bytes_per_operation"] = *fixture.InlineLimit
 					}
-					value = map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.commits.inline_content": fixture.InlineLimit != nil, "filesystem.uploads.direct_put": fixture.Mode == "direct_put", "filesystem.uploads.direct_multipart": fixture.Mode == "direct_multipart"}, "limits": limits}
+					value = map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.commits.inline_content": fixture.InlineLimit != nil, "filesystem.uploads.direct_put": fixture.StoreShape != "local", "filesystem.uploads.direct_multipart": fixture.StoreShape == "s3"}, "limits": limits}
 				case strings.HasSuffix(path, "/uploads"):
 					var body struct {
 						Mode string `json:"mode"`
@@ -103,8 +104,12 @@ func TestStreamingUploads(t *testing.T) {
 					session["status"] = "open"
 					session["expires_at_ms"] = 2000000000000
 					session["checksum_algorithm"] = fixture.Algorithm
-					session["part_size_bytes"] = 4
-					session["access"] = access
+					if fixture.Mode == "direct_multipart" {
+						session["part_size_bytes"] = 4
+					}
+					if fixture.Mode == "direct_put" {
+						session["access"] = access
+					}
 					value = session
 				case strings.HasSuffix(path, "/parts"):
 					var body struct {
@@ -141,6 +146,7 @@ func TestStreamingUploads(t *testing.T) {
 					w.Header().Set("ETag", "test-etag")
 					session["status"] = "open"
 					session["expires_at_ms"] = 2000000000000
+					session["checksum_algorithm"] = fixture.Algorithm
 					session["content_ref"] = claim
 					value = session
 				case strings.HasSuffix(path, "/abort"):
@@ -175,9 +181,16 @@ func TestStreamingUploads(t *testing.T) {
 					return
 				}
 				json.NewEncoder(w).Encode(value)
-			}))
-			defer host.Close()
-			client := server.NewClient(option.WithBaseURL(host.URL), option.WithToken("private-token"), option.WithHTTPHeader(http.Header{"X-Private": {"secret"}}), option.WithHTTPClient(host.Client()), option.WithMaxAttempts(4))
+			})
+			httpClient := &http.Client{Transport: transferTransport(func(request *http.Request) (*http.Response, error) {
+				recorder := httptest.NewRecorder()
+				handler.ServeHTTP(recorder, request)
+				if err := request.Context().Err(); err != nil {
+					return nil, err
+				}
+				return recorder.Result(), nil
+			})}
+			client := server.NewClient(option.WithBaseURL("http://api.test"), option.WithToken("private-token"), option.WithHTTPHeader(http.Header{"X-Private": {"secret"}}), option.WithHTTPClient(httpClient), option.WithMaxAttempts(4))
 			ctx := context.Background()
 			if fixture.Fault == "timeout" {
 				var cancel context.CancelFunc

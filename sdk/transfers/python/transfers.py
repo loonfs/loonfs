@@ -1,10 +1,9 @@
-"""Streaming transfers and buffered convenience methods for both Python clients."""
+"""Transfer helpers for both clients. See the package README for their contract."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import contextvars
 import io
 import typing
 import uuid
@@ -12,26 +11,41 @@ from dataclasses import dataclass
 
 import httpx
 
+from ._transfer_runtime import (
+    _AsyncReader,
+    _AsyncUploadSource,
+    _DownloadVerification,
+    _IncrementalChecksum,
+    _TRANSFER_CHUNK_BYTES,
+    _UploadSource,
+    _async_download_ranges,
+    _async_send_stream_presigned,
+    _checksum,
+    _download_ranges,
+    _send_stream_presigned,
+    _validate_download_ranges,
+)
+
 from .client import AsyncLoonFS as _GeneratedAsyncLoonFS
 from .client import LoonFS as _GeneratedLoonFS
 from .files.client import AsyncFilesClient as _GeneratedAsyncFilesClient
 from .files.client import FilesClient as _GeneratedFilesClient
 from .core.request_options import RequestOptions
 from .types import (
+    AbsolutePath,
+    NamespaceId,
     Commit,
     CommitId,
     InodeId,
     CreateUploadBody_DirectMultipart,
     CreateUploadBody_DirectPut,
     CreateUploadBody_ServiceProxied,
-    Checksum,
     CompletedUploadPart,
     ContentRef,
     ContentToken,
     DestinationBehavior,
     FilesystemOperation_AppendFile,
     FilesystemOperation_PutFile,
-    ObjectTransferAccess,
     RevisionNo,
     CompleteUploadBody_DirectMultipart,
     CompleteUploadBody_DirectPut,
@@ -55,106 +69,38 @@ _PROXY_UPLOAD_LIMIT = "upload.service_proxied.max_content_bytes"
 _DIRECT_PUT_LIMIT = "upload.direct_put.max_content_bytes"
 
 
-def _crc_table(polynomial: int, mask: int) -> tuple[int, ...]:
-    values = []
-    for byte in range(256):
-        value = byte
-        for _ in range(8):
-            value = (value >> 1) ^ polynomial if value & 1 else value >> 1
-        values.append(value & mask)
-    return tuple(values)
-
-
-_CRC64_NVME_MASK = (1 << 64) - 1
-_CRC32C_MASK = (1 << 32) - 1
-_CRC64_NVME_TABLE = _crc_table(0x9A6C9329AC4BC9B5, _CRC64_NVME_MASK)
-_CRC32C_TABLE = _crc_table(0x82F63B78, _CRC32C_MASK)
-
-
 @dataclass(frozen=True)
 class DownloadResult:
-    """Downloaded bytes and the immutable revision facts from its grant."""
-
     content: bytes
-    namespace_id: str
-    path: str
-    revision_no: int
+    namespace_id: NamespaceId
+    path: AbsolutePath
+    revision_no: RevisionNo
     content_ref: ContentRef
 
 
 @dataclass(frozen=True)
 class PreparedContent:
-    """Completed content retained for repeated publication of the same request.
-
-    Preparation does not publish a file or extend the upload lifetime.
-    Treat the content reference and token as immutable.
-    """
-
     content_ref: ContentRef
     content_token: ContentToken | None
 
 
 @dataclass(frozen=True)
 class InlinePreparedContent:
-    """Immutable bytes retained for a commit; no upload or content reference yet."""
-
     content: bytes
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "content", bytes(self.content))
 
 
-# Preserve PreparedContent's existing staged constructor and fields.
 PreparedFile = typing.Union[PreparedContent, InlinePreparedContent]
 
 
-_TRANSFER_CHUNK_BYTES = 64 * 1024
-
-
-class _IncrementalChecksum:
-    def __init__(self, algorithm: str):
-        self.algorithm = algorithm
-        if algorithm == "crc32c":
-            self.value, self.table, self.mask = (
-                _CRC32C_MASK,
-                _CRC32C_TABLE,
-                _CRC32C_MASK,
-            )
-        elif algorithm == "crc64nvme":
-            self.value, self.table, self.mask = (
-                _CRC64_NVME_MASK,
-                _CRC64_NVME_TABLE,
-                _CRC64_NVME_MASK,
-            )
-        else:
-            raise ValueError(f"unsupported checksum algorithm {algorithm!r}")
-
-    def update(self, content: bytes) -> None:
-        for byte in content:
-            self.value = self.table[(self.value ^ byte) & 0xFF] ^ (self.value >> 8)
-
-    def finish(self) -> Checksum:
-        value = format(
-            self.value ^ self.mask, "08x" if self.algorithm == "crc32c" else "016x"
-        )
-        return Checksum(algorithm=self.algorithm, value=value)
-
-
 class DownloadStream(typing.Iterator[bytes]):
-    """A single-use verified iterator. Close or leave its with block to cancel.
-
-    A caller that stops early has not verified the complete file. Bytes already
-    consumed cannot be recalled if a checksum or transport error occurs later.
-    """
-
     def __init__(self, chunks, close, namespace_id, path, revision_no, content_ref):
         self._chunks, self._close = iter(chunks), close
         self.namespace_id, self.path, self.revision_no = namespace_id, path, revision_no
         self.content_ref = content_ref
-        self._checksum = _IncrementalChecksum(content_ref.checksum.algorithm)
-        self._expected_checksum = content_ref.checksum.value
-        self._expected_size = content_ref.size_bytes
-        self._count = 0
+        self._verification = _DownloadVerification(content_ref)
         self._closed = False
         self._verified = False
         self._terminal_error = None
@@ -177,23 +123,11 @@ class DownloadStream(typing.Iterator[bytes]):
             raise ValueError("download stream was closed before verification")
         try:
             chunk = next(self._chunks)
-            self._count += len(chunk)
-            if self._count > self._expected_size:
-                raise RuntimeError(
-                    f"download exceeded expected size {self._expected_size}"
-                )
-            self._checksum.update(chunk)
+            self._verification.update(chunk)
             return chunk
         except StopIteration:
             try:
-                if self._count != self._expected_size:
-                    raise RuntimeError(
-                        f"download returned {self._count} bytes, expected {self._expected_size}"
-                    )
-                if self._checksum.finish().value != self._expected_checksum:
-                    raise RuntimeError(
-                        "download checksum did not match its content reference"
-                    )
+                self._verification.finish()
                 self._verified = True
             except BaseException as error:
                 self._terminal_error = error
@@ -213,17 +147,15 @@ class DownloadStream(typing.Iterator[bytes]):
 
 
 class FilesClient(_GeneratedFilesClient):
-    """The files group plus streaming and buffered transfers."""
-
     def __init__(self, *, client_wrapper, root: "LoonFS") -> None:
         super().__init__(client_wrapper=client_wrapper)
         self._root = root
 
     def upload(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         content: bytes,
         commit_id: CommitId | None = None,
         message: str | None = None,
@@ -233,7 +165,6 @@ class FilesClient(_GeneratedFilesClient):
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
     ) -> Commit:
-        """Pass commit_id explicitly if you may retry."""
         return self.upload_stream(
             namespace_id,
             path=path,
@@ -250,9 +181,9 @@ class FilesClient(_GeneratedFilesClient):
 
     def upload_stream(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         content: typing.BinaryIO,
         size_bytes: int | None = None,
         commit_id: CommitId | None = None,
@@ -263,8 +194,7 @@ class FilesClient(_GeneratedFilesClient):
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
     ) -> Commit:
-        """Pass commit_id explicitly if you may retry. The caller owns the source."""
-        commit_id = self._publication_ids(commit_id)
+        commit_id = _publication_id(commit_id)
         prepared = self.prepare_stream(
             namespace_id,
             content=content,
@@ -286,13 +216,12 @@ class FilesClient(_GeneratedFilesClient):
 
     def prepare(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
         content: bytes,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
     ) -> PreparedFile:
-        """Prepare an existing byte buffer through the streaming path."""
         return self.prepare_stream(
             namespace_id,
             content=io.BytesIO(content),
@@ -303,20 +232,15 @@ class FilesClient(_GeneratedFilesClient):
 
     def prepare_stream(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
         content: typing.BinaryIO,
         size_bytes: int | None = None,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
     ) -> PreparedFile:
-        """Prepare inline bytes or stage once; retain the result for publication retries.
-
-        The caller owns content. Payload requests are never retried. A known
-        size validates the source and selects the usual small-file transport.
-        """
         if size_bytes is not None and size_bytes < 0:
-            raise ValueError("size_bytes must be nonnegative")
+            raise ValueError("invalid upload size")
         capabilities = self._root.capabilities.retrieve(request_options=request_options)
         first = b""
         if size_bytes is None:
@@ -342,9 +266,9 @@ class FilesClient(_GeneratedFilesClient):
             "timeout", self._root._client_wrapper.get_timeout()
         )
         options = {**(request_options or {}), "max_retries": 0}
+        if not isinstance(begin, UploadSession_Open):
+            raise RuntimeError("created upload session is not open")
         try:
-            if not isinstance(begin, UploadSession_Open):
-                raise RuntimeError("created upload session is not open")
             if begin.mode == "service_proxied":
                 source.limit = (capabilities.limits or {}).get(_PROXY_UPLOAD_LIMIT)
                 self._root.uploads.put_content(
@@ -371,7 +295,7 @@ class FilesClient(_GeneratedFilesClient):
                     self._root, client, namespace_id, begin, source, timeout, options
                 )
             else:
-                raise RuntimeError(f"unsupported upload mode {begin.mode!r}")
+                raise RuntimeError(f"unsupported upload mode {begin.mode}")
             source.finish()
         except BaseException:
             _abort_quietly(self._root, namespace_id, begin.upload_id)
@@ -387,9 +311,9 @@ class FilesClient(_GeneratedFilesClient):
 
     def upload_prepared(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         prepared: PreparedFile,
         commit_id: CommitId | None = None,
         message: str | None = None,
@@ -398,33 +322,22 @@ class FilesClient(_GeneratedFilesClient):
         expected_revision_no: RevisionNo | None = None,
         request_options: RequestOptions | None = None,
     ) -> Commit:
-        """Pass commit_id explicitly if you may retry. Reuse identical inputs."""
-        commit_id = self._publication_ids(commit_id)
-        content, tokens = _prepared_commit_fields(prepared)
-        operation_arguments = {"path": path, **content}
-        if behavior is not None:
-            operation_arguments["behavior"] = behavior
-        if expected_inode_id is not None:
-            operation_arguments["expected_inode_id"] = expected_inode_id
-        if expected_revision_no is not None:
-            operation_arguments["expected_revision_no"] = expected_revision_no
-        operation = FilesystemOperation_PutFile(**operation_arguments)
-        commit_arguments = {
-            "commit_id": commit_id,
-            "operations": [operation],
-            "content_tokens": tokens,
-        }
-        if message is not None:
-            commit_arguments["message"] = message
+        commit_id = _publication_id(commit_id)
+        commit_arguments = _upload_commit(
+            path, prepared, message, behavior, expected_inode_id, expected_revision_no
+        )
         return self._root.commits.create(
-            namespace_id, request_options=request_options, **commit_arguments
+            namespace_id,
+            commit_id=commit_id,
+            request_options=request_options,
+            **commit_arguments,
         )
 
     def append(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         content: bytes,
         commit_id: CommitId | None = None,
         message: str | None = None,
@@ -432,39 +345,25 @@ class FilesClient(_GeneratedFilesClient):
         expected_revision_no: RevisionNo | None = None,
         request_options: RequestOptions | None = None,
     ) -> Commit:
-        """Add 1 byte to 256 KiB to the end of a file in one commit.
-
-        Pass commit_id explicitly if you may retry.
-        """
         commit_arguments = _append_commit(
             path, content, message, expected_inode_id, expected_revision_no
         )
         return self._root.commits.create(
             namespace_id,
-            commit_id=self._publication_ids(commit_id),
+            commit_id=_publication_id(commit_id),
             request_options=request_options,
             **commit_arguments,
         )
 
-    def _publication_ids(self, commit_id: CommitId | None) -> CommitId:
-        if commit_id is None:
-            commit_id = "c_" + uuid.uuid4().hex
-        return commit_id
-
     def download_stream(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         revision_no: RevisionNo | None = None,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
     ) -> DownloadStream:
-        """Open a verified stream; use a with block to close on early exit.
-
-        Size and checksum verification complete only at successful exhaustion.
-        Request timeouts apply to metadata and payload I/O on either transport.
-        """
         capabilities = self._root.capabilities.retrieve(request_options=request_options)
         if not (capabilities.features or {}).get(_DIRECT_GET_FEATURE, False):
             claim, revision_no = _proxied_claim(
@@ -505,14 +404,13 @@ class FilesClient(_GeneratedFilesClient):
 
     def download(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         revision_no: RevisionNo | None = None,
         http_client: httpx.Client | None = None,
         request_options: RequestOptions | None = None,
     ) -> DownloadResult:
-        """Collect download_stream for callers that want all bytes in memory."""
         with self.download_stream(
             namespace_id,
             path=path,
@@ -536,8 +434,6 @@ def _validate_subject_context(options: typing.Mapping[str, typing.Any]) -> None:
 
 
 class LoonFS(_GeneratedLoonFS):
-    """The generated client with ``files.upload`` and ``files.download``."""
-
     def __init__(self, **kwargs: typing.Any) -> None:
         _validate_subject_context(kwargs)
         super().__init__(**kwargs)
@@ -553,20 +449,11 @@ class LoonFS(_GeneratedLoonFS):
 
 
 class AsyncDownloadStream(typing.AsyncIterator[bytes]):
-    """Use an async with block or call aclose() to cancel this verified iterator.
-
-    A caller that stops early has not verified the complete file. Bytes already
-    consumed cannot be recalled if a checksum or transport error occurs later.
-    """
-
     def __init__(self, chunks, close, namespace_id, path, revision_no, content_ref):
         self._chunks, self._close = chunks.__aiter__(), close
         self.namespace_id, self.path, self.revision_no = namespace_id, path, revision_no
         self.content_ref = content_ref
-        self._checksum = _IncrementalChecksum(content_ref.checksum.algorithm)
-        self._expected_checksum = content_ref.checksum.value
-        self._expected_size = content_ref.size_bytes
-        self._count = 0
+        self._verification = _DownloadVerification(content_ref)
         self._closed = False
         self._verified = False
         self._terminal_error = None
@@ -589,23 +476,11 @@ class AsyncDownloadStream(typing.AsyncIterator[bytes]):
             raise ValueError("download stream was closed before verification")
         try:
             chunk = await self._chunks.__anext__()
-            self._count += len(chunk)
-            if self._count > self._expected_size:
-                raise RuntimeError(
-                    f"download exceeded expected size {self._expected_size}"
-                )
-            self._checksum.update(chunk)
+            self._verification.update(chunk)
             return chunk
         except StopAsyncIteration:
             try:
-                if self._count != self._expected_size:
-                    raise RuntimeError(
-                        f"download returned {self._count} bytes, expected {self._expected_size}"
-                    )
-                if self._checksum.finish().value != self._expected_checksum:
-                    raise RuntimeError(
-                        "download checksum did not match its content reference"
-                    )
+                self._verification.finish()
                 self._verified = True
             except BaseException as error:
                 self._terminal_error = error
@@ -631,9 +506,9 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
 
     async def upload(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         content: bytes,
         commit_id: CommitId | None = None,
         message: str | None = None,
@@ -643,7 +518,6 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         http_client: httpx.AsyncClient | None = None,
         request_options: RequestOptions | None = None,
     ) -> Commit:
-        """Pass commit_id explicitly if you may retry."""
         return await self.upload_stream(
             namespace_id,
             path=path,
@@ -660,9 +534,9 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
 
     async def upload_stream(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         content: typing.AsyncIterator[bytes] | typing.BinaryIO,
         size_bytes: int | None = None,
         commit_id: CommitId | None = None,
@@ -673,8 +547,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         http_client: httpx.AsyncClient | None = None,
         request_options: RequestOptions | None = None,
     ) -> Commit:
-        """Pass commit_id explicitly if you may retry. The caller owns the source."""
-        commit_id = self._publication_ids(commit_id)
+        commit_id = _publication_id(commit_id)
         prepared = await self.prepare_stream(
             namespace_id,
             content=content,
@@ -696,7 +569,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
 
     async def prepare(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
         content: bytes,
         http_client: httpx.AsyncClient | None = None,
@@ -712,20 +585,15 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
 
     async def prepare_stream(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
         content: typing.AsyncIterator[bytes] | typing.BinaryIO,
         size_bytes: int | None = None,
         http_client: httpx.AsyncClient | None = None,
         request_options: RequestOptions | None = None,
     ) -> PreparedFile:
-        """Prepare inline bytes or stage once; retain the result for publication retries.
-
-        The caller owns content. Payload requests are never retried. A known
-        size validates the source and selects the usual small-file transport.
-        """
         if size_bytes is not None and size_bytes < 0:
-            raise ValueError("size_bytes must be nonnegative")
+            raise ValueError("invalid upload size")
         capabilities = await self._root.capabilities.retrieve(
             request_options=request_options
         )
@@ -754,9 +622,9 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
             "timeout", self._root._client_wrapper.get_timeout()
         )
         options = {**(request_options or {}), "max_retries": 0}
+        if not isinstance(begin, UploadSession_Open):
+            raise RuntimeError("created upload session is not open")
         try:
-            if not isinstance(begin, UploadSession_Open):
-                raise RuntimeError("created upload session is not open")
             if begin.mode == "service_proxied":
                 source.limit = (capabilities.limits or {}).get(_PROXY_UPLOAD_LIMIT)
                 await self._root.uploads.put_content(
@@ -768,9 +636,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
                 completion = CompleteUploadBody_ServiceProxied()
             elif begin.mode == "direct_put":
                 if begin.access is None:
-                    raise RuntimeError(
-                        "direct_put session lacks access"
-                    )
+                    raise RuntimeError("direct_put session lacks access")
                 source.digest = _IncrementalChecksum(begin.checksum_algorithm)
                 await _async_send_stream_presigned(
                     client, begin.access, source.chunks(), timeout, size_bytes
@@ -785,7 +651,7 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
                     self._root, client, namespace_id, begin, source, timeout, options
                 )
             else:
-                raise RuntimeError(f"unsupported upload mode {begin.mode!r}")
+                raise RuntimeError(f"unsupported upload mode {begin.mode}")
             source.finish()
         except BaseException:
             await _async_abort_quietly(self._root, namespace_id, begin.upload_id)
@@ -801,9 +667,9 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
 
     async def upload_prepared(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         prepared: PreparedFile,
         commit_id: CommitId | None = None,
         message: str | None = None,
@@ -812,33 +678,22 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         expected_revision_no: RevisionNo | None = None,
         request_options: RequestOptions | None = None,
     ) -> Commit:
-        """Pass commit_id explicitly if you may retry. Reuse identical inputs."""
-        commit_id = self._publication_ids(commit_id)
-        content, tokens = _prepared_commit_fields(prepared)
-        operation_arguments = {"path": path, **content}
-        if behavior is not None:
-            operation_arguments["behavior"] = behavior
-        if expected_inode_id is not None:
-            operation_arguments["expected_inode_id"] = expected_inode_id
-        if expected_revision_no is not None:
-            operation_arguments["expected_revision_no"] = expected_revision_no
-        operation = FilesystemOperation_PutFile(**operation_arguments)
-        commit_arguments = {
-            "commit_id": commit_id,
-            "operations": [operation],
-            "content_tokens": tokens,
-        }
-        if message is not None:
-            commit_arguments["message"] = message
+        commit_id = _publication_id(commit_id)
+        commit_arguments = _upload_commit(
+            path, prepared, message, behavior, expected_inode_id, expected_revision_no
+        )
         return await self._root.commits.create(
-            namespace_id, request_options=request_options, **commit_arguments
+            namespace_id,
+            commit_id=commit_id,
+            request_options=request_options,
+            **commit_arguments,
         )
 
     async def append(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         content: bytes,
         commit_id: CommitId | None = None,
         message: str | None = None,
@@ -846,39 +701,25 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
         expected_revision_no: RevisionNo | None = None,
         request_options: RequestOptions | None = None,
     ) -> Commit:
-        """Add 1 byte to 256 KiB to the end of a file in one commit.
-
-        Pass commit_id explicitly if you may retry.
-        """
         commit_arguments = _append_commit(
             path, content, message, expected_inode_id, expected_revision_no
         )
         return await self._root.commits.create(
             namespace_id,
-            commit_id=self._publication_ids(commit_id),
+            commit_id=_publication_id(commit_id),
             request_options=request_options,
             **commit_arguments,
         )
 
-    def _publication_ids(self, commit_id: CommitId | None) -> CommitId:
-        if commit_id is None:
-            commit_id = "c_" + uuid.uuid4().hex
-        return commit_id
-
     async def download_stream(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         revision_no: RevisionNo | None = None,
         http_client: httpx.AsyncClient | None = None,
         request_options: RequestOptions | None = None,
     ) -> AsyncDownloadStream:
-        """Open a verified stream; use an async with block to close on early exit.
-
-        Size and checksum verification complete only at successful exhaustion.
-        Request timeouts apply to metadata and payload I/O on either transport.
-        """
         capabilities = await self._root.capabilities.retrieve(
             request_options=request_options
         )
@@ -921,9 +762,9 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
 
     async def download(
         self,
-        namespace_id: str,
+        namespace_id: NamespaceId,
         *,
-        path: str,
+        path: AbsolutePath,
         revision_no: RevisionNo | None = None,
         http_client: httpx.AsyncClient | None = None,
         request_options: RequestOptions | None = None,
@@ -974,88 +815,13 @@ __all__ = [
 ]
 
 
-def _validate_download_ranges(ranges, size_bytes):
-    if not ranges or (size_bytes == 0 and len(ranges) != 1):
-        raise RuntimeError("download grant has invalid ranges")
-    offset = 0
-    for part in ranges:
-        if part.access.method.upper() != "GET":
-            raise RuntimeError("download grant must use GET")
-        if (
-            part.start_offset != offset
-            or part.length < 0
-            or (part.length == 0 and size_bytes != 0)
-        ):
-            raise RuntimeError("download grant has invalid ranges")
-        offset += part.length
-    if offset != size_bytes:
-        raise RuntimeError("download grant has invalid ranges")
-
-
-def _download_range_request(part, timeout):
-    return httpx.Request(
-        "GET",
-        part.access.url,
-        headers=part.access.headers or {},
-        extensions={"timeout": httpx.Timeout(timeout).as_dict()},
-    )
-
-
-def _download_ranges(client, ranges, timeout):
-    for part in ranges:
-        if part.length == 0:
-            continue
-        response = client.send(
-            _download_range_request(part, timeout),
-            stream=True,
-            auth=None,
-            follow_redirects=False,
-        )
-        try:
-            response.raise_for_status()
-            count = 0
-            for chunk in response.iter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES):
-                count += len(chunk)
-                if count > part.length:
-                    raise RuntimeError("download range exceeded its declared length")
-                yield chunk
-            if count != part.length:
-                raise RuntimeError("download range ended before its declared length")
-        finally:
-            response.close()
-
-
-async def _async_download_ranges(client, ranges, timeout):
-    for part in ranges:
-        if part.length == 0:
-            continue
-        response = await client.send(
-            _download_range_request(part, timeout),
-            stream=True,
-            auth=None,
-            follow_redirects=False,
-        )
-        try:
-            response.raise_for_status()
-            count = 0
-            async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES):
-                count += len(chunk)
-                if count > part.length:
-                    raise RuntimeError("download range exceeded its declared length")
-                yield chunk
-            if count != part.length:
-                raise RuntimeError("download range ended before its declared length")
-        finally:
-            await response.aclose()
-
-
 def _proxied_claim(client, namespace_id, path, revision_no, request_options):
     if revision_no is None:
         entry = client.files.retrieve(
             namespace_id, path=path, request_options=request_options
         )
         if entry.inode_kind != "file":
-            raise RuntimeError(f"path {path!r} is a {entry.inode_kind}, not a file")
+            raise RuntimeError(f"path is a {entry.inode_kind}, not a file")
         return entry.content_ref, entry.revision_no
     cursor = None
     while True:
@@ -1066,51 +832,8 @@ def _proxied_claim(client, namespace_id, path, revision_no, request_options):
             if revision.revision_no == revision_no:
                 return revision.content_ref, revision_no
         if page.next_cursor is None:
-            raise RuntimeError(f"revision {revision_no} not found for {path!r}")
+            raise RuntimeError(f"revision {revision_no} not found for {path}")
         cursor = page.next_cursor
-
-
-class _UploadSource:
-    def __init__(self, reader, prefix, expected):
-        self.reader, self.prefix, self.expected = reader, prefix, expected
-        self.count = 0
-        self.ended = False
-        self.limit = None
-        self.digest = None
-
-    def read(self, size):
-        if self.ended:
-            return b""
-        size = min(size, _TRANSFER_CHUNK_BYTES)
-        if self.prefix:
-            chunk, self.prefix = self.prefix[:size], self.prefix[size:]
-        else:
-            chunk = self.reader.read(size)
-        if not isinstance(chunk, bytes):
-            raise TypeError("upload source must return bytes")
-        self.count += len(chunk)
-        if self.limit is not None and self.count > self.limit:
-            raise ValueError("source exceeds advertised proxy upload limit")
-        if self.expected is not None and (
-            self.count > self.expected or (not chunk and self.count != self.expected)
-        ):
-            raise ValueError("source does not match declared size")
-        if self.digest is not None:
-            self.digest.update(chunk)
-        if not chunk:
-            self.ended = True
-        return chunk
-
-    def chunks(self):
-        while True:
-            chunk = self.read(_TRANSFER_CHUNK_BYTES)
-            if not chunk:
-                return
-            yield chunk
-
-    def finish(self):
-        if not self.ended:
-            raise RuntimeError("successful response before upload source reached EOF")
 
 
 def _inline_limit(capabilities):
@@ -1147,16 +870,6 @@ def _append_commit(path, content, message, expected_inode_id, expected_revision_
     return commit_arguments
 
 
-def _prepared_commit_fields(prepared: PreparedFile):
-    if isinstance(prepared, InlinePreparedContent):
-        return {
-            "inline_content": base64.b64encode(prepared.content).decode("ascii")
-        }, []
-    return {"content_ref": prepared.content_ref}, (
-        [prepared.content_token] if prepared.content_token is not None else []
-    )
-
-
 def _create_upload(client, namespace_id, capabilities, size_bytes, request_options):
     features, limits = capabilities.features or {}, capabilities.limits or {}
     if (size_bytes is None or size_bytes >= _MULTIPART_MIN_BYTES) and features.get(
@@ -1183,29 +896,10 @@ def _create_upload(client, namespace_id, capabilities, size_bytes, request_optio
         else:
             raise ValueError("source fits no advertised upload transport")
     return client.uploads.create(
-        namespace_id, request=request, request_options=request_options
+        namespace_id,
+        request=request,
+        request_options={**(request_options or {}), "max_retries": 0},
     )
-
-
-def _send_stream_presigned(client, access, content, timeout, size_bytes=None):
-    if access.method.upper() != "PUT":
-        raise RuntimeError("upload grant must use PUT")
-    headers = httpx.Headers(access.headers or {})
-    if size_bytes is not None:
-        headers["Content-Length"] = str(size_bytes)
-    request = httpx.Request(
-        "PUT",
-        access.url,
-        headers=headers,
-        content=content,
-        extensions={"timeout": httpx.Timeout(timeout).as_dict()},
-    )
-    response = client.send(request, stream=True, auth=None, follow_redirects=False)
-    try:
-        response.raise_for_status()
-        return response.headers.get("etag")
-    finally:
-        response.close()
 
 
 def _stream_multipart(
@@ -1215,7 +909,7 @@ def _stream_multipart(
     if part_size is None:
         raise RuntimeError("direct_multipart session lacks part_size_bytes")
     if part_size <= 0:
-        raise RuntimeError("multipart part size must be positive")
+        raise RuntimeError("invalid multipart part size")
     source.digest = _IncrementalChecksum(begin.checksum_algorithm)
     completed_parts = []
     while True:
@@ -1257,9 +951,7 @@ def _stream_multipart(
 
 def _completed_content(response: UploadSession) -> PreparedContent:
     if response.status != "completed":
-        raise RuntimeError(
-            f"upload {response.upload_id!r} completed with status {response.status!r}"
-        )
+        raise RuntimeError(f"upload is {response.status}, not completed")
     return PreparedContent(
         content_ref=response.content_ref,
         content_token=response.content_token,
@@ -1275,19 +967,15 @@ def _abort_quietly(client, namespace_id, upload_id):
         pass
 
 
-def _checksum(algorithm: str, content: bytes) -> Checksum:
-    digest = _IncrementalChecksum(algorithm)
-    digest.update(content)
-    return digest.finish()
-
-
-async def _async_proxied_claim(client, namespace_id, path, revision_no, request_options):
+async def _async_proxied_claim(
+    client, namespace_id, path, revision_no, request_options
+):
     if revision_no is None:
         entry = await client.files.retrieve(
             namespace_id, path=path, request_options=request_options
         )
         if entry.inode_kind != "file":
-            raise RuntimeError(f"path {path!r} is a {entry.inode_kind}, not a file")
+            raise RuntimeError(f"path is a {entry.inode_kind}, not a file")
         return entry.content_ref, entry.revision_no
     cursor = None
     while True:
@@ -1298,97 +986,8 @@ async def _async_proxied_claim(client, namespace_id, path, revision_no, request_
             if revision.revision_no == revision_no:
                 return revision.content_ref, revision_no
         if page.next_cursor is None:
-            raise RuntimeError(f"revision {revision_no} not found for {path!r}")
+            raise RuntimeError(f"revision {revision_no} not found for {path}")
         cursor = page.next_cursor
-
-
-class _AsyncReader:
-    def __init__(self, content: typing.AsyncIterator[bytes] | typing.BinaryIO):
-        self._content = content
-        self._iterator = content.__aiter__() if hasattr(content, "__aiter__") else None
-        self._pending = memoryview(b"")
-
-    async def read(self, size: int) -> bytes:
-        size = min(size, _TRANSFER_CHUNK_BYTES)
-        if self._iterator is None:
-            return await asyncio.get_running_loop().run_in_executor(
-                None, contextvars.copy_context().run, self._content.read, size
-            )
-        while not self._pending:
-            try:
-                chunk = await self._iterator.__anext__()
-            except StopAsyncIteration:
-                return b""
-            if not isinstance(chunk, bytes):
-                raise TypeError("upload source must return bytes")
-            self._pending = memoryview(chunk)
-        chunk = bytes(self._pending[:size])
-        self._pending = self._pending[size:]
-        return chunk
-
-
-class _AsyncUploadSource:
-    def __init__(self, reader, prefix, expected):
-        self.reader, self.prefix, self.expected = reader, prefix, expected
-        self.count = 0
-        self.ended = False
-        self.limit = None
-        self.digest = None
-
-    async def read(self, size):
-        if self.ended:
-            return b""
-        size = min(size, _TRANSFER_CHUNK_BYTES)
-        if self.prefix:
-            chunk, self.prefix = self.prefix[:size], self.prefix[size:]
-        else:
-            chunk = await self.reader.read(size)
-        if not isinstance(chunk, bytes):
-            raise TypeError("upload source must return bytes")
-        self.count += len(chunk)
-        if self.limit is not None and self.count > self.limit:
-            raise ValueError("source exceeds advertised proxy upload limit")
-        if self.expected is not None and (
-            self.count > self.expected or (not chunk and self.count != self.expected)
-        ):
-            raise ValueError("source does not match declared size")
-        if self.digest is not None:
-            self.digest.update(chunk)
-        if not chunk:
-            self.ended = True
-        return chunk
-
-    async def chunks(self):
-        while True:
-            chunk = await self.read(_TRANSFER_CHUNK_BYTES)
-            if not chunk:
-                return
-            yield chunk
-
-    def finish(self):
-        if not self.ended:
-            raise RuntimeError("successful response before upload source reached EOF")
-
-
-async def _async_send_stream_presigned(client, access, content, timeout, size_bytes=None):
-    if access.method.upper() != "PUT":
-        raise RuntimeError("upload grant must use PUT")
-    headers = httpx.Headers(access.headers or {})
-    if size_bytes is not None:
-        headers["Content-Length"] = str(size_bytes)
-    request = httpx.Request(
-        "PUT",
-        access.url,
-        headers=headers,
-        content=content,
-        extensions={"timeout": httpx.Timeout(timeout).as_dict()},
-    )
-    response = await client.send(request, stream=True, auth=None, follow_redirects=False)
-    try:
-        response.raise_for_status()
-        return response.headers.get("etag")
-    finally:
-        await response.aclose()
 
 
 async def _async_stream_multipart(
@@ -1398,7 +997,7 @@ async def _async_stream_multipart(
     if part_size is None:
         raise RuntimeError("direct_multipart session lacks part_size_bytes")
     if part_size <= 0:
-        raise RuntimeError("multipart part size must be positive")
+        raise RuntimeError("invalid multipart part size")
     source.digest = _IncrementalChecksum(begin.checksum_algorithm)
     completed_parts = []
     while True:
@@ -1442,9 +1041,41 @@ async def _async_abort_quietly(client, namespace_id, upload_id):
     try:
         await asyncio.wait_for(
             client.uploads.abort(
-                namespace_id, upload_id, request_options={"timeout": 5, "max_retries": 0}
+                namespace_id,
+                upload_id,
+                request_options={"timeout": 5, "max_retries": 0},
             ),
             timeout=5,
         )
     except (Exception, asyncio.CancelledError):
         pass
+
+
+def _publication_id(commit_id: CommitId | None) -> CommitId:
+    return commit_id if commit_id is not None else "c_" + uuid.uuid4().hex
+
+
+def _upload_commit(
+    path, prepared, message, behavior, expected_inode_id, expected_revision_no
+):
+    if isinstance(prepared, InlinePreparedContent):
+        content = {"inline_content": base64.b64encode(prepared.content).decode("ascii")}
+        tokens = []
+    else:
+        content = {"content_ref": prepared.content_ref}
+        tokens = [prepared.content_token] if prepared.content_token is not None else []
+    operation_arguments = {"path": path, **content}
+    if behavior is not None:
+        operation_arguments["behavior"] = behavior
+    if expected_inode_id is not None:
+        operation_arguments["expected_inode_id"] = expected_inode_id
+    if expected_revision_no is not None:
+        operation_arguments["expected_revision_no"] = expected_revision_no
+    operation = FilesystemOperation_PutFile(**operation_arguments)
+    commit_arguments = {
+        "operations": [operation],
+        "content_tokens": tokens,
+    }
+    if message is not None:
+        commit_arguments["message"] = message
+    return commit_arguments

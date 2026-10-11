@@ -18,9 +18,6 @@ import (
 	"github.com/loonfs/loonfs-sdk-go/uploads"
 )
 
-// StreamUploadInput consumes Content once. SizeBytes is optional; supply it when
-// known to validate the source and select a single PUT for small files.
-// The caller owns Content and is responsible for closing it.
 type StreamUploadInput struct {
 	NamespaceID        loonfs.NamespaceID
 	Path               loonfs.AbsolutePath
@@ -33,9 +30,8 @@ type StreamUploadInput struct {
 	ExpectedRevisionNo *loonfs.RevisionNo
 }
 
-// Pass CommitID explicitly if you may retry. The caller owns Content.
 func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput, opts ...core.RequestOption) (*loonfs.Commit, error) {
-	commitID, err := c.publicationIDs(in.CommitID)
+	commitID, err := c.publicationID(in.CommitID)
 	if err != nil {
 		return nil, err
 	}
@@ -52,14 +48,15 @@ func (c *Client) UploadStream(ctx context.Context, in StreamUploadInput, opts ..
 	}, opts...)
 }
 
-// PrepareStream retains small content inline or stages it once, with no payload
-// retries. Retain its result for UploadPrepared publication retries.
 func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.NamespaceID, source io.Reader, sizeBytes *int64) (PreparedFile, error) {
 	if c == nil {
-		return nil, fmt.Errorf("transfers: client is nil")
+		return nil, fmt.Errorf("client is nil")
 	}
-	if source == nil || (sizeBytes != nil && *sizeBytes < 0) {
-		return nil, fmt.Errorf("transfers: source and nonnegative size are required")
+	if source == nil {
+		return nil, fmt.Errorf("upload source is nil")
+	}
+	if sizeBytes != nil && *sizeBytes < 0 {
+		return nil, fmt.Errorf("invalid upload size")
 	}
 	ctx, cancel := transferContext(ctx)
 	defer cancel()
@@ -68,7 +65,7 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 		return nil, err
 	}
 	if capabilities == nil {
-		return nil, fmt.Errorf("transfers: no capabilities")
+		return nil, fmt.Errorf("no capabilities")
 	}
 	if sizeBytes == nil {
 		// Distinguish an empty source before selecting multipart. Retain at
@@ -134,7 +131,7 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 		return nil, err
 	}
 	if begin == nil || begin.Open == nil {
-		return nil, fmt.Errorf("transfers: created upload session is not open")
+		return nil, fmt.Errorf("created upload session is not open")
 	}
 	session := begin.Open
 	reader := &uploadReader{ctx: ctx, source: source, expected: sizeBytes}
@@ -150,7 +147,7 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 		completion = &loonfs.CompleteUploadBody{ServiceProxied: &loonfs.CompleteUploadBodyServiceProxied{}}
 	case loonfs.UploadModeDirectPut:
 		if session.Access == nil {
-			err = fmt.Errorf("transfers: direct_put session lacks access")
+			err = fmt.Errorf("direct_put session lacks access")
 			break
 		}
 		reader.digest, err = newChecksum(session.ChecksumAlgorithm)
@@ -167,7 +164,7 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 	case loonfs.UploadModeDirectMultipart:
 		completion, err = c.streamMultipart(ctx, uploadsClient, namespaceID, session, reader)
 	default:
-		err = fmt.Errorf("transfers: unsupported upload mode %q", session.Mode)
+		err = fmt.Errorf("unsupported upload mode %s", session.Mode)
 	}
 	if err == nil {
 		err = reader.finish()
@@ -175,21 +172,23 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 	if err != nil {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		abortUpload(cleanup, uploadsClient, namespaceID, uploadID)
+		_, _ = uploadsClient.Abort(cleanup, &loonfs.AbortUploadRequest{
+			NamespaceID: string(namespaceID), UploadID: string(uploadID),
+		}, option.WithMaxAttempts(1))
 		return nil, err
 	}
 	// A lost completion response may still have completed the upload. Keep
 	// that session available for inspection rather than aborting it.
 	completed, err := uploadsClient.Complete(ctx, &loonfs.CompleteUploadRequest{NamespaceID: string(namespaceID), UploadID: string(uploadID), Body: completion}, option.WithMaxAttempts(1))
 	if err != nil {
-		return nil, fmt.Errorf("transfers: complete upload %s: %w", uploadID, err)
+		return nil, fmt.Errorf("complete upload %s: %w", uploadID, err)
 	}
 	status, err := completedUploadStatus(completed)
 	if err != nil {
 		return nil, err
 	}
 	if status.ContentRef.SizeBytes != reader.count {
-		return nil, fmt.Errorf("transfers: completed upload size mismatch")
+		return nil, fmt.Errorf("completed upload size mismatch")
 	}
 	return &PreparedContent{ContentRef: status.ContentRef, ContentToken: status.ContentToken}, nil
 }
@@ -211,11 +210,11 @@ func (c *Client) putStream(ctx context.Context, access *loonfs.ObjectTransferAcc
 
 func (c *Client) streamMultipart(ctx context.Context, client *uploads.Client, namespaceID loonfs.NamespaceID, begin *loonfs.UploadSessionStatusOpen, reader *uploadReader) (*loonfs.CompleteUploadBody, error) {
 	if begin.PartSizeBytes == nil {
-		return nil, fmt.Errorf("transfers: direct_multipart session lacks part_size_bytes")
+		return nil, fmt.Errorf("direct_multipart session lacks part_size_bytes")
 	}
 	partSize := int(*begin.PartSizeBytes)
 	if partSize <= 0 || int64(partSize) != *begin.PartSizeBytes {
-		return nil, fmt.Errorf("transfers: invalid multipart part size")
+		return nil, fmt.Errorf("invalid multipart part size")
 	}
 	digest, err := newChecksum(begin.ChecksumAlgorithm)
 	if err != nil {
@@ -236,7 +235,7 @@ func (c *Client) streamMultipart(ctx context.Context, client *uploads.Client, na
 			break
 		}
 		if len(parts) == 10000 {
-			return nil, fmt.Errorf("transfers: multipart upload exceeds 10000 parts")
+			return nil, fmt.Errorf("multipart upload exceeds 10000 parts")
 		}
 		part := buffer[:n]
 		number := len(parts) + 1
@@ -249,14 +248,14 @@ func (c *Client) streamMultipart(ctx context.Context, client *uploads.Client, na
 			return nil, err
 		}
 		if signed == nil || len(signed.Parts) != 1 || signed.Parts[0].PartNumber != number {
-			return nil, fmt.Errorf("transfers: server did not sign requested part %d", number)
+			return nil, fmt.Errorf("server did not sign requested part %d", number)
 		}
 		etag, err := c.putStream(ctx, signed.Parts[0].Access, bytes.NewReader(part), int64(n))
 		if err != nil {
 			return nil, err
 		}
 		if etag == "" {
-			return nil, fmt.Errorf("transfers: part %d has no ETag", number)
+			return nil, fmt.Errorf("part %d returned no ETag", number)
 		}
 		parts = append(parts, &loonfs.CompletedUploadPart{PartNumber: number, Checksum: checksum, Etag: etag})
 	}
@@ -288,12 +287,15 @@ func (r *uploadReader) Read(buffer []byte) (int, error) {
 		buffer = buffer[:transferChunkBytes]
 	}
 	n, err := r.source.Read(buffer)
-	r.count += int64(n)
-	if r.limit != nil && r.count > *r.limit {
-		err = fmt.Errorf("transfers: source exceeds advertised proxy limit")
+	if err != nil && err != io.EOF {
+		r.failure = err
+		return n, err
 	}
+	r.count += int64(n)
 	if r.expected != nil && (r.count > *r.expected || (err == io.EOF && r.count != *r.expected)) {
-		err = fmt.Errorf("transfers: source does not match declared size")
+		err = fmt.Errorf("source does not match declared size")
+	} else if r.limit != nil && r.count > *r.limit {
+		err = fmt.Errorf("source exceeds advertised proxy upload limit")
 	}
 	if err != nil && err != io.EOF {
 		r.failure = err
@@ -312,7 +314,7 @@ func (r *uploadReader) finish() error {
 		return r.failure
 	}
 	if !r.ended {
-		return fmt.Errorf("transfers: successful response before source reached EOF")
+		return fmt.Errorf("successful response before upload source reached EOF")
 	}
 	return nil
 }

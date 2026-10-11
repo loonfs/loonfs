@@ -17,16 +17,27 @@ type Fixture = {
     checksum: string;
     size_bytes: number;
     range: string | null;
-    error: boolean;
     transport_error?: boolean;
-    range_error?: boolean;
-    ranges?: { start_offset: number; length: number; range: string; content: string }[];
+    error_message: string | null;
+    direct_error_message: string | null;
+    object_requests: string[];
+    ranges?: {
+        start_offset: number;
+        length: number;
+        range: string;
+        content: string;
+    }[];
 };
 const fixtures: Fixture[] = JSON.parse(
     readFileSync(join(__dirname, "../../../../../fixtures/streaming_downloads.json"), "utf8"),
 );
 
-function fakeFetch(fixture: Fixture, direct: boolean, body: ReadableStream<Uint8Array>): typeof fetch {
+function fakeFetch(
+    fixture: Fixture,
+    direct: boolean,
+    body: ReadableStream<Uint8Array>,
+    requests: string[] = [],
+): typeof fetch {
     const claim = {
         kind: "blob_v1",
         owner_namespace_id: "demo",
@@ -36,6 +47,7 @@ function fakeFetch(fixture: Fixture, direct: boolean, body: ReadableStream<Uint8
     };
     return (async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(input instanceof Request ? input.url : input.toString());
+        requests.push(url.pathname);
         const headers = new Headers(init?.headers);
         if (url.pathname.startsWith("/object/")) {
             const part = fixture.ranges![Number(url.pathname.split("/").pop())]!;
@@ -66,16 +78,28 @@ function fakeFetch(fixture: Fixture, direct: boolean, body: ReadableStream<Uint8
                 revision_no: 1,
                 content_ref: claim,
                 ranges: fixture.ranges?.map((part, index) => ({
-                    start_offset: part.start_offset, length: part.length,
-                    access: { kind: "presigned_url", method: "GET", url: `http://objects.test/object/${index}`,
-                              headers: { range: part.range }, expires_at_ms: 2000000000000 },
-                })) ?? [{ start_offset: 0, length: fixture.size_bytes, access: {
-                    kind: "presigned_url",
-                    method: "GET",
-                    url: "http://objects.test/object",
-                    ...(fixture.range === null ? {} : { headers: { range: fixture.range } }),
-                    expires_at_ms: 2000000000000,
-                } }],
+                    start_offset: part.start_offset,
+                    length: part.length,
+                    access: {
+                        kind: "presigned_url",
+                        method: "GET",
+                        url: `http://objects.test/object/${index}`,
+                        headers: { range: part.range },
+                        expires_at_ms: 2000000000000,
+                    },
+                })) ?? [
+                    {
+                        start_offset: 0,
+                        length: fixture.size_bytes,
+                        access: {
+                            kind: "presigned_url",
+                            method: "GET",
+                            url: "http://objects.test/object",
+                            ...(fixture.range === null ? {} : { headers: { range: fixture.range } }),
+                            expires_at_ms: 2000000000000,
+                        },
+                    },
+                ],
             });
         if (url.pathname.endsWith("/entry"))
             return Response.json({
@@ -105,37 +129,55 @@ for (const browser of [false, true])
                         pull(controller) {
                             reads++;
                             if (reads === 1) controller.enqueue(new TextEncoder().encode(fixture.content));
-                            else if (fixture.transport_error) controller.error(new Error("body interrupted after its last byte"));
-                        else controller.close();
+                            else if (fixture.transport_error)
+                                controller.error(new Error("body interrupted after its last byte"));
+                            else controller.close();
                         },
                     },
                     { highWaterMark: 0 },
                 );
+                const requests: string[] = [];
                 const options = {
                     baseUrl: "http://api.test",
                     token: "private-token",
                     headers: { "X-Private": "secret" },
-                    fetch: fakeFetch(fixture, direct, body),
+                    fetch: fakeFetch(fixture, direct, body, requests),
                 };
-                const stream = browser
-                    ? await new BrowserClient(options).files.downloadStream({
-                          namespace_alias: "demo",
-                          path: "/file",
-                      })
-                    : await new LoonFSClient(options).files.downloadStream({
-                          namespace_id: "demo",
-                          path: "/file",
-                      });
-                assert.equal(reads, 0, "opening must not consume the response body");
-                const collected = new Response(stream.content).text();
-                if (fixture.error || (direct && fixture.range_error)) await assert.rejects(collected);
-                else assert.equal(await collected, fixture.content);
+                const collect = async () => {
+                    const stream = browser
+                        ? await new BrowserClient(options).files.downloadStream({
+                              namespace_alias: "demo",
+                              path: "/file",
+                          })
+                        : await new LoonFSClient(options).files.downloadStream({
+                              namespace_id: "demo",
+                              path: "/file",
+                          });
+                    assert.equal(reads, 0, "opening must not consume the response body");
+                    return new Response(stream.content).text();
+                };
+                const expectedError = direct ? fixture.direct_error_message : fixture.error_message;
+                if (expectedError) await assert.rejects(collect(), { message: expectedError });
+                else assert.equal(await collect(), fixture.content);
+                if (direct)
+                    assert.deepEqual(
+                        requests.filter((path) => path.startsWith("/object")),
+                        fixture.object_requests,
+                    );
+                else
+                    assert.deepEqual(
+                        requests.map((path) => path.split("/").pop()),
+                        ["capabilities", "entry", "content"],
+                    );
             });
         }
 
 test("incremental CRCs match the catalog values across chunks", () => {
     const bytes = new TextEncoder().encode("123456789");
-    for (const [algorithm, expected] of [["crc32c", "e3069283"], ["crc64nvme", "ae8b14860a799888"]] as const) {
+    for (const [algorithm, expected] of [
+        ["crc32c", "e3069283"],
+        ["crc64nvme", "ae8b14860a799888"],
+    ] as const) {
         for (const stride of [1, 3, 7, 9]) {
             const digest = new IncrementalChecksum(algorithm);
             for (let offset = 0; offset < bytes.length; offset += stride)
@@ -190,7 +232,9 @@ for (const direct of [false, true]) {
             { namespace_id: "demo", path: "/file" },
             { timeoutInSeconds: 0.05 },
         );
-        await assert.rejects(stream.content.getReader().read(), { name: "TimeoutError" });
+        await assert.rejects(stream.content.getReader().read(), {
+            name: "TimeoutError",
+        });
         assert.ok(cancelled);
     });
 }
@@ -215,7 +259,13 @@ test("verified streams bound chunks and stop reading when the consumer closes", 
     );
     const stream = verifiedDownload(
         body,
-        { size_bytes: bytes.length, checksum: digest.finish() },
+        {
+            kind: "blob_v1",
+            owner_namespace_id: "demo",
+            content_id: "con_00000000000000000000000000000001",
+            size_bytes: bytes.length,
+            checksum: digest.finish(),
+        },
         new TransferScope(),
     );
     const reader = stream.getReader();

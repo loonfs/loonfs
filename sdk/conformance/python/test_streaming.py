@@ -1,17 +1,19 @@
+import asyncio
 import json
+import re
 from pathlib import Path
 
 import httpx
 import pytest
-from loonfs.server import LoonFS
-from loonfs.transfers import _checksum
+from loonfs.server import AsyncLoonFS, LoonFS
+from loonfs._transfer_runtime import _checksum
 
 CASES = json.loads(
     (Path(__file__).parents[1] / "fixtures/streaming_downloads.json").read_text()
 )
 
 
-class Chunks(httpx.SyncByteStream):
+class Chunks(httpx.SyncByteStream, httpx.AsyncByteStream):
     def __init__(self, chunks, transport_error=False):
         self.transport_error = transport_error
         self.chunks = chunks
@@ -25,11 +27,18 @@ class Chunks(httpx.SyncByteStream):
         if self.transport_error:
             raise httpx.ReadError("body interrupted after its last byte")
 
+    async def __aiter__(self):
+        for chunk in self:
+            yield chunk
+
+    async def aclose(self):
+        self.close()
+
     def close(self):
         self.closed = True
 
 
-def stream_client(fixture, direct, body):
+def stream_client(fixture, direct, body, asynchronous=False):
     claim = {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
@@ -124,54 +133,98 @@ def stream_client(fixture, direct, body):
             raise AssertionError(str(request.url))
         return httpx.Response(200, json=value)
 
-    http = httpx.Client(
+    http_type = httpx.AsyncClient if asynchronous else httpx.Client
+    client_type = AsyncLoonFS if asynchronous else LoonFS
+    http = http_type(
         transport=httpx.MockTransport(handle),
         headers={"X-Private": "secret"},
         cookies={"private": "secret"},
     )
     return (
-        LoonFS(base_url="http://api.test", token="private-token", httpx_client=http),
+        client_type(
+            base_url="http://api.test", token="private-token", httpx_client=http
+        ),
         http,
         requests,
     )
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("fixture", CASES, ids=lambda case: case["name"])
-def test_streaming_download_conformance(fixture, direct):
+def test_streaming_download_conformance(fixture, direct, asynchronous):
     body = Chunks([fixture["content"].encode()], fixture.get("transport_error", False))
-    client, http, requests = stream_client(fixture, direct, body)
-    with http:
-        with client.files.download_stream(
-            "demo", path="/file", request_options={"timeout": 7}
-        ) as stream:
-            assert body.reads == 0, "opening the download must not consume its body"
-            if fixture["error"] or (direct and fixture.get("range_error", False)):
-                with pytest.raises((RuntimeError, httpx.ReadError)):
-                    b"".join(stream)
-            else:
-                assert b"".join(stream) == fixture["content"].encode()
-        # A direct grant of zero bytes makes no object request, so no body opens.
-        assert body.closed or (
-            direct and (fixture["size_bytes"] == 0 or "ranges" in fixture)
-        )
+    client, http, requests = stream_client(fixture, direct, body, asynchronous)
+
+    def collect():
+        with http:
+            with client.files.download_stream(
+                "demo", path="/file", request_options={"timeout": 7}
+            ) as stream:
+                assert body.reads == 0
+                return b"".join(stream)
+
+    async def collect_async():
+        async with http:
+            async with await client.files.download_stream(
+                "demo", path="/file", request_options={"timeout": 7}
+            ) as stream:
+                assert body.reads == 0
+                return b"".join([chunk async for chunk in stream])
+
+    expected_error = fixture["direct_error_message" if direct else "error_message"]
+    if expected_error:
+        with pytest.raises(
+            (RuntimeError, httpx.ReadError), match=f"^{re.escape(expected_error)}$"
+        ):
+            asyncio.run(collect_async()) if asynchronous else collect()
+    else:
+        result = asyncio.run(collect_async()) if asynchronous else collect()
+        assert result == fixture["content"].encode()
+    assert body.closed or (
+        direct and (fixture["size_bytes"] == 0 or "ranges" in fixture)
+    )
+    if direct:
+        assert [
+            r.url.path for r in requests if r.url.host == "objects.test"
+        ] == fixture["object_requests"]
+    else:
+        assert [r.url.path.rsplit("/", 1)[1] for r in requests] == [
+            "capabilities",
+            "entry",
+            "content",
+        ]
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("direct", [False, True])
-def test_streaming_download_backpressure_and_early_close(direct):
+def test_streaming_download_backpressure_and_early_close(direct, asynchronous):
     chunk = b"x" * 65536
     fixture = {
         "size_bytes": len(chunk) * 3,
         "algorithm": "crc64nvme",
         "checksum": _checksum("crc64nvme", chunk * 3).value,
+        "range": "bytes=0-196607",
     }
     body = Chunks([chunk] * 3)
-    client, http, _ = stream_client(fixture, direct, body)
-    with http:
-        with client.files.download_stream(
-            "demo", path="/file", request_options={"timeout": 7}
-        ) as stream:
-            assert next(stream) == chunk
-            assert body.reads == 1, "the next chunk must wait for the consumer"
-        assert body.closed
-        assert body.reads == 1
+    client, http, _ = stream_client(fixture, direct, body, asynchronous)
+    if asynchronous:
+
+        async def read_one():
+            async with http:
+                async with await client.files.download_stream(
+                    "demo", path="/file", request_options={"timeout": 7}
+                ) as stream:
+                    assert await stream.__anext__() == chunk
+                    assert body.reads == 1
+
+        asyncio.run(read_one())
+    else:
+        with http:
+            with client.files.download_stream(
+                "demo", path="/file", request_options={"timeout": 7}
+            ) as stream:
+                assert next(stream) == chunk
+                assert body.reads == 1
+    assert body.closed
+    assert body.reads == 1

@@ -51,14 +51,13 @@ for (const browser of [false, true])
                 namespace_alias: "demo",
                 upload_id: "upl_test",
                 mode: "service_proxied",
-                checksum_algorithm: fixture.algorithm,
             };
             const digest = new IncrementalChecksum(fixture.algorithm);
             digest.update(content);
             const claim = {
                 kind: "blob_v1",
                 owner_namespace_id: "demo",
-                content_id: "con_test",
+                content_id: "con_00000000000000000000000000000001",
                 size_bytes: content.length,
                 checksum: digest.finish(),
             };
@@ -84,14 +83,20 @@ for (const browser of [false, true])
                             "bounded lookahead plus one caller chunk",
                         );
                     assert.equal((await request.json()).mode, "service_proxied");
-                    value = { ...session, status: "open", expires_at_ms: 2000000000000 };
+                    value = {
+                        ...session, status: "open", checksum_algorithm: fixture.algorithm,
+                        expires_at_ms: 2000000000000,
+                    };
                 } else if (path.endsWith("/content")) {
                     assert.deepEqual(
                         new Uint8Array(await request.arrayBuffer()),
                         content,
                         "fallback must preserve every byte",
                     );
-                    value = { ...session, status: "open", expires_at_ms: 2000000000000, content_ref: claim };
+                    value = {
+                        ...session, status: "open", checksum_algorithm: fixture.algorithm,
+                        expires_at_ms: 2000000000000, content_ref: claim,
+                    };
                 } else if (path.endsWith("/complete")) {
                     value = {
                         ...session,

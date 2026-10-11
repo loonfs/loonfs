@@ -6,7 +6,11 @@
     "checksum": "ae8b14860a799888",
     "size_bytes": 9,
     "range": "bytes=0-8",
-    "error": false
+    "error_message": null,
+    "direct_error_message": null,
+    "object_requests": [
+      "/object"
+    ]
   },
   {
     "name": "crc32c",
@@ -15,7 +19,11 @@
     "checksum": "e3069283",
     "size_bytes": 9,
     "range": "bytes=0-8",
-    "error": false
+    "error_message": null,
+    "direct_error_message": null,
+    "object_requests": [
+      "/object"
+    ]
   },
   {
     "name": "truncated",
@@ -24,7 +32,11 @@
     "checksum": "ae8b14860a799888",
     "size_bytes": 9,
     "range": "bytes=0-8",
-    "error": true
+    "error_message": "download returned 8 bytes, expected 9",
+    "direct_error_message": "download range ended before its declared length",
+    "object_requests": [
+      "/object"
+    ]
   },
   {
     "name": "too_long",
@@ -33,7 +45,11 @@
     "checksum": "ae8b14860a799888",
     "size_bytes": 9,
     "range": "bytes=0-8",
-    "error": true
+    "error_message": "download exceeded expected size 9",
+    "direct_error_message": "download range exceeded its declared length",
+    "object_requests": [
+      "/object"
+    ]
   },
   {
     "name": "corrupt",
@@ -42,7 +58,11 @@
     "checksum": "ae8b14860a799888",
     "size_bytes": 9,
     "range": "bytes=0-8",
-    "error": true
+    "error_message": "download checksum mismatch",
+    "direct_error_message": "download checksum mismatch",
+    "object_requests": [
+      "/object"
+    ]
   },
   {
     "name": "empty",
@@ -51,7 +71,9 @@
     "checksum": "0000000000000000",
     "size_bytes": 0,
     "range": null,
-    "error": false
+    "error_message": null,
+    "direct_error_message": null,
+    "object_requests": []
   },
   {
     "name": "transport_failure_after_last_byte",
@@ -60,8 +82,12 @@
     "checksum": "ae8b14860a799888",
     "size_bytes": 9,
     "range": "bytes=0-8",
-    "error": true,
-    "transport_error": true
+    "transport_error": true,
+    "error_message": "body interrupted after its last byte",
+    "direct_error_message": "body interrupted after its last byte",
+    "object_requests": [
+      "/object"
+    ]
   },
   {
     "name": "two_ranges",
@@ -70,8 +96,6 @@
     "checksum": "ae8b14860a799888",
     "size_bytes": 9,
     "range": "bytes=0-8",
-    "error": false,
-    "range_error": false,
     "ranges": [
       {
         "start_offset": 0,
@@ -85,6 +109,12 @@
         "range": "bytes=2-5",
         "content": "6789"
       }
+    ],
+    "error_message": null,
+    "direct_error_message": null,
+    "object_requests": [
+      "/object/0",
+      "/object/1"
     ]
   },
   {
@@ -94,8 +124,6 @@
     "checksum": "ae8b14860a799888",
     "size_bytes": 9,
     "range": "bytes=0-8",
-    "error": false,
-    "range_error": true,
     "ranges": [
       {
         "start_offset": 0,
@@ -109,6 +137,11 @@
         "range": "bytes=2-5",
         "content": "56789"
       }
+    ],
+    "error_message": null,
+    "direct_error_message": "download range ended before its declared length",
+    "object_requests": [
+      "/object/0"
     ]
   },
   {
@@ -118,8 +151,6 @@
     "checksum": "ae8b14860a799888",
     "size_bytes": 9,
     "range": "bytes=0-8",
-    "error": false,
-    "range_error": true,
     "ranges": [
       {
         "start_offset": 0,
@@ -133,6 +164,92 @@
         "range": "bytes=2-5",
         "content": "789"
       }
+    ],
+    "error_message": null,
+    "direct_error_message": "download range exceeded its declared length",
+    "object_requests": [
+      "/object/0"
     ]
+  },
+  {
+    "name": "out_of_order",
+    "content": "123456789",
+    "algorithm": "crc64nvme",
+    "checksum": "ae8b14860a799888",
+    "size_bytes": 9,
+    "range": "bytes=0-8",
+    "error_message": null,
+    "direct_error_message": "download grant has invalid ranges",
+    "object_requests": [],
+    "ranges": [
+      {
+        "start_offset": 5,
+        "length": 4,
+        "range": "bytes=0-8",
+        "content": "123456789"
+      },
+      {
+        "start_offset": 0,
+        "length": 5,
+        "range": "bytes=0-8",
+        "content": "123456789"
+      }
+    ]
+  },
+  {
+    "name": "gap",
+    "content": "123456789",
+    "algorithm": "crc64nvme",
+    "checksum": "ae8b14860a799888",
+    "size_bytes": 9,
+    "range": "bytes=0-8",
+    "error_message": null,
+    "direct_error_message": "download grant has invalid ranges",
+    "object_requests": [],
+    "ranges": [
+      {
+        "start_offset": 0,
+        "length": 4,
+        "range": "bytes=0-8",
+        "content": "123456789"
+      },
+      {
+        "start_offset": 5,
+        "length": 4,
+        "range": "bytes=0-8",
+        "content": "123456789"
+      }
+    ]
+  },
+  {
+    "name": "oversized_range",
+    "content": "123456789",
+    "algorithm": "crc64nvme",
+    "checksum": "ae8b14860a799888",
+    "size_bytes": 9,
+    "range": "bytes=0-8",
+    "error_message": null,
+    "direct_error_message": "download grant has invalid ranges",
+    "object_requests": [],
+    "ranges": [
+      {
+        "start_offset": 0,
+        "length": 10,
+        "range": "bytes=0-8",
+        "content": "123456789"
+      }
+    ]
+  },
+  {
+    "name": "missing_ranges",
+    "content": "123456789",
+    "algorithm": "crc64nvme",
+    "checksum": "ae8b14860a799888",
+    "size_bytes": 9,
+    "range": "bytes=0-8",
+    "error_message": null,
+    "direct_error_message": "download grant has invalid ranges",
+    "object_requests": [],
+    "ranges": []
   }
 ]
