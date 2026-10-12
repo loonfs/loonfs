@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import concurrent.futures
 import contextvars
 import typing
@@ -10,6 +11,7 @@ import httpx
 from .types import Checksum, ChecksumAlgorithm, ContentRef
 
 _TRANSFER_CHUNK_BYTES = 64 * 1024
+_RANGE_WINDOW = 4
 
 
 def _crc_table(polynomial: int, mask: int) -> tuple[int, ...]:
@@ -125,20 +127,27 @@ def _send_download_range(client, part, timeout):
 
 
 def _download_ranges(client, ranges, timeout):
-    parts = [part for part in ranges if part.length != 0]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        pending = None
-        if parts:
-            pending = executor.submit(_send_download_range, client, parts[0], timeout)
+    parts = collections.deque(part for part in ranges if part.length != 0)
+    pending = collections.deque()
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=_RANGE_WINDOW - 1
+    ) as executor:
+
+        def fill():
+            while parts and len(pending) < _RANGE_WINDOW - 1:
+                part = parts.popleft()
+                future = executor.submit(_send_download_range, client, part, timeout)
+                pending.append((part, future))
+
         response = None
         try:
-            for index, part in enumerate(parts):
-                response, pending = pending.result(), None
+            fill()
+            while pending:
+                part, future = pending[0]
+                response = future.result()
+                pending.popleft()
                 _require_success(response)
-                if index + 1 < len(parts):
-                    pending = executor.submit(
-                        _send_download_range, client, parts[index + 1], timeout
-                    )
+                fill()
                 count = 0
                 for chunk in response.iter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES):
                     count += len(chunk)
@@ -155,27 +164,32 @@ def _download_ranges(client, ranges, timeout):
         finally:
             if response is not None:
                 response.close()
-            if pending is not None:
+            for _, future in pending:
                 try:
-                    pending.result().close()
+                    future.result().close()
                 except Exception:
                     pass
 
 
 async def _async_download_ranges(client, ranges, timeout):
-    parts = [part for part in ranges if part.length != 0]
-    pending = None
-    if parts:
-        pending = asyncio.create_task(_send_download_range(client, parts[0], timeout))
+    parts = collections.deque(part for part in ranges if part.length != 0)
+    pending = collections.deque()
+
+    def fill():
+        while parts and len(pending) < _RANGE_WINDOW - 1:
+            part = parts.popleft()
+            task = asyncio.create_task(_send_download_range(client, part, timeout))
+            pending.append((part, task))
+
     response = None
     try:
-        for index, part in enumerate(parts):
-            response, pending = await pending, None
+        fill()
+        while pending:
+            part, task = pending[0]
+            response = await task
+            pending.popleft()
             _require_success(response)
-            if index + 1 < len(parts):
-                pending = asyncio.create_task(
-                    _send_download_range(client, parts[index + 1], timeout)
-                )
+            fill()
             count = 0
             async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_BYTES):
                 count += len(chunk)
@@ -188,11 +202,14 @@ async def _async_download_ranges(client, ranges, timeout):
     finally:
         if response is not None:
             await response.aclose()
-        if pending is not None:
-            pending.cancel()
-            results = await asyncio.gather(pending, return_exceptions=True)
-            if isinstance(results[0], httpx.Response):
-                await results[0].aclose()
+        for _, task in pending:
+            task.cancel()
+        results = await asyncio.gather(
+            *(task for _, task in pending), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, httpx.Response):
+                await result.aclose()
 
 
 class _AsyncReader:

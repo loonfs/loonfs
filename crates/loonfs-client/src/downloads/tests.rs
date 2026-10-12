@@ -292,19 +292,15 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
 }
 
 #[tokio::test]
-async fn the_next_range_is_requested_while_the_current_one_is_read() {
-    let payload = b"the first range, the second range, and the third".to_vec();
+async fn ranges_up_to_the_window_are_requested_while_the_current_one_is_read() {
+    let payload: Vec<u8> = (0u8..50).collect();
     let content_ref = ContentRef::blob_v1(
         loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
         ContentId::generate(),
         &payload,
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
-    let grant = grant_of_ranges(
-        content_ref,
-        "http://example.invalid/object",
-        &[16, 18, payload.len() as u64 - 34],
-    );
+    let grant = grant_of_ranges(content_ref, "http://example.invalid/object", &[10; 5]);
     let transport = scripted_transport::script(grant.ranges.iter().map(|range| {
         let start = range.start_offset as usize;
         Outcome::Success(payload[start..start + range.length as usize].to_vec())
@@ -317,26 +313,22 @@ async fn the_next_range_is_requested_while_the_current_one_is_read() {
         .expect("open the grant");
     assert_eq!(transport.attempts(), 1);
     let first = download.next_chunk().await.expect("first range");
-    assert_eq!(first.as_deref(), Some(&payload[..16]));
-    assert_eq!(transport.attempts(), 2);
+    assert_eq!(first.as_deref(), Some(&payload[..10]));
+    assert_eq!(transport.attempts(), RANGE_WINDOW);
     let second = download.next_chunk().await.expect("second range");
-    assert_eq!(second.as_deref(), Some(&payload[16..34]));
-    assert_eq!(transport.attempts(), 3);
+    assert_eq!(second.as_deref(), Some(&payload[10..20]));
+    assert_eq!(transport.attempts(), RANGE_WINDOW + 1);
     let mut rest = Vec::new();
     while let Some(chunk) = download.next_chunk().await.expect("verified download") {
         rest.extend_from_slice(&chunk);
     }
 
-    assert_eq!(rest, payload[34..]);
+    assert_eq!(rest, payload[20..]);
     let urls: Vec<String> = transport.sent().into_iter().map(|sent| sent.url).collect();
-    assert_eq!(
-        urls,
-        [
-            "http://example.invalid/object?signed=0",
-            "http://example.invalid/object?signed=1",
-            "http://example.invalid/object?signed=2",
-        ]
-    );
+    let expected: Vec<String> = (0..5)
+        .map(|index| format!("http://example.invalid/object?signed={index}"))
+        .collect();
+    assert_eq!(urls, expected);
 }
 
 #[tokio::test(start_paused = true)]

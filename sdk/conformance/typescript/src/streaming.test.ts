@@ -37,6 +37,7 @@ function fakeFetch(
     direct: boolean,
     body: ReadableStream<Uint8Array>,
     requests: string[] = [],
+    signals: AbortSignal[] = [],
 ): typeof fetch {
     const claim = {
         kind: "blob_v1",
@@ -50,6 +51,7 @@ function fakeFetch(
         requests.push(url.pathname);
         const headers = new Headers(init?.headers);
         if (url.pathname.startsWith("/object/")) {
+            signals.push(init!.signal!);
             const part = fixture.ranges![Number(url.pathname.split("/").pop())]!;
             assert.equal(headers.has("Authorization"), false);
             assert.equal(headers.has("X-Private"), false);
@@ -137,11 +139,12 @@ for (const browser of [false, true])
                     { highWaterMark: 0 },
                 );
                 const requests: string[] = [];
+                const signals: AbortSignal[] = [];
                 const options = {
                     baseUrl: "http://api.test",
                     token: "private-token",
                     headers: { "X-Private": "secret" },
-                    fetch: fakeFetch(fixture, direct, body, requests),
+                    fetch: fakeFetch(fixture, direct, body, requests, signals),
                 };
                 const collect = async () => {
                     const stream = browser
@@ -168,6 +171,11 @@ for (const browser of [false, true])
                     assert.deepEqual(
                         requests.map((path) => path.split("/").pop()),
                         ["capabilities", "entry", "content"],
+                    );
+                if (direct && expectedError)
+                    assert.ok(
+                        signals.every((signal) => signal.aborted),
+                        "a failed range aborts the requests behind it",
                     );
             });
         }
@@ -276,9 +284,9 @@ test("verified streams bound chunks and stop reading when the consumer closes", 
     assert.equal(reads, 1);
 });
 
-test("direct downloads request the next range while the current one is read", async () => {
+test("direct downloads request a window of ranges while the current one is read", async () => {
     const fixture: Fixture = {
-        name: "three_ranges",
+        name: "five_ranges",
         content: "123456789",
         algorithm: "crc64nvme",
         checksum: "ae8b14860a799888",
@@ -286,13 +294,16 @@ test("direct downloads request the next range while the current one is read", as
         range: null,
         error_message: null,
         direct_error_message: null,
-        object_requests: ["/object/0", "/object/1", "/object/2"],
+        object_requests: ["/object/0", "/object/1", "/object/2", "/object/3", "/object/4"],
         ranges: [
-            { start_offset: 0, length: 3, range: "bytes=4-6", content: "123" },
-            { start_offset: 3, length: 3, range: "bytes=0-2", content: "456" },
-            { start_offset: 6, length: 3, range: "bytes=8-10", content: "789" },
+            { start_offset: 0, length: 2, range: "bytes=4-5", content: "12" },
+            { start_offset: 2, length: 2, range: "bytes=0-1", content: "34" },
+            { start_offset: 4, length: 2, range: "bytes=8-9", content: "56" },
+            { start_offset: 6, length: 2, range: "bytes=2-3", content: "78" },
+            { start_offset: 8, length: 1, range: "bytes=6-6", content: "9" },
         ],
     };
+    const rangeWindow = 4;
     const requests: string[] = [];
     const objects = () => requests.filter((path) => path.startsWith("/object"));
     const stream = await new LoonFSClient({
@@ -303,10 +314,12 @@ test("direct downloads request the next range while the current one is read", as
     const reader = stream.content.getReader();
     const text = async () => new TextDecoder().decode((await reader.read()).value);
 
-    assert.equal(await text(), "123");
-    assert.deepEqual(objects(), fixture.object_requests.slice(0, 2));
-    assert.equal(await text(), "456");
+    assert.equal(await text(), "12");
+    assert.deepEqual(objects(), fixture.object_requests.slice(0, rangeWindow));
+    assert.equal(await text(), "34");
     assert.deepEqual(objects(), fixture.object_requests);
-    assert.equal(await text(), "789");
+    assert.equal(await text(), "56");
+    assert.equal(await text(), "78");
+    assert.equal(await text(), "9");
     assert.equal((await reader.read()).done, true);
 });

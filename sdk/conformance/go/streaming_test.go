@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -196,7 +197,9 @@ func TestStreamingDownloadConformance(t *testing.T) {
 					}
 				}
 				expectedPaths := fixture.ObjectRequests
-				if !direct {
+				if direct {
+					sort.Strings(paths)
+				} else {
 					expectedPaths = []string{"capabilities", "entry", "content"}
 				}
 				if !reflect.DeepEqual(paths, expectedPaths) {
@@ -244,30 +247,42 @@ func TestStreamingDownloadsStartBeforeEOFAndCancelPendingReads(t *testing.T) {
 	}
 }
 
-func TestStreamingDownloadsRequestTheNextRangeWhileOneIsRead(t *testing.T) {
+func TestStreamingDownloadsRequestAWindowOfRangesWhileOneIsRead(t *testing.T) {
+	const rangeWindow = 4
 	var fixture streamCase
-	if err := json.Unmarshal([]byte(`{"name": "three_ranges", "content": "123456789", "algorithm": "crc64nvme",
+	if err := json.Unmarshal([]byte(`{"name": "five_ranges", "content": "123456789", "algorithm": "crc64nvme",
 		"checksum": "ae8b14860a799888", "size_bytes": 9, "ranges": [
-		{"start_offset": 0, "length": 3, "range": "bytes=4-6", "content": "123"},
-		{"start_offset": 3, "length": 3, "range": "bytes=0-2", "content": "456"},
-		{"start_offset": 6, "length": 3, "range": "bytes=8-10", "content": "789"}]}`), &fixture); err != nil {
+		{"start_offset": 0, "length": 2, "range": "bytes=4-5", "content": "12"},
+		{"start_offset": 2, "length": 2, "range": "bytes=0-1", "content": "34"},
+		{"start_offset": 4, "length": 2, "range": "bytes=8-9", "content": "56"},
+		{"start_offset": 6, "length": 2, "range": "bytes=2-3", "content": "78"},
+		{"start_offset": 8, "length": 1, "range": "bytes=6-6", "content": "9"}]}`), &fixture); err != nil {
 		t.Fatal(err)
 	}
-	reached := []chan struct{}{nil, make(chan struct{}), make(chan struct{})}
+	reached := make([]chan struct{}, len(fixture.Ranges))
+	for index := range reached {
+		reached[index] = make(chan struct{})
+	}
+	release := make(chan struct{})
 	objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		index, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/object/"))
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if index == 0 {
-			io.WriteString(w, fixture.Ranges[0].Content[:1])
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
-			return
-		}
 		close(reached[index])
-		io.WriteString(w, fixture.Ranges[index].Content)
+		content := fixture.Ranges[index].Content
+		if index == 0 {
+			io.WriteString(w, content[:1])
+			w.(http.Flusher).Flush()
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			content = content[1:]
+		}
+		io.WriteString(w, content)
 	}))
 	dialer := &net.Dialer{}
 	objectTransport := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -292,15 +307,34 @@ func TestStreamingDownloadsRequestTheNextRangeWhileOneIsRead(t *testing.T) {
 	if _, err := io.ReadFull(opened.Content, first); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-reached[1]:
-	case <-time.After(5 * time.Second):
-		t.Fatal("range 1 was not requested while range 0 was read")
+	for index := 0; index < rangeWindow; index++ {
+		select {
+		case <-reached[index]:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("range %d was not requested while range 0 was read", index)
+		}
 	}
 	select {
-	case <-reached[2]:
-		t.Fatal("range 2 was requested before range 1 was read")
+	case <-reached[rangeWindow]:
+		t.Fatal("a range past the window was requested before range 0 ended")
 	default:
+	}
+	close(release)
+	crossing := make([]byte, len(fixture.Ranges[0].Content))
+	if _, err := io.ReadFull(opened.Content, crossing); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reached[rangeWindow]:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the range past the window was not requested once range 0 ended")
+	}
+	rest, err := io.ReadAll(opened.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content := string(first) + string(crossing) + string(rest); content != fixture.Content {
+		t.Fatalf("content = %q, want %q", content, fixture.Content)
 	}
 	opened.Content.Close()
 	shutdown := make(chan struct{})

@@ -23,6 +23,7 @@ import (
 
 const defaultTransferTimeout = 60 * time.Second
 const transferChunkBytes = 64 * 1024
+const rangeWindow = 4
 
 type DownloadStream struct {
 	Content     io.ReadCloser
@@ -264,22 +265,26 @@ type openedRange struct {
 	err      error
 }
 
+type pendingRange struct {
+	length int64
+	opened chan openedRange
+}
+
 type downloadRangeReader struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	client    core.HTTPClient
 	ranges    []*loonfs.DownloadRange
+	pending   []pendingRange
 	body      io.ReadCloser
 	remaining int64
-	next      chan openedRange
-	requested bool
 	wait      sync.WaitGroup
 	closed    bool
 }
 
 func newDownloadRangeReader(ctx context.Context, client core.HTTPClient, ranges []*loonfs.DownloadRange) *downloadRangeReader {
 	ctx, cancel := context.WithCancel(ctx)
-	reader := &downloadRangeReader{ctx: ctx, cancel: cancel, client: client, next: make(chan openedRange, 1)}
+	reader := &downloadRangeReader{ctx: ctx, cancel: cancel, client: client}
 	for _, part := range ranges {
 		if part.Length != 0 {
 			reader.ranges = append(reader.ranges, part)
@@ -288,14 +293,19 @@ func newDownloadRangeReader(ctx context.Context, client core.HTTPClient, ranges 
 	return reader
 }
 
-func (r *downloadRangeReader) request(part *loonfs.DownloadRange) {
-	r.requested = true
-	r.wait.Add(1)
-	go func() {
-		defer r.wait.Done()
-		response, err := sendPresignedWithClient(r.ctx, r.client, part.Access, http.MethodGet, nil, 0)
-		r.next <- openedRange{response: response, err: err}
-	}()
+func (r *downloadRangeReader) fill() {
+	for len(r.pending) < rangeWindow-1 && len(r.ranges) > 0 {
+		part := r.ranges[0]
+		r.ranges = r.ranges[1:]
+		opened := make(chan openedRange, 1)
+		r.pending = append(r.pending, pendingRange{length: part.Length, opened: opened})
+		r.wait.Add(1)
+		go func() {
+			defer r.wait.Done()
+			response, err := sendPresignedWithClient(r.ctx, r.client, part.Access, http.MethodGet, nil, 0)
+			opened <- openedRange{response: response, err: err}
+		}()
+	}
 }
 
 func (r *downloadRangeReader) Read(buffer []byte) (int, error) {
@@ -307,16 +317,13 @@ func (r *downloadRangeReader) Read(buffer []byte) (int, error) {
 	}
 	for {
 		if r.body == nil {
-			if len(r.ranges) == 0 {
+			r.fill()
+			if len(r.pending) == 0 {
 				return 0, io.EOF
 			}
-			part := r.ranges[0]
-			r.ranges = r.ranges[1:]
-			if !r.requested {
-				r.request(part)
-			}
-			opened := <-r.next
-			r.requested = false
+			next := r.pending[0]
+			r.pending = r.pending[1:]
+			opened := <-next.opened
 			if opened.err != nil {
 				return 0, opened.err
 			}
@@ -325,10 +332,8 @@ func (r *downloadRangeReader) Read(buffer []byte) (int, error) {
 				defer response.Body.Close()
 				return 0, responseStatusError(response)
 			}
-			r.body, r.remaining = response.Body, part.Length
-			if len(r.ranges) > 0 {
-				r.request(r.ranges[0])
-			}
+			r.body, r.remaining = response.Body, next.length
+			r.fill()
 		}
 		n, err := r.body.Read(buffer)
 		if err != nil && err != io.EOF {
@@ -364,12 +369,10 @@ func (r *downloadRangeReader) Close() error {
 		err = r.body.Close()
 	}
 	r.wait.Wait()
-	select {
-	case opened := <-r.next:
-		if opened.response != nil {
+	for _, next := range r.pending {
+		if opened := <-next.opened; opened.response != nil {
 			opened.response.Body.Close()
 		}
-	default:
 	}
 	return err
 }
