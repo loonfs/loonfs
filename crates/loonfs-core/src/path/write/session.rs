@@ -91,8 +91,7 @@ impl<'a> PublishPlanningSession<'a> {
         allocation: &mut CandidateAllocation,
     ) -> Result<ValidatedCommitPlan> {
         let base_view = base_view.with_durable_cache(&self.durable_cache);
-        let overlay = MetadataState::default();
-        let pre_state = base_view.with_overlay(&overlay, &self.accepted_rows, self.head.seq);
+        let pre_state = base_view.with_overlay(None, &self.accepted_rows, self.head.seq);
         evaluate_preconditions(
             &candidate.request().preconditions,
             candidate.authority(),

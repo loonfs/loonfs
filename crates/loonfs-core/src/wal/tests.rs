@@ -362,12 +362,18 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
     create(&store, &namespace_id, &context(1_000))
         .await
         .expect("create");
+    let session = crate::commit_engine::SharedWriterSessionState::default();
     let mut first = NamespaceCommitEngine::new(
         namespace_id.clone(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
-    );
+    )
+    .writer_session(Arc::clone(&session));
     publish(&mut first, &store, "seed").await.expect("seed");
-    let mut second = first.clone();
+    let mut second = NamespaceCommitEngine::new(
+        namespace_id.clone(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+    )
+    .writer_session(session);
     store.reset();
     let blocked = BlockingStore::new(
         store.clone(),

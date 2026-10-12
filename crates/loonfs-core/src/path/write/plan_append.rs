@@ -1,6 +1,7 @@
 //! Publish plans that add bytes to the end of a file.
 
 use super::ensure_expected_inode;
+use super::planned_pieces::CommitPieces;
 use super::publish_path_planning::{
     resolve_visible_inode, resolve_visible_path_for_authorization, CompiledFilesystemOperation,
     PublishPathPlanningView,
@@ -19,6 +20,10 @@ use loonfs_types::{
     RevisionNo,
 };
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "an append carries the commit's pieces, the store, and content write permits"
+)]
 pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     bytes: &[u8],
@@ -27,6 +32,7 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
     store: &S,
     content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
+    pieces: &CommitPieces<'_>,
 ) -> Result<CompiledFilesystemOperation> {
     ensure_mutation_path(absolute_path)?;
     let expected = DestinationPrecondition {
@@ -61,6 +67,7 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
         store,
         content_writes,
         view,
+        pieces,
         absolute_path.as_str(),
         revision,
         expected.and_then(|expected| expected.revision_no),
@@ -76,6 +83,7 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
     store: &S,
     content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
+    pieces: &CommitPieces<'_>,
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
     view.authorize(
@@ -99,6 +107,7 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
         store,
         content_writes,
         view,
+        pieces,
         target.absolute_path.as_str(),
         revision,
         expected_revision_no,
@@ -110,10 +119,15 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
 /// Plans the next revision of a file as its current bytes followed by
 /// `bytes`. The guard is checked first so that a stale caller hears about
 /// the revision, not about the content it would have extended.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "an append carries the commit's pieces, the store, and content write permits"
+)]
 async fn plan_append<S: ObjectStore + ?Sized>(
     store: &S,
     content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
+    pieces: &CommitPieces<'_>,
     target: &str,
     revision: RevisionRecord,
     expected_revision_no: Option<RevisionNo>,
@@ -130,7 +144,16 @@ async fn plan_append<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    let appended = append_to(store, content_writes, view, target, &revision, bytes).await?;
+    let appended = append_to(
+        store,
+        content_writes,
+        view,
+        pieces,
+        target,
+        &revision,
+        bytes,
+    )
+    .await?;
     Ok(CompiledFilesystemOperation {
         ops: vec![CommitOp::ReplaceFile {
             inode_id: revision.inode_id,
@@ -145,6 +168,7 @@ async fn append_to<S: ObjectStore + ?Sized>(
     store: &S,
     content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
+    pieces: &CommitPieces<'_>,
     target: &str,
     base_row: &RevisionRecord,
     bytes: &[u8],
@@ -189,22 +213,12 @@ async fn append_to<S: ObjectStore + ?Sized>(
     let layout = if extends_base || base.size_bytes == 0 {
         None
     } else {
-        let content = view
-            .pieces
-            .ok_or_else(|| {
-                CoreError::Internal("append planning requires the commit's pieces".to_owned())
-            })?
-            .content(base);
+        let content = pieces.content(base);
         Some(
             materialize_content_layout(store, view.view, content.as_ref(), base, content_writes)
                 .await?,
         )
     };
-    let pieces = vec![WalInlineContent {
-        content_id: content_id.clone(),
-        offset: base.size_bytes,
-        bytes: bytes.to_vec(),
-    }];
     Ok(AppendedContent {
         content_ref: ContentRef {
             kind: ContentRefKind::BlobV1,
@@ -214,6 +228,10 @@ async fn append_to<S: ObjectStore + ?Sized>(
             checksum,
         },
         layout,
-        pieces,
+        pieces: vec![WalInlineContent {
+            content_id,
+            offset: base.size_bytes,
+            bytes: bytes.to_vec(),
+        }],
     })
 }
