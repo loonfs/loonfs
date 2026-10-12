@@ -244,8 +244,9 @@ async fn validate_planned_ops(
     context: &TestValidationContext<'_>,
 ) -> Result<Vec<WalCommitDelta>, CoreError> {
     let accepted_rows = MetadataState::default();
+    let base = crate::wal::ProjectedWalTail::from_rows(context.metadata_state.clone());
     let mut metadata_state = PublishValidationView::new(
-        InMemoryMetadataView::in_memory(context.metadata_state, None, context.head.seq),
+        InMemoryMetadataView::in_memory(&base, None, context.head.seq),
         &accepted_rows,
         committed_seq(context),
     );

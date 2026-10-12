@@ -2,21 +2,33 @@
 
 use super::frame::WalObjectError;
 use crate::heap_bytes::{arc_bytes, hash_map_table_bytes, HeapBytes};
-use crate::metadata::MetadataState;
+use crate::metadata::{
+    CommitReceiptRecord, ContentLayoutRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+};
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
 use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{ChangeSeq, ContentId, ContentRef, NamespaceId};
+use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef, NamespaceId};
 use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
+use std::sync::Arc;
 
-/// Holds the WAL tail after a manifest as rows and the content pieces they
-/// name. Replay already downloaded the resident bytes, so reads need no
+/// Holds the WAL tail after a manifest as one chunk per WAL object, oldest
+/// first. Replay already downloaded the resident bytes, so reads need no
 /// content request for them. The head-state budgets bound those bytes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectedWalTail {
+    chunks: Vec<Arc<TailChunk>>,
+    activity: ManifestActivity,
+    inline_bytes: usize,
+}
+
+/// One WAL object's commits: its rows, its content pieces, and its activity.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TailChunk {
+    pub(crate) first_seq: ChangeSeq,
     pub(crate) rows: MetadataState,
-    pub(crate) activity: ManifestActivity,
+    activity: ManifestActivity,
     contents: Vec<ProjectedContent>,
     content_positions: HashMap<ContentId, usize>,
     inline_bytes: usize,
@@ -46,17 +58,13 @@ impl ProjectedContent {
     pub(crate) fn insert_piece(
         &mut self,
         content_ref: &ContentRef,
-        entry: &WalInlineContent,
+        piece: ProjectedPiece,
         committed_seq: ChangeSeq,
     ) -> Option<ProjectedPiece> {
         if content_ref.size_bytes > self.content_ref.size_bytes {
             self.content_ref = content_ref.clone();
             self.committed_seq = committed_seq;
         }
-        let piece = ProjectedPiece {
-            offset: entry.offset,
-            bytes: Bytes::copy_from_slice(&entry.bytes),
-        };
         match self
             .pieces
             .binary_search_by_key(&piece.offset, |piece| piece.offset)
@@ -66,6 +74,12 @@ impl ProjectedContent {
                 self.pieces.insert(index, piece);
                 None
             }
+        }
+    }
+
+    fn merge(&mut self, later: &ProjectedContent) {
+        for piece in &later.pieces {
+            self.insert_piece(&later.content_ref, piece.clone(), later.committed_seq);
         }
     }
 }
@@ -85,35 +99,199 @@ impl ProjectedPiece {
 impl ProjectedWalTail {
     pub(crate) fn from_rows(rows: MetadataState) -> Self {
         Self {
-            rows,
+            chunks: vec![Arc::new(TailChunk::new(ChangeSeq(0), rows))],
             ..Self::default()
         }
     }
 
-    /// Applies one commit of `namespace_id`'s WAL: its pieces, then its rows.
-    pub(crate) fn apply_commit(
+    /// Appends one WAL object of `namespace_id`'s WAL as a chunk and returns
+    /// that chunk, or `None` for an object with no records.
+    pub(crate) fn push_object(
         &mut self,
         namespace_id: &NamespaceId,
-        record: &WalCommitPayload,
-    ) -> Result<(), WalObjectError> {
-        let activity = committed_activity(record)
-            .and_then(|activity| self.activity.checked_add(activity))
+        records: &[WalCommitPayload],
+    ) -> Result<Option<Arc<TailChunk>>, WalObjectError> {
+        if records.is_empty() {
+            return Ok(None);
+        }
+        let chunk = Arc::new(TailChunk::from_records(namespace_id, records)?);
+        self.push_chunk(Arc::clone(&chunk))?;
+        Ok(Some(chunk))
+    }
+
+    pub(crate) fn push_chunk(&mut self, chunk: Arc<TailChunk>) -> Result<(), WalObjectError> {
+        self.activity = self
+            .activity
+            .checked_add(chunk.activity)
             .ok_or(WalObjectError::ActivityOverflow)?;
-        self.apply_pieces(namespace_id, record);
-        self.rows.apply_committed_wal_record_mut(record);
-        self.activity = activity;
+        self.inline_bytes += chunk.inline_bytes;
+        self.chunks.push(chunk);
         Ok(())
     }
 
-    fn apply_pieces(&mut self, namespace_id: &NamespaceId, record: &WalCommitPayload) {
-        for (content_ref, entry) in inline_content_refs(namespace_id, record) {
-            self.insert_piece(content_ref, entry, record.committed_seq);
-        }
+    #[cfg(test)]
+    pub(crate) fn chunks(&self) -> &[Arc<TailChunk>] {
+        &self.chunks
+    }
+
+    /// The rows of every chunk a view at `visible_seq` can see, newest first.
+    pub(crate) fn row_states(
+        &self,
+        visible_seq: ChangeSeq,
+    ) -> impl Iterator<Item = &MetadataState> {
+        self.chunks
+            .iter()
+            .rev()
+            .filter(move |chunk| chunk.first_seq <= visible_seq)
+            .map(|chunk| &chunk.rows)
     }
 
     /// The unfolded pieces of the content `content_ref` names, when the
     /// tail holds any.
-    pub(crate) fn content(&self, content_ref: &ContentRef) -> Option<&ProjectedContent> {
+    pub(crate) fn content(&self, content_ref: &ContentRef) -> Option<ProjectedContent> {
+        let mut found = self
+            .chunks
+            .iter()
+            .filter_map(|chunk| chunk.content(content_ref));
+        let mut merged = found.next()?.clone();
+        for later in found {
+            merged.merge(later);
+        }
+        Some(merged)
+    }
+
+    /// Contents with pieces, in the order the tail first named them.
+    pub(crate) fn contents(&self) -> Vec<ProjectedContent> {
+        let mut positions: HashMap<&ContentId, usize> = HashMap::new();
+        let mut merged: Vec<ProjectedContent> = Vec::new();
+        for content in self.chunks.iter().flat_map(|chunk| &chunk.contents) {
+            match positions.entry(&content.content_ref.content_id) {
+                Entry::Occupied(position) => merged[*position.get()].merge(content),
+                Entry::Vacant(vacant) => {
+                    vacant.insert(merged.len());
+                    merged.push(content.clone());
+                }
+            }
+        }
+        merged
+    }
+
+    pub(crate) fn merged_rows(&self) -> MetadataState {
+        let rows = || self.chunks.iter().map(|chunk| &chunk.rows);
+        MetadataState::from_rows(
+            rows().flat_map(MetadataState::inodes).cloned().collect(),
+            rows()
+                .flat_map(MetadataState::direntry_binds)
+                .cloned()
+                .collect(),
+            rows().flat_map(MetadataState::revisions).cloned().collect(),
+            rows()
+                .flat_map(MetadataState::subtree_tombstones)
+                .cloned()
+                .collect(),
+            rows()
+                .flat_map(MetadataState::commit_receipts)
+                .cloned()
+                .collect(),
+            rows().flat_map(MetadataState::commits).cloned().collect(),
+            rows()
+                .flat_map(MetadataState::attributes_revisions)
+                .cloned()
+                .collect(),
+            rows()
+                .flat_map(MetadataState::content_layouts)
+                .cloned()
+                .collect(),
+            rows()
+                .flat_map(MetadataState::access_revisions)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    pub(crate) fn revisions(&self) -> impl Iterator<Item = &RevisionRecord> {
+        self.chunks.iter().flat_map(|chunk| chunk.rows.revisions())
+    }
+
+    pub(crate) fn content_layouts(&self) -> impl Iterator<Item = &ContentLayoutRecord> {
+        self.chunks
+            .iter()
+            .flat_map(|chunk| chunk.rows.content_layouts())
+    }
+
+    pub(crate) fn subtree_tombstones(&self) -> impl Iterator<Item = &SubtreeTombstoneRecord> {
+        self.chunks
+            .iter()
+            .flat_map(|chunk| chunk.rows.subtree_tombstones())
+    }
+
+    pub(crate) fn find_commit_receipt(&self, commit_id: &CommitId) -> Option<&CommitReceiptRecord> {
+        self.chunks
+            .iter()
+            .rev()
+            .find_map(|chunk| chunk.rows.find_commit_receipt(commit_id))
+    }
+
+    pub(crate) fn activity(&self) -> ManifestActivity {
+        self.activity
+    }
+
+    pub(crate) fn inline_bytes(&self) -> usize {
+        self.inline_bytes
+    }
+
+    /// The heap the projection holds behind the `Arc` every holder shares.
+    /// Each tail counts every chunk it holds, including chunks another tail
+    /// shares.
+    pub fn decoded_bytes(&self) -> usize {
+        arc_bytes::<Self>()
+            + self.chunks.capacity() * size_of::<Arc<TailChunk>>()
+            + self
+                .chunks
+                .iter()
+                .map(|chunk| chunk.decoded_bytes())
+                .sum::<usize>()
+    }
+}
+
+impl TailChunk {
+    fn new(first_seq: ChangeSeq, rows: MetadataState) -> Self {
+        Self {
+            first_seq,
+            rows,
+            activity: ManifestActivity::default(),
+            contents: Vec::new(),
+            content_positions: HashMap::new(),
+            inline_bytes: 0,
+            inline_entry_heap_bytes: 0,
+        }
+    }
+
+    /// Applies each commit of one WAL object of `namespace_id`'s WAL: its
+    /// pieces, then its rows.
+    fn from_records(
+        namespace_id: &NamespaceId,
+        records: &[WalCommitPayload],
+    ) -> Result<Self, WalObjectError> {
+        let first_seq = records
+            .first()
+            .expect("push_object should skip a WAL object with no records")
+            .committed_seq;
+        let mut chunk = Self::new(first_seq, MetadataState::default());
+        for record in records {
+            let activity = committed_activity(record)
+                .and_then(|activity| chunk.activity.checked_add(activity))
+                .ok_or(WalObjectError::ActivityOverflow)?;
+            for (content_ref, entry) in inline_content_refs(namespace_id, record) {
+                chunk.insert_piece(content_ref, entry, record.committed_seq);
+            }
+            chunk.rows.apply_committed_wal_record_mut(record);
+            chunk.activity = activity;
+        }
+        Ok(chunk)
+    }
+
+    fn content(&self, content_ref: &ContentRef) -> Option<&ProjectedContent> {
         self.content_positions
             .get(&content_ref.content_id)
             .map(|position| &self.contents[*position])
@@ -122,26 +300,16 @@ impl ProjectedWalTail {
             })
     }
 
-    /// Content ids with pieces, in the order the tail first named them.
-    pub(crate) fn contents(&self) -> &[ProjectedContent] {
-        &self.contents
-    }
-
-    pub(crate) fn inline_bytes(&self) -> usize {
-        self.inline_bytes
-    }
-
-    /// The heap the projection holds behind the `Arc` every holder shares.
-    pub fn decoded_bytes(&self) -> usize {
+    fn decoded_bytes(&self) -> usize {
         arc_bytes::<Self>()
             + self.rows.decoded_bytes()
             + hash_map_table_bytes(&self.content_positions)
             + self.contents.capacity() * size_of::<ProjectedContent>()
             + self.inline_entry_heap_bytes
-            + self.inline_bytes()
+            + self.inline_bytes
     }
 
-    pub(crate) fn insert_piece(
+    fn insert_piece(
         &mut self,
         content_ref: &ContentRef,
         entry: &WalInlineContent,
@@ -161,7 +329,11 @@ impl ProjectedWalTail {
         let content = &mut self.contents[position];
         let reference_bytes = content.content_ref.heap_bytes();
         let slots = content.pieces.capacity();
-        let replaced = content.insert_piece(content_ref, entry, committed_seq);
+        let piece = ProjectedPiece {
+            offset: entry.offset,
+            bytes: Bytes::copy_from_slice(&entry.bytes),
+        };
+        let replaced = content.insert_piece(content_ref, piece, committed_seq);
         self.inline_entry_heap_bytes = self.inline_entry_heap_bytes
             + content.content_ref.heap_bytes()
             + (content.pieces.capacity() - slots) * size_of::<ProjectedPiece>()
@@ -201,6 +373,7 @@ pub(crate) fn inline_content_refs<'r>(
 #[cfg(test)]
 mod tests {
     use super::ProjectedWalTail;
+    use crate::metadata::MetadataState;
     use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
     use loonfs_types::{
         ChangeSeq, CommitId, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo,
@@ -253,26 +426,27 @@ mod tests {
             .collect();
         let mut tail = ProjectedWalTail::default();
         for (seq, content_id) in (1..).zip(&ids) {
-            tail.apply_commit(
+            tail.push_object(
                 &namespace_id,
-                &commit(&namespace_id, seq, content_id, b"value", 0),
+                &[commit(&namespace_id, seq, content_id, b"value", 0)],
             )
             .expect("value");
         }
-        tail.apply_commit(
+        tail.push_object(
             &namespace_id,
-            &commit(&namespace_id, 65, &ids[17], b"value appended", 5),
+            &[commit(&namespace_id, 65, &ids[17], b"value appended", 5)],
         )
         .expect("append");
 
+        let contents = tail.contents();
         assert_eq!(
-            tail.contents()
+            contents
                 .iter()
                 .map(|content| &content.content_ref.content_id)
                 .collect::<Vec<_>>(),
             ids.iter().collect::<Vec<_>>()
         );
-        let appended = &tail.contents()[17];
+        let appended = &contents[17];
         assert_eq!(appended.content_ref.size_bytes, 14);
         assert_eq!(
             appended
@@ -283,5 +457,49 @@ mod tests {
             [(0, 5), (5, 14)]
         );
         assert_eq!(tail.inline_bytes(), 64 * 5 + 9);
+    }
+
+    #[test]
+    fn appended_pieces_merge_across_chunks_and_an_earlier_view_skips_later_chunks() {
+        let namespace_id = NamespaceId::parse("pieces").expect("namespace id");
+        let content_id = ContentId::parse(format!("con_{:032x}", 1)).expect("content id");
+        let mut tail = ProjectedWalTail::default();
+        for (seq, whole, offset) in [
+            (1, &b"value"[..], 0),
+            (2, b"value appended", 5),
+            (3, b"value appended twice", 14),
+        ] {
+            tail.push_object(
+                &namespace_id,
+                &[commit(&namespace_id, seq, &content_id, whole, offset)],
+            )
+            .expect("chunk");
+        }
+        let newest = ContentRef::blob_v1(
+            namespace_id.clone(),
+            content_id.clone(),
+            b"value appended twice",
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+        );
+
+        let content = tail.content(&newest).expect("merged content");
+        assert_eq!(content.content_ref, newest);
+        assert_eq!(content.committed_seq, ChangeSeq(3));
+        assert_eq!(
+            content
+                .pieces
+                .iter()
+                .map(|piece| (piece.offset, piece.end()))
+                .collect::<Vec<_>>(),
+            [(0, 5), (5, 14), (14, 20)]
+        );
+        assert_eq!(tail.contents(), [content]);
+        assert_eq!(
+            tail.row_states(ChangeSeq(1))
+                .flat_map(MetadataState::commits)
+                .map(|record| record.committed_seq)
+                .collect::<Vec<_>>(),
+            [ChangeSeq(1)]
+        );
     }
 }

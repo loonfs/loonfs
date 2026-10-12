@@ -7,8 +7,8 @@ use loonfs_test_support::stores::{
     BlockingStore, FakeMultipartStore, KeyPredicate, MetadataMapStore, OperationClass,
     RecordedOperation, RecordingStore,
 };
-use loonfs_types::format::wal::WalInlineContent;
-use loonfs_types::{ChangeSeq, ContentId, ContentRef, NamespaceId};
+use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo};
 
 struct Layout(ContentLayoutRecord);
 
@@ -20,6 +20,33 @@ impl LayoutLookup for Layout {
 
     fn content_has_other_size(&self, _: &ContentRef) -> bool {
         false
+    }
+}
+
+fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -> WalCommitPayload {
+    WalCommitPayload {
+        committed_seq: ChangeSeq(seq),
+        commit_id: CommitId::parse(format!("c_{seq:032x}")).expect("commit id"),
+        committed_by: loonfs_test_support::test_actor(),
+        semantic_commit_fingerprint: serde_json::from_str(r#""v1:sha256:test""#)
+            .expect("fingerprint"),
+        committed_at_ms: 0,
+        message: None,
+        deltas: vec![WalCommitDelta {
+            semantic_operation_index: 0,
+            delta: WalDelta::AppendFileRevision {
+                delta_index: 0,
+                inode_id: InodeId(2),
+                revision_no: RevisionNo(seq),
+                content_ref: reference.clone(),
+                layout: None,
+            },
+        }],
+        inline_content: vec![WalInlineContent {
+            content_id: reference.content_id.clone(),
+            offset,
+            bytes,
+        }],
     }
 }
 
@@ -78,15 +105,11 @@ async fn fixture<S: ObjectStore>(
             .expect("tail checksum"),
     };
     let mut tail = ProjectedWalTail::default();
-    tail.insert_piece(
-        &reference,
-        &WalInlineContent {
-            content_id,
-            offset,
-            bytes,
-        },
-        ChangeSeq(2),
-    );
+    tail.push_object(
+        &reference.owner_namespace_id,
+        &[piece_commit(&reference, offset, bytes, 2)],
+    )
+    .expect("tail");
     (layout, tail, reference)
 }
 
@@ -106,8 +129,8 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     let written = write_tail_content(
         &store,
         &layout,
-        content,
-        assemble_tail_content(content).expect("pieces"),
+        &content,
+        assemble_tail_content(&content).expect("pieces"),
         &pool,
     )
     .await
@@ -137,8 +160,8 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     let retried = write_tail_content(
         &store,
         &layout,
-        content,
-        assemble_tail_content(content).expect("pieces"),
+        &content,
+        assemble_tail_content(&content).expect("pieces"),
         &pool,
     )
     .await
@@ -162,8 +185,8 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
     let written = write_tail_content(
         &store,
         &layout,
-        content,
-        assemble_tail_content(content).expect("pieces"),
+        &content,
+        assemble_tail_content(&content).expect("pieces"),
         &Semaphore::new(1),
     )
     .await
@@ -220,7 +243,7 @@ async fn local_large_tail_assembles_without_sources() {
     let store = RecordingStore::new(local, KeyPredicate::any());
     let (layout, _, mut reference) = fixture(&store, &[], false, 0).await;
     let piece = vec![b'z'; 4 * 1024 * 1024];
-    let mut tail = ProjectedWalTail::default();
+    let mut records = Vec::new();
     for index in 0..13 {
         let offset = index * piece.len() as u64;
         reference.size_bytes += piece.len() as u64;
@@ -228,24 +251,19 @@ async fn local_large_tail_assembles_without_sources() {
             .checksum
             .crc_combine(&Checksum::crc64nvme(&piece), piece.len() as u64)
             .expect("combine");
-        tail.insert_piece(
-            &reference,
-            &WalInlineContent {
-                content_id: reference.content_id.clone(),
-                offset,
-                bytes: piece.clone(),
-            },
-            ChangeSeq(index + 2),
-        );
+        records.push(piece_commit(&reference, offset, piece.clone(), index + 2));
     }
+    let mut tail = ProjectedWalTail::default();
+    tail.push_object(&reference.owner_namespace_id, &records)
+        .expect("tail");
     let content = tail.content(&reference).expect("content");
-    let pieces = assemble_tail_content(content).expect("pieces");
+    let pieces = assemble_tail_content(&content).expect("pieces");
     assert_eq!(pieces.len(), 13);
     for (actual, resident) in pieces.iter().zip(&content.pieces) {
         assert_eq!(actual.as_ptr(), resident.bytes.as_ptr());
     }
     let pool = Semaphore::new(1);
-    let written = write_tail_content(&store, &layout, content, pieces, &pool)
+    let written = write_tail_content(&store, &layout, &content, pieces, &pool)
         .await
         .expect("streamed tail");
     assert!(matches!(
@@ -288,8 +306,8 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let written = write_tail_content(
             &store,
             &layout,
-            content,
-            assemble_tail_content(content).expect("pieces"),
+            &content,
+            assemble_tail_content(&content).expect("pieces"),
             &Semaphore::new(1),
         )
         .await
@@ -315,8 +333,8 @@ async fn validation_materialization_holds_a_write_permit() {
     let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
     let pool = Semaphore::new(1);
     store.arm();
-    let write =
-        materialize_content_layout(&store, &layout, tail.content(&reference), &reference, &pool);
+    let content = tail.content(&reference);
+    let write = materialize_content_layout(&store, &layout, content.as_ref(), &reference, &pool);
     let check = async {
         store.wait_until_blocked().await;
         assert_eq!(pool.available_permits(), 0);

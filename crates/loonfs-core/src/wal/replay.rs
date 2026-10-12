@@ -20,8 +20,8 @@ pub(crate) fn project_validated_wal_tail(
             head.seq = record.committed_seq;
             head.next_inode_id =
                 replay_next_inode_id_from_commit_deltas(head.next_inode_id, &record.deltas);
-            tail.apply_commit(&payload.namespace_id, record)?;
         }
+        tail.push_object(&payload.namespace_id, &payload.records)?;
         if head.next_inode_id != payload.next_inode_id {
             return Err(WalObjectError::SummaryMismatch);
         }

@@ -217,7 +217,15 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .expect("the publish put its tail in the head-state cache");
     let tail_bytes = tail.decoded_bytes();
     assert_eq!(tail.inline_bytes(), value.bytes().len());
-    assert!(tail_bytes >= tail.rows.decoded_bytes() + value.bytes().len());
+    assert!(
+        tail_bytes
+            >= tail
+                .chunks()
+                .iter()
+                .map(|chunk| chunk.rows.decoded_bytes())
+                .sum::<usize>()
+                + value.bytes().len()
+    );
     assert_eq!(context.head_state.stats().cached_decoded_bytes, tail_bytes);
     let cloned = tail.as_ref().clone();
     assert_eq!(
@@ -284,6 +292,44 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         old_tail,
         "the publish extends the cached tail in place"
     );
+}
+
+#[tokio::test]
+async fn a_publish_shares_every_earlier_chunk_with_a_tail_a_reader_holds() {
+    let (_directory, store, mut publisher, mutation_context) = setup().await;
+    let mut tails = Vec::new();
+    for name in ["first", "second"] {
+        let value = inline(&publisher.namespace_id, Bytes::from_static(b"bytes"));
+        let state = publisher
+            .publish_batch(
+                &store,
+                [candidate(name, vec![value])],
+                &mutation_context,
+                &Deadline::start(Arc::new(StdMonotonicTimer::default())),
+            )
+            .await
+            .resulting_read_state
+            .expect("published state");
+        tails.push(
+            publisher
+                .head_state
+                .as_ref()
+                .expect("head state")
+                .get_tail(&cache_key(&read_context(state.head, state.basis)))
+                .expect("the publish cached its tail"),
+        );
+    }
+    let (held, extended) = (&tails[0], &tails[1]);
+    assert!(
+        !Arc::ptr_eq(held, extended),
+        "a held tail makes the publish extend a copy of its chunk list"
+    );
+    assert_eq!(extended.chunks().len(), held.chunks().len() + 1);
+    assert!(held
+        .chunks()
+        .iter()
+        .zip(extended.chunks())
+        .all(|(held, extended)| Arc::ptr_eq(held, extended)));
 }
 
 #[tokio::test]

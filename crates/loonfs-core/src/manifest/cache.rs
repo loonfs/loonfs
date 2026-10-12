@@ -574,6 +574,7 @@ mod tests {
                 cache
                     .get_tail(&key)
                     .expect("same projection cache key should hit")
+                    .chunks()[0]
                     .rows
                     .inodes()[0]
                     .committed_by,

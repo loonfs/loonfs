@@ -778,7 +778,7 @@ impl NamespaceCommitEngine {
         self.publish_tail
             .as_ref()
             .and_then(|position| self.cached_tail(position))
-            .is_some_and(|tail| tail.rows.find_commit_receipt(commit_id).is_some())
+            .is_some_and(|tail| tail.find_commit_receipt(commit_id).is_some())
     }
 
     /// Unfolded WAL objects as of the last publication unit, or `None` when
@@ -1077,8 +1077,9 @@ impl NamespaceCommitEngine {
                 projection.position.wal_tail_objects += 1;
                 self.remove_tail(&projection.position);
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
-                for record in &records {
-                    if let Err(error) = tail_state.apply_commit(&self.namespace_id, record) {
+                let chunk = match tail_state.push_object(&self.namespace_id, &records) {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
                         // The WAL is already durable. Discard this cache; replay
                         // and folding will report the accounting error.
                         tracing::error!(%error, "could not update the committed WAL projection");
@@ -1089,8 +1090,8 @@ impl NamespaceCommitEngine {
                             None,
                         );
                     }
-                }
-                if let Err(error) = projection.apply_fold_records(&self.namespace_id, &records) {
+                };
+                if let Err(error) = projection.apply_fold_object(chunk) {
                     tracing::error!(%error, "could not update the committed WAL projection");
                     self.invalidate_projection();
                     return (

@@ -99,11 +99,11 @@ impl LiveSet {
         live.protect_manifest(&anchor.manifest);
         if !live.namespace_deleted {
             let tail = project_anchor_tail(store, segment_cache, &anchor).await?;
-            for revision in tail.rows.revisions() {
+            for revision in tail.revisions() {
                 live.content_ids
                     .insert(revision.content_ref.content_id.clone())?;
             }
-            for row in tail.rows.content_layouts() {
+            for row in tail.content_layouts() {
                 for extent in &row.layout.extents {
                     if extent.owner_namespace_id == *namespace_id {
                         live.content_ids.insert(extent.content_id.clone())?;

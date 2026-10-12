@@ -160,11 +160,12 @@ async fn commit_piece(
             &whole[..offset],
             store.checksum_algorithm(),
         );
+        let content = view.wal_tail().content(&base);
         Some(
             crate::storage::tail_content::materialize_content_layout(
                 store,
                 &view.projected_metadata_view(),
-                view.wal_tail().content(&base),
+                content.as_ref(),
                 &base,
                 &tokio::sync::Semaphore::new(32),
             )

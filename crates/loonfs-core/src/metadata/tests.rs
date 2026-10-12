@@ -729,13 +729,14 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
         )],
     );
 
+    let base = crate::wal::ProjectedWalTail::from_rows(state);
     for (visible_seq, expected_revision, expected) in [
         (5_u64, 2_u64, Some("grace")),
         (4, 1, Some("ada")),
         (2, 1, Some("ada")),
         (1, 0, None),
     ] {
-        let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(visible_seq));
+        let view = InMemoryMetadataView::in_memory(&base, None, ChangeSeq(visible_seq));
         let (revision, attributes) = view
             .attributes_at_visible_seq(InodeId(7))
             .await
@@ -755,7 +756,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     }
 
     // An inode that never had attributes is at the concrete empty state.
-    let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(5));
+    let view = InMemoryMetadataView::in_memory(&base, None, ChangeSeq(5));
     assert_eq!(
         view.attributes_at_visible_seq(InodeId(8))
             .await
@@ -1074,7 +1075,8 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
         Vec::new(),
     );
-    let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(2));
+    let base = crate::wal::ProjectedWalTail::from_rows(state.clone());
+    let view = InMemoryMetadataView::in_memory(&base, None, ChangeSeq(2));
     assert!(
         visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe bound child")
@@ -1110,6 +1112,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
         Vec::new(),
     );
+    let emptied = crate::wal::ProjectedWalTail::from_rows(emptied);
     let view = InMemoryMetadataView::in_memory(&emptied, None, ChangeSeq(3));
     assert!(
         !visibility::resolve_in_memory_read(view.has_visible_children(dir))
