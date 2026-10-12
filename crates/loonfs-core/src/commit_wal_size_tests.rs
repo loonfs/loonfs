@@ -165,7 +165,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             "append" => MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES,
             _ => MAX_COMMIT_OPERATIONS,
         };
-        let request = CommitRequest {
+        let request = CommitIntent {
             commit_id: CommitId::parse("c".repeat(MAX_ID_BYTES)).expect("commit"),
             actor_id: actor.clone(),
             subject: None,

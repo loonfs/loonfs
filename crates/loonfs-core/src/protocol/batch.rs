@@ -26,7 +26,7 @@ use loonfs_types::NamespaceId;
 use tracing::Instrument;
 
 #[derive(Debug, Clone)]
-pub(crate) struct PublishBatchAgainstViewResult {
+pub(crate) struct PublishBatchReport {
     pub(crate) results: Vec<Result<Commit>>,
     pub(crate) effect: PublishViewEffect,
     pub(crate) unconfirmed_inline_bytes: usize,
@@ -51,7 +51,7 @@ pub(crate) enum PublishViewEffect {
     },
 }
 
-impl PublishBatchAgainstViewResult {
+impl PublishBatchReport {
     fn unchanged(results: Vec<Result<Commit>>) -> Self {
         Self {
             results,
@@ -97,13 +97,13 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
     content_writes: &tokio::sync::Semaphore,
-) -> PublishBatchAgainstViewResult {
+) -> PublishBatchReport {
     if candidates.is_empty() {
-        return PublishBatchAgainstViewResult::unchanged(Vec::new());
+        return PublishBatchReport::unchanged(Vec::new());
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     if view.head.namespace_id != *namespace_id {
-        return PublishBatchAgainstViewResult::unchanged(vec![
+        return PublishBatchReport::unchanged(vec![
             Err(CoreError::Internal(
                 "publish view namespace mismatch".to_owned()
             ));
@@ -112,7 +112,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
     let elapsed_before_attempt_ms = clock.batch.elapsed_at(&clock.attempt);
     let Some(admission_now_ms) = context.now_ms.checked_add(elapsed_before_attempt_ms) else {
-        return PublishBatchAgainstViewResult::unchanged(vec![
+        return PublishBatchReport::unchanged(vec![
             Err(CoreError::Internal(
                 "publication time overflow".to_owned()
             ));
@@ -244,7 +244,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     drop(prepare_span);
 
     if accepted_commits.is_empty() {
-        return PublishBatchAgainstViewResult::unchanged(finish_batch_outcomes(&slots));
+        return PublishBatchReport::unchanged(finish_batch_outcomes(&slots));
     }
     let wal = match prepare_wal_object(
         namespace_id.clone(),
@@ -313,7 +313,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             };
         }
     }
-    PublishBatchAgainstViewResult {
+    PublishBatchReport {
         results: finish_batch_outcomes(&slots),
         unconfirmed_inline_bytes: 0,
         effect: PublishViewEffect::Advanced {
@@ -324,12 +324,9 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
 }
 
 /// Applies the publication error and invalidates the loaded projection.
-fn abort_batch(
-    mut slots: Vec<BatchOutcomeSlot>,
-    error: &CoreError,
-) -> PublishBatchAgainstViewResult {
+fn abort_batch(mut slots: Vec<BatchOutcomeSlot>, error: &CoreError) -> PublishBatchReport {
     fail_unpublished_slots(&mut slots, error);
-    PublishBatchAgainstViewResult {
+    PublishBatchReport {
         results: finish_batch_outcomes(&slots),
         effect: PublishViewEffect::Invalidated,
         unconfirmed_inline_bytes: 0,
@@ -391,7 +388,7 @@ fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<Commit>> {
 mod tests {
     use super::*;
     use crate::namespace::writer_epoch::acquire_writer_epoch;
-    use crate::path::write::{CommitRequest, FilesystemOperation};
+    use crate::path::write::{CommitIntent, FilesystemOperation};
     use crate::protocol::load_publish_metadata_view;
     use crate::test_support::ops::create;
     use crate::time::StdMonotonicTimer;
@@ -435,7 +432,7 @@ mod tests {
             .content_ref()
             .clone();
             CommitCandidate::prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::parse(name).expect("commit id"),
                     loonfs_test_support::test_actor(),
                     None,
@@ -525,7 +522,7 @@ mod tests {
         // Change only the in-memory head so this exercises the sequence limit
         // without modifying the stored metadata.
         view.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
-        let candidate = CommitCandidate::new(CommitRequest::single(
+        let candidate = CommitCandidate::new(CommitIntent::single(
             CommitId::parse("past-sequence-limit").expect("commit id"),
             loonfs_test_support::test_actor(),
             None,

@@ -6,7 +6,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs::publish::CommitRequest as CoreCommitRequest;
+use loonfs::publish::CommitIntent;
 use loonfs::{LoonFs, StoreConfig};
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::ids::{first_page, namespace_id};
@@ -179,7 +179,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .expect("prepare second");
     let embedded_committed = namespace_writer
         .commit_prepared(
-            CoreCommitRequest {
+            CommitIntent {
                 subject: None,
                 preconditions: Vec::new(),
                 commit_id: commit_id("batch-one"),
@@ -978,7 +978,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             .expect("create namespace");
         let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
         let receipt = namespace_writer
-            .commit(CoreCommitRequest {
+            .commit(CommitIntent {
                 subject: None,
                 preconditions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),

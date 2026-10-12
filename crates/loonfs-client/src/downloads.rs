@@ -375,7 +375,7 @@ impl Client {
         if options.start_offset != 0 {
             query.push("start_offset", options.start_offset);
         }
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), CreateDownloadByInodeResponse>(
             self.post(&url),
             None,

@@ -29,7 +29,7 @@ pub use self::CoreError as Error;
 /// expose this as `std::result::Result<T, Error>`.
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
-pub use loonfs_objectstore::ObjectStoreErrorClass as StoreFailureClass;
+pub use loonfs_objectstore::ObjectStoreErrorKind as StoreFailureClass;
 pub use loonfs_types::{ErrorCode, ErrorKind};
 
 /// Detailed core error.
@@ -310,9 +310,9 @@ impl MetadataProjectionLoadError {
             Self::LoadHead(error) => error.code(),
             Self::WalTailLoad(error) => error.code(),
             Self::WalReplay(_) => ErrorCode::NamespaceCorrupt,
-            Self::ManifestLoad(error) => match error.failure_class() {
-                crate::manifest::ManifestLoadFailureClass::Corrupt => ErrorCode::NamespaceCorrupt,
-                crate::manifest::ManifestLoadFailureClass::Store => ErrorCode::ServerError,
+            Self::ManifestLoad(error) => match error.kind() {
+                crate::manifest::ManifestLoadFailureKind::Corrupt => ErrorCode::NamespaceCorrupt,
+                crate::manifest::ManifestLoadFailureKind::Store => ErrorCode::ServerError,
             },
         }
     }

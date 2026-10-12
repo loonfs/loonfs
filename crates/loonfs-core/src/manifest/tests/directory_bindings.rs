@@ -248,7 +248,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     crate::commit_engine::publish_namespace_commits_batch(
         &store,
         &namespace_id,
-        vec![CommitCandidate::new(CommitRequest {
+        vec![CommitCandidate::new(CommitIntent {
             commit_id: CommitId::parse("repeat-move").expect("commit id"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -427,7 +427,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
     crate::commit_engine::publish_namespace_commits_batch(
         &store,
         &namespace_id,
-        vec![CommitCandidate::new(CommitRequest {
+        vec![CommitCandidate::new(CommitIntent {
             commit_id: CommitId::parse("parents").expect("commit id"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,

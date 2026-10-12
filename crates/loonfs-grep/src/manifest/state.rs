@@ -18,6 +18,12 @@ pub struct GrepHint {
 /// Each phase stores only the position it needs. A backfill records its
 /// target and progress. An active index records how far indexing has
 /// progressed.
+///
+/// The wire twin is `GrepIndexLifecycle` in `loonfs-types`, and the fields
+/// differ because this record tags variants with `kind` and always writes
+/// `next_event_index`, while the API response tags variants with `status`,
+/// writes inode IDs in their public `ino_` form, and omits a zero
+/// `next_event_index`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrepIndexStatus {
@@ -253,7 +259,7 @@ impl GrepManifestState {
             let bytes = crate::index_read::segment_object_len(&key, segment)?;
             total
                 .checked_add(bytes)
-                .ok_or_else(|| crate::GrepError::CorruptIndex {
+                .ok_or_else(|| crate::GrepError::IndexCorrupt {
                     message: "index byte count overflow".to_owned(),
                 })
         })

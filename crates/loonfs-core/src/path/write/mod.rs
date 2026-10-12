@@ -21,7 +21,7 @@ use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use loonfs_types::{DisplayName, InodeId, NameKey, NamespaceNaming, ROOT_INODE_ID};
 
-pub use intent::{CommitRequest, FilesystemOperation};
+pub use intent::{CommitIntent, FilesystemOperation};
 pub(crate) use planner::commit_fingerprint;
 pub(crate) use session::PublishPlanningSession;
 

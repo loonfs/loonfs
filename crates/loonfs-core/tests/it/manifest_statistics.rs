@@ -7,7 +7,7 @@ use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::{
     load_checkpoint_statistics, load_namespace_current_manifest, load_namespace_statistics,
 };
-use loonfs_core::publish::{CommitRequest, FilesystemOperation, NamespaceCommitEngine};
+use loonfs_core::publish::{CommitIntent, FilesystemOperation, NamespaceCommitEngine};
 use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -89,7 +89,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
         )
         .head_state(Arc::new(HeadStateCache::unshared(usize::MAX)));
         for (index, operation) in operations.into_iter().enumerate() {
-            let request = CommitRequest::single(
+            let request = CommitIntent::single(
                 CommitId::parse(format!("activity-{index}")).expect("id"),
                 loonfs_test_support::test_actor(),
                 None,

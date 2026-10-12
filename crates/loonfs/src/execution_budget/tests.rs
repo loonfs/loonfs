@@ -10,7 +10,7 @@ use super::{ExecutionBudget, ExecutionBudgetStats};
 use crate::metrics::{DefaultMetricsRecorder, MetricValue};
 use crate::{
     CommitId, CreateDirectoryOptions, ErrorCode, LoonFs, LoonFsBuilder, Namespace, NamespaceId,
-    PublicationLimits, Writable,
+    PublicationPolicy, Writable,
 };
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -603,9 +603,9 @@ async fn one_namespace_id_in_two_stores_is_charged_separately() {
     let budget = ExecutionBudget::builder()
         .metrics_recorder(recorder.clone())
         .build();
-    let one_request_per_namespace = || PublicationLimits {
+    let one_request_per_namespace = || PublicationPolicy {
         max_requests_per_namespace: NonZeroUsize::MIN,
-        ..PublicationLimits::default()
+        ..PublicationPolicy::default()
     };
     let first = gated_runtime(|builder| {
         builder

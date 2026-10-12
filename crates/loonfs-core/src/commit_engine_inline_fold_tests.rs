@@ -114,7 +114,7 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
     for replay_receipt in [false, true] {
         let (_directory, store, mut engine, context) = setup().await;
         let directory = |name: &str| {
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,

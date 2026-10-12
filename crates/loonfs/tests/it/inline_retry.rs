@@ -1,7 +1,7 @@
 //! Retrying an inline commit with a retained receipt must not upload the content again.
 
 use bytes::Bytes;
-use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
+use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
 use loonfs::{
     CreateNamespaceOptions, InlineContentPolicy, LoonFs, Namespace, SharedObjectStore, Writable,
 };
@@ -55,8 +55,8 @@ fn access(grants: AccessGrants) -> FilesystemOperation {
     }
 }
 
-fn request(id: &str, who: &str, operation: FilesystemOperation) -> CommitRequest {
-    CommitRequest::single(
+fn request(id: &str, who: &str, operation: FilesystemOperation) -> CommitIntent {
+    CommitIntent::single(
         CommitId::parse(id).expect("commit id"),
         loonfs_test_support::test_actor(),
         None,

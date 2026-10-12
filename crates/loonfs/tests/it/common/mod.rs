@@ -4,7 +4,7 @@
 #![allow(clippy::panic)]
 // Fixture assertions panic for precise diagnostics, as the test modules do.
 
-use loonfs::publish::{CommitCandidate, CommitRequest};
+use loonfs::publish::{CommitCandidate, CommitIntent};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, Commit, ContentRef, DeleteOptions,
@@ -510,12 +510,12 @@ pub(crate) trait RuntimeTestExt {
     fn mutate_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: CommitRequest,
+        request: CommitIntent,
     ) -> loonfs::Result<Commit>;
     fn mutate_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
-        requests: Vec<CommitRequest>,
+        requests: Vec<CommitIntent>,
     ) -> Vec<loonfs::Result<Commit>>;
     fn list_changes_blocking(
         &self,
@@ -706,7 +706,7 @@ impl RuntimeTestExt for TestRuntime {
     fn mutate_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: CommitRequest,
+        request: CommitIntent,
     ) -> loonfs::Result<Commit> {
         let namespace = self.namespace_writer(namespace_id)?;
         block_on(namespace.commit(request))
@@ -715,7 +715,7 @@ impl RuntimeTestExt for TestRuntime {
     fn mutate_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
-        requests: Vec<CommitRequest>,
+        requests: Vec<CommitIntent>,
     ) -> Vec<loonfs::Result<Commit>> {
         let namespace = match self.namespace_writer(namespace_id) {
             Ok(namespace) => namespace,

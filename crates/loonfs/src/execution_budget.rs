@@ -44,7 +44,7 @@ const DEFAULT_MAX_ADMITTED_BYTES: usize = 64 * 1024 * 1024;
 /// runtime has a reserved share, so an idle runtime holds nothing back. A
 /// host that wants to isolate runtimes from each other gives them separate
 /// budgets. The per-namespace admission limits stay with each runtime (see
-/// [`PublicationLimits`](crate::PublicationLimits)). Clones share the budget.
+/// [`PublicationPolicy`](crate::PublicationPolicy)). Clones share the budget.
 /// A runtime built without one creates a private budget with the
 /// default limits.
 #[derive(Clone)]

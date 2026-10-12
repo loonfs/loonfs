@@ -5,7 +5,7 @@ use futures::future::{BoxFuture, Shared};
 use futures::FutureExt as _;
 use loonfs::{
     ChangeSeq, CloseNamespaceReport, InlineContentPolicy, LoonFs, Maintenance, Namespace,
-    NamespaceSessionState, SharedObjectStore, SnapshotPolicy, Writable,
+    NamespaceSessionStatus, SharedObjectStore, SnapshotPolicy, Writable,
 };
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
@@ -27,7 +27,7 @@ pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 16;
 pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 60_000;
 
 #[derive(Clone, Debug)]
-pub struct BindingOptions {
+pub struct BindingConfig {
     pub serves_grep: bool,
     pub maintains_grep_index: bool,
     pub serves_maintenance: bool,
@@ -47,7 +47,7 @@ pub struct BindingOptions {
 /// Hosts supply one runtime over one store, with grep services and permit limits matching `options`.
 #[derive(Clone)]
 pub struct BindingState {
-    pub options: Arc<BindingOptions>,
+    pub options: Arc<BindingConfig>,
     pub runtime: LoonFs<Writable>,
     pub namespaces: Arc<Namespaces>,
     pub maintenance: Maintenance,
@@ -141,7 +141,7 @@ impl Namespaces {
                 if let Some(entry) = handles.get(namespace_id) {
                     let mut held = entry.lock().unwrap_or_else(PoisonError::into_inner);
                     if held.closing.is_none()
-                        && held.handle.session_state() != NamespaceSessionState::Closed
+                        && held.handle.session_state() != NamespaceSessionStatus::Closed
                     {
                         held.last_opened_ms = self.now_ms();
                         return Ok(held.handle.clone());
@@ -293,7 +293,7 @@ impl Namespaces {
                 .unwrap_or_else(PoisonError::into_inner)
                 .handle
                 .session_state()
-                == NamespaceSessionState::Fenced
+                == NamespaceSessionStatus::Fenced
         }) {
             return false;
         }

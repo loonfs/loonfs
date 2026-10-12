@@ -32,7 +32,7 @@ pub(super) async fn rewrite_manifest_segment(
             .push(&row_key, &filter_key, row)
             .expect("rewritten rows should encode");
     }
-    let built = builder.finish().expect("rewritten segment");
+    let built = builder.build().expect("rewritten segment");
     store
         .put_overwrite(
             &metadata_segment_object_key(descriptor),
@@ -382,7 +382,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     );
     assert!(!binds.iter().any(|row| matches!(
         row,
-        MetadataRow::DirentryBinding (crate::metadata::DirentryBindingRecord { state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name }, .. }) if display_name.as_str() == "tmp.txt"
+        MetadataRow::DirentryBinding (crate::metadata::DirentryBindingRecord { state: loonfs_types::format::manifest::DirentryBindingStatus::Bound { display_name }, .. }) if display_name.as_str() == "tmp.txt"
     )));
     assert!(materialized
         .metadata_state
@@ -420,7 +420,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             },
             child_inode_id: InodeId(2),
@@ -441,7 +441,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(unbind_seq),
             delta_index: 0,
-            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
         })
     };
     let mut rows = BTreeMap::new();
@@ -470,7 +470,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             },
             child_inode_id: InodeId(2),
@@ -490,7 +490,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         child_created_at_ms: 4_200,
         committed_seq: ChangeSeq(1),
         delta_index: 1,
-        state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
+        state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
     });
     let mut rows = BTreeMap::new();
     rows.insert(
@@ -530,7 +530,7 @@ fn drop_pass_refuses_superseded_bind_without_unbind() {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("docs").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             },
             child_inode_id: InodeId(2),
@@ -769,7 +769,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
             },
         )
         .expect("encode pre-change row");
-    let built = builder.finish().expect("finish pre-change segment");
+    let built = builder.build().expect("finish pre-change segment");
     let mut payload = materialized.manifest.payload().clone();
     let descriptor = payload
         .runs

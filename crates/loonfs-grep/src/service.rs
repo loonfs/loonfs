@@ -1,8 +1,7 @@
 //! [`GrepService`]: query planning and execution over grep index state.
 
 use crate::cache::{
-    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind,
-    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use crate::codec::{lookup, Gram, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
 use crate::index_read::{
@@ -17,7 +16,7 @@ use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReadView, NamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
-use loonfs::engine::Observation;
+use loonfs::engine::{Observation, SegmentBlockKind};
 use loonfs::{CoreError, CurrentFileState};
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
@@ -141,7 +140,7 @@ impl GrepService {
                 self.block_cache.insert(
                     GrepBlockCacheKey {
                         identity: manifest_key(namespace_id, &state.manifest_no()),
-                        block_kind: GrepBlockKind::Manifest,
+                        block_kind: SegmentBlockKind::Manifest,
                         block_offset: 0,
                     },
                     DecodedGrepBlock::Manifest {
@@ -503,7 +502,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     let admitted = match &descriptor.filter_inline {
         Some(inline) => {
             let filter_bytes =
-                hex_decode_bytes(inline).map_err(|error| GrepError::CorruptIndex {
+                hex_decode_bytes(inline).map_err(|error| GrepError::IndexCorrupt {
                     message: format!(
                         "index segment `{}` carries undecodable inline filter hex: {error}",
                         object_key
@@ -586,7 +585,7 @@ async fn tail_revisions(
             let events = &change.events;
             if start_event_index > events.len() {
                 let next_event_index = resume.next_event_index();
-                return Err(GrepError::CorruptIndex {
+                return Err(GrepError::IndexCorrupt {
                     message: format!(
                         "grep event cursor `{next_event_index}` exceeds commit `{}` length `{}`",
                         change.committed_seq,

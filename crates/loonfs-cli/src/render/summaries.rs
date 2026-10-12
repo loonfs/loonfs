@@ -20,7 +20,7 @@ pub(super) fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
 
 /// Overall result of an object-store probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StoreProbeVerdict {
+pub(crate) enum StoreProbeRunOutcome {
     Failed { checks: usize },
     Unsupported { checks: usize },
     Passed,
@@ -28,7 +28,7 @@ pub(crate) enum StoreProbeVerdict {
 
 pub(crate) fn store_probe_verdict(
     response: &loonfs_types::api::v0::StoreProbeResponse,
-) -> StoreProbeVerdict {
+) -> StoreProbeRunOutcome {
     let counted = |outcome: StoreProbeCheckOutcome| {
         response
             .checks
@@ -40,9 +40,9 @@ pub(crate) fn store_probe_verdict(
         counted(StoreProbeCheckOutcome::Failed),
         counted(StoreProbeCheckOutcome::Unsupported),
     ) {
-        (0, 0) => StoreProbeVerdict::Passed,
-        (0, checks) => StoreProbeVerdict::Unsupported { checks },
-        (checks, _) => StoreProbeVerdict::Failed { checks },
+        (0, 0) => StoreProbeRunOutcome::Passed,
+        (0, checks) => StoreProbeRunOutcome::Unsupported { checks },
+        (checks, _) => StoreProbeRunOutcome::Failed { checks },
     }
 }
 
@@ -52,13 +52,13 @@ pub(crate) fn store_probe_summary_line(
     let run_id = &response.run_id;
     let total = response.checks.len();
     match store_probe_verdict(response) {
-        StoreProbeVerdict::Failed { checks } => {
+        StoreProbeRunOutcome::Failed { checks } => {
             format!("store probe {run_id}: {checks} of {total} checks failed")
         }
-        StoreProbeVerdict::Unsupported { checks } => {
+        StoreProbeRunOutcome::Unsupported { checks } => {
             format!("store probe {run_id}: {checks} of {total} checks are unsupported")
         }
-        StoreProbeVerdict::Passed => format!("store probe {run_id}: {total} checks passed"),
+        StoreProbeRunOutcome::Passed => format!("store probe {run_id}: {total} checks passed"),
     }
 }
 

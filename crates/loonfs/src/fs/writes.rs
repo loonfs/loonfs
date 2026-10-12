@@ -2,7 +2,7 @@
 //! publication pipeline they go through.
 
 use super::core::RuntimeCore;
-use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
+use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, PreparedContent};
 use crate::trace::phase_span;
 use crate::ByteStream;
 use crate::Result;
@@ -20,8 +20,8 @@ fn single_operation(
     actor: &ActorId,
     commit: &CommitOptions,
     operation: FilesystemOperation,
-) -> CommitRequest {
-    CommitRequest::single(
+) -> CommitIntent {
+    CommitIntent::single(
         commit.commit_id.clone().unwrap_or_else(CommitId::generate),
         actor.clone(),
         commit.message.clone(),
@@ -265,7 +265,7 @@ impl Namespace<Writable> {
                 let mut chunk = chunk.map_err(|error| crate::CoreError::Store {
                     object_key: "upload body".to_owned(),
                     message: error.public_message().into_owned(),
-                    class: loonfs_objectstore::ObjectStoreErrorClass::of(&error),
+                    class: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
                 })?;
                 let take = chunk.len().min(threshold + 1 - buffered.len());
                 buffered.extend_from_slice(&chunk.split_to(take));
@@ -994,7 +994,7 @@ impl Namespace<Writable> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn commit(&self, request: CommitRequest) -> Result<Commit> {
+    pub async fn commit(&self, request: CommitIntent) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());
         self.commit_candidate_inner(CommitCandidate::new(request))
             .await
@@ -1018,7 +1018,7 @@ impl Namespace<Writable> {
     )]
     pub async fn commit_prepared(
         &self,
-        request: CommitRequest,
+        request: CommitIntent,
         prepared_content: Vec<PreparedContent>,
     ) -> Result<Commit> {
         self.core.record_trace_context(&tracing::Span::current());

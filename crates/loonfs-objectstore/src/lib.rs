@@ -41,7 +41,7 @@ pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use immutable_write::ImmutableWriteError;
 pub use object_store::{
     required_etag, AssemblySource, ByteRange, ByteStream, ListedObject, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorClass, PutMode, Result,
+    ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorKind, PutMode, Result,
     SharedObjectStore,
 };
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};

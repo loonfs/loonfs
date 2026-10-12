@@ -9,7 +9,7 @@ use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
+    CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
@@ -119,7 +119,7 @@ async fn update<S: ObjectStore + ?Sized>(
 async fn publish_request<S: ObjectStore + ?Sized>(
     engine: &mut NamespaceCommitEngine,
     store: &S,
-    request: CommitRequest,
+    request: CommitIntent,
     context: &MutationContext,
 ) -> Result<loonfs_types::Commit, CoreError> {
     engine
@@ -407,7 +407,7 @@ async fn an_unchanged_update_replays_its_receipt_without_advancing_again() {
         expected_inode_id: Some(file_inode),
         expected_attributes_revision_no: Some(AttributesRevisionNo(1)),
     };
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         commit_id("same-value"),
         loonfs_test_support::test_actor(),
         None,
@@ -573,7 +573,7 @@ async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_t
     publish_request(
         &mut engine,
         &store,
-        CommitRequest::single(
+        CommitIntent::single(
             commit_id("set-owner"),
             loonfs_test_support::test_actor(),
             None,
@@ -596,7 +596,7 @@ async fn an_attribute_revision_precondition_requires_an_inode_before_resolving_t
         ("directory", "/docs"),
         ("missing", "/missing.txt"),
     ] {
-        let request = CommitRequest::single(
+        let request = CommitIntent::single(
             commit_id(label),
             loonfs_test_support::test_actor(),
             None,
@@ -769,7 +769,7 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
     let response = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("put-then-set"),
             actor_id: loonfs_test_support::test_actor(),
@@ -818,7 +818,7 @@ async fn an_unchanged_update_and_a_second_update_commit_together() {
     submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("twice"),
             actor_id: loonfs_test_support::test_actor(),
@@ -869,7 +869,7 @@ async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
     let error = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("stops"),
             actor_id: loonfs_test_support::test_actor(),

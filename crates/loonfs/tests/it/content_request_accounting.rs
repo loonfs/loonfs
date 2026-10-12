@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use loonfs::content_tokens::ContentTokenError;
 use loonfs::publish::{
-    parse_mutation_path, CommitCandidate, CommitRequest, ContentPreparationError,
+    parse_mutation_path, CommitCandidate, CommitIntent, ContentPreparationError,
     FilesystemOperation, PreparedContent,
 };
 use loonfs::uploads::ResolvedUploadCompletion;
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 
 #[derive(Debug, Clone, Copy)]
-enum KeyClass {
+enum KeyKind {
     Content = 0,
     Other = 1,
 }
@@ -40,7 +40,7 @@ struct RequestCounts {
 }
 
 impl RequestCounts {
-    fn operations(self, class: KeyClass) -> OperationCounts {
+    fn operations(self, class: KeyKind) -> OperationCounts {
         self.by_class[class as usize]
     }
 }
@@ -79,12 +79,12 @@ impl RequestLog {
         let content = self.content.counts();
         let other = self.other.counts();
         let mut counts = RequestCounts::default();
-        counts.by_class[KeyClass::Content as usize] = OperationCounts {
+        counts.by_class[KeyKind::Content as usize] = OperationCounts {
             head: content.heads,
             get: content.gets + content.gets_with_metadata,
             put: content.puts,
         };
-        counts.by_class[KeyClass::Other as usize] = OperationCounts {
+        counts.by_class[KeyKind::Other as usize] = OperationCounts {
             head: other.heads,
             get: other.gets + other.gets_with_metadata,
             put: other.puts,
@@ -174,8 +174,8 @@ async fn prepare_content(
         .expect("prepare existing content")
 }
 
-fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> CommitRequest {
-    CommitRequest::single(
+fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> CommitIntent {
+    CommitIntent::single(
         CommitId::parse(commit_id).expect("valid commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -198,7 +198,7 @@ fn assert_content_counts(
     bytes_read: usize,
 ) {
     assert_eq!(
-        counts.operations(KeyClass::Content),
+        counts.operations(KeyKind::Content),
         OperationCounts { head, get, put }
     );
     assert_eq!(counts.content_get_bytes, bytes_read);
@@ -534,7 +534,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .expect("upload content");
     let upload_counts = harness.recording.snapshot();
     assert_eq!(
-        upload_counts.operations(KeyClass::Content),
+        upload_counts.operations(KeyKind::Content),
         OperationCounts {
             head: 0,
             get: 0,
@@ -612,7 +612,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
     assert_eq!(completed.response.content_ref(), Some(&content_ref));
     let completion_counts = harness.recording.snapshot();
     assert_eq!(
-        completion_counts.operations(KeyClass::Content),
+        completion_counts.operations(KeyKind::Content),
         OperationCounts {
             head: 1,
             get: 0,
@@ -661,7 +661,7 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
             let content_ref = harness.stage_content(b"unprepared content").await;
             harness.recording.reset();
 
-            let request = CommitRequest::single(
+            let request = CommitIntent::single(
                 CommitId::parse("unprepared-put").expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -734,7 +734,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     };
     namespace
         .commit_prepared(
-            CommitRequest {
+            CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("prepared-many-puts").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -790,7 +790,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
     // Restore resolves content from retained namespace metadata, so
     // re-downloading the retained blob would prove nothing.
     namespace
-        .commit(CommitRequest::single(
+        .commit(CommitIntent::single(
             CommitId::parse("restore-first-revision").expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -892,7 +892,7 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
     harness.recording.reset();
-    let intent = CommitRequest::single(
+    let intent = CommitIntent::single(
         CommitId::parse("new-rejected").expect("valid commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -980,8 +980,8 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     assert_eq!(duplicate_receipt, primary_receipt);
     let completed_counts = recording.snapshot();
     assert_eq!(
-        completed_counts.operations(KeyClass::Content),
-        primary_counts.operations(KeyClass::Content)
+        completed_counts.operations(KeyKind::Content),
+        primary_counts.operations(KeyKind::Content)
     );
     assert_eq!(
         completed_counts.content_get_bytes,
@@ -1054,7 +1054,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
         let namespace = namespace.clone();
         tokio::spawn(async move {
             namespace
-                .commit_candidate(CommitCandidate::new(CommitRequest::single(
+                .commit_candidate(CommitCandidate::new(CommitIntent::single(
                     CommitId::parse("mixed-blocker").expect("valid commit id"),
                     loonfs_test_support::test_actor(),
                     None,

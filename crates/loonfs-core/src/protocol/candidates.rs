@@ -10,7 +10,7 @@ use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparati
 use crate::error::{CoreError, MetadataViewError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::metadata::CommitReceiptRecord;
-use crate::path::write::{CommitRequest, FilesystemOperation, PublishPlanningSession};
+use crate::path::write::{CommitIntent, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_objectstore::ObjectStore;
@@ -240,7 +240,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
 }
 
 pub(crate) fn validate_inline_content_references<'a>(
-    request: &CommitRequest,
+    request: &CommitIntent,
     inline_content: &'a [InlineContent],
     namespace_id: &NamespaceId,
 ) -> Result<HashMap<&'a ContentId, &'a loonfs_types::ContentRef>> {
@@ -288,7 +288,7 @@ pub(crate) fn validate_inline_content_references<'a>(
 
 /// Checks that each put's content is covered by a staged proof or an equal inline value.
 fn validate_commit_content_references(
-    request: &CommitRequest,
+    request: &CommitIntent,
     admissions: &[PreparedContent],
     inline_content: &[InlineContent],
     namespace_id: &NamespaceId,

@@ -143,7 +143,7 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
     let config = loonfs_server::load_server_config(&config_path).map_err(config_error)?;
     let (api_router, _state) = loonfs_server::app(
         config,
-        loonfs_server::AppOptions {
+        loonfs_server::AppConfig {
             store: Some(shared_store),
             direct_transfers: Some(transfers),
         },

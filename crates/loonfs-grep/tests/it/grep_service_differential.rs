@@ -4,7 +4,7 @@
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
-use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::{
     CommitId, DestinationBehavior, LoonFs, Maintenance, MetadataMaintenanceOptions, NamespaceId,
     PutFileOptions, ReadOnly, SharedObjectStore, Writable,
@@ -111,7 +111,7 @@ async fn publish_same_content_files(
     let candidates = (0..count)
         .map(|index| {
             CommitCandidate::prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,

@@ -6,13 +6,14 @@ mod admission;
 mod composition;
 
 use super::serve::{build_handles, serve_on};
-use super::{app, AppOptions};
-use crate::config::MetadataCacheOverrides;
+use super::{app, AppConfig};
+use crate::config::MetadataCacheConfig;
 use crate::{ServerConfig, StoreConfig};
 use axum::http::StatusCode;
 use loonfs::metrics::MetricValue;
 use loonfs::{
-    LoonFs, SharedObjectStore, StoredMetadataBlockCache, TraceMode, TraceStoreKind, Writable,
+    ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, StoredMetadataBlockCache, TraceMode,
+    Writable,
 };
 use loonfs_client::{Client, ClientConfig};
 use loonfs_http::HttpMetrics;
@@ -60,7 +61,7 @@ async fn app_validates_directly_built_configs() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config(temp_dir.path(), "app-validate-writer");
     config.max_concurrent_uploads = 0;
-    match app(config, AppOptions::default()).await {
+    match app(config, AppConfig::default()).await {
         Err(crate::config::ServerConfigError::InvalidField { field, .. }) => {
             assert_eq!(field, "max_concurrent_uploads");
         }
@@ -801,8 +802,8 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     );
 }
 
-fn options_with_store(store: SharedObjectStore) -> AppOptions {
-    AppOptions {
+fn options_with_store(store: SharedObjectStore) -> AppConfig {
+    AppConfig {
         store: Some(store),
         direct_transfers: None,
     }
@@ -820,7 +821,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         publication: Default::default(),
         inline_content: Default::default(),
-        metadata_cache: MetadataCacheOverrides::default(),
+        metadata_cache: MetadataCacheConfig::default(),
         local_cache: None,
         grep: crate::config::GrepConfig {
             mode: crate::config::GrepMode::ServeAndMaintain,
@@ -863,7 +864,7 @@ async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writa
     LoonFs::builder_with_store(store)
         .writer_id(writer_id)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(TraceStoreKind::LocalFs)
+        .trace_store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")

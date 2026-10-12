@@ -961,7 +961,7 @@ impl crate::Namespace<crate::Writable> {
                 precondition_index: None,
             })
         })?;
-        let request = crate::publish::CommitRequest::single(
+        let request = crate::publish::CommitIntent::single(
             loonfs_types::CommitId::generate(),
             actor.clone(),
             Some("administrator recovery".to_owned()),

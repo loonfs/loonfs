@@ -41,7 +41,7 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
         .await
         .expect("upload");
     for (commit_id, paths) in [("first", vec!["/one", "/two"]), ("again", vec!["/three"])] {
-        let request = CommitRequest {
+        let request = CommitIntent {
             commit_id: CommitId::parse(commit_id).expect("commit"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -460,7 +460,7 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
             &mut engine,
             &store,
             &context,
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 CommitId::parse(commit_id).expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -666,7 +666,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
     .await
     .expect("other shard content");
     let candidate = CommitCandidate::prepared(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -836,7 +836,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         &mut engine,
         &store,
         &context,
-        CommitCandidate::new(CommitRequest::single(
+        CommitCandidate::new(CommitIntent::single(
             CommitId::parse("copy").expect("commit"),
             loonfs_test_support::test_actor(),
             None,
@@ -983,7 +983,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
             &mut engine,
             &store,
             &context,
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("append").expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -1137,7 +1137,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     let view = load_current_metadata_view(&store, &namespace_id)
         .await
         .expect("view");
-    let candidate = CommitCandidate::new(CommitRequest::single(
+    let candidate = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("copy").expect("commit"),
         loonfs_test_support::test_actor(),
         None,
@@ -1316,7 +1316,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             &mut engine,
             &store,
             &context,
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("append").expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -1333,7 +1333,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("view");
-        let candidate = CommitCandidate::new(CommitRequest::single(
+        let candidate = CommitCandidate::new(CommitIntent::single(
             CommitId::parse("reference").expect("commit"),
             loonfs_test_support::test_actor(),
             None,
@@ -1391,7 +1391,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
         let replacement = CommitCandidate::with_inline_content(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::parse("replace").expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,

@@ -12,4 +12,4 @@ mod view;
 
 pub(crate) use checks::{validate_ops, CommitNumbering};
 pub use error::{CommitOperand, CommitValidationError};
-pub(crate) use view::PublishValidationView;
+pub(crate) use view::PublishValidationSession;

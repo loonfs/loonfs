@@ -5,7 +5,7 @@ use loonfs::{
     AppendFileOptions, CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore,
 };
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
+    CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{MutationContext, NamespaceEngine};
@@ -35,7 +35,7 @@ async fn publish_inline(
         Bytes::from_static(b"inline content"),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
-    let mut request = CommitRequest::single(
+    let mut request = CommitIntent::single(
         CommitId::generate(),
         loonfs_test_support::test_actor(),
         None,

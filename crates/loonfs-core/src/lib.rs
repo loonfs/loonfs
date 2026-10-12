@@ -13,7 +13,7 @@
 //! ```no_run
 //! use loonfs_types::{AbsolutePath, ActorId, CommitId, NamespaceId};
 //! use loonfs_core::publish::{
-//!     FilesystemOperation, CommitRequest, NamespaceCommitEngine, CommitCandidate,
+//!     FilesystemOperation, CommitIntent, NamespaceCommitEngine, CommitCandidate,
 //! };
 //! use loonfs_core::time::Deadline;
 //! use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -43,7 +43,7 @@
 //! let mut publisher = NamespaceCommitEngine::new(namespace, content_writes);
 //! let _ = publisher.publish_batch(
 //!     &publish_store,
-//!     vec![CommitCandidate::new(CommitRequest::single(
+//!     vec![CommitCandidate::new(CommitIntent::single(
 //!         CommitId::generate(),
 //!         ActorId::parse("example-service").expect("a static actor ID should parse"),
 //!         None,
@@ -165,10 +165,10 @@ pub mod publish {
     pub use crate::commit::{CommitFingerprint, WalPublishError};
     pub use crate::commit_engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
-        NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionState,
-        WalFoldInput, WriterSessionState,
+        NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionStatus,
+        WalFoldInput, WriterSessionStatus,
     };
-    pub use crate::path::write::{CommitRequest, FilesystemOperation};
+    pub use crate::path::write::{CommitIntent, FilesystemOperation};
     pub use crate::storage::content_admission::PreparedContent;
     pub use crate::storage::inline_content::InlineContent;
 }
@@ -192,7 +192,7 @@ pub use manifest::{
     MetadataFamilyGroup, MetadataLsmPolicy, RetentionTarget, SegmentBlockLoader,
     SegmentRowIterator,
 };
-pub use manifest::{ManifestLoadError, ManifestLoadFailureClass};
+pub use manifest::{ManifestLoadError, ManifestLoadFailureKind};
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange,

@@ -1041,7 +1041,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     for round in 0..boundary - 2 {
-        let request = CommitRequest::single(
+        let request = CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -1068,7 +1068,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         store,
         KeyPredicate::new(move |key| key == hint_key || key.starts_with(&wal_prefix)),
     );
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::parse("at-the-boundary").expect("commit id"),
         loonfs_test_support::test_actor(),
         None,

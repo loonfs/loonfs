@@ -57,7 +57,7 @@ pub enum GrepError {
     },
     /// Grep's rebuildable derived state failed validation.
     #[error("grep index is corrupt: {message}; disable and re-enable grep to rebuild it")]
-    CorruptIndex {
+    IndexCorrupt {
         /// Hint, manifest, or segment validation failure.
         message: String,
     },
@@ -123,7 +123,7 @@ impl GrepError {
                 StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
                 _ => ErrorCode::ServerError,
             },
-            Self::CorruptIndex { .. } => ErrorCode::IndexCorrupt,
+            Self::IndexCorrupt { .. } => ErrorCode::IndexCorrupt,
             Self::PublicationConflict { .. } => ErrorCode::StaleHead,
             Self::Runtime(error) => error.code(),
         }
@@ -156,7 +156,7 @@ impl From<GrepManifestError> for GrepError {
             },
             GrepManifestError::Conflict { object_key } => Self::PublicationConflict { object_key },
             error @ (GrepManifestError::Corrupt { .. }
-            | GrepManifestError::IdentityMismatch { .. }) => Self::CorruptIndex {
+            | GrepManifestError::IdentityMismatch { .. }) => Self::IndexCorrupt {
                 message: error.to_string(),
             },
         }

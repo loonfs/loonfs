@@ -1268,7 +1268,7 @@ mod tests {
     use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
     use crate::namespace::control::load_namespace_read_state;
-    use crate::path::write::{CommitRequest, FilesystemOperation};
+    use crate::path::write::{CommitIntent, FilesystemOperation};
     use crate::test_support::ops::create;
     use bytes::Bytes;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -1335,7 +1335,7 @@ mod tests {
             publish_namespace_commits_batch(
                 &store,
                 &namespace_id,
-                vec![CommitCandidate::new(CommitRequest::single(
+                vec![CommitCandidate::new(CommitIntent::single(
                     CommitId::parse(commit_id).expect("commit id"),
                     loonfs_test_support::test_actor(),
                     None,
@@ -1384,7 +1384,7 @@ mod tests {
         let published = publish_namespace_commits_batch(
             &store,
             &namespace_id,
-            vec![CommitCandidate::new(CommitRequest::single(
+            vec![CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("create-after-tamper").expect("commit id"),
                 loonfs_test_support::test_actor(),
                 None,

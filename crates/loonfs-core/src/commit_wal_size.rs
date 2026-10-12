@@ -1,6 +1,6 @@
 //! Bounds the WAL records produced by a request before metadata planning.
 
-use crate::path::write::CommitRequest;
+use crate::path::write::CommitIntent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::wal::{WalCommitDelta, WalInlineContent};
 use loonfs_types::{
@@ -194,7 +194,7 @@ const fn delta_bytes(kind: &str, fields: &[(&str, usize)]) -> usize {
 }
 
 pub(crate) fn estimated_wal_record_bytes(
-    request: &CommitRequest,
+    request: &CommitIntent,
     inline_content: &[InlineContent],
 ) -> usize {
     let fixed_bytes = map_bytes(&[
@@ -243,7 +243,7 @@ pub(crate) fn estimated_wal_record_bytes(
 }
 
 pub(crate) fn planned_wal_record_bytes(
-    request: &CommitRequest,
+    request: &CommitIntent,
     inline_content: &[InlineContent],
     deltas: &[WalCommitDelta],
     appended: &[WalInlineContent],

@@ -18,7 +18,7 @@ use std::future::Future;
 
 /// An attempt whose write may have landed reads it back before it answers.
 #[derive(Debug)]
-pub(crate) enum CasAttempt<T, R> {
+pub(crate) enum CasOutcome<T, R> {
     Settled(T),
     Contended(R),
 }
@@ -29,13 +29,13 @@ pub(crate) async fn retry_while_contended<T, R, E, F, Fut>(
 ) -> std::result::Result<std::result::Result<T, R>, E>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = std::result::Result<CasAttempt<T, R>, E>>,
+    Fut: Future<Output = std::result::Result<CasOutcome<T, R>, E>>,
 {
     let mut last_reason = None;
     for _attempt in 0..CONTENTION_RETRY_LIMIT {
         match attempt().await? {
-            CasAttempt::Settled(outcome) => return Ok(Ok(outcome)),
-            CasAttempt::Contended(reason) => last_reason = Some(reason),
+            CasOutcome::Settled(outcome) => return Ok(Ok(outcome)),
+            CasOutcome::Contended(reason) => last_reason = Some(reason),
         }
     }
     Ok(Err(last_reason.expect(
@@ -57,13 +57,13 @@ pub(crate) async fn create_control_object_under_generated_id<S: ObjectStore + ?S
 ) -> crate::error::Result<ObjectMetadata> {
     retry_while_contended(|| async {
         match store.put_if_absent(object_key, encoded.clone()).await {
-            Ok(metadata) => Ok(CasAttempt::Settled(metadata)),
+            Ok(metadata) => Ok(CasOutcome::Settled(metadata)),
             Err(
                 error @ (ObjectStoreError::PreconditionFailed { .. }
                 | ObjectStoreError::Transport { .. }),
             ) => match store.get_with_metadata(object_key).await {
-                Ok(Some(stored)) => Ok(CasAttempt::Settled(stored.metadata)),
-                Ok(None) => Ok(CasAttempt::Contended(CoreError::store(object_key, &error))),
+                Ok(Some(stored)) => Ok(CasOutcome::Settled(stored.metadata)),
+                Ok(None) => Ok(CasOutcome::Contended(CoreError::store(object_key, &error))),
                 Err(error) => Err(CoreError::store(object_key, &error)),
             },
             Err(error) => Err(CoreError::store(object_key, &error)),
@@ -128,7 +128,7 @@ pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     update: F,
-) -> crate::error::Result<CasAttempt<T, CoreError>>
+) -> crate::error::Result<CasOutcome<T, CoreError>>
 where
     S: ObjectStore + ?Sized,
     F: FnOnce(UploadSessionPayload) -> Fut,
@@ -142,14 +142,14 @@ async fn try_update_loaded_upload_session<S, T, F, Fut>(
     store: &S,
     loaded: LoadedControl<UploadSessionPayload>,
     update: F,
-) -> crate::error::Result<CasAttempt<T, CoreError>>
+) -> crate::error::Result<CasOutcome<T, CoreError>>
 where
     S: ObjectStore + ?Sized,
     F: FnOnce(UploadSessionPayload) -> Fut,
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     match update(loaded.state).await? {
-        UploadSessionUpdate::Noop(outcome) => Ok(CasAttempt::Settled(outcome)),
+        UploadSessionUpdate::Noop(outcome) => Ok(CasOutcome::Settled(outcome)),
         UploadSessionUpdate::Replace { mut next, outcome } => {
             if !matches!(next.status, UploadSessionRecordStatus::Open { .. }) {
                 if let UploadSessionMode::ServiceProxied { staging } = &mut next.mode {
@@ -165,8 +165,8 @@ where
                 .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
                 .await
             {
-                Ok(_) => Ok(CasAttempt::Settled(outcome)),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
+                Ok(_) => Ok(CasOutcome::Settled(outcome)),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasOutcome::Contended(
                     CoreError::contention_exhausted(&loaded.object_key),
                 )),
                 // A generic upload update has no state predicate that proves an
@@ -328,7 +328,7 @@ mod tests {
         let exhausted = retry_while_contended(|| {
             let reason = attempt.get();
             attempt.set(reason + 1);
-            async move { Ok::<CasAttempt<(), usize>, ()>(CasAttempt::Contended(reason)) }
+            async move { Ok::<CasOutcome<(), usize>, ()>(CasOutcome::Contended(reason)) }
         })
         .await
         .expect("contention attempts should not fail");

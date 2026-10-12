@@ -4,7 +4,7 @@
 //! publication itself.
 
 use futures::future::BoxFuture;
-use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::{
     Commit, CommitId, DestinationBehavior, LoonFs, NamespaceId, SharedObjectStore, Writable,
 };
@@ -97,7 +97,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     // batch behind it.
     let mut second: BoxFuture<'static, loonfs::Result<Commit>> = {
         let namespace = namespace.clone();
-        let request = CommitRequest::single(
+        let request = CommitIntent::single(
             CommitId::parse("parked-second").expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,

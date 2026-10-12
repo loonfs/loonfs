@@ -63,7 +63,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
         .collect();
     namespace
         .commit_prepared(
-            loonfs::publish::CommitRequest {
+            loonfs::publish::CommitIntent {
                 commit_id: loonfs_types::CommitId::generate(),
                 actor_id: loonfs_test_support::test_actor(),
                 subject: None,

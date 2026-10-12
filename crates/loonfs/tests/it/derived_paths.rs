@@ -5,7 +5,7 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::{expect_code, open_runtime_async, store};
-use loonfs::publish::{CommitRequest, FilesystemOperation};
+use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
     CommitId, CreateDirectoryOptions, ErrorCode, FilesystemChange, InodeId, Namespace, PageRequest,
     PaginationPolicy, Writable,
@@ -31,7 +31,7 @@ async fn create_directory_by_inode(
     name: &str,
 ) -> InodeId {
     let commit = namespace
-        .commit(CommitRequest::single(
+        .commit(CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -72,7 +72,7 @@ async fn assert_inode_addressing_serves(
         .expect("put a file to move");
     let loose = namespace.stat("/loose.txt").await.expect("stat the file");
     namespace
-        .commit(CommitRequest::single(
+        .commit(CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,

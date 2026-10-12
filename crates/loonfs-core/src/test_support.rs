@@ -37,7 +37,7 @@ pub async fn append_wal_objects<S: loonfs_objectstore::ObjectStore + ?Sized>(
         let path = loonfs_types::AbsolutePath::parse(format!("/wal-tail-{commit_id}")).map_err(
             |error| crate::error::CoreError::Internal(format!("test WAL-tail path: {error}")),
         )?;
-        let request = crate::publish::CommitRequest::single(
+        let request = crate::publish::CommitIntent::single(
             commit_id,
             loonfs_types::ActorId::loonfs(),
             None,

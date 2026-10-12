@@ -32,7 +32,7 @@ use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::StdMonotonicTimer;
 use crate::{
     AssemblySource, ByteRange, MultipartPart, ObjectMetadata, ObjectStoreError,
-    ObjectStoreErrorClass, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
+    ObjectStoreErrorKind, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
 };
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -695,7 +695,7 @@ where
         operation,
         payload_bytes,
         Some(&deadline),
-        |error: &ObjectStoreError| error.class() == ObjectStoreErrorClass::RetryableTransport,
+        |error: &ObjectStoreError| error.kind() == ObjectStoreErrorKind::RetryableTransport,
         attempt,
     )
     .await
@@ -827,7 +827,7 @@ mod tests {
     use crate::ByteRange;
     use crate::{
         AssemblySource, AwsS3Credentials, ConfiguredObjectStoreKind, ObjectStoreError,
-        ObjectStoreErrorClass,
+        ObjectStoreErrorKind,
     };
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -1272,19 +1272,19 @@ mod tests {
     #[test]
     fn multipart_provider_codes_are_classified_at_the_adapter_boundary() {
         for (code, expected) in [
-            ("AccessDenied", ObjectStoreErrorClass::PermissionDenied),
-            ("NoSuchKey", ObjectStoreErrorClass::NotFound),
+            ("AccessDenied", ObjectStoreErrorKind::PermissionDenied),
+            ("NoSuchKey", ObjectStoreErrorKind::NotFound),
             (
                 "PreconditionFailed",
-                ObjectStoreErrorClass::PreconditionFailed,
+                ObjectStoreErrorKind::PreconditionFailed,
             ),
-            ("SlowDown", ObjectStoreErrorClass::RetryableTransport),
-            ("MalformedXML", ObjectStoreErrorClass::Other),
+            ("SlowDown", ObjectStoreErrorKind::RetryableTransport),
+            ("MalformedXML", ObjectStoreErrorKind::Other),
         ] {
             assert_eq!(
                 classify_signed_response("private-key", http::StatusCode::BAD_REQUEST, Some(code),)
                     .expect("provider error should classify")
-                    .class(),
+                    .kind(),
                 expected,
                 "wrong class for {code}"
             );

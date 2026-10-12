@@ -12,7 +12,7 @@ use super::super::scan::VerifiedMetadataSegments;
 use super::super::streaming_compaction::{
     finalize_metadata_compaction, input_segment_keys, merge_group_in_step, run_metadata_compaction,
     CompactionPublication, MetadataCompactionCancellation, MetadataCompactionJobOutcome,
-    MetadataCompactionSpec, MetadataMergeResult,
+    MetadataCompactionSpec, MetadataMergeReport,
 };
 use super::*;
 use crate::store_waves::STORE_READ_WAVE;
@@ -409,7 +409,7 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
-) -> std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome> {
+) -> std::result::Result<MetadataMergeReport, MetadataCompactionJobOutcome> {
     let segments = load_current_manifest_segments(store, namespace_id).await;
     run_metadata_compaction(&segments, namespace_id, spec, policy, cancellation)
         .await
@@ -437,7 +437,7 @@ async fn finalize_streaming_compaction<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     input_keys: &BTreeSet<String>,
-    result: &MetadataMergeResult,
+    result: &MetadataMergeReport,
 ) -> MetadataCompactionJobOutcome {
     finalize_streaming_compaction_under(
         store,
@@ -456,7 +456,7 @@ async fn finalize_streaming_compaction_under<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     input_keys: &BTreeSet<String>,
-    result: &MetadataMergeResult,
+    result: &MetadataMergeReport,
     cancellation: &MetadataCompactionCancellation,
 ) -> MetadataCompactionJobOutcome {
     let timer = Arc::new(StdMonotonicTimer::default());
@@ -484,7 +484,7 @@ async fn publish_streaming_compaction<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     input_keys: &BTreeSet<String>,
-    result: &MetadataMergeResult,
+    result: &MetadataMergeReport,
 ) -> ManifestNo {
     match finalize_streaming_compaction(store, namespace_id, spec, input_keys, result).await {
         MetadataCompactionJobOutcome::Published { manifest_no, .. } => manifest_no,
@@ -1511,7 +1511,7 @@ async fn install_synthetic_bindings_base(
             crate::metadata::DirentryBindingRecord {
                 parent_inode_id: parent,
                 name_key: NameKey::parse(&name).expect("name key"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                 },
                 child_inode_id: InodeId(100_000 + index),
@@ -1532,7 +1532,7 @@ async fn install_synthetic_bindings_base(
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
                 delta_index: delta,
-                state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
             },
         ));
     }

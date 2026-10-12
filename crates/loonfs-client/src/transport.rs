@@ -499,7 +499,7 @@ impl QueryBuilder {
         }
     }
 
-    pub(crate) fn finish(self) -> String {
+    pub(crate) fn build(self) -> String {
         self.url
     }
 }

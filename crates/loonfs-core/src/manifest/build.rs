@@ -312,11 +312,9 @@ impl<'a> MetadataSegmentWriter<'a> {
         puts: &mut MetadataSegmentPuts<'_, S>,
     ) -> Result<()> {
         puts.wait_for_capacity(0).await?;
-        let built = std::mem::take(&mut self.builder)
-            .finish()
-            .map_err(|error| {
-                CoreError::Internal(format!("failed to encode metadata segment: {error}"))
-            })?;
+        let built = std::mem::take(&mut self.builder).build().map_err(|error| {
+            CoreError::Internal(format!("failed to encode metadata segment: {error}"))
+        })?;
         let (descriptor, bytes) = prepare_manifest_segment(self.namespace_id, self.family, built);
         puts.put(&descriptor, bytes).await?;
         self.segments.push(descriptor);
@@ -339,7 +337,7 @@ mod tests {
         prepare_manifest_segment(
             namespace_id,
             MetadataRowFamily::Inodes,
-            builder.finish().expect("segment"),
+            builder.build().expect("segment"),
         )
         .0
     }

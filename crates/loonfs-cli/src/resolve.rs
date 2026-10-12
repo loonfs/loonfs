@@ -9,7 +9,7 @@ use crate::config::{
 use crate::error::CliError;
 use crate::profiles::default_namespace;
 use loonfs::engine::DecodedBlockCacheConfig;
-use loonfs::{LoonFs, SharedObjectStore, TraceStoreKind, WriterId};
+use loonfs::{LoonFs, SharedObjectStore, WriterId};
 use loonfs_client::Client;
 use loonfs_grep::{
     GrepBlockCache, GrepService, GrepStepBudget, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
@@ -323,7 +323,7 @@ impl ResolvedTarget {
             // A CLI invocation is one solo mutation: holding the commit
             // window open would only add its full delay to every command.
             .min_publish_interval_ms(0)
-            .trace_store_kind(TraceStoreKind::from(store_kind))
+            .trace_store_kind(store_kind)
             .build()
             .await
             .map_err(CliError::from)?;

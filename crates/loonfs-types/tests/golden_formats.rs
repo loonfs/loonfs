@@ -2085,7 +2085,7 @@ fn sample_segment_blocks() -> loonfs_types::format::sst_blocks::BuiltSegmentBloc
         MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             },
             child_inode_id: InodeId(2),
@@ -2098,7 +2098,7 @@ fn sample_segment_blocks() -> loonfs_types::format::sst_blocks::BuiltSegmentBloc
         MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs-archive")
                     .expect("valid display name"),
             },
@@ -2120,7 +2120,7 @@ fn sample_segment_blocks() -> loonfs_types::format::sst_blocks::BuiltSegmentBloc
             committed_seq: ChangeSeq(8),
             delta_index: 0,
 
-            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
         }),
     ];
     rows.extend(sample_inode_rows());
@@ -2130,7 +2130,7 @@ fn sample_segment_blocks() -> loonfs_types::format::sst_blocks::BuiltSegmentBloc
         let key = row.row_key();
         builder.push(&key, &key, row).expect("push sample row");
     }
-    builder.finish().expect("finish sample segment")
+    builder.build().expect("finish sample segment")
 }
 
 fn segment_section<'a>(
@@ -2209,7 +2209,7 @@ fn assert_rows_match_single_block_golden(name: &str, rows: &[MetadataRow]) {
         let key = row.row_key();
         builder.push(&key, &key, row).expect("push golden row");
     }
-    let built = builder.finish().expect("finish golden segment");
+    let built = builder.build().expect("finish golden segment");
     let index = sample_segment_index(&built);
     assert_eq!(index.len(), 1, "the row fixture should be one block");
     let entry = &index[0];
@@ -2980,12 +2980,12 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
 }
 
 fn sample_binding_rows() -> Vec<MetadataRow> {
-    use loonfs_types::format::manifest::{DirentryBindingRecord, DirentryBindingState};
+    use loonfs_types::format::manifest::{DirentryBindingRecord, DirentryBindingStatus};
     [
-        DirentryBindingState::Bound {
+        DirentryBindingStatus::Bound {
             display_name: loonfs_types::DisplayName::parse("Report.txt").expect("display name"),
         },
-        DirentryBindingState::Unbound,
+        DirentryBindingStatus::Unbound,
     ]
     .into_iter()
     .enumerate()
@@ -3030,7 +3030,7 @@ fn binding_index_blocks_pin_both_slot_values_and_key_orders() {
                 )
                 .expect("push row");
         }
-        let built = builder.finish().expect("finish block");
+        let built = builder.build().expect("finish block");
         let index = sample_segment_index(&built);
         assert_eq!(index.len(), 1);
         assert_matches_golden(

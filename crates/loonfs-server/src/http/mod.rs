@@ -8,7 +8,7 @@ mod tests;
 mod tls;
 
 pub use serve::{
-    app, check_config, probe_store, serve, serve_with_shutdown, AppOptions, AppState, ServeError,
+    app, check_config, probe_store, serve, serve_with_shutdown, AppConfig, AppState, ServeError,
 };
 pub use tls::TlsConfigError;
 

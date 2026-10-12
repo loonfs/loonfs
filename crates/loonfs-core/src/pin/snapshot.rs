@@ -4,7 +4,7 @@ use super::delete::delete_owned_pin;
 use super::read_basis::{load_checkpoint_read_basis_from_record, CheckpointReadBasis};
 use super::record::{encode_pin, load_owned_pin, LoadedPin, PinOwnerKind};
 use crate::context::MutationContext;
-use crate::control_update::{retry_while_contended, CasAttempt};
+use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::{CoreError, Result};
 use crate::manifest::MetadataSegmentCache;
 use crate::namespace::state::NamespaceReadState;
@@ -57,7 +57,7 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
             .min(lifetime_ceiling)
             .max(*expires_at_ms);
         if *expires_at_ms == new_expires_at_ms {
-            return Ok(CasAttempt::Settled(super::checkpoint_summary(next)));
+            return Ok(CasOutcome::Settled(super::checkpoint_summary(next)));
         }
         *expires_at_ms = new_expires_at_ms;
         let encoded = encode_pin(&next)?;
@@ -65,8 +65,8 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
             .compare_and_swap(&object_key, &loaded.etag, encoded)
             .await
         {
-            Ok(_) => Ok(CasAttempt::Settled(super::checkpoint_summary(next))),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasAttempt::Contended(
+            Ok(_) => Ok(CasOutcome::Settled(super::checkpoint_summary(next))),
+            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasOutcome::Contended(
                 CoreError::contention_exhausted(&object_key),
             )),
             Err(ObjectStoreError::Transport { .. }) => {
@@ -82,11 +82,11 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
                     .expires_at_ms()
                     .expect("a classified snapshot should carry an expiry");
                 if expires_at_ms >= new_expires_at_ms {
-                    Ok(CasAttempt::Settled(super::checkpoint_summary(
+                    Ok(CasOutcome::Settled(super::checkpoint_summary(
                         current.state,
                     )))
                 } else {
-                    Ok(CasAttempt::Contended(CoreError::contention_exhausted(
+                    Ok(CasOutcome::Contended(CoreError::contention_exhausted(
                         &object_key,
                     )))
                 }

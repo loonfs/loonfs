@@ -368,7 +368,7 @@ mod tests {
         use crate::heap_bytes::HeapBytes;
         use crate::limits::{CHANGE_FEED_PAGE_BYTES, MAX_COMMIT_OPERATIONS};
         use crate::path::read::load_current_metadata_view;
-        use crate::publish::{CommitRequest, FilesystemOperation};
+        use crate::publish::{CommitIntent, FilesystemOperation};
         use loonfs_types::{AbsolutePath, CommitId};
 
         let directory = tempdir().expect("tempdir");
@@ -384,7 +384,7 @@ mod tests {
         let mut expected = Vec::new();
         for number in 1..=5 {
             let depth = if number == 4 { 4 } else { 2 };
-            let request = CommitRequest {
+            let request = CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse(format!("commit-{number}")).expect("commit id"),
                 actor_id: loonfs_test_support::test_actor(),

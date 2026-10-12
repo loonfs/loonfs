@@ -6,13 +6,13 @@
 
 pub(super) use super::block_load::SessionBlockMemo;
 use super::cache::{
-    read_working_memory, DecodedMetadataSegmentBlock, MetadataSegmentBlockKind,
-    MetadataSegmentCache, MetadataSegmentCacheKey,
+    read_working_memory, DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey,
 };
 use super::error::ManifestLoadError;
 use super::runs::{manifest_cache_heap_bytes, runs_newest_first};
 use super::scan::VerifiedMetadataSegments;
 use super::validate::{validate_manifest, validate_namespace_manifest};
+use crate::block_cache::SegmentBlockKind;
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
@@ -120,7 +120,7 @@ pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
         cache.insert(
             MetadataSegmentCacheKey {
                 identity: manifest.object_key.clone(),
-                block_kind: MetadataSegmentBlockKind::Manifest,
+                block_kind: SegmentBlockKind::Manifest,
                 block_offset: 0,
             },
             DecodedMetadataSegmentBlock::Manifest {
@@ -249,7 +249,7 @@ pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?
         Some(cache) => {
             let cache_key = MetadataSegmentCacheKey {
                 identity: manifest_key.clone(),
-                block_kind: MetadataSegmentBlockKind::Manifest,
+                block_kind: SegmentBlockKind::Manifest,
                 block_offset: 0,
             };
             cache.get_or_load(&cache_key, fetch).await?

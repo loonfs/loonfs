@@ -157,7 +157,7 @@ async fn a_replaced_file_is_not_served_from_the_cached_reference() {
 async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     use bytes::Bytes;
     use loonfs_core::publish::{
-        CommitCandidate, CommitRequest, FilesystemOperation, InlineContent, NamespaceCommitEngine,
+        CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
     };
     use loonfs_core::{CreateNamespaceOptions, MutationContext, NamespaceEngine};
     use loonfs_test_support::stores::KeyPredicate;
@@ -199,7 +199,7 @@ async fn buffered_inline_reads_request_no_content_object_on_either_branch() {
     })
     .collect();
     let candidate = CommitCandidate::with_inline_content(
-        CommitRequest {
+        CommitIntent {
             commit_id: CommitId::parse("inline").expect("commit"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,

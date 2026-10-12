@@ -9,8 +9,8 @@
 
 use loonfs_client::{Client, ClientConfig, ListOptions, NamespacePath};
 use loonfs_server::{
-    app, serve_with_shutdown, AppOptions, GrepConfig, GrepMode, MaintenanceMode,
-    MetadataCacheOverrides, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
+    app, serve_with_shutdown, AppConfig, GrepConfig, GrepMode, MaintenanceMode,
+    MetadataCacheConfig, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
 };
 use loonfs_test_support::http::raw_agent;
 use loonfs_types::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
@@ -118,7 +118,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let (router, state) = app(config, AppOptions::default()).await.expect("build app");
+    let (router, state) = app(config, AppConfig::default()).await.expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
@@ -316,7 +316,7 @@ pub(crate) fn test_config(
         max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         publication: Default::default(),
         inline_content: Default::default(),
-        metadata_cache: MetadataCacheOverrides::default(),
+        metadata_cache: MetadataCacheConfig::default(),
         local_cache: None,
         grep: GrepConfig {
             mode: GrepMode::ServeAndMaintain,

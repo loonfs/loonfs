@@ -141,7 +141,7 @@ impl Writer {
             values.push(value);
         }
         let candidate = CommitCandidate::with_inline_content(
-            CommitRequest {
+            CommitIntent {
                 commit_id: CommitId::parse(commit_id).expect("commit id"),
                 actor_id: loonfs_test_support::test_actor(),
                 subject: None,

@@ -12,7 +12,7 @@ use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer;
 use crate::options::DeleteNamespaceOptions;
-use crate::path::write::{commit_fingerprint, CommitRequest, FilesystemOperation};
+use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
 use crate::protocol::{
     load_publish_metadata_view, PublishTailPosition, PublishTailProjection, PublishViewEffect,
 };
@@ -40,7 +40,7 @@ use thiserror::Error;
 /// it references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitCandidate {
-    request: CommitRequest,
+    request: CommitIntent,
     content: ContentPreparation,
     maintenance: bool,
     inline_content: Vec<InlineContent>,
@@ -91,7 +91,7 @@ impl CommitCandidate {
     }
 
     /// A commit no subject check applies to. Only maintenance builds one.
-    pub fn maintenance(request: CommitRequest) -> Self {
+    pub fn maintenance(request: CommitIntent) -> Self {
         Self {
             request,
             content: ContentPreparation::Ready(Vec::new()),
@@ -110,7 +110,7 @@ impl CommitCandidate {
     }
 
     /// Wraps a mutation request with no attached content proofs.
-    pub fn new(request: CommitRequest) -> Self {
+    pub fn new(request: CommitIntent) -> Self {
         Self {
             request,
             content: ContentPreparation::Ready(Vec::new()),
@@ -121,7 +121,7 @@ impl CommitCandidate {
     }
 
     /// Wraps a mutation request with opaque proofs for its prepared content.
-    pub fn prepared(request: CommitRequest, content: Vec<PreparedContent>) -> Self {
+    pub fn prepared(request: CommitIntent, content: Vec<PreparedContent>) -> Self {
         let mut candidate = Self::new(request);
         let mut proofs = Vec::new();
         for value in content {
@@ -135,7 +135,7 @@ impl CommitCandidate {
     }
 
     /// Wraps a mutation request whose content preparation failed.
-    pub fn rejected(request: CommitRequest, error: ContentPreparationError) -> Self {
+    pub fn rejected(request: CommitIntent, error: ContentPreparationError) -> Self {
         Self::new(request).reject_content_preparation(error)
     }
 
@@ -154,7 +154,7 @@ impl CommitCandidate {
 
     /// Takes `inline_content` as the content bytes carried by the commit.
     pub fn with_inline_content(
-        request: CommitRequest,
+        request: CommitIntent,
         content: Vec<PreparedContent>,
         inline_content: Vec<InlineContent>,
     ) -> Self {
@@ -291,7 +291,7 @@ impl CommitCandidate {
         Ok(())
     }
 
-    pub(crate) fn request(&self) -> &CommitRequest {
+    pub(crate) fn request(&self) -> &CommitIntent {
         &self.request
     }
 
@@ -599,7 +599,7 @@ pub struct ResultingReadState {
 /// namespace and keep it outside rebuildable caches. An engine without shared
 /// state treats each one-shot commit as a separate session.
 #[derive(Debug, Default)]
-pub enum WriterSessionState {
+pub enum WriterSessionStatus {
     /// No epoch yet: the session's first publish acquires one.
     #[default]
     Unacquired,
@@ -612,8 +612,8 @@ pub enum WriterSessionState {
     Fenced(WriterFence),
 }
 
-/// Shared handle to one namespace's [`WriterSessionState`].
-pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
+/// Shared handle to one namespace's [`WriterSessionStatus`].
+pub type SharedWriterSessionStatus = Arc<Mutex<WriterSessionStatus>>;
 
 #[derive(Debug)]
 pub struct NamespaceCommitEngine {
@@ -627,8 +627,8 @@ pub struct NamespaceCommitEngine {
     /// current: the discovery that loaded it, or a HEAD that found no successor.
     basis_checked: Option<Observation>,
     /// This session's epoch and fencing for the namespace; see
-    /// [`WriterSessionState`].
-    session: SharedWriterSessionState,
+    /// [`WriterSessionStatus`].
+    session: SharedWriterSessionStatus,
     /// Local monotonic source for the self-enforced publish budget.
     timer: Arc<dyn MonotonicTimer>,
     /// Shared cache of decoded blocks used by publish-view reads. Blocks are
@@ -649,7 +649,7 @@ impl NamespaceCommitEngine {
             acquired_anchor: None,
             fold_observed: None,
             basis_checked: None,
-            session: SharedWriterSessionState::default(),
+            session: SharedWriterSessionStatus::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             segment_cache: None,
             head_state: None,
@@ -669,12 +669,12 @@ impl NamespaceCommitEngine {
 
     /// Uses runtime-managed session state so the writer epoch and fenced status
     /// persist across engine instances.
-    pub fn writer_session(mut self, session: SharedWriterSessionState) -> Self {
+    pub fn writer_session(mut self, session: SharedWriterSessionStatus) -> Self {
         self.session = session;
         self
     }
 
-    fn lock_session(&self) -> std::sync::MutexGuard<'_, WriterSessionState> {
+    fn lock_session(&self) -> std::sync::MutexGuard<'_, WriterSessionStatus> {
         // Treat a poisoned lock as fatal because another thread panicked while
         // updating the session state.
         self.session
@@ -847,11 +847,11 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
     ) -> Result<AcquiredWriter> {
         let already_acquired = match &*self.lock_session() {
-            WriterSessionState::Fenced(fence) => {
+            WriterSessionStatus::Fenced(fence) => {
                 return Err(CoreError::WriterFenced(fence.clone()))
             }
-            WriterSessionState::Acquired(acquired_writer) => Some(acquired_writer.clone()),
-            WriterSessionState::Unacquired => None,
+            WriterSessionStatus::Acquired(acquired_writer) => Some(acquired_writer.clone()),
+            WriterSessionStatus::Unacquired => None,
         };
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
@@ -860,12 +860,12 @@ impl NamespaceCommitEngine {
             acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
         self.acquired_anchor = Some(anchor);
         let mut session = self.lock_session();
-        if let WriterSessionState::Fenced(fence) = &*session {
+        if let WriterSessionStatus::Fenced(fence) = &*session {
             // Another engine fenced the shared session while this engine was acquiring
             // the epoch. Preserve the fenced state.
             return Err(CoreError::WriterFenced(fence.clone()));
         }
-        *session = WriterSessionState::Acquired(acquired_writer.clone());
+        *session = WriterSessionStatus::Acquired(acquired_writer.clone());
         Ok(acquired_writer)
     }
 
@@ -897,7 +897,7 @@ impl NamespaceCommitEngine {
         .await;
         self.invalidate_projection();
         if let Err(CoreError::WriterFenced(fence)) = &deleted {
-            *self.lock_session() = WriterSessionState::Fenced(fence.clone());
+            *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
         }
         deleted
     }
@@ -994,7 +994,7 @@ impl NamespaceCommitEngine {
             Err(error) => {
                 self.invalidate_projection();
                 if let CoreError::WriterFenced(fence) = &error {
-                    *self.lock_session() = WriterSessionState::Fenced(fence.clone());
+                    *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
                 }
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
@@ -1213,8 +1213,8 @@ mod tests {
         }
     }
 
-    fn create_dir_request(commit_id: &str, name: &str) -> CommitRequest {
-        CommitRequest::single(
+    fn create_dir_request(commit_id: &str, name: &str) -> CommitIntent {
+        CommitIntent::single(
             CommitId::parse(commit_id).expect("valid commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -1307,7 +1307,7 @@ mod tests {
     #[test]
     fn semantic_identity_ignores_current_request_limits() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let oversized_ops = CommitCandidate::new(CommitRequest {
+        let oversized_ops = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1340,7 +1340,7 @@ mod tests {
             .semantic_identity(&namespace_id)
             .expect("prepared proof limits must not affect identity");
 
-        let oversized_message = CommitCandidate::new(CommitRequest {
+        let oversized_message = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("too-long-message").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1358,7 +1358,7 @@ mod tests {
 
     #[test]
     fn a_batch_past_the_operation_ceiling_is_rejected() {
-        let oversized = CommitCandidate::new(CommitRequest {
+        let oversized = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("oversized-batch").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1378,7 +1378,7 @@ mod tests {
             .expect_err("the batch is over the operation ceiling");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
-        let at_ceiling = CommitCandidate::new(CommitRequest {
+        let at_ceiling = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("largest-batch").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1404,7 +1404,7 @@ mod tests {
             parents: false,
         }];
 
-        let oversized = CommitCandidate::new(CommitRequest {
+        let oversized = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("oversized-message").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1417,7 +1417,7 @@ mod tests {
             .expect_err("the message is over the byte ceiling");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
-        let at_ceiling = CommitCandidate::new(CommitRequest {
+        let at_ceiling = CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::parse("largest-message").expect("valid commit id"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1606,7 +1606,7 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        let session = SharedWriterSessionState::default();
+        let session = SharedWriterSessionStatus::default();
         let mut engine_a1 = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
             .writer_session(Arc::clone(&session));
         engine_a1

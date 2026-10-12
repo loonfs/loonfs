@@ -15,9 +15,7 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
         } else {
             crate::MaintenanceMode::MaintainOnly
         };
-        let (router, state) = app(config, AppOptions::default())
-            .await
-            .expect("server app");
+        let (router, state) = app(config, AppConfig::default()).await.expect("server app");
         let router = if serves_maintenance {
             router
         } else {

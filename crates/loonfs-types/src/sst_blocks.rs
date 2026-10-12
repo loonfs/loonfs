@@ -335,7 +335,7 @@ impl SegmentBlocksBuilder {
     }
 
     /// Encodes the remaining rows and assembles the object bytes.
-    pub fn finish(mut self) -> Result<BuiltSegmentBlocks, SstBlockCodecError> {
+    pub fn build(mut self) -> Result<BuiltSegmentBlocks, SstBlockCodecError> {
         if self.row_count == 0 {
             return Err(SstBlockCodecError::EmptySegment);
         }
@@ -787,7 +787,7 @@ mod tests {
             !builder.index.is_empty(),
             "completed blocks are already compressed"
         );
-        let built = builder.finish().expect("finish segment");
+        let built = builder.build().expect("finish segment");
         let start = built.index.offset as usize;
         let end = start + built.index.stored_bytes as usize;
         let index = decode_index_block(&built.bytes[start..end], &built.index).expect("index");
@@ -820,7 +820,7 @@ mod tests {
             let (key, filter_key, row) = inode_row(index as u64);
             builder.push(&key, &filter_key, &row).expect("push row");
         }
-        builder.finish().expect("finish segment")
+        builder.build().expect("finish segment")
     }
 
     const SHARED_SEGMENT_ROWS: usize = 5_000;
@@ -935,7 +935,7 @@ mod tests {
         ));
 
         let error = SegmentBlocksBuilder::default()
-            .finish()
+            .build()
             .expect_err("empty segment should be rejected");
         assert!(matches!(error, SstBlockCodecError::EmptySegment));
     }
@@ -963,13 +963,13 @@ mod tests {
             let (key, filter_key, row) = inode_row(index as u64);
             builder.push(&key, &filter_key, &row).expect("push row");
         }
-        let built = builder.finish().expect("finish segment");
+        let built = builder.build().expect("finish segment");
 
         let expected_max = inode_row((rows - 1) as u64).0;
         assert_eq!(built.min_row_key, inode_row(0).0);
         assert_eq!(built.max_row_key, expected_max);
         assert_eq!(built.row_count, rows as u64);
-        // The last push closed the block, so `finish` appended nothing. The
+        // The last push closed the block, so `build` appended nothing. The
         // object must still be the same bytes a larger target produces.
         assert_eq!(built.bytes, single_block.bytes);
         let index =
@@ -989,7 +989,7 @@ mod tests {
                 let (key, filter_key, row) = inode_row(index as u64);
                 builder.push(&key, &filter_key, &row).expect("push row");
             }
-            let built = builder.finish().expect("finish segment");
+            let built = builder.build().expect("finish segment");
             assert_eq!(built.min_row_key, expected[0], "target {target}");
             assert_eq!(
                 &built.max_row_key,
@@ -1049,7 +1049,7 @@ mod tests {
         let (key, filter_key, row) = inode_row(7);
         builder.push(&key, &filter_key, &row).expect("first copy");
         builder.push(&key, &filter_key, &row).expect("second copy");
-        let built = builder.finish().expect("finish");
+        let built = builder.build().expect("finish");
         assert_eq!(built.row_count, 2);
     }
 

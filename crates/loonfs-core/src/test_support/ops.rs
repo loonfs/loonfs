@@ -5,7 +5,7 @@ use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::parse_mutation_path;
-use crate::path::write::{CommitRequest, FilesystemOperation};
+use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::storage::content_admission::PreparedContent;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_types::format::wal::{
@@ -44,7 +44,7 @@ async fn submit_operation<S: ObjectStore + ?Sized>(
     prepared_content: Vec<PreparedContent>,
     context: &MutationContext,
 ) -> Result<Commit> {
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         commit_id,
         loonfs_test_support::test_actor(),
         None,
@@ -142,7 +142,7 @@ pub(crate) async fn write_files_bytes<S: ObjectStore + ?Sized>(
         });
         prepared.push(content);
     }
-    let request = CommitRequest {
+    let request = CommitIntent {
         commit_id: CommitId::generate(),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,

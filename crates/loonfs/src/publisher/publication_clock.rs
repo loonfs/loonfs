@@ -77,7 +77,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
     publisher.timer = clock;
     publisher.min_publish_interval = Duration::ZERO;
     let candidate = CommitCandidate::prepared(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::parse("put-content").expect("commit id"),
             loonfs_test_support::test_actor(),
             None,

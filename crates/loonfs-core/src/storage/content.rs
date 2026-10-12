@@ -222,7 +222,7 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
         Err(error) => {
             tracing::warn!(
                 content_id = %content_id,
-                error_class = ?error.class(),
+                error_class = ?error.kind(),
                 "failed to remove the content object of a terminated upload session"
             );
             false
@@ -254,7 +254,7 @@ pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
         Err(error) => {
             tracing::warn!(
                 content_id = %content_id,
-                error_class = ?error.class(),
+                error_class = ?error.kind(),
                 "failed to abandon the multipart upload of a terminated upload session"
             );
             false

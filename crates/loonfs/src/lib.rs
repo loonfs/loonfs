@@ -137,7 +137,7 @@ pub mod requests {
 /// Commit types used by integrations that submit classified mutations to
 /// the runtime publisher.
 ///
-/// Server handlers build [`publish::CommitRequest`] values, and lower-level
+/// Server handlers build [`publish::CommitIntent`] values, and lower-level
 /// integrations may submit [`publish::CommitCandidate`] values directly.
 /// Most embedded applications do not need this module.
 pub mod publish {
@@ -147,8 +147,8 @@ pub mod publish {
     };
     pub use loonfs_core::path::parse_mutation_path;
     pub use loonfs_core::publish::{
-        CommitCandidate, CommitRequest, ContentPreparationError, FilesystemOperation,
-        InlineContent, PreparedContent,
+        CommitCandidate, CommitIntent, ContentPreparationError, FilesystemOperation, InlineContent,
+        PreparedContent,
     };
 }
 
@@ -198,10 +198,11 @@ pub mod control {
 }
 
 pub use loonfs_objectstore::{
-    ByteStream, ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig,
+    ByteStream, ConfiguredObjectStoreKind, ObjectStore, ObjectStoreError, SharedObjectStore,
+    StoreConfig,
 };
 
-pub use config::{InlineContentPolicy, PublicationLimits};
+pub use config::{InlineContentPolicy, PublicationPolicy};
 pub use execution_budget::{
     ExecutionBudget, ExecutionBudgetBuilder, ExecutionBudgetStats,
     DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS,
@@ -227,8 +228,8 @@ pub use options::{
     UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
     UpdateAttributesOptions,
 };
-pub use publisher::{CloseNamespaceReport, NamespaceSessionState};
-pub use trace::{payload_class, TraceMode, TraceStoreKind};
+pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
+pub use trace::{payload_class, TraceMode};
 
 /// Result type used by the embedded runtime.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,4 +1,4 @@
-//! [`CommitRequest`]: the one filesystem commit language, before planning.
+//! [`CommitIntent`]: the one filesystem commit language, before planning.
 
 use loonfs_types::{ActorId, CommitId, CommitPrecondition, Subject};
 
@@ -29,7 +29,7 @@ pub use loonfs_types::FilesystemOperation;
 ///
 /// [`parse_mutation_path`]: crate::path::parse_mutation_path
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommitRequest {
+pub struct CommitIntent {
     /// Client idempotency key for the whole request.
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
@@ -45,7 +45,7 @@ pub struct CommitRequest {
     pub preconditions: Vec<CommitPrecondition>,
 }
 
-impl CommitRequest {
+impl CommitIntent {
     /// Sets the subject the request acts as.
     pub fn with_subject(mut self, subject: Subject) -> Self {
         self.subject = Some(subject);

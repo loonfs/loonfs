@@ -1620,7 +1620,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
         .expect_err("mismatch");
-    assert!(matches!(error, GrepError::CorruptIndex { .. }), "{error:?}");
+    assert!(matches!(error, GrepError::IndexCorrupt { .. }), "{error:?}");
     assert_eq!(recording.counts().puts, 0);
     assert_eq!(recording.counts().deletes, 0);
     writer.shutdown().await.expect("shutdown");
@@ -1792,7 +1792,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
 
 #[tokio::test]
 async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
-    use loonfs::publish::{CommitRequest, FilesystemOperation};
+    use loonfs::publish::{CommitIntent, FilesystemOperation};
     use loonfs::{CommitId, FilesystemChange};
     use loonfs_types::{DisplayName, MAX_PATH_BYTES, ROOT_INODE_ID};
 
@@ -1814,7 +1814,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let commit = |operation| {
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -1922,7 +1922,7 @@ fn assert_backfilling_error(case: &str, result: loonfs_grep::Result<GrepResponse
 
 fn assert_corrupt_index_error(case: &str, result: loonfs_grep::Result<GrepResponse>) {
     match result {
-        Err(error @ GrepError::CorruptIndex { .. }) => {
+        Err(error @ GrepError::IndexCorrupt { .. }) => {
             assert_eq!(error.code(), ErrorCode::IndexCorrupt, "code for {case}");
             assert!(
                 error
@@ -2595,7 +2595,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         collector
             .garbage_collect_namespace(&namespace_id, u64::MAX)
             .await,
-        Err(GrepError::CorruptIndex { .. })
+        Err(GrepError::IndexCorrupt { .. })
     ));
     assert_eq!(recording.counts().deletes, 0);
     namespace.delete().await.expect("tombstone");
@@ -2740,7 +2740,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
 
 #[tokio::test]
 async fn grep_filters_candidates_the_subject_cannot_read() {
-    use loonfs::publish::{CommitRequest, FilesystemOperation};
+    use loonfs::publish::{CommitIntent, FilesystemOperation};
     use loonfs_types::{
         AccessGrants, AccessRight, AccessRights, CommitId, NamespaceAccess, PrincipalId,
         PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -2814,7 +2814,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     ] {
         namespace
             .commit(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -2832,7 +2832,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
             .expect("content");
         namespace
             .commit_prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,

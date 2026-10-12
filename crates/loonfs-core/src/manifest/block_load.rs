@@ -337,13 +337,13 @@ pub(super) async fn load_segment_blocks_with_readahead<S: ObjectStore + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::cache::MetadataSegmentBlockKind;
     use super::*;
+    use crate::block_cache::SegmentBlockKind;
 
     fn key(offset: u64) -> MetadataSegmentCacheKey {
         MetadataSegmentCacheKey {
             identity: "segment".to_owned(),
-            block_kind: MetadataSegmentBlockKind::Data,
+            block_kind: SegmentBlockKind::Data,
             block_offset: offset,
         }
     }

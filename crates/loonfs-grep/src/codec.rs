@@ -468,7 +468,7 @@ mod tests {
                 .push(&last_row_key, &row.filter_key(), &row)
                 .expect("push");
         }
-        let built = builder.finish().expect("finish");
+        let built = builder.build().expect("finish");
         assert_eq!(built.max_row_key, last_row_key);
         assert!(built.min_row_key <= built.max_row_key);
     }

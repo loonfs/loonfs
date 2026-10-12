@@ -8,7 +8,7 @@
 use super::super::{CommitOp, ResolvedBinding, ValidatedCommitPlan};
 use super::checks::{validate_ops, CommitNumbering};
 use super::error::CommitOperand;
-use super::view::PublishValidationView;
+use super::view::PublishValidationSession;
 use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator};
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
@@ -245,7 +245,7 @@ async fn validate_planned_ops(
 ) -> Result<Vec<WalCommitDelta>, CoreError> {
     let accepted_rows = MetadataState::default();
     let base = crate::wal::ProjectedWalTail::from_rows(context.metadata_state.clone());
-    let mut metadata_state = PublishValidationView::new(
+    let mut metadata_state = PublishValidationSession::new(
         InMemoryMetadataView::in_memory(&base, None, context.head.seq),
         &accepted_rows,
         committed_seq(context),

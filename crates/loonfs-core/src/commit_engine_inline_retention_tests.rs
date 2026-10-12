@@ -15,7 +15,7 @@ use loonfs_types::format::control::PinOwner;
 fn replace(namespace_id: &NamespaceId, bytes: &'static [u8]) -> CommitCandidate {
     let value = inline(namespace_id, Bytes::from_static(bytes));
     CommitCandidate::with_inline_content(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::parse("reused").expect("commit id"),
             loonfs_test_support::test_actor(),
             None,

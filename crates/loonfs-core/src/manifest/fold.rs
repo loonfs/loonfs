@@ -9,7 +9,7 @@ use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::commit::WalPublishError;
 use crate::commit_engine::WalFoldInput;
-use crate::control_update::{retry_while_contended, CasAttempt};
+use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
@@ -53,7 +53,7 @@ pub(crate) struct FoldedBasis {
     pub(super) outcome: FoldWalOutcome,
 }
 
-pub(crate) enum TryFoldWal {
+pub(crate) enum TryFoldWalOutcome {
     /// The attempt finished with a valid basis, whether or not it published
     /// that basis itself.
     Settled(Box<FoldedBasis>),
@@ -118,9 +118,9 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
             )
             .await?
             {
-                TryFoldWal::Settled(basis) => CasAttempt::Settled(*basis),
-                TryFoldWal::RaceLost(_) => {
-                    CasAttempt::Contended(CoreError::WalPublish(WalPublishError::NumberTaken))
+                TryFoldWalOutcome::Settled(basis) => CasOutcome::Settled(*basis),
+                TryFoldWalOutcome::RaceLost(_) => {
+                    CasOutcome::Contended(CoreError::WalPublish(WalPublishError::NumberTaken))
                 }
             },
         )
@@ -137,7 +137,7 @@ pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
-) -> Result<TryFoldWal> {
+) -> Result<TryFoldWalOutcome> {
     let projection = load_fold_projection(store, namespace_id, segment_cache).await?;
     fold_held_projection(
         store,
@@ -176,7 +176,7 @@ async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
     content_writes: &tokio::sync::Semaphore,
-) -> Result<TryFoldWal> {
+) -> Result<TryFoldWalOutcome> {
     if let Some(current) = already_current(&projection) {
         return Ok(current);
     }
@@ -184,7 +184,7 @@ async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
     let mut attempt =
         publish_fold(store, namespace_id, &projection, &layouts, deadline, policy).await?;
     for _retry in 0..CONTENTION_RETRY_LIMIT {
-        let TryFoldWal::RaceLost(winner) = &attempt else {
+        let TryFoldWalOutcome::RaceLost(winner) = &attempt else {
             break;
         };
         if !keeps_held_tail(
@@ -241,7 +241,7 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
     content_writes: &tokio::sync::Semaphore,
-) -> Result<TryFoldWal> {
+) -> Result<TryFoldWalOutcome> {
     if let Some(current) = already_current(projection) {
         return Ok(current);
     }
@@ -253,7 +253,7 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
 /// tail.
 fn already_current<S: ObjectStore + ?Sized>(
     projection: &ManifestProjection<'_, S>,
-) -> Option<TryFoldWal> {
+) -> Option<TryFoldWalOutcome> {
     if projection
         .manifest_segments
         .manifest()
@@ -265,7 +265,7 @@ fn already_current<S: ObjectStore + ?Sized>(
     }
     let head_seq = projection.head.seq;
     let basis_manifest = projection.basis.manifest();
-    Some(TryFoldWal::Settled(Box::new(FoldedBasis {
+    Some(TryFoldWalOutcome::Settled(Box::new(FoldedBasis {
         manifest: basis_manifest.clone(),
         target_head_seq: head_seq,
         current_manifest_no: basis_manifest.manifest_no,
@@ -281,7 +281,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
     layouts: &HashMap<ContentId, ContentLayoutRecord>,
     deadline: &Deadline,
     policy: MetadataLsmPolicy,
-) -> Result<TryFoldWal> {
+) -> Result<TryFoldWalOutcome> {
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let manifest_no = next_manifest_no_after(projection.basis.manifest_no())?;
     let manifest = build_namespace_manifest_for_projection(
@@ -305,10 +305,10 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
         // covering the newer WAL head. That manifest wins, but it has not
         // satisfied the fold.
         ManifestPublicationOutcome::PredecessorChanged(current) => {
-            return Ok(TryFoldWal::RaceLost(current));
+            return Ok(TryFoldWalOutcome::RaceLost(current));
         }
     };
-    Ok(TryFoldWal::Settled(Box::new(FoldedBasis {
+    Ok(TryFoldWalOutcome::Settled(Box::new(FoldedBasis {
         current_manifest_no: current.manifest().manifest_no,
         current_manifest_head_seq: current.manifest().head_seq,
         manifest: current.manifest(),
@@ -392,8 +392,8 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
         )
         .await?
         {
-            TryFoldWal::Settled(basis) => *basis,
-            TryFoldWal::RaceLost(_) => {
+            TryFoldWalOutcome::Settled(basis) => *basis,
+            TryFoldWalOutcome::RaceLost(_) => {
                 fold_wal_basis_with_deadline(
                     store,
                     namespace_id,

@@ -354,7 +354,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
         .get_file("/source-0", &context, None)
         .await
         .expect("cache first tail");
-    let copy = CommitCandidate::new(CommitRequest::single(
+    let copy = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("copy").expect("commit"),
         loonfs_test_support::test_actor(),
         None,
@@ -472,7 +472,7 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
         .await
         .expect("store object");
     let candidate = CommitCandidate::prepared(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::parse("object").expect("commit"),
             loonfs_test_support::test_actor(),
             None,

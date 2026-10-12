@@ -296,7 +296,7 @@ pub struct DirentryBindingRecord {
     /// Order within the commit.
     pub delta_index: u32,
     /// Value after this change.
-    pub state: DirentryBindingState,
+    pub state: DirentryBindingStatus,
 }
 
 impl DirentryBindingRecord {
@@ -311,21 +311,21 @@ impl DirentryBindingRecord {
     /// Returns the spelling while the slot is bound.
     pub fn display_name(&self) -> Option<&DisplayName> {
         match &self.state {
-            DirentryBindingState::Bound { display_name } => Some(display_name),
-            DirentryBindingState::Unbound => None,
+            DirentryBindingStatus::Bound { display_name } => Some(display_name),
+            DirentryBindingStatus::Unbound => None,
         }
     }
 
     /// Returns whether the slot has a child at this position.
     pub fn is_bound(&self) -> bool {
-        matches!(self.state, DirentryBindingState::Bound { .. })
+        matches!(self.state, DirentryBindingStatus::Bound { .. })
     }
 }
 
 /// An unbound value hides older values of the slot or child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum DirentryBindingState {
+pub enum DirentryBindingStatus {
     /// The slot names its child.
     Bound {
         /// Caller spelling preserved for reads.
@@ -1686,7 +1686,7 @@ mod tests {
         let row = super::MetadataRow::DirentryBinding(super::DirentryBindingRecord {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
-            state: super::DirentryBindingState::Bound {
+            state: super::DirentryBindingStatus::Bound {
                 display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
             },
             child_inode_id: InodeId(42),
@@ -1712,7 +1712,7 @@ mod tests {
         let row = super::MetadataRow::DirentryBinding(super::DirentryBindingRecord {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report-2024").expect("valid name key"),
-            state: super::DirentryBindingState::Bound {
+            state: super::DirentryBindingStatus::Bound {
                 display_name: crate::DisplayName::parse("report-2024").expect("valid display name"),
             },
             child_inode_id: InodeId(42),
@@ -1830,7 +1830,7 @@ mod tests {
         let bind = super::MetadataRow::DirentryBinding(super::DirentryBindingRecord {
             parent_inode_id: InodeId(9),
             name_key: name_key.clone(),
-            state: super::DirentryBindingState::Bound {
+            state: super::DirentryBindingStatus::Bound {
                 display_name: display_name.clone(),
             },
             child_inode_id: InodeId(42),

@@ -22,7 +22,7 @@ impl ResolvedTarget {
             || async {
                 let Some(host) = &self.maintenance else {
                     rest_between_status_checks().await;
-                    return Ok(GrepWaitStep::Continue);
+                    return Ok(GrepWaitStepOutcome::Continue);
                 };
                 let outcome = host
                     .grep_worker
@@ -31,9 +31,9 @@ impl ResolvedTarget {
                 Ok(match outcome {
                     GrepBuildOutcome::Published { .. }
                     | GrepBuildOutcome::BackfillRestarted { .. }
-                    | GrepBuildOutcome::Superseded => GrepWaitStep::Continue,
+                    | GrepBuildOutcome::Superseded => GrepWaitStepOutcome::Continue,
                     GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled => {
-                        GrepWaitStep::Settled
+                        GrepWaitStepOutcome::Settled
                     }
                 })
             },
@@ -74,7 +74,7 @@ pub(crate) struct GrepWaitProgress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GrepWaitStep {
+pub(super) enum GrepWaitStepOutcome {
     Continue,
     Settled,
 }
@@ -90,7 +90,7 @@ where
     Read: Fn() -> ReadTurn,
     ReadTurn: Future<Output = Result<GrepIndexLifecycle, CliError>>,
     Step: Fn() -> StepTurn,
-    StepTurn: Future<Output = Result<GrepWaitStep, CliError>>,
+    StepTurn: Future<Output = Result<GrepWaitStepOutcome, CliError>>,
 {
     let timer = StdMonotonicTimer::default();
     let started_ms = timer.monotonic_now_ms();
@@ -103,7 +103,7 @@ where
         if reached || settled || lifecycle_stopped(&lifecycle) || budget.spent(steps, elapsed_ms) {
             return Ok(GrepWaitProgress { steps, reached });
         }
-        settled = step().await? == GrepWaitStep::Settled;
+        settled = step().await? == GrepWaitStepOutcome::Settled;
         steps += 1;
     }
 }
@@ -126,7 +126,7 @@ pub(super) async fn rest_between_status_checks() {
 
 #[cfg(test)]
 mod tests {
-    use super::{wait_for_grep_index, GrepWaitProgress, GrepWaitStep, StepBudget};
+    use super::{wait_for_grep_index, GrepWaitProgress, GrepWaitStepOutcome, StepBudget};
     use loonfs_types::api::v0::GrepIndexLifecycle;
     use loonfs_types::ChangeSeq;
     use std::cell::Cell;
@@ -141,7 +141,7 @@ mod tests {
             || async {
                 turns.set(turns.get() + 1);
                 assert!(turns.get() < 4, "a disabled index must end the wait");
-                Ok(GrepWaitStep::Continue)
+                Ok(GrepWaitStepOutcome::Continue)
             },
         )
         .await
@@ -167,7 +167,7 @@ mod tests {
                     .expect("checkpoint id"),
                 })
             },
-            || async { Ok(GrepWaitStep::Settled) },
+            || async { Ok(GrepWaitStepOutcome::Settled) },
         )
         .await
         .expect("wait over an index that settles short");

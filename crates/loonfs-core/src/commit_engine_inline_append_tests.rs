@@ -19,7 +19,7 @@ fn append(path: &str, bytes: &[u8]) -> FilesystemOperation {
 }
 
 fn request(commit_id: &str, operations: Vec<FilesystemOperation>) -> CommitCandidate {
-    CommitCandidate::new(CommitRequest {
+    CommitCandidate::new(CommitIntent {
         commit_id: CommitId::parse(commit_id).expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,

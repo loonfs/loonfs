@@ -19,9 +19,7 @@ mod retention;
 mod streaming_compaction;
 
 use super::build::{build_manifest_segments, build_manifest_segments_from_rows};
-use super::cache::{
-    CacheScope, MetadataSegmentBlockKind, MetadataSegmentCache, SharedSegmentBlocks,
-};
+use super::cache::{CacheScope, MetadataSegmentCache, SharedSegmentBlocks};
 use super::compaction_merge::locality_of;
 use super::error::ManifestLoadError;
 use super::load::{
@@ -48,6 +46,7 @@ use super::{
     block_fetch, compaction_step, data_block_load, fold, load, row, scan, CompactionStepOutcome,
     MetadataCompactionPolicy,
 };
+use crate::block_cache::SegmentBlockKind;
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::catalog::load_namespace_catalog_entry;
@@ -57,7 +56,7 @@ use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
 use crate::pin::record::load_pin;
 use crate::protocol::list_changes_after;
-use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine};
+use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine};
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use crate::test_support::ops::{
     create, delete_path, move_path, put_file, restore_file_revision, write_file_bytes,
@@ -182,7 +181,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
     .publish_batch(
         store,
         vec![CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::parse(commit_id).expect("commit id"),
                 loonfs_test_support::test_actor(),
                 None,

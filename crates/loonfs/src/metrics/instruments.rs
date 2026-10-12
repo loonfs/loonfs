@@ -121,10 +121,10 @@ impl MetricLabel for PublishOutcome {
 }
 
 /// One reclaimable family: its label, and the count a pass reports for it.
-type GcCategory = (&'static str, fn(&GcResponse) -> u64);
+type GcKind = (&'static str, fn(&GcResponse) -> u64);
 
 /// Counts each deletion once, with pins grouped by owner.
-const GC_CATEGORIES: [GcCategory; 10] = [
+const GC_CATEGORIES: [GcKind; 10] = [
     ("deleted_wal_objects", |gc| gc.deleted.wal_objects),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
@@ -1126,22 +1126,22 @@ mod tests {
 
     use super::*;
     use crate::metrics::{
-        DefaultMetricsRecorder, KeyClass, MetricValue, MetricsSnapshot, ObjectStoreOperation,
-        ObjectStoreResultClass, PutModeClass, VecObjectStoreMetricsRecorder,
+        DefaultMetricsRecorder, KeyKind, MetricValue, MetricsSnapshot, ObjectStoreOperation,
+        ObjectStoreResultKind, PutModeKind, VecObjectStoreMetricsRecorder,
     };
 
     fn sample(
         operation: ObjectStoreOperation,
-        result: ObjectStoreResultClass,
+        result: ObjectStoreResultKind,
         attempts: u32,
     ) -> ObjectStoreMetricSample {
-        classified_sample(operation, result, KeyClass::Content, attempts)
+        classified_sample(operation, result, KeyKind::Content, attempts)
     }
 
     fn classified_sample(
         operation: ObjectStoreOperation,
-        result: ObjectStoreResultClass,
-        key_class: KeyClass,
+        result: ObjectStoreResultKind,
+        key_class: KeyKind,
         attempts: u32,
     ) -> ObjectStoreMetricSample {
         ObjectStoreMetricSample {
@@ -1154,7 +1154,7 @@ mod tests {
             item_count: None,
             key_class,
             range_class: None,
-            put_mode: Some(PutModeClass::Overwrite),
+            put_mode: Some(PutModeKind::Overwrite),
             store_kind: None,
         }
     }
@@ -1285,7 +1285,7 @@ mod tests {
 
         bridge.record(sample(
             ObjectStoreOperation::Put,
-            ObjectStoreResultClass::Ok,
+            ObjectStoreResultKind::Ok,
             3,
         ));
 
@@ -1347,10 +1347,10 @@ mod tests {
         let bridge = instruments.object_store_recorder().expect("bridge");
 
         for (result, key_class) in [
-            (ObjectStoreResultClass::Ok, KeyClass::WalObject),
-            (ObjectStoreResultClass::NotFound, KeyClass::WalObject),
-            (ObjectStoreResultClass::NotFound, KeyClass::WalObject),
-            (ObjectStoreResultClass::Ok, KeyClass::NamespaceManifest),
+            (ObjectStoreResultKind::Ok, KeyKind::WalObject),
+            (ObjectStoreResultKind::NotFound, KeyKind::WalObject),
+            (ObjectStoreResultKind::NotFound, KeyKind::WalObject),
+            (ObjectStoreResultKind::Ok, KeyKind::NamespaceManifest),
         ] {
             bridge.record(classified_sample(
                 ObjectStoreOperation::Get,
@@ -1402,7 +1402,7 @@ mod tests {
 
         composed.record(sample(
             ObjectStoreOperation::Delete,
-            ObjectStoreResultClass::Ok,
+            ObjectStoreResultKind::Ok,
             1,
         ));
 

@@ -1,7 +1,7 @@
 //! Runtime handles and options for binding tests.
 
-use crate::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces};
-use loonfs::{LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode, TraceStoreKind};
+use crate::{AuthPolicy, BindingConfig, BindingState, HttpMetrics, Namespaces};
+use loonfs::{LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode};
 use loonfs_grep::{
     new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
@@ -15,7 +15,7 @@ use tokio::sync::Semaphore;
 
 #[derive(Clone)]
 pub(super) struct TestOptions {
-    pub(super) binding: BindingOptions,
+    pub(super) binding: BindingConfig,
     pub(super) writer_id: WriterId,
     pub(super) store: SharedObjectStore,
 }
@@ -28,7 +28,7 @@ pub(super) struct TestAppOptions {
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
     TestOptions {
-        binding: BindingOptions {
+        binding: BindingConfig {
             serves_grep: true,
             maintains_grep_index: true,
             serves_maintenance: true,
@@ -65,7 +65,7 @@ pub(super) async fn test_app(
         .inline_content(options.inline_content.clone())
         .max_read_content_bytes(options.max_download_bytes)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(TraceStoreKind::from(options.store_kind))
+        .trace_store_kind(options.store_kind)
         .metrics_recorder(metrics.recorder())
         .build()
         .await?;

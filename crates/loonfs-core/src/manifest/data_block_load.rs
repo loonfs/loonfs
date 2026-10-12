@@ -11,9 +11,10 @@ use super::block_fetch::{
     stored_block_section,
 };
 use super::block_load::SessionBlockMemo;
-use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, MetadataSegmentCache};
+use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache};
 use super::error::ManifestLoadError;
 use super::stored_block_cache::StoredMetadataBlockKind;
+use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::data_block_heap_bytes;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -35,8 +36,7 @@ pub(super) async fn load_segment_data_block<S: ObjectStore + ?Sized>(
     entry: &SegmentIndexEntry,
 ) -> Result<Arc<DecodedDataBlock>, ManifestLoadError> {
     let handle = entry.block;
-    let cache_key =
-        segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Data, handle.offset);
+    let cache_key = segment_block_cache_key(descriptor, SegmentBlockKind::Data, handle.offset);
     if let Some(DecodedMetadataSegmentBlock::Data { block, .. }) =
         memo.and_then(|memo| memo.get(&cache_key))
     {
@@ -97,8 +97,7 @@ pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Siz
     entries: &[SegmentIndexEntry],
 ) -> Result<Arc<DecodedDataBlock>, ManifestLoadError> {
     let handle = entries[0].block;
-    let cache_key =
-        segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Data, handle.offset);
+    let cache_key = segment_block_cache_key(descriptor, SegmentBlockKind::Data, handle.offset);
     if let Some(DecodedMetadataSegmentBlock::Data { block, .. }) =
         memo.and_then(|memo| memo.get(&cache_key))
     {
@@ -132,7 +131,7 @@ pub(super) async fn load_segment_data_block_with_readahead<S: ObjectStore + ?Siz
                 memo.record_stored(
                     &segment_block_cache_key(
                         descriptor,
-                        MetadataSegmentBlockKind::Data,
+                        SegmentBlockKind::Data,
                         entry.block.offset,
                     ),
                     &bytes[start..start + entry.block.stored_bytes as usize],
@@ -185,7 +184,7 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     let mut blocks: Vec<Option<Arc<DecodedDataBlock>>> = vec![None; entries.len()];
     // One probe key reused across the span: a fresh key per block would
     // build the segment object key once per block on every warm scan.
-    let mut probe_key = segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Data, 0);
+    let mut probe_key = segment_block_cache_key(descriptor, SegmentBlockKind::Data, 0);
     for (position, entry) in entries.iter().enumerate() {
         let handle = entry.block;
         probe_key.block_offset = handle.offset;
@@ -261,7 +260,7 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 // concurrent loser resolves the remaining blocks from caches.
                 let first_key = segment_block_cache_key(
                     descriptor,
-                    MetadataSegmentBlockKind::Data,
+                    SegmentBlockKind::Data,
                     span[0].block.offset,
                 );
                 let fetch = || async move {
@@ -354,7 +353,7 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
         );
         if memo.is_some() || segment_cache.is_some() {
             let cache_key =
-                segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Data, handle.offset);
+                segment_block_cache_key(descriptor, SegmentBlockKind::Data, handle.offset);
             let cache_block = DecodedMetadataSegmentBlock::Data {
                 decoded_bytes: data_block_heap_bytes(&decoded),
                 block: Arc::clone(&decoded),

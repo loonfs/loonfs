@@ -1,9 +1,10 @@
 //! Cached reads of gram-index segment filter, index, and data blocks.
 
-use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind};
+use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey};
 use crate::codec::IndexRow;
 use crate::manifest::GrepSegmentRef;
 use crate::{GrepError, Result};
+use loonfs::engine::SegmentBlockKind;
 use loonfs::StoreFailureClass;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::sst_blocks::{
@@ -26,14 +27,14 @@ pub(crate) fn index_segment_corrupt(
     what: &str,
     error: &dyn std::fmt::Display,
 ) -> GrepError {
-    GrepError::CorruptIndex {
+    GrepError::IndexCorrupt {
         message: format!("index segment `{object_key}` carries an unreadable {what}: {error}"),
     }
 }
 
 fn cache_key(
     segment_id: &IndexSegmentId,
-    block_kind: GrepBlockKind,
+    block_kind: SegmentBlockKind,
     handle: &BlockHandle,
 ) -> GrepBlockCacheKey {
     GrepBlockCacheKey {
@@ -51,7 +52,7 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
     let end_exclusive = handle
         .offset
         .checked_add(u64::from(handle.stored_bytes))
-        .ok_or_else(|| GrepError::CorruptIndex {
+        .ok_or_else(|| GrepError::IndexCorrupt {
             message: format!(
                 "index segment `{object_key}` descriptor names bytes past the address space"
             ),
@@ -66,7 +67,7 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
         )
         .await
         .map_err(|error| GrepError::store(object_key, &error))?
-        .ok_or_else(|| GrepError::CorruptIndex {
+        .ok_or_else(|| GrepError::IndexCorrupt {
             message: format!("manifest references missing index segment `{object_key}`"),
         })?;
     if bytes.len() != handle.stored_bytes as usize {
@@ -93,7 +94,7 @@ pub(crate) fn segment_object_len(object_key: &str, descriptor: &GrepSegmentRef) 
         .index_block
         .offset
         .checked_add(u64::from(descriptor.index_block.stored_bytes))
-        .ok_or_else(|| GrepError::CorruptIndex {
+        .ok_or_else(|| GrepError::IndexCorrupt {
             message: format!(
                 "index segment `{object_key}` descriptor names bytes past the address space"
             ),
@@ -119,7 +120,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
         let end = start.checked_add(handle.stored_bytes as usize)?;
         bytes.get(start..end)
     };
-    let index_bytes = section(&descriptor.index_block).ok_or_else(|| GrepError::CorruptIndex {
+    let index_bytes = section(&descriptor.index_block).ok_or_else(|| GrepError::IndexCorrupt {
         message: format!("index segment `{object_key}` index block exceeds the object bounds"),
     })?;
     let entries = Arc::new(
@@ -127,7 +128,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
     );
     let filter_bytes =
-        section(&descriptor.filter_block).ok_or_else(|| GrepError::CorruptIndex {
+        section(&descriptor.filter_block).ok_or_else(|| GrepError::IndexCorrupt {
             message: format!("index segment `{object_key}` filter block exceeds the object bounds"),
         })?;
     let filter = Arc::new(
@@ -135,7 +136,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
     );
     for entry in entries.iter() {
-        let stored = section(&entry.block).ok_or_else(|| GrepError::CorruptIndex {
+        let stored = section(&entry.block).ok_or_else(|| GrepError::IndexCorrupt {
             message: format!("index segment `{object_key}` data block exceeds the object bounds"),
         })?;
         let block = Arc::new(
@@ -143,7 +144,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                 .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?,
         );
         cache.insert(
-            cache_key(&descriptor.segment_id, GrepBlockKind::Data, &entry.block),
+            cache_key(&descriptor.segment_id, SegmentBlockKind::Data, &entry.block),
             DecodedGrepBlock::Data {
                 block,
                 decoded_bytes: entry.block.decoded_bytes as usize,
@@ -160,7 +161,7 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     descriptor: &GrepSegmentRef,
 ) -> Result<Arc<SegmentFilter>> {
     let handle = &descriptor.filter_block;
-    let key = cache_key(&descriptor.segment_id, GrepBlockKind::Filter, handle);
+    let key = cache_key(&descriptor.segment_id, SegmentBlockKind::Filter, handle);
     let decoded = cache
         .get_or_load(&key, || async {
             let object_len = segment_object_len(object_key, descriptor)?;
@@ -172,7 +173,7 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
                 cache.insert(
                     cache_key(
                         &descriptor.segment_id,
-                        GrepBlockKind::Index,
+                        SegmentBlockKind::Index,
                         &descriptor.index_block,
                     ),
                     DecodedGrepBlock::Index {
@@ -219,7 +220,7 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
                 cache.insert(
                     cache_key(
                         &descriptor.segment_id,
-                        GrepBlockKind::Filter,
+                        SegmentBlockKind::Filter,
                         &descriptor.filter_block,
                     ),
                     DecodedGrepBlock::Filter {
@@ -245,7 +246,7 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     };
     let decoded = match cache {
         Some(cache) => {
-            let key = cache_key(&descriptor.segment_id, GrepBlockKind::Index, handle);
+            let key = cache_key(&descriptor.segment_id, SegmentBlockKind::Index, handle);
             cache.get_or_load(&key, load).await?
         }
         None => load().await?,
@@ -262,7 +263,7 @@ pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
     segment_id: &IndexSegmentId,
     handle: &BlockHandle,
 ) -> Result<Arc<DecodedDataBlock<IndexRow>>> {
-    let key = cache_key(segment_id, GrepBlockKind::Data, handle);
+    let key = cache_key(segment_id, SegmentBlockKind::Data, handle);
     let decoded = cache
         .get_or_load(&key, || async {
             let bytes = load_index_section_bytes(store, object_key, handle).await?;
@@ -327,7 +328,7 @@ pub(crate) async fn load_data_block_span<S: ObjectStore + ?Sized>(
 }
 
 fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {
-    GrepError::CorruptIndex {
+    GrepError::IndexCorrupt {
         message: format!(
             "index segment `{object_key}` resolved its {expected} block to a different cache kind"
         ),
@@ -386,7 +387,7 @@ mod tests {
                 .expect("append row");
             rows.push(row);
         }
-        let built = builder.finish().expect("build segment");
+        let built = builder.build().expect("build segment");
         let entries = decode_index_block(&built.bytes[built.index.offset as usize..], &built.index)
             .expect("decode index");
         assert_eq!(entries.len(), rows.len());

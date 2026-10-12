@@ -1,9 +1,9 @@
 //! Garbage collection for upload sessions and their content.
 
-use super::live_set::{LiveSet, RetirementState};
+use super::live_set::{LiveSet, RetirementStatus};
 use crate::context::MutationContext;
 use crate::control_update::{
-    load_upload_session_state, try_update_upload_session, CasAttempt, UploadSessionUpdate,
+    load_upload_session_state, try_update_upload_session, CasOutcome, UploadSessionUpdate,
 };
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
@@ -64,14 +64,14 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     state: &UploadSessionPayload,
 ) -> Result<UploadSessionSweep> {
     match live.retirement_state() {
-        RetirementState::Retained { until_ms } => {
+        RetirementStatus::Retained { until_ms } => {
             return Ok(UploadSessionSweep::Retain {
                 reclaimable_at_ms: until_ms,
             })
         }
-        RetirementState::Active | RetirementState::Eligible => {}
+        RetirementStatus::Active | RetirementStatus::Eligible => {}
     }
-    let retired = live.retirement_state() == RetirementState::Eligible;
+    let retired = live.retirement_state() == RetirementStatus::Eligible;
     match &state.status {
         UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
             abort_expired_session(store, grace_window_ms, context, state, *expires_at_ms).await
@@ -160,12 +160,12 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     };
     match aborted {
         // Keep the newly aborted record until its post-abort grace period expires.
-        CasAttempt::Settled(Some(abandoned)) => {
+        CasOutcome::Settled(Some(abandoned)) => {
             let _ = abandoned.release(store).await;
             Ok(retain_until(context.now_ms.saturating_add(grace_window_ms)))
         }
-        CasAttempt::Settled(None) => Ok(retain_undated()),
-        CasAttempt::Contended(_) => {
+        CasOutcome::Settled(None) => Ok(retain_undated()),
+        CasOutcome::Contended(_) => {
             tracing::debug!(
                 namespace_id = %state.namespace_id,
                 upload_id = %state.upload_id,

@@ -2,7 +2,7 @@
 
 use crate::common::commit_split_support::*;
 use loonfs_core::content::store_bytes_as_content;
-use loonfs_core::publish::{CommitRequest, FilesystemOperation};
+use loonfs_core::publish::{CommitIntent, FilesystemOperation};
 use loonfs_core::{Error as CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::{
@@ -69,7 +69,7 @@ async fn guarded_mkdir(
     submit_commit(
         store,
         namespace_id,
-        CommitRequest::single(
+        CommitIntent::single(
             test_commit_id(None),
             loonfs_test_support::test_actor(),
             None,
@@ -168,7 +168,7 @@ async fn creates_entries_under_a_parent_inode() {
     submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: test_commit_id(Some("create-by-inode")),
             actor_id: loonfs_test_support::test_actor(),
@@ -369,7 +369,7 @@ async fn move_requires_the_current_binding_version() {
     assert_eq!(details.actual_binding_version, Some(fresh_version.clone()));
 
     let binding_precondition = |path: &str, inode_id| {
-        CommitRequest::single(
+        CommitIntent::single(
             test_commit_id(Some("binding-precondition")),
             loonfs_test_support::test_actor(),
             None,
@@ -499,7 +499,7 @@ async fn earlier_move_makes_a_later_precondition_stale_and_rolls_back_the_commit
     let error = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: test_commit_id(Some("move-then-delete-with-old-version")),
             actor_id: loonfs_test_support::test_actor(),
@@ -564,7 +564,7 @@ async fn content_write_preserves_the_precondition_for_a_later_move() {
     submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: test_commit_id(Some("write-then-move-with-same-version")),
             actor_id: loonfs_test_support::test_actor(),
@@ -678,7 +678,7 @@ async fn inode_operation_observes_an_earlier_delete_in_the_same_commit() {
     let error = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: test_commit_id(Some("delete-then-write")),
             actor_id: loonfs_test_support::test_actor(),

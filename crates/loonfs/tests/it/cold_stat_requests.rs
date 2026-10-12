@@ -110,7 +110,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .expect("prepare existing content");
             let content_ref = prepared.content_ref().clone();
             candidates.push(loonfs::publish::CommitCandidate::prepared(
-                loonfs::publish::CommitRequest::single(
+                loonfs::publish::CommitIntent::single(
                     loonfs::CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,

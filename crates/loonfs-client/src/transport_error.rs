@@ -5,7 +5,7 @@ use loonfs_types::ErrorCode;
 type Cause = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug)]
-enum Kind {
+enum TransportErrorKind {
     Other,
     Connect,
     Timeout,
@@ -16,7 +16,7 @@ enum Kind {
 #[derive(Debug, thiserror::Error)]
 #[error("transport failure: {source}")]
 pub struct TransportError {
-    kind: Kind,
+    kind: TransportErrorKind,
     #[source]
     source: Cause,
 }
@@ -25,7 +25,7 @@ impl TransportError {
     /// Preserves a transport cause without a more specific classification.
     pub fn new(source: impl Into<Cause>) -> Self {
         Self {
-            kind: Kind::Other,
+            kind: TransportErrorKind::Other,
             source: source.into(),
         }
     }
@@ -33,7 +33,7 @@ impl TransportError {
     /// Marks a failure to establish a connection.
     pub fn connect(source: impl Into<Cause>) -> Self {
         Self {
-            kind: Kind::Connect,
+            kind: TransportErrorKind::Connect,
             source: source.into(),
         }
     }
@@ -41,7 +41,7 @@ impl TransportError {
     /// Marks an expired request or inactivity limit.
     pub fn timeout(source: impl Into<Cause>) -> Self {
         Self {
-            kind: Kind::Timeout,
+            kind: TransportErrorKind::Timeout,
             source: source.into(),
         }
     }
@@ -49,24 +49,24 @@ impl TransportError {
     /// Marks an interrupted request or response body.
     pub fn body(source: impl Into<Cause>) -> Self {
         Self {
-            kind: Kind::Body,
+            kind: TransportErrorKind::Body,
             source: source.into(),
         }
     }
 
     /// Reports whether establishing the connection failed.
     pub fn is_connect(&self) -> bool {
-        matches!(self.kind, Kind::Connect)
+        matches!(self.kind, TransportErrorKind::Connect)
     }
 
     /// Reports whether a configured time limit expired.
     pub fn is_timeout(&self) -> bool {
-        matches!(self.kind, Kind::Timeout)
+        matches!(self.kind, TransportErrorKind::Timeout)
     }
 
     /// Reports whether a body ended with an error.
     pub fn is_body(&self) -> bool {
-        matches!(self.kind, Kind::Body)
+        matches!(self.kind, TransportErrorKind::Body)
     }
 
     /// Returns `None` because transport failures carry no server error code.

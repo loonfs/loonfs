@@ -1623,12 +1623,12 @@ mod tests {
     fn provider_client_failures_are_classified_at_the_adapter_boundary() {
         let path = Path::from("private-key");
         assert_eq!(
-            map_provider_error("private-key", transport_glitch()).class(),
-            crate::ObjectStoreErrorClass::RetryableTransport
+            map_provider_error("private-key", transport_glitch()).kind(),
+            crate::ObjectStoreErrorKind::RetryableTransport
         );
         assert_eq!(
-            map_provider_error("private-key", auth_rejection(&path)).class(),
-            crate::ObjectStoreErrorClass::PermissionDenied
+            map_provider_error("private-key", auth_rejection(&path)).kind(),
+            crate::ObjectStoreErrorKind::PermissionDenied
         );
     }
 
@@ -1648,7 +1648,7 @@ mod tests {
 
         let error = map_provider_error("private-key", error);
 
-        assert_eq!(error.class(), crate::ObjectStoreErrorClass::Configuration);
+        assert_eq!(error.kind(), crate::ObjectStoreErrorKind::Configuration);
         assert_eq!(
             error.to_string(),
             "invalid object store configuration: could not resolve `store.credentials` through the standard AWS credential chain"

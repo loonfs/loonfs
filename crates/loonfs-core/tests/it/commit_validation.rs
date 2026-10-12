@@ -11,7 +11,7 @@ use loonfs_core::content::{
     mint_content_token, store_bytes_as_content, verify_content_token, ContentTokenError,
 };
 use loonfs_core::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
-use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::time::Deadline;
 use loonfs_core::{Error as CoreError, ErrorCode, ResolvedUploadCompletion};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -75,7 +75,7 @@ async fn unadmitted_content_fails_every_candidate_without_being_read() {
     let responses = publish_namespace_commits_batch(
         &store,
         &namespace_id,
-        vec![CommitCandidate::new(CommitRequest::single(
+        vec![CommitCandidate::new(CommitIntent::single(
             commit_id("put-cold-content"),
             loonfs_test_support::test_actor(),
             None,
@@ -99,13 +99,13 @@ async fn unadmitted_content_fails_every_candidate_without_being_read() {
         &store,
         &namespace_id,
         vec![
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 commit_id("put-shared-a"),
                 loonfs_test_support::test_actor(),
                 None,
                 put_file("/docs/a.txt", content.content_ref().clone()),
             )),
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 commit_id("put-shared-b"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -191,7 +191,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .publish_batch(
             &store,
             vec![CommitCandidate::prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     commit_id("put-admitted-content"),
                     loonfs_test_support::test_actor(),
                     None,
@@ -230,7 +230,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .publish_batch(
             &store,
             vec![CommitCandidate::prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     commit_id("forged-content-owner"),
                     loonfs_test_support::test_actor(),
                     None,
@@ -310,7 +310,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         &store,
         &namespace_id,
         vec![CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id("put-expired-prepared-content"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -356,7 +356,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
         &store,
         &namespace_id,
         vec![
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id("move-before-child-name-check"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -370,7 +370,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
                     },
                 },
             ),
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id("delete-with-stale-binding"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -421,13 +421,13 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
         &store,
         &namespace_id,
         vec![
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id("create-child-before-empty-check"),
                 loonfs_test_support::test_actor(),
                 None,
                 put_file("/docs/child.txt", content.into_content_ref()),
             ),
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id("delete-dir-with-stale-empty-check"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -462,13 +462,13 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
         &store,
         &namespace_id,
         vec![
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id("keep-first-allocation"),
                 loonfs_test_support::test_actor(),
                 None,
                 create_dir("/first"),
             ),
-            CommitRequest {
+            CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: commit_id("discard-allocation"),
                 actor_id: loonfs_test_support::test_actor(),
@@ -476,7 +476,7 @@ async fn a_rejected_batch_candidate_does_not_consume_inode_ids() {
                 message: None,
                 operations: vec![create_dir("/discarded"), delete_path("/missing")],
             },
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id("reuse-discarded-allocation"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -645,7 +645,7 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
     let error = publish_namespace_commits_batch(
         &guarded_store,
         &namespace_id("demo"),
-        vec![CommitCandidate::new(CommitRequest::single(
+        vec![CommitCandidate::new(CommitIntent::single(
             commit_id("replace-stale-missing-content"),
             loonfs_test_support::test_actor(),
             None,
@@ -728,7 +728,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
     let response = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("reports-batch"),
             actor_id: loonfs_test_support::test_actor(),
@@ -786,7 +786,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
     let error = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
             actor_id: loonfs_test_support::test_actor(),
@@ -820,7 +820,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
     let response = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("half-good-batch"),
             actor_id: loonfs_test_support::test_actor(),
@@ -845,7 +845,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         .await
         .expect("bootstrap namespace");
 
-    let batch = |commit: &str| CommitRequest {
+    let batch = |commit: &str| CommitIntent {
         preconditions: Vec::new(),
         commit_id: commit_id(commit),
         actor_id: loonfs_test_support::test_actor(),
@@ -865,7 +865,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
     let error = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("replayed-batch"),
             actor_id: loonfs_test_support::test_actor(),
@@ -893,7 +893,7 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
     let as_batch = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("one-operation"),
             actor_id: loonfs_test_support::test_actor(),
@@ -921,7 +921,7 @@ async fn operation_order_decides_the_outcome() {
     submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("create-then-delete"),
             actor_id: loonfs_test_support::test_actor(),
@@ -940,7 +940,7 @@ async fn operation_order_decides_the_outcome() {
     submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("seed-y"),
             actor_id: loonfs_test_support::test_actor(),
@@ -955,7 +955,7 @@ async fn operation_order_decides_the_outcome() {
     submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("delete-then-create"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1016,7 +1016,7 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
     submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("with_preconditions-chain"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1037,7 +1037,7 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
     let error = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             preconditions: Vec::new(),
             commit_id: commit_id("stale-with_preconditions-chain"),
             actor_id: loonfs_test_support::test_actor(),
@@ -1141,7 +1141,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         &store,
         &namespace_id,
         vec![CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id("put-re-minted-content"),
                 loonfs_test_support::test_actor(),
                 None,

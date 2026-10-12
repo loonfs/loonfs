@@ -17,7 +17,7 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
     );
     config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
     config.grep.mode = loonfs_server::GrepMode::Disabled;
-    let (router, state) = loonfs_server::app(config, loonfs_server::AppOptions::default())
+    let (router, state) = loonfs_server::app(config, loonfs_server::AppConfig::default())
         .await
         .expect("app");
     let service = tower::service_fn(move |request: http::Request<Body>| {

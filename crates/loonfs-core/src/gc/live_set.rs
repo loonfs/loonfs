@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum RetirementState {
+pub(super) enum RetirementStatus {
     Active,
     Retained { until_ms: Option<u64> },
     Eligible,
@@ -238,19 +238,19 @@ impl LiveSet {
             .saturating_add(self.grace_window_ms)
     }
 
-    pub(super) fn retirement_state(&self) -> RetirementState {
+    pub(super) fn retirement_state(&self) -> RetirementStatus {
         let Some(tombstone) = &self.current_tombstone else {
-            return RetirementState::Active;
+            return RetirementStatus::Active;
         };
         let deadline_ms = self.deadline(tombstone);
         if self.now_ms < deadline_ms {
-            RetirementState::Retained {
+            RetirementStatus::Retained {
                 until_ms: Some(deadline_ms),
             }
         } else if self.has_pins {
-            RetirementState::Retained { until_ms: None }
+            RetirementStatus::Retained { until_ms: None }
         } else {
-            RetirementState::Eligible
+            RetirementStatus::Eligible
         }
     }
 }

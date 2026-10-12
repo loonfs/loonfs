@@ -1,6 +1,7 @@
 //! Runtime limits and read policy.
 
-use crate::trace::{TraceMode, TraceStoreKind};
+use crate::trace::TraceMode;
+use loonfs_objectstore::ConfiguredObjectStoreKind;
 
 /// Default minimum interval, in milliseconds, between checks for a successor
 /// to a cached manifest.
@@ -23,14 +24,14 @@ pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// that share an execution budget, are limits of the
 /// [`ExecutionBudget`](crate::ExecutionBudget).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublicationLimits {
+pub struct PublicationPolicy {
     /// Maximum admitted requests for one namespace. Defaults to 1,024.
     pub max_requests_per_namespace: std::num::NonZeroUsize,
     /// Approximate retained request bytes for one namespace. Defaults to 8 MiB.
     pub max_estimated_bytes_per_namespace: std::num::NonZeroUsize,
 }
 
-impl Default for PublicationLimits {
+impl Default for PublicationPolicy {
     fn default() -> Self {
         Self {
             max_requests_per_namespace: std::num::NonZeroUsize::new(1024)
@@ -129,6 +130,7 @@ pub(crate) struct ReadConfig {
     pub metadata_lsm_policy: loonfs_core::MetadataLsmPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
-    /// Object-store kind label used by tracing.
-    pub trace_store_kind: TraceStoreKind,
+    /// Object-store kind label used by tracing, or `None` when the caller
+    /// didn't identify the backend.
+    pub trace_store_kind: Option<ConfiguredObjectStoreKind>,
 }

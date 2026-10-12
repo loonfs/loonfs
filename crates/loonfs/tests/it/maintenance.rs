@@ -4,7 +4,7 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
-use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
+use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CompactionStepOutcome, CreateCheckpointOptions, ErrorCode, FoldWalOutcome,
     ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions,
@@ -472,8 +472,8 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
     );
 }
 
-fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitRequest {
-    CommitRequest::single(
+fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitIntent {
+    CommitIntent::single(
         CommitId::parse(commit_id).expect("valid commit id"),
         loonfs_test_support::test_actor(),
         None,

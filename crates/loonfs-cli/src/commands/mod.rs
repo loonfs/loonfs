@@ -20,7 +20,7 @@ mod tree_failures;
 pub(crate) use tree_failures::TreeTransferFailures;
 
 pub(crate) use self::output::{
-    CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus, ListingHeadDrift,
+    CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorOutcome, ListingHeadDrift,
     MaintenanceRan, TrashListing,
 };
 

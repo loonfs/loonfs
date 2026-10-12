@@ -322,7 +322,7 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
         .into_iter()
         .filter_map(|row| match row {
             MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound { display_name },
                 ..
             }) => Some(display_name.as_str().to_owned()),
             _ => None,
@@ -1135,7 +1135,7 @@ async fn multi_block_direntry_segment() -> (
             )
             .expect("rebuilt rows should encode");
     }
-    let built = builder.finish().expect("rebuilt segment");
+    let built = builder.build().expect("rebuilt segment");
     store
         .put_overwrite(
             &metadata_segment_object_key(&descriptor),
@@ -1223,11 +1223,7 @@ fn seed_decoded_blocks(
         let decoded = decode_data_block(&stored_block_bytes(object, &handle), &handle)
             .expect("seeded block decodes");
         cache.insert(
-            block_fetch::segment_block_cache_key(
-                descriptor,
-                MetadataSegmentBlockKind::Data,
-                handle.offset,
-            ),
+            block_fetch::segment_block_cache_key(descriptor, SegmentBlockKind::Data, handle.offset),
             data_block_load::decoded_data_cache_block(decoded),
         );
     }

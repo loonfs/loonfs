@@ -7,15 +7,13 @@
 //! the coalescing provided by ranged store GETs.
 
 use super::block_load::SessionBlockMemo;
-use super::cache::{
-    DecodedMetadataSegmentBlock, MetadataSegmentBlockKind, MetadataSegmentCache,
-    MetadataSegmentCacheKey,
-};
+use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
 use super::data_block_load::decoded_data_cache_block;
 use super::error::ManifestLoadError;
 use super::stored_block_cache::{
     StoredMetadataBlockCache, StoredMetadataBlockKey, StoredMetadataBlockKind,
 };
+use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::index_block_heap_bytes;
 use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -30,7 +28,7 @@ use std::sync::Arc;
 
 pub(super) fn segment_block_cache_key(
     descriptor: &MetadataSegmentRef,
-    block_kind: MetadataSegmentBlockKind,
+    block_kind: SegmentBlockKind,
     block_offset: u64,
 ) -> MetadataSegmentCacheKey {
     MetadataSegmentCacheKey {
@@ -203,7 +201,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     memo: Option<&SessionBlockMemo>,
     descriptor: &MetadataSegmentRef,
-    want: MetadataSegmentBlockKind,
+    want: SegmentBlockKind,
 ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
     let object_key = metadata_segment_object_key(descriptor);
     let filter_handle = descriptor.filter_block;
@@ -211,15 +209,15 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     let object_len = segment_object_len(descriptor);
     let fetch_whole_object = object_len <= WHOLE_SEGMENT_LOAD_MAX_BYTES;
     let fetch_offset = match want {
-        MetadataSegmentBlockKind::Data | MetadataSegmentBlockKind::Manifest => {
+        SegmentBlockKind::Data | SegmentBlockKind::Manifest => {
             return Err(segment_codec_error(
                 &object_key,
                 "segment section fetch supports only filter and index blocks",
             ));
         }
         _ if fetch_whole_object => 0,
-        MetadataSegmentBlockKind::Filter => filter_handle.offset,
-        MetadataSegmentBlockKind::Index => index_handle.offset,
+        SegmentBlockKind::Filter => filter_handle.offset,
+        SegmentBlockKind::Index => index_handle.offset,
     };
     let bytes =
         load_section_bytes(store, &object_key, fetch_offset, object_len - fetch_offset).await?;
@@ -245,11 +243,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             publish_segment_block(
                 segment_cache,
                 memo,
-                segment_block_cache_key(
-                    descriptor,
-                    MetadataSegmentBlockKind::Index,
-                    index_handle.offset,
-                ),
+                segment_block_cache_key(descriptor, SegmentBlockKind::Index, index_handle.offset),
                 &block,
             );
             Some(block)
@@ -271,11 +265,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
             publish_segment_block(
                 segment_cache,
                 memo,
-                segment_block_cache_key(
-                    descriptor,
-                    MetadataSegmentBlockKind::Filter,
-                    filter_handle.offset,
-                ),
+                segment_block_cache_key(descriptor, SegmentBlockKind::Filter, filter_handle.offset),
                 &block,
             );
             Some(block)
@@ -302,7 +292,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                     memo.record_stored(
                         &segment_block_cache_key(
                             descriptor,
-                            MetadataSegmentBlockKind::Data,
+                            SegmentBlockKind::Data,
                             entry.block.offset,
                         ),
                         stored,
@@ -315,11 +305,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
                 publish_segment_block(
                     segment_cache,
                     memo,
-                    segment_block_cache_key(
-                        descriptor,
-                        MetadataSegmentBlockKind::Data,
-                        entry.block.offset,
-                    ),
+                    segment_block_cache_key(descriptor, SegmentBlockKind::Data, entry.block.offset),
                     &block,
                 );
             }
@@ -327,7 +313,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     }
 
     let wanted = match want {
-        MetadataSegmentBlockKind::Filter => filter_block,
+        SegmentBlockKind::Filter => filter_block,
         _ => index_entries,
     };
     wanted.ok_or_else(|| {
@@ -395,8 +381,7 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
     load_small_segment_whole: bool,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
     let handle = descriptor.index_block;
-    let cache_key =
-        segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Index, handle.offset);
+    let cache_key = segment_block_cache_key(descriptor, SegmentBlockKind::Index, handle.offset);
     if let Some(DecodedMetadataSegmentBlock::Index { entries, .. }) =
         memo.and_then(|memo| memo.get(&cache_key))
     {
@@ -424,7 +409,7 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
                 segment_cache,
                 memo,
                 descriptor,
-                MetadataSegmentBlockKind::Index,
+                SegmentBlockKind::Index,
             )
             .await
         } else {
@@ -465,8 +450,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
     descriptor: &MetadataSegmentRef,
 ) -> Result<Arc<SegmentFilter>, ManifestLoadError> {
     let handle = descriptor.filter_block;
-    let cache_key =
-        segment_block_cache_key(descriptor, MetadataSegmentBlockKind::Filter, handle.offset);
+    let cache_key = segment_block_cache_key(descriptor, SegmentBlockKind::Filter, handle.offset);
     if let Some(DecodedMetadataSegmentBlock::Filter { filter, .. }) = memo.get(&cache_key) {
         return Ok(filter);
     }
@@ -502,7 +486,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
             segment_cache,
             Some(memo),
             descriptor,
-            MetadataSegmentBlockKind::Filter,
+            SegmentBlockKind::Filter,
         )
         .await
     };

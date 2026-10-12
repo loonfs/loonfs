@@ -95,7 +95,7 @@ impl Client {
             self.base_url
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), ListSnapshotsResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
@@ -189,7 +189,7 @@ impl Client {
         if let Some(expected) = expected_head_seq {
             query.push("expected_head_seq", expected.0);
         }
-        let url = query.finish();
+        let url = query.build();
         // The expected head is a precondition, not an idempotency key for an ambiguous delete.
         self.request_json::<(), DeleteNamespaceResponse>(self.delete(&url), None, SendPolicy::Once)
             .await
@@ -276,7 +276,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
@@ -302,7 +302,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
@@ -334,7 +334,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
@@ -387,7 +387,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
@@ -415,7 +415,7 @@ impl Client {
         ));
         query.push("path", spec.absolute_path().as_str());
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
@@ -451,7 +451,7 @@ impl Client {
             self.base_url
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
@@ -478,7 +478,7 @@ impl Client {
             namespace_id.as_str()
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), ListTrashResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
@@ -532,7 +532,7 @@ impl Client {
         if let Some(snapshot_id) = &options.snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        let url = query.finish();
+        let url = query.build();
         self.request_json::<(), ListChangesResponse>(self.get(&url), None, SendPolicy::Retry)
             .await
     }
@@ -621,7 +621,7 @@ impl Client {
         if let Some(snapshot_id) = snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        query.finish()
+        query.build()
     }
 
     /// Returns the current bytes of a visible file inode, wherever it is bound.
@@ -728,7 +728,7 @@ impl Client {
         if let Some(snapshot_id) = snapshot_id {
             query.push("snapshot_id", snapshot_id.as_str());
         }
-        query.finish()
+        query.build()
     }
 
     fn inode_revision_content_url(

@@ -101,6 +101,12 @@ pub struct GrepResponse {
 /// The grep index lifecycle for a namespace.
 ///
 /// A namespace is searchable only when the lifecycle is `Active`.
+///
+/// The durable twin is `GrepIndexStatus` in `loonfs-grep`, and the fields
+/// differ because this response tags variants with `status`, writes inode IDs
+/// in their public `ino_` form, and omits a zero `next_event_index`, while the
+/// durable record tags variants with `kind` and always writes
+/// `next_event_index`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]

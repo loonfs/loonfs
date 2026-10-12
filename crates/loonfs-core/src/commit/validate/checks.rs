@@ -2,7 +2,7 @@
 
 use super::super::{CommitOp, CommitValidationError, ResolvedBinding};
 use super::error::CommitOperand;
-use super::view::PublishValidationView;
+use super::view::PublishValidationSession;
 use crate::error::CoreError;
 use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
@@ -41,7 +41,7 @@ impl CommitNumbering {
 
 pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     ops: &[CommitOp],
-    view: &mut PublishValidationView<'_, S>,
+    view: &mut PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     commit_id: &CommitId,
     actor: &ActorId,
@@ -210,7 +210,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_create_directory<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     child_inode_id: InodeId,
     parent_inode_id: InodeId,
@@ -247,7 +247,7 @@ async fn validate_create_directory<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_create_file<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     child_inode_id: InodeId,
     parent_inode_id: InodeId,
@@ -292,7 +292,7 @@ async fn validate_create_file<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_replace_file<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     inode_id: InodeId,
     base_revision_no: RevisionNo,
@@ -323,7 +323,7 @@ async fn validate_replace_file<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_restore_revision<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     inode_id: InodeId,
     source_revision_no: RevisionNo,
@@ -356,7 +356,7 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_delete_file<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     inode_id: InodeId,
     source_binding: &ResolvedBinding,
@@ -369,7 +369,7 @@ async fn validate_delete_file<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_rename<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     inode_id: InodeId,
     source_binding: &ResolvedBinding,
@@ -414,7 +414,7 @@ async fn validate_rename<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_delete_subtree<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     root_inode_id: InodeId,
     source_binding: &ResolvedBinding,
@@ -438,7 +438,7 @@ async fn validate_delete_subtree<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_undelete<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
@@ -476,7 +476,7 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_update_attributes<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     inode_id: InodeId,
     base_attributes_revision_no: AttributesRevisionNo,
@@ -495,7 +495,7 @@ async fn validate_update_attributes<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_update_access<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     inode_id: InodeId,
     base_access_revision_no: AccessRevisionNo,
@@ -586,7 +586,7 @@ fn next_attributes_revision_no(
 }
 
 async fn validate_undelete_target<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
 ) -> Result<(InodeRecord, SubtreeTombstoneRecord), CoreError> {
@@ -622,7 +622,7 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_target_visible<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     operand: CommitOperand,
 ) -> Result<(), CoreError> {
@@ -633,7 +633,7 @@ async fn validate_target_visible<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     expected: AttributesRevisionNo,
 ) -> Result<Attributes, CoreError> {
@@ -653,7 +653,7 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_inode_access_revision_is<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     expected: AccessRevisionNo,
 ) -> Result<(), CoreError> {
@@ -675,7 +675,7 @@ async fn validate_inode_access_revision_is<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_inode_kind<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     expected: InodeKind,
     operand: CommitOperand,
@@ -698,7 +698,7 @@ async fn validate_inode_kind<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_not_covered_by_tombstone<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     operand: CommitOperand,
 ) -> Result<(), CoreError> {
@@ -715,7 +715,7 @@ async fn validate_not_covered_by_tombstone<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_name_absent<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
     rebinding_inode_id: Option<InodeId>,
@@ -745,7 +745,7 @@ async fn validate_name_absent<S: ObjectStore + ?Sized>(
 /// One parent per child: a bind names an inode with no current binding, or
 /// with the binding its own operation unbinds first.
 async fn validate_child_unbound<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     child_inode_id: InodeId,
     unbinding: Option<DeltaPosition>,
 ) -> Result<(), CoreError> {
@@ -766,7 +766,7 @@ async fn validate_child_unbound<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_source_binding<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     expected: &ResolvedBinding,
 ) -> Result<(), CoreError> {
     let Some(existing) = view
@@ -800,7 +800,7 @@ async fn validate_source_binding<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_file_base_revision_is<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
     operand: CommitOperand,
@@ -824,7 +824,7 @@ async fn validate_file_base_revision_is<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_restore_source_revision<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     source_revision_no: RevisionNo,
 ) -> Result<RevisionRecord, CoreError> {
@@ -841,7 +841,7 @@ async fn validate_restore_source_revision<S: ObjectStore + ?Sized>(
 }
 
 async fn validate_rename_does_not_cycle<S: ObjectStore + ?Sized>(
-    view: &PublishValidationView<'_, S>,
+    view: &PublishValidationSession<'_, S>,
     inode: &InodeRecord,
     new_parent_inode_id: InodeId,
 ) -> Result<(), CoreError> {

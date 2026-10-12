@@ -8,7 +8,7 @@ pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<Absolu
 }
 
 /// Parses a raw string into the validated, normalized path a
-/// [`CommitRequest`](crate::path::write::CommitRequest) carries:
+/// [`CommitIntent`](crate::path::write::CommitIntent) carries:
 /// absolute, normalized, and not the root.
 ///
 /// Every surface that accepts a raw mutation path parses it here. Planning

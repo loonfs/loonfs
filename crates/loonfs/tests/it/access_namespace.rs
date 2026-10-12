@@ -1,6 +1,6 @@
 //! Namespace administration and recovery under ACL access.
 
-use loonfs::publish::{CommitRequest, FilesystemOperation};
+use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{CreateNamespaceOptions, LoonFs, SnapshotPolicy, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{first_page, namespace_id};
@@ -151,7 +151,7 @@ async fn commit_as(
     let namespace_writer = writer.open_namespace(namespace)?;
     namespace_writer
         .commit(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,

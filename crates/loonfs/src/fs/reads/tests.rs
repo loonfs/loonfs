@@ -6,7 +6,7 @@
 //! [`Maintenance::narrow_segment_row_budget`]. Everything else — folds,
 //! compaction planning, and the page read — is the shipped path.
 
-use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, InlineContent};
+use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
 use crate::{
     CreateNamespaceOptions, DestinationBehavior, LoonFs, NamespaceId, PageRequest,
     SharedObjectStore,
@@ -161,7 +161,7 @@ async fn create_compacted_directory(
             .collect();
         namespace
             .commit_candidate(CommitCandidate::with_inline_content(
-                CommitRequest {
+                CommitIntent {
                     commit_id: CommitId::generate(),
                     actor_id: actor.clone(),
                     subject: None,

@@ -5,7 +5,7 @@
 
 use crate::common::*;
 use bytes::Bytes;
-use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     ChangeSeq, CommitId, DestinationBehavior, ErrorCode, MetadataCache, NamespaceId,
@@ -506,7 +506,7 @@ fn concurrent_puts_coalesce_into_one_wal_object() {
             |commit_id: &str, path: &str, prepared: loonfs_core::content::PreparedContent| {
                 let content_ref = prepared.content_ref().clone();
                 (
-                    CommitRequest::single(
+                    CommitIntent::single(
                         CommitId::parse(commit_id).expect("valid commit id"),
                         loonfs_test_support::test_actor(),
                         None,
@@ -751,7 +751,7 @@ fn a_mutation_request_appears_in_change_feed() {
     let response = fs
         .mutate_blocking(
             &namespace_id,
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id.clone(),
                 loonfs_test_support::test_actor(),
                 Some("create docs".to_owned()),

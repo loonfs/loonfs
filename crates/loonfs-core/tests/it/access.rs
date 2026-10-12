@@ -2,7 +2,7 @@
 
 use crate::common::commit_split_support::{bootstrap_namespace, submit_commit};
 use crate::common::{namespace_engine, read_context};
-use loonfs_core::publish::{CommitRequest, FilesystemOperation};
+use loonfs_core::publish::{CommitIntent, FilesystemOperation};
 use loonfs_core::{CreateNamespaceOptions, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -166,7 +166,7 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
     let batch = submit_commit(
         &store,
         &namespace_id,
-        CommitRequest {
+        CommitIntent {
             commit_id: CommitId::parse("batch-access").expect("commit id"),
             actor_id: loonfs_test_support::test_actor(),
             subject: Some(subject("root", &["prn_root"])),
@@ -362,7 +362,7 @@ async fn commit_as(
     submit_commit(
         store,
         namespace_id,
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -396,7 +396,7 @@ async fn seed(
 #[tokio::test]
 async fn an_acl_namespace_requires_a_subject_and_an_unrestricted_one_ignores_it() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::generate(),
         loonfs_test_support::test_actor(),
         None,
@@ -763,7 +763,7 @@ async fn a_retry_by_another_subject_is_a_reuse_conflict() {
         ],
     )
     .await;
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::generate(),
         loonfs_test_support::test_actor(),
         None,
@@ -800,7 +800,7 @@ async fn a_retry_by_another_subject_is_a_reuse_conflict() {
 #[tokio::test]
 async fn a_replay_from_another_principal_scope_is_refused() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::parse("scope-replay").expect("commit id"),
         loonfs_test_support::test_actor(),
         None,
@@ -880,7 +880,7 @@ async fn submit_operation(
     submit_commit(
         store,
         namespace_id,
-        CommitRequest::single(
+        CommitIntent::single(
             commit_id,
             loonfs_test_support::test_actor(),
             None,
@@ -1762,7 +1762,7 @@ async fn path_absence_preconditions_hide_an_unreadable_parent_kind() {
         ("/team/secret/file/child", "/team/precondition-file"),
         ("/team/secret/child", "/team/precondition-directory"),
     ] {
-        let request = CommitRequest::single(
+        let request = CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -1890,7 +1890,7 @@ async fn inode_forms_require_the_rights_of_their_path_forms() {
         let result = submit_commit(
             &store,
             &namespace_id,
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,

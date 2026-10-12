@@ -17,7 +17,7 @@ pub(crate) use self::plan::{
     AppendedContent, CommitPlan, PreparedCommit, ResolvedBinding, ValidatedCommitPlan,
 };
 pub use self::publish_error::{is_retryable_wal_publish, settle_publish_attempt, WalPublishError};
-pub(crate) use self::validate::{validate_ops, CommitNumbering, PublishValidationView};
+pub(crate) use self::validate::{validate_ops, CommitNumbering, PublishValidationSession};
 pub use self::validate::{CommitOperand, CommitValidationError};
 pub(crate) use self::wal_payload::wal_payload_from_prepared_commit;
 pub use loonfs_types::CommitFingerprint;

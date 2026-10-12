@@ -1,6 +1,6 @@
 //! Subject reads observe access changes through the runtime cache.
 
-use loonfs::publish::{CommitRequest, FilesystemOperation};
+use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{CreateNamespaceOptions, DestinationBehavior, LoonFs};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -87,7 +87,7 @@ async fn check_buffered_read_access(content_size: usize) {
     ] {
         namespace_writer
             .commit(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -107,7 +107,7 @@ async fn check_buffered_read_access(content_size: usize) {
             .expect("prepare file");
         namespace_writer
             .commit_prepared(
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::generate(),
                     loonfs_test_support::test_actor(),
                     None,
@@ -149,7 +149,7 @@ async fn check_buffered_read_access(content_size: usize) {
         .inode_id;
     namespace_writer
         .commit(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -247,7 +247,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
     };
     old_namespace_writer
         .commit(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -278,7 +278,7 @@ async fn check_former_writer_read(warm_before_handoff: bool) {
     let peer_namespace_writer = peer.open_namespace(&namespace_id).expect("open namespace");
     peer_namespace_writer
         .commit(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,

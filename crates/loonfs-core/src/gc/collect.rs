@@ -3,7 +3,7 @@
 use super::content::ContentSweep;
 use super::deletes::apply_decisions;
 use super::families::CandidateFamily;
-use super::live_set::{LiveSet, RetirementState};
+use super::live_set::{LiveSet, RetirementStatus};
 use super::reclaim::reclaim_namespace;
 use super::sweep::Sweep;
 use super::GcOptions;
@@ -39,7 +39,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         .as_ref()
         .map(|tombstone| live.deadline(tombstone));
     report.next_reclamation_at_ms = match live.retirement_state() {
-        RetirementState::Retained { until_ms } => until_ms,
+        RetirementStatus::Retained { until_ms } => until_ms,
         _ => None,
     };
     let content = ContentSweep::load(

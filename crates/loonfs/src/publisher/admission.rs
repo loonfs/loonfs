@@ -3,7 +3,7 @@
 
 use super::{CoreError, NamespaceId, PreparedCandidate};
 use crate::execution_budget::BudgetPermit;
-use crate::{ExecutionBudget, PublicationLimits};
+use crate::{ExecutionBudget, PublicationPolicy};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,7 +18,7 @@ use tokio::sync::oneshot;
 /// share the budget. Lock order: this runtime's usage, then the budget's
 /// totals. Neither lock is held across an await.
 pub(super) struct PublicationAdmission {
-    limits: PublicationLimits,
+    limits: PublicationPolicy,
     namespaces: Mutex<HashMap<NamespaceId, RequestWeight>>,
     budget: ExecutionBudget,
 }
@@ -31,7 +31,7 @@ struct RequestWeight {
 }
 
 impl PublicationAdmission {
-    pub(super) fn new(limits: PublicationLimits, budget: ExecutionBudget) -> Self {
+    pub(super) fn new(limits: PublicationPolicy, budget: ExecutionBudget) -> Self {
         Self {
             limits,
             namespaces: Mutex::default(),
@@ -220,7 +220,7 @@ mod tests {
     }
 
     fn runtime_admission(
-        limits: PublicationLimits,
+        limits: PublicationPolicy,
         budget: &ExecutionBudget,
     ) -> Arc<PublicationAdmission> {
         Arc::new(PublicationAdmission::new(limits, budget.clone()))
@@ -236,7 +236,7 @@ mod tests {
         let budget = ExecutionBudget::builder()
             .max_admitted_requests(limit(1))
             .build();
-        let admission = runtime_admission(PublicationLimits::default(), &budget);
+        let admission = runtime_admission(PublicationPolicy::default(), &budget);
         let namespace_id = NamespaceId::parse("large").expect("namespace");
         let permit = admission.acquire(&namespace_id, 0).expect("fill queue");
         let mut candidate = PreparedCandidate::new(CommitCandidate::new(
@@ -266,9 +266,9 @@ mod tests {
             .max_admitted_requests(limit(3))
             .build();
         let admission = runtime_admission(
-            PublicationLimits {
+            PublicationPolicy {
                 max_requests_per_namespace: limit(2),
-                ..PublicationLimits::default()
+                ..PublicationPolicy::default()
             },
             &budget,
         );
@@ -314,9 +314,9 @@ mod tests {
             .max_admitted_bytes(limit(1026))
             .build();
         let admission = runtime_admission(
-            PublicationLimits {
+            PublicationPolicy {
                 max_estimated_bytes_per_namespace: limit(513),
-                ..PublicationLimits::default()
+                ..PublicationPolicy::default()
             },
             &budget,
         );
@@ -346,7 +346,7 @@ mod tests {
         let budget = ExecutionBudget::builder()
             .max_admitted_bytes(limit(charge))
             .build();
-        let admission = runtime_admission(PublicationLimits::default(), &budget);
+        let admission = runtime_admission(PublicationPolicy::default(), &budget);
         let permit = admission
             .acquire(
                 &namespace,
@@ -368,7 +368,7 @@ mod tests {
         let too_small = ExecutionBudget::builder()
             .max_admitted_bytes(limit(charge - 1))
             .build();
-        let refused = runtime_admission(PublicationLimits::default(), &too_small);
+        let refused = runtime_admission(PublicationPolicy::default(), &too_small);
         assert!(matches!(
             refused.acquire(
                 &namespace,
@@ -385,9 +385,9 @@ mod tests {
         let budget = ExecutionBudget::builder()
             .max_admitted_requests(limit(2))
             .build();
-        let one_per_namespace = PublicationLimits {
+        let one_per_namespace = PublicationPolicy {
             max_requests_per_namespace: limit(1),
-            ..PublicationLimits::default()
+            ..PublicationPolicy::default()
         };
         let first_runtime = runtime_admission(one_per_namespace.clone(), &budget);
         let second_runtime = runtime_admission(one_per_namespace, &budget);

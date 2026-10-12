@@ -4,7 +4,7 @@ use crate::codec::IndexRow;
 use crate::manifest::GrepManifestState;
 use loonfs::engine::{
     DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver, DecodedSegmentBlock,
-    SegmentBlockKind, SegmentCacheKey,
+    SegmentCacheKey,
 };
 use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
 use loonfs_types::format::sst_blocks::DEFAULT_TARGET_BLOCK_BYTES;
@@ -18,7 +18,6 @@ pub type GrepBlockCache = DecodedBlockCache<SegmentCacheKey, DecodedGrepBlock>;
 
 /// A decoded grep block.
 pub type DecodedGrepBlock = DecodedSegmentBlock<IndexRow, Arc<GrepManifestState>>;
-pub(crate) type GrepBlockKind = SegmentBlockKind;
 pub type GrepBlockCacheKey = SegmentCacheKey;
 
 struct GrepBlockCacheMetrics {
@@ -89,9 +88,8 @@ mod tests {
     // The metric helper below expects counters and panics if a test requests
     // a metric of another type.
 
-    use super::{
-        DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockCacheMetrics, GrepBlockKind,
-    };
+    use super::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockCacheMetrics};
+    use loonfs::engine::SegmentBlockKind;
     use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
     use loonfs_types::format::sst_blocks::DecodedDataBlock;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -110,7 +108,7 @@ mod tests {
     fn key(identity: &str) -> GrepBlockCacheKey {
         GrepBlockCacheKey {
             identity: identity.to_owned(),
-            block_kind: GrepBlockKind::Data,
+            block_kind: SegmentBlockKind::Data,
             block_offset: 0,
         }
     }

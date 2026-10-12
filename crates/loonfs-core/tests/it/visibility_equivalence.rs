@@ -6,7 +6,7 @@
 
 use crate::common::read_context;
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::{
     CompactionStepOutcome, CreateNamespaceOptions, Error as CoreError, ErrorCode,
     NamespaceWriterEngine, RuntimeReadContext,
@@ -46,7 +46,7 @@ impl VisibilityHarness {
             .await
             .expect("bootstrap namespace");
         let results = engine
-            .publish_namespace_commits_batch(vec![CommitCandidate::new(CommitRequest::single(
+            .publish_namespace_commits_batch(vec![CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("acquire-for-base").expect("commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -85,7 +85,7 @@ impl VisibilityHarness {
     /// Publishes one operation as its own single-operation request, the shape
     /// every scenario below drives except where it deliberately batches.
     async fn publish_operation(&self, operation: FilesystemOperation) -> Result<Commit, CoreError> {
-        self.publish(CommitCandidate::new(CommitRequest::single(
+        self.publish(CommitCandidate::new(CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
@@ -118,7 +118,7 @@ impl VisibilityHarness {
                 .expect("load namespace catalog");
         let prepared = prepare_stored_content(&catalog, stored);
         self.publish(CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -219,7 +219,7 @@ impl VisibilityHarness {
         &self,
         operations: Vec<FilesystemOperation>,
     ) -> Result<Commit, CoreError> {
-        self.publish(CommitCandidate::new(CommitRequest {
+        self.publish(CommitCandidate::new(CommitIntent {
             preconditions: Vec::new(),
             commit_id: CommitId::generate(),
             actor_id: loonfs_test_support::test_actor(),

@@ -5,7 +5,7 @@ use crate::args::CommandKind;
 use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
-use crate::render::{store_probe_verdict, StoreProbeVerdict};
+use crate::render::{store_probe_verdict, StoreProbeRunOutcome};
 use loonfs_types::api::v0::{
     DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, SnapshotSummary,
     StoreProbeResponse,
@@ -72,14 +72,14 @@ pub(crate) struct TrashListing {
 /// Possible results for one `doctor` check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum DoctorStatus {
+pub(crate) enum DoctorOutcome {
     Ok,
     Warning,
     Failed,
     Skipped,
 }
 
-impl DoctorStatus {
+impl DoctorOutcome {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
@@ -94,7 +94,7 @@ impl DoctorStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct DoctorCheck {
     pub name: String,
-    pub status: DoctorStatus,
+    pub status: DoctorOutcome,
     pub message: String,
     /// Request ID returned with a remote failure.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,7 +339,7 @@ impl CommandData {
             CommandData::TreeTransfer { failures, .. } => !failures.is_empty(),
             CommandData::Doctor { checks } => checks
                 .iter()
-                .any(|check| check.status == DoctorStatus::Failed),
+                .any(|check| check.status == DoctorOutcome::Failed),
             // A wait that ran out of budget renders where the index got to
             // — real data, not an error — and still exits nonzero, because
             // the caller asked for a target that was not reached.
@@ -352,7 +352,7 @@ impl CommandData {
             CommandData::StoreProbed(response) => {
                 matches!(
                     store_probe_verdict(response),
-                    StoreProbeVerdict::Failed { .. }
+                    StoreProbeRunOutcome::Failed { .. }
                 )
             }
             _ => false,

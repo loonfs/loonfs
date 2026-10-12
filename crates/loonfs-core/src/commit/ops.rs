@@ -2,7 +2,7 @@
 //! with their concurrency checks.
 //!
 //! This vocabulary is internal. Callers speak
-//! [`CommitRequest`](crate::path::write::CommitRequest), whose
+//! [`CommitIntent`](crate::path::write::CommitIntent), whose
 //! path-oriented operations the planner compiles into the ops below; nothing
 //! outside this crate constructs them.
 

@@ -13,7 +13,7 @@ use super::runs::MetadataRunManifest;
 use super::stored_block_cache::StoredMetadataBlockCache;
 use crate::block_cache::{
     DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheObserver,
-    DecodedSegmentBlock, SegmentBlockKind, SegmentCacheKey,
+    DecodedSegmentBlock, SegmentCacheKey,
 };
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::namespace::basis::MetadataBasis;
@@ -54,7 +54,6 @@ pub struct MetadataSegmentCacheStats {
     pub cached_decoded_bytes: usize,
 }
 
-pub(super) type MetadataSegmentBlockKind = SegmentBlockKind;
 pub(super) type MetadataSegmentCacheKey = SegmentCacheKey;
 pub(super) type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
     MetadataRow,
@@ -279,12 +278,12 @@ enum HeadStateKey {
 }
 
 #[derive(Debug, Clone)]
-enum HeadState {
+enum HeadStateEntry {
     Anchor(Arc<CachedReadAnchor>),
     Tail(Arc<ProjectedWalTail>),
 }
 
-impl HeadState {
+impl HeadStateEntry {
     fn into_anchor(self) -> Option<Arc<CachedReadAnchor>> {
         match self {
             Self::Anchor(anchor) => Some(anchor),
@@ -300,7 +299,7 @@ impl HeadState {
     }
 }
 
-impl DecodedBlock for HeadState {
+impl DecodedBlock for HeadStateEntry {
     fn weight(&self) -> usize {
         match self {
             Self::Anchor(anchor) => {
@@ -319,7 +318,7 @@ impl DecodedBlock for HeadState {
 /// budget is not kept, because inserting it would evict everything else
 /// first.
 pub struct SharedHeadState {
-    entries: DecodedBlockCache<(CacheScope, HeadStateKey), HeadState>,
+    entries: DecodedBlockCache<(CacheScope, HeadStateKey), HeadStateEntry>,
     max_decoded_bytes: usize,
     observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
     tail_observer: Option<Arc<dyn DecodedBlockCacheObserver>>,
@@ -380,7 +379,7 @@ impl SharedHeadState {
         }
     }
 
-    fn insert(&self, key: (CacheScope, HeadStateKey), entry: HeadState) -> bool {
+    fn insert(&self, key: (CacheScope, HeadStateKey), entry: HeadStateEntry) -> bool {
         if self.max_decoded_bytes == 0 {
             return false;
         }
@@ -435,7 +434,7 @@ impl HeadStateCache {
         self.shared
             .entries
             .get(&self.anchor_key(namespace_id))
-            .and_then(HeadState::into_anchor)
+            .and_then(HeadStateEntry::into_anchor)
     }
 
     /// Returns the namespace's anchor without marking it used.
@@ -443,13 +442,13 @@ impl HeadStateCache {
         self.shared
             .entries
             .peek(&self.anchor_key(namespace_id))
-            .and_then(HeadState::into_anchor)
+            .and_then(HeadStateEntry::into_anchor)
     }
 
     pub fn insert_anchor(&self, anchor: Arc<CachedReadAnchor>) {
         self.shared.insert(
             self.anchor_key(&anchor.head.namespace_id),
-            HeadState::Anchor(anchor),
+            HeadStateEntry::Anchor(anchor),
         );
     }
 
@@ -465,7 +464,7 @@ impl HeadStateCache {
         let tail = shared
             .entries
             .get(&(self.scope, HeadStateKey::Tail(key.clone())))
-            .and_then(HeadState::into_tail);
+            .and_then(HeadStateEntry::into_tail);
         let counter = match &tail {
             Some(_) => &shared.counters.tail_hits,
             None => &shared.counters.tail_misses,
@@ -482,7 +481,10 @@ impl HeadStateCache {
 
     pub fn insert_tail(&self, key: WalTailProjectionCacheKey, tail: Arc<ProjectedWalTail>) {
         let shared = &self.shared;
-        if shared.insert((self.scope, HeadStateKey::Tail(key)), HeadState::Tail(tail)) {
+        if shared.insert(
+            (self.scope, HeadStateKey::Tail(key)),
+            HeadStateEntry::Tail(tail),
+        ) {
             shared.counters.tail_inserts.fetch_add(1, Ordering::SeqCst);
             if let Some(observer) = &shared.tail_observer {
                 observer.insert();
@@ -501,11 +503,10 @@ impl HeadStateCache {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        CacheScope, DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentBlockKind,
-        MetadataSegmentCache, MetadataSegmentCacheKey, SharedSegmentBlocks,
-        WalTailProjectionCacheKey,
+        CacheScope, DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentCache,
+        MetadataSegmentCacheKey, SharedSegmentBlocks, WalTailProjectionCacheKey,
     };
-    use crate::block_cache::DecodedBlock;
+    use crate::block_cache::{DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::wal::ProjectedWalTail;
     use loonfs_types::format::sst_blocks::DecodedDataBlock;
@@ -525,7 +526,7 @@ mod tests {
     fn key(identity: &str) -> MetadataSegmentCacheKey {
         MetadataSegmentCacheKey {
             identity: identity.to_owned(),
-            block_kind: MetadataSegmentBlockKind::Data,
+            block_kind: SegmentBlockKind::Data,
             block_offset: 0,
         }
     }

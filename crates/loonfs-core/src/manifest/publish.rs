@@ -24,7 +24,7 @@ pub(crate) enum ManifestPublicationOutcome {
     PredecessorChanged(CurrentManifest),
 }
 
-enum ManifestClassification {
+enum ManifestKind {
     Installable,
     Settled(ManifestPublicationOutcome),
 }
@@ -158,8 +158,8 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
             ));
         }
         match classify_current(&current.state, &candidate, expected_predecessor, false) {
-            ManifestClassification::Installable => {}
-            ManifestClassification::Settled(outcome) => return Ok((outcome, hint)),
+            ManifestKind::Installable => {}
+            ManifestKind::Settled(outcome) => return Ok((outcome, hint)),
         }
     }
     let payload = manifest.envelope().payload();
@@ -221,7 +221,7 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
                     .await?
                 }
             };
-            let ManifestClassification::Settled(outcome) = outcome else {
+            let ManifestKind::Settled(outcome) = outcome else {
                 return Err(CoreError::OutcomeUnknown {
                     object_key,
                     message: error.public_message().into_owned(),
@@ -278,7 +278,7 @@ fn classify_current(
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
     confirm_authorship: bool,
-) -> ManifestClassification {
+) -> ManifestKind {
     let outcome = if current.manifest() == candidate.manifest() {
         if confirm_authorship {
             ManifestPublicationOutcome::Published(current.clone())
@@ -296,14 +296,14 @@ fn classify_current(
     {
         ManifestPublicationOutcome::CoveredByCurrent(current.clone())
     } else if Some(current.manifest().manifest_no) == expected_predecessor {
-        return ManifestClassification::Installable;
+        return ManifestKind::Installable;
     } else {
         ManifestPublicationOutcome::PredecessorChanged(current.clone())
     };
-    ManifestClassification::Settled(outcome)
+    ManifestKind::Settled(outcome)
 }
 
-impl ManifestClassification {
+impl ManifestKind {
     fn settled_after_conflict(
         self,
         namespace_id: &NamespaceId,
@@ -323,11 +323,11 @@ async fn classify_current_manifest<S: ObjectStore + ?Sized>(
     candidate: &CurrentManifest,
     expected_predecessor: Option<ManifestNo>,
     confirm_authorship: bool,
-) -> Result<ManifestClassification> {
+) -> Result<ManifestKind> {
     Ok(load_current_manifest_if_present(store, namespace_id)
         .await
         .map_err(CoreError::ControlObjectLoad)?
-        .map_or(ManifestClassification::Installable, |loaded| {
+        .map_or(ManifestKind::Installable, |loaded| {
             classify_current(
                 &loaded.state,
                 candidate,

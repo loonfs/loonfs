@@ -323,7 +323,7 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
 }
 
 fn directory(name: &str) -> CommitCandidate {
-    CommitCandidate::new(crate::path::write::CommitRequest::single(
+    CommitCandidate::new(crate::path::write::CommitIntent::single(
         CommitId::parse(name).expect("commit"),
         loonfs_test_support::test_actor(),
         None,
@@ -362,7 +362,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
     create(&store, &namespace_id, &context(1_000))
         .await
         .expect("create");
-    let session = crate::commit_engine::SharedWriterSessionState::default();
+    let session = crate::commit_engine::SharedWriterSessionStatus::default();
     let mut first = NamespaceCommitEngine::new(
         namespace_id.clone(),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
@@ -449,7 +449,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         .expect("next")
         .is_none());
     let session = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::commit_engine::WriterSessionState::Acquired(acquired),
+        crate::commit_engine::WriterSessionStatus::Acquired(acquired),
     ));
     let mut active = NamespaceCommitEngine::new(
         namespace_id.clone(),

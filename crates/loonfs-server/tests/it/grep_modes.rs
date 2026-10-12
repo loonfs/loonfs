@@ -11,7 +11,7 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, AppOptions, GrepConfig, GrepMode, MaintenanceMode, MetadataCacheOverrides, ServerConfig,
+    app, AppConfig, GrepConfig, GrepMode, MaintenanceMode, MetadataCacheConfig, ServerConfig,
     StoreConfig,
 };
 use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
@@ -34,7 +34,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "disabled").await;
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::Disabled),
-        AppOptions::default(),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -96,7 +96,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
 async fn grep_gc_requires_grep_maintenance() {
     for mode in [GrepMode::Disabled, GrepMode::ServeOnly] {
         let temp_dir = tempdir().expect("store tempdir");
-        let (router, server) = app(test_config(temp_dir.path(), mode), AppOptions::default())
+        let (router, server) = app(test_config(temp_dir.path(), mode), AppConfig::default())
             .await
             .expect("build app");
         assert_not_supported(
@@ -121,7 +121,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "query-grammar").await;
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::ServeOnly),
-        AppOptions::default(),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -199,7 +199,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         .expect("open namespace");
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
-        AppOptions::default(),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -465,7 +465,7 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     // carries both indexes to their heads.
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
-        AppOptions::default(),
+        AppConfig::default(),
     )
     .await
     .expect("reopen app");
@@ -502,7 +502,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
         .expect("open namespace");
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::ServeOnly),
-        AppOptions::default(),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -594,7 +594,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .expect("open namespace");
     let (router, server) = app(
         test_config(temp_dir.path(), GrepMode::MaintainOnly),
-        AppOptions::default(),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -679,7 +679,7 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
             maintenance: MaintenanceMode::ServeOnly,
             ..test_config(temp_dir.path(), GrepMode::ServeAndMaintain)
         },
-        AppOptions::default(),
+        AppConfig::default(),
     )
     .await
     .expect("build app");
@@ -763,7 +763,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         publication: Default::default(),
         inline_content: Default::default(),
-        metadata_cache: MetadataCacheOverrides::default(),
+        metadata_cache: MetadataCacheConfig::default(),
         local_cache: None,
         grep: GrepConfig {
             mode,

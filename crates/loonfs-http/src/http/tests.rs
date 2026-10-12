@@ -23,7 +23,9 @@ use axum::body::Bytes;
 use axum::http::StatusCode;
 use fixtures::{test_app, test_options, TestAppOptions, TestOptions};
 use futures::stream::StreamExt;
-use loonfs::{DeleteOptions, LoonFs, PutFileOptions, TraceMode, TraceStoreKind, Writable};
+use loonfs::{
+    ConfiguredObjectStoreKind, DeleteOptions, LoonFs, PutFileOptions, TraceMode, Writable,
+};
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{hint_key as grep_hint_key, manifest_key as grep_manifest_key};
 use loonfs_grep::manifest::{encode_grep_hint, GrepHint};
@@ -2832,7 +2834,7 @@ async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writa
     LoonFs::builder_with_store(store)
         .writer_id(writer_id)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(TraceStoreKind::LocalFs)
+        .trace_store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")

@@ -7,14 +7,14 @@ use loonfs_types::{ActorId, ChangeSeq, CommitId};
 
 /// The publish view: it holds the loaded [`MetadataView`] plus the
 /// accumulating commit overlay, rebuilding an overlaid view for each lookup.
-pub(crate) struct PublishValidationView<'a, S: ObjectStore + ?Sized> {
+pub(crate) struct PublishValidationSession<'a, S: ObjectStore + ?Sized> {
     base_view: MetadataView<'a, 'a, S>,
     batch_accepted: &'a MetadataState,
     committed_seq: ChangeSeq,
     overlay: MetadataState,
 }
 
-impl<'a, S: ObjectStore + ?Sized> PublishValidationView<'a, S> {
+impl<'a, S: ObjectStore + ?Sized> PublishValidationSession<'a, S> {
     pub(crate) fn new(
         base_view: MetadataView<'a, 'a, S>,
         accepted_rows: &'a MetadataState,
@@ -38,7 +38,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishValidationView<'a, S> {
     }
 }
 
-impl<S: ObjectStore + ?Sized> PublishValidationView<'_, S> {
+impl<S: ObjectStore + ?Sized> PublishValidationSession<'_, S> {
     pub(crate) fn committed_seq(&self) -> ChangeSeq {
         self.committed_seq
     }

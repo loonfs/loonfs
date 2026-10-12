@@ -67,7 +67,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
 
 fn put_candidate(completed: &CompletedUpload) -> CommitCandidate {
     CommitCandidate::prepared(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::parse("publish-content").expect("commit id"),
             loonfs_test_support::test_actor(),
             None,
@@ -84,8 +84,8 @@ fn put_candidate(completed: &CompletedUpload) -> CommitCandidate {
     )
 }
 
-fn directory_request(commit_id: &str, name: &str) -> CommitRequest {
-    CommitRequest::single(
+fn directory_request(commit_id: &str, name: &str) -> CommitIntent {
+    CommitIntent::single(
         CommitId::parse(commit_id).expect("commit id"),
         loonfs_test_support::test_actor(),
         None,

@@ -14,10 +14,10 @@ use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{
     LoonFs, Maintenance, SharedObjectStore, StoredMetadataBlockCache,
-    StoredMetadataBlockCacheCloseError, TraceMode, TraceStoreKind, Writable, WriterId,
+    StoredMetadataBlockCacheCloseError, TraceMode, Writable, WriterId,
 };
 use loonfs_grep::{new_grep_block_cache, GrepService, GrepWorker};
-use loonfs_http::{AuthPolicy, BindingOptions, BindingState, HttpMetrics, Namespaces};
+use loonfs_http::{AuthPolicy, BindingConfig, BindingState, HttpMetrics, Namespaces};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use std::ffi::OsString;
@@ -131,7 +131,7 @@ pub struct AppState {
 
 /// Optional inputs for building the HTTP application.
 #[derive(Default)]
-pub struct AppOptions {
+pub struct AppConfig {
     /// Existing object store to use instead of building one from the config.
     pub store: Option<SharedObjectStore>,
     /// Direct-transfer issuers to use instead of the store's issuers.
@@ -147,14 +147,14 @@ pub struct AppOptions {
 /// performs these steps automatically. The cache is optional.
 pub async fn app(
     config: ServerConfig,
-    options: AppOptions,
+    options: AppConfig,
 ) -> Result<(Router, AppState), ServerConfigError> {
     // The one unavoidable validation point: configs that skipped
     // `load_server_config` (direct Rust construction) fail here exactly as
     // file-loaded ones fail at load.
     let memory = config.validate()?;
     memory.log();
-    let AppOptions {
+    let AppConfig {
         store,
         direct_transfers,
     } = options;
@@ -224,7 +224,7 @@ pub async fn app(
             )
         })
         .transpose()?;
-    let options = Arc::new(BindingOptions {
+    let options = Arc::new(BindingConfig {
         serves_grep: config.grep.mode.serves_grep(),
         maintains_grep_index,
         serves_maintenance: config.maintenance.serves(),
@@ -307,7 +307,7 @@ pub(super) async fn build_handles(
     metrics_jsonl_path: Option<OsString>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 ) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
-    let trace_store_kind = TraceStoreKind::from(config.store.kind());
+    let trace_store_kind = config.store.kind();
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
     let invalid_runtime = |error: loonfs::Error| ServerConfigError::InvalidField {
         field: "runtime",
@@ -479,7 +479,7 @@ where
 {
     let shutdown_deadline_ms = config.shutdown_deadline_ms;
     let max_connections = config.max_connections;
-    let (router, state) = app(config, AppOptions::default()).await?;
+    let (router, state) = app(config, AppConfig::default()).await?;
     let listener = super::connection_limit::ConnectionLimit::new(
         listener,
         max_connections,

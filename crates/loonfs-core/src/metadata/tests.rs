@@ -200,7 +200,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
         vec![DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("persisted-key").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: loonfs_types::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
             },
@@ -261,7 +261,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("valid name key"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                     display_name: loonfs_types::DisplayName::parse("docs")
                         .expect("valid display name"),
                 },
@@ -275,7 +275,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             DirentryBindingRecord {
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("report.txt").expect("valid name key"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                     display_name: loonfs_types::DisplayName::parse("report.txt")
                         .expect("valid display name"),
                 },
@@ -433,7 +433,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("report").expect("valid name key"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                     display_name: loonfs_types::DisplayName::parse("report")
                         .expect("valid display name"),
                 },
@@ -453,12 +453,12 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
                 delta_index: 0,
-                state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
             },
             DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("report").expect("valid name key"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                     display_name: loonfs_types::DisplayName::parse("report")
                         .expect("valid display name"),
                 },
@@ -519,7 +519,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
         vec![DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: loonfs_types::DisplayName::parse("Report.TXT")
                     .expect("valid display name"),
             },
@@ -1056,7 +1056,7 @@ fn has_visible_children_sees_through_unbinds() {
         vec![DirentryBindingRecord {
             parent_inode_id: dir,
             name_key: NameKey::parse("doc.txt").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: loonfs_types::DisplayName::parse("doc.txt")
                     .expect("valid display name"),
             },
@@ -1100,7 +1100,7 @@ fn has_visible_children_sees_through_unbinds() {
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(3),
                 delta_index: 0,
-                state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
             }],
         ]
         .concat(),

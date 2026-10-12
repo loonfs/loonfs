@@ -60,7 +60,7 @@ pub(crate) mod commit_split_support {
     use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 
     use loonfs_core::publish::{
-        CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
+        CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
     };
     use loonfs_core::{CreateNamespaceOptions, Error as CoreError, MutationContext};
 
@@ -120,7 +120,7 @@ pub(crate) mod commit_split_support {
     pub(crate) async fn submit_commit<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        request: CommitRequest,
+        request: CommitIntent,
         context: &MutationContext,
     ) -> Result<loonfs_types::api::v0::Commit, CoreError> {
         let candidate = prepared_candidate(store, namespace_id, request).await;
@@ -136,7 +136,7 @@ pub(crate) mod commit_split_support {
     pub(crate) async fn submit_commits_batch<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        requests: Vec<CommitRequest>,
+        requests: Vec<CommitIntent>,
         context: &MutationContext,
     ) -> Vec<Result<loonfs_types::api::v0::Commit, CoreError>> {
         let mut candidates = Vec::with_capacity(requests.len());
@@ -155,7 +155,7 @@ pub(crate) mod commit_split_support {
     pub(crate) async fn prepared_candidate<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        request: CommitRequest,
+        request: CommitIntent,
     ) -> CommitCandidate {
         let mut seen = HashSet::new();
         let mut prepared = Vec::new();
@@ -253,7 +253,7 @@ pub(crate) mod commit_split_support {
         submit_commit(
             store,
             namespace_id,
-            CommitRequest::single(
+            CommitIntent::single(
                 commit_id,
                 loonfs_test_support::test_actor(),
                 None,

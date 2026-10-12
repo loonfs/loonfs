@@ -510,9 +510,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
 
 #[tokio::test]
 async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once() {
-    use crate::publish::{
-        parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation,
-    };
+    use crate::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
     use crate::{AttributeChanges, CommitId};
     use loonfs_objectstore::keys::metadata_segment;
     use loonfs_test_support::ids::{attribute_key, attribute_text};
@@ -568,7 +566,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             })
             .collect();
         namespace_writer
-            .commit_candidate(CommitCandidate::new(CommitRequest {
+            .commit_candidate(CommitCandidate::new(CommitIntent {
                 commit_id: CommitId::generate(),
                 actor_id: loonfs_test_support::test_actor(),
                 subject: None,

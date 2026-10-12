@@ -2,7 +2,7 @@
 
 use super::{LoonFs, ReadOnly, Writable};
 use crate::fs::RuntimeCore;
-use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionState};
+use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionStatus};
 use crate::{ChangeSeq, NamespaceId, Result};
 use loonfs_types::Subject;
 use std::fmt;
@@ -119,7 +119,7 @@ impl Namespace<Writable> {
     }
 
     /// Returns the state of this handle's writer session.
-    pub fn session_state(&self) -> NamespaceSessionState {
+    pub fn session_state(&self) -> NamespaceSessionStatus {
         self.session().state()
     }
 

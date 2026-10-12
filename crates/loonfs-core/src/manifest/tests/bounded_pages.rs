@@ -25,7 +25,7 @@ fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow> {
             MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse(&name).expect("name"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                 },
                 child_inode_id: InodeId(index as u64 + 2),
@@ -50,7 +50,7 @@ async fn segment(store: &impl ObjectStore, rows: &[MetadataRow]) -> MetadataSegm
             )
             .expect("encode fixture row");
     }
-    let built = builder.finish().expect("finish segment");
+    let built = builder.build().expect("finish segment");
     assert!(
         built.bytes.len() > 288 * 1024,
         "exercise ranged, not eager reads"
@@ -429,7 +429,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 )
                 .expect("encode row");
         }
-        let built = builder.finish().expect("segment");
+        let built = builder.build().expect("segment");
         let descriptor = write_manifest_segment(
             &store,
             &NamespaceId::parse("lookup-readahead").expect("namespace"),
@@ -509,7 +509,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         };
         let name = format!("file-{index:06}-{}", "x".repeat(200));
         binding.name_key = NameKey::parse(&name).expect("name");
-        binding.state = loonfs_types::format::manifest::DirentryBindingState::Bound {
+        binding.state = loonfs_types::format::manifest::DirentryBindingStatus::Bound {
             display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
         };
     }

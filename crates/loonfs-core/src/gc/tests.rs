@@ -16,7 +16,7 @@ use crate::manifest::tests::{
 };
 use crate::manifest::MetadataCompactionPolicy;
 use crate::manifest::{advance_retention_floor, RetentionTarget};
-use crate::path::write::{CommitRequest, FilesystemOperation};
+use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::pin::record::delete_pin;
 use crate::store_waves::STORE_WRITE_WAVE;
 use crate::test_support::ops::create;
@@ -944,7 +944,7 @@ async fn put_file_content_with_id<S: ObjectStore>(
     .publish_batch(
         store,
         vec![CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 loonfs_types::CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,
@@ -987,7 +987,7 @@ async fn publish_inline(
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let key = loonfs_objectstore::keys::content_blob(namespace_id, &value.content_ref().content_id);
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         loonfs_types::CommitId::parse(format!("write-{index}")).expect("commit"),
         loonfs_test_support::test_actor(),
         None,

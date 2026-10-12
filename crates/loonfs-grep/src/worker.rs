@@ -762,7 +762,7 @@ async fn plan_backfill_unit(
             .page(page_request(cursor, files_remaining)?)
             .await?;
         if page.captured_seq != captured_seq {
-            return Err(GrepError::CorruptIndex {
+            return Err(GrepError::IndexCorrupt {
                 message: format!(
                     "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep manifest is \
                  backfilling sequence `{captured_seq}`",
@@ -844,7 +844,7 @@ async fn plan_incremental_unit(
             })?;
         let events = &change.events;
         if start_event_index > events.len() {
-            return Err(GrepError::CorruptIndex {
+            return Err(GrepError::IndexCorrupt {
                 message: format!(
                     "grep event cursor `{}` exceeds commit `{}` length `{}`",
                     resume.next_event_index(),
@@ -999,7 +999,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
             .push(&row.row_key(), &row.filter_key(), row)
             .map_err(codec_error)?;
     }
-    let built = builder.finish().map_err(codec_error)?;
+    let built = builder.build().map_err(codec_error)?;
     let filter_inline = built.inline_filter_hex();
     store
         .put_immutable_verified(&object_key, bytes::Bytes::from(built.bytes))
@@ -1105,7 +1105,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     .segments()
                     .iter()
                     .find(|segment| &segment.segment_id == segment_id)
-                    .ok_or_else(|| GrepError::CorruptIndex {
+                    .ok_or_else(|| GrepError::IndexCorrupt {
                         message: format!(
                             "grep reorganization snapshot segment `{segment_id}` is missing from the manifest"
                         ),
@@ -1276,7 +1276,7 @@ fn reorganize_snapshot_row(
 ) -> Result<()> {
     let IndexRow::GramPostings { gram, .. } = &row;
     let gram = *gram;
-    let batch = row.postings().map_err(|error| GrepError::CorruptIndex {
+    let batch = row.postings().map_err(|error| GrepError::IndexCorrupt {
         message: format!(
             "index segment `{object_key}` carries an unreadable posting batch: {error}"
         ),
@@ -1325,7 +1325,7 @@ fn core_state_error(
 fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
     let fallback_object_key = error.object_key().to_owned();
     match error {
-        ImmutableWriteError::DifferentObject { object_key } => GrepError::CorruptIndex {
+        ImmutableWriteError::DifferentObject { object_key } => GrepError::IndexCorrupt {
             message: format!("immutable object `{object_key}` already exists with different bytes"),
         },
         ImmutableWriteError::Transport { object_key, source } => {

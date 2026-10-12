@@ -250,7 +250,7 @@ fn sample_gram_postings_segment() -> BuiltSegmentBlocks {
             .push(&row.row_key(), &row.filter_key(), &row)
             .expect("push a gram postings row");
     }
-    builder.finish().expect("finish the gram index segment")
+    builder.build().expect("finish the gram index segment")
 }
 
 fn segment_section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {

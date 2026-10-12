@@ -7,7 +7,7 @@ use crate::common::commit_split_support::*;
 use crate::common::{namespace_engine, read_context};
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::store_bytes_as_content;
-use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
+use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::time::Deadline;
 use loonfs_core::{CreateNamespaceOptions, Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -1061,7 +1061,7 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     // A spelling whose canonical lookup key differs from it: planning must
     // derive the key from the path component and carry it typed all the way
     // into the durable binding.
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::parse("typed-name-key").expect("valid commit id"),
         loonfs_test_support::test_actor(),
         Some("typed boundary".to_owned()),
@@ -1126,7 +1126,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
             prepared_candidate(
                 &store,
                 &namespace_id,
-                CommitRequest::single(
+                CommitIntent::single(
                     CommitId::parse("put-batched-path").expect("valid commit id"),
                     loonfs_test_support::test_actor(),
                     None,
@@ -1141,7 +1141,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
                 ),
             )
             .await,
-            CommitCandidate::new(CommitRequest::single(
+            CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("move-batched-path").expect("valid commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -1818,7 +1818,7 @@ async fn assert_corpus_admission_and_lookup<'a>(
         let stored_path = format!("/{display_name}");
         let lookup_path = format!("/{name_key}");
         for path in [&stored_path, &lookup_path] {
-            let candidate = CommitCandidate::new(CommitRequest::single(
+            let candidate = CommitCandidate::new(CommitIntent::single(
                 CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,

@@ -5,7 +5,7 @@
 use crate::common::{collect_path_entries, expect_code, writer};
 use loonfs::{
     ErrorCode, LoonFs, ManifestNo, MetadataMaintenanceOptions, Namespace, NamespaceId,
-    NamespaceSessionState, ReadOnly, SharedObjectStore, Writable,
+    NamespaceSessionStatus, ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -108,7 +108,7 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     assert_eq!(failing.attempts(), 0);
     assert_eq!(
         namespace_writer_a.session_state(),
-        NamespaceSessionState::Fenced
+        NamespaceSessionStatus::Fenced
     );
     failing.clear();
 

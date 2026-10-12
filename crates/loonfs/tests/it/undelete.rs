@@ -4,7 +4,7 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
-use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
+use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, Error,
     ErrorCode, InodeId, PutFileOptions, RevisionNo,
@@ -598,7 +598,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
     let error = fs
         .mutate_blocking(
             &namespace_id,
-            CommitRequest {
+            CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("same-commit-cycle").expect("valid commit id"),
                 actor_id: loonfs_test_support::test_actor(),

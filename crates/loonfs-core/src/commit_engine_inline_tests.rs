@@ -72,7 +72,7 @@ fn put(path: &str, content_ref: &ContentRef) -> FilesystemOperation {
 
 fn candidate(commit_id: &str, values: Vec<InlineContent>) -> CommitCandidate {
     CommitCandidate::with_inline_content(
-        CommitRequest {
+        CommitIntent {
             commit_id: CommitId::parse(commit_id).expect("commit"),
             actor_id: loonfs_test_support::test_actor(),
             subject: None,
@@ -440,7 +440,7 @@ async fn invalid_inline_candidates_write_nothing() {
 #[tokio::test]
 async fn inline_tail_replay_matches_publication_and_materializes_before_metadata() {
     let (_directory, store, mut engine, context) = setup().await;
-    let directory = CommitCandidate::new(CommitRequest::single(
+    let directory = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("directory").expect("commit"),
         loonfs_test_support::test_actor(),
         None,

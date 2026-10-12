@@ -53,7 +53,7 @@ fn many_block_segment() -> (Vec<IndexRow>, BuiltSegmentBlocks) {
             .expect("append row");
         rows.push(row);
     }
-    (rows, builder.finish().expect("build segment"))
+    (rows, builder.build().expect("build segment"))
 }
 
 #[tokio::test]

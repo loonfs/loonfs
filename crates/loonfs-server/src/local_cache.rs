@@ -97,7 +97,7 @@ const BLOCK_KINDS: [StoredMetadataBlockKind; 3] = [
 ];
 
 /// One counter per block kind, indexed by [`kind_index`].
-type PerKind = [Arc<dyn CounterHandle>; BLOCK_KINDS.len()];
+type CountersPerBlockKind = [Arc<dyn CounterHandle>; BLOCK_KINDS.len()];
 
 /// Foyer-backed cache with a byte-limited memory tier and local disk tier.
 ///
@@ -535,7 +535,7 @@ fn kind_label(kind: StoredMetadataBlockKind) -> &'static str {
     }
 }
 
-/// Where one block kind's counter sits in a [`PerKind`] array.
+/// Where one block kind's counter sits in a [`CountersPerBlockKind`] array.
 fn kind_index(kind: StoredMetadataBlockKind) -> usize {
     BLOCK_KINDS
         .iter()
@@ -549,11 +549,11 @@ fn kind_index(kind: StoredMetadataBlockKind) -> usize {
 /// closed: the only labels are the three block kinds and the two close
 /// outcomes, all of them `&'static str`, and no call path can add another.
 struct LocalCacheMetrics {
-    hits: PerKind,
-    misses: PerKind,
-    get_failures: PerKind,
-    inserts: PerKind,
-    rejections: PerKind,
+    hits: CountersPerBlockKind,
+    misses: CountersPerBlockKind,
+    get_failures: CountersPerBlockKind,
+    inserts: CountersPerBlockKind,
+    rejections: CountersPerBlockKind,
     closes_clean: Arc<dyn CounterHandle>,
     closes_failed: Arc<dyn CounterHandle>,
 }

@@ -9,7 +9,7 @@
 
 use bytes::Bytes;
 use loonfs::publish::{
-    parse_mutation_path, CommitCandidate, CommitRequest, FilesystemOperation, InlineContent,
+    parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation, InlineContent,
 };
 use loonfs::{
     ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, ListOptions, LoonFs,
@@ -222,7 +222,7 @@ impl Shape {
             );
         }
         CommitCandidate::with_inline_content(
-            CommitRequest {
+            CommitIntent {
                 commit_id: self.commit_id(label),
                 actor_id: self.actor(),
                 subject: (self.rows == Rows::Dense).then(|| subject(0)),

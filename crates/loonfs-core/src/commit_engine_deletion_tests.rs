@@ -76,7 +76,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     stale
         .publish_batch(
             &store,
-            [CommitCandidate::new(CommitRequest::single(
+            [CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("before-delete").expect("commit"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -99,7 +99,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     .delete_namespace(&store, Default::default(), &context)
     .await
     .expect("delete");
-    let candidate = CommitCandidate::new(CommitRequest::single(
+    let candidate = CommitCandidate::new(CommitIntent::single(
         CommitId::parse("after-delete").expect("commit"),
         loonfs_test_support::test_actor(),
         None,
@@ -159,7 +159,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let candidate = CommitCandidate::with_inline_content(
-        CommitRequest::single(
+        CommitIntent::single(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,

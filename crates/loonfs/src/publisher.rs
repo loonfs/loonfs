@@ -33,7 +33,7 @@ use loonfs_core::commit::{
     is_retryable_wal_publish, settle_publish_attempt, CommitFingerprint, WalPublishError,
 };
 use loonfs_core::limits::{CONTENTION_RETRY_LIMIT, FOLD_AT_WAL_OBJECTS};
-use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionState, WriterSessionState};
+use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionStatus, WriterSessionStatus};
 use loonfs_core::time::{Deadline, Observation};
 use loonfs_objectstore::timing::MonotonicTimer;
 use loonfs_types::api::v0::Commit;
@@ -66,7 +66,7 @@ pub struct CloseNamespaceReport {
 
 /// Current state of one namespace writer session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamespaceSessionState {
+pub enum NamespaceSessionStatus {
     /// The session admits work.
     Open,
     /// Another writer acquired a later epoch. Mutations fail with
@@ -159,7 +159,7 @@ impl NamespaceSession {
         self.publisher.submit_delete(options).await
     }
 
-    pub(crate) fn state(&self) -> NamespaceSessionState {
+    pub(crate) fn state(&self) -> NamespaceSessionStatus {
         self.publisher.session_state()
     }
 
@@ -248,7 +248,7 @@ impl PublisherRegistry {
         writer: Weak<WriterBits>,
         runtime: Handle,
         min_publish_interval: Duration,
-        publication_limits: crate::PublicationLimits,
+        publication_limits: crate::PublicationPolicy,
         execution_budget: crate::ExecutionBudget,
     ) -> Self {
         Self {
@@ -440,7 +440,7 @@ struct NamespacePublisher {
     /// Admission holds this lock until it reserves bytes against the observed
     /// tail, so a publication cannot change that tail before the reservation.
     engine: Arc<AsyncMutex<EngineSlot>>,
-    session: SharedWriterSessionState,
+    session: SharedWriterSessionStatus,
     /// Weak: the session table owns its publishers, and a strong reference
     /// back would cycle the whole structure into a leak. A publisher whose
     /// registry is gone keeps serving, with an unowned worker.
@@ -465,7 +465,7 @@ struct EngineSlot {
     /// Invalidation drops only the position of its WAL tail.
     engine: Option<NamespaceCommitEngine>,
     /// Never dropped or rebuilt while the publisher lives.
-    session: SharedWriterSessionState,
+    session: SharedWriterSessionStatus,
     /// Only a publish that observed the tail replaces it. A fold leaves it
     /// as an overestimate, so admission stays conservative until then.
     last_known_wal_tail_inline_bytes: Option<usize>,
@@ -490,7 +490,7 @@ impl EngineSlot {
 ///
 /// A single enum preserves precedence: after deletion succeeds, the
 /// publisher remains `Deleted` even if registry shutdown closes admission.
-enum PublisherAdmissionState {
+enum PublisherAdmissionStatus {
     Open,
     /// Set by the registry's admission close. Later admissions fail with
     /// `shutting_down`; everything already queued keeps publishing.
@@ -508,7 +508,7 @@ struct NamespacePublisherState {
     /// batch, so a delete queued between them keeps its barrier position.
     queue: VecDeque<WorkItem>,
     in_flight: HashMap<CommitId, InFlightRequest>,
-    admission: PublisherAdmissionState,
+    admission: PublisherAdmissionStatus,
     /// The worker draining `queue`, while one is running. A live entry is
     /// what makes the loop single-flight: a worker installs itself under
     /// the admission lock and releases the slot under the same lock that
@@ -533,9 +533,9 @@ impl NamespacePublisherState {
     /// publish. A session is over once no handle holds it, or once it was
     /// closed or its namespace deleted.
     fn has_ended(&self, held: bool) -> bool {
-        let deleted = matches!(self.admission, PublisherAdmissionState::Deleted);
+        let deleted = matches!(self.admission, PublisherAdmissionStatus::Deleted);
         let over =
-            !held || deleted || matches!(self.admission, PublisherAdmissionState::SessionClosed);
+            !held || deleted || matches!(self.admission, PublisherAdmissionStatus::SessionClosed);
         // A deleted session's worker takes nothing more from its queue.
         let worker_running = !deleted
             && self
@@ -665,7 +665,7 @@ enum SubmissionAdmission {
 
 impl NamespacePublisher {
     fn new(namespace_id: NamespaceId, registry: &PublisherRegistry) -> Self {
-        let session = SharedWriterSessionState::default();
+        let session = SharedWriterSessionStatus::default();
         Self {
             namespace_id,
             runtime_core: registry.runtime_core.clone(),
@@ -673,7 +673,7 @@ impl NamespacePublisher {
             state: Arc::new(Mutex::new(NamespacePublisherState {
                 queue: VecDeque::new(),
                 in_flight: HashMap::new(),
-                admission: PublisherAdmissionState::Open,
+                admission: PublisherAdmissionStatus::Open,
                 worker: None,
                 fold: None,
                 compaction: None,
@@ -717,8 +717,8 @@ impl NamespacePublisher {
     /// stays terminal. Either way the session's compaction is cancelled.
     fn close_admission(&self) {
         let mut state = self.lock_state();
-        if matches!(state.admission, PublisherAdmissionState::Open) {
-            state.admission = PublisherAdmissionState::Closed;
+        if matches!(state.admission, PublisherAdmissionStatus::Open) {
+            state.admission = PublisherAdmissionStatus::Closed;
         }
         self.compaction_cancellation.cancel();
     }
@@ -734,27 +734,27 @@ impl NamespacePublisher {
             return Err(CoreError::ShuttingDown);
         }
         let mut state = self.lock_state();
-        if !matches!(state.admission, PublisherAdmissionState::Open) {
+        if !matches!(state.admission, PublisherAdmissionStatus::Open) {
             return Ok(None);
         }
-        state.admission = PublisherAdmissionState::SessionClosed;
+        state.admission = PublisherAdmissionStatus::SessionClosed;
         Ok(Some(state.in_flight.len()))
     }
 
     fn session_closed(&self) -> bool {
         matches!(
             self.lock_state().admission,
-            PublisherAdmissionState::SessionClosed
+            PublisherAdmissionStatus::SessionClosed
         )
     }
 
-    fn session_state(&self) -> NamespaceSessionState {
-        if !matches!(self.lock_state().admission, PublisherAdmissionState::Open) {
-            NamespaceSessionState::Closed
+    fn session_state(&self) -> NamespaceSessionStatus {
+        if !matches!(self.lock_state().admission, PublisherAdmissionStatus::Open) {
+            NamespaceSessionStatus::Closed
         } else if self.session_is_fenced() {
-            NamespaceSessionState::Fenced
+            NamespaceSessionStatus::Fenced
         } else {
-            NamespaceSessionState::Open
+            NamespaceSessionStatus::Open
         }
     }
 
@@ -790,25 +790,25 @@ impl NamespacePublisher {
     fn check_admission(
         &self,
         state: &NamespacePublisherState,
-    ) -> Result<std::sync::MutexGuard<'_, WriterSessionState>, CoreError> {
+    ) -> Result<std::sync::MutexGuard<'_, WriterSessionStatus>, CoreError> {
         match state.admission {
-            PublisherAdmissionState::Open => self.check_fence(),
-            PublisherAdmissionState::Closed => Err(CoreError::ShuttingDown),
-            PublisherAdmissionState::SessionClosed => Err(CoreError::WriterSessionClosed {
+            PublisherAdmissionStatus::Open => self.check_fence(),
+            PublisherAdmissionStatus::Closed => Err(CoreError::ShuttingDown),
+            PublisherAdmissionStatus::SessionClosed => Err(CoreError::WriterSessionClosed {
                 namespace_id: self.namespace_id.clone(),
             }),
-            PublisherAdmissionState::Deleted => Err(self.namespace_deleted()),
+            PublisherAdmissionStatus::Deleted => Err(self.namespace_deleted()),
         }
     }
 
     /// Keeps fencing from racing with admission or a task start until the
     /// caller drops the guard.
-    fn check_fence(&self) -> Result<std::sync::MutexGuard<'_, WriterSessionState>, CoreError> {
+    fn check_fence(&self) -> Result<std::sync::MutexGuard<'_, WriterSessionStatus>, CoreError> {
         let session = self
             .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let WriterSessionState::Fenced(fence) = &*session {
+        if let WriterSessionStatus::Fenced(fence) = &*session {
             return Err(CoreError::WriterFenced(fence.clone()));
         }
         Ok(session)
@@ -820,7 +820,7 @@ impl NamespacePublisher {
                 .session
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            WriterSessionState::Fenced(_)
+            WriterSessionStatus::Fenced(_)
         )
     }
 
@@ -1092,7 +1092,7 @@ impl NamespacePublisher {
         let mut state = self.lock_state();
         // Terminal: a successful delete emptied the queue and set this
         // before its worker returned, so nothing may be taken afterwards.
-        if matches!(state.admission, PublisherAdmissionState::Deleted) || state.queue.is_empty() {
+        if matches!(state.admission, PublisherAdmissionStatus::Deleted) || state.queue.is_empty() {
             state.worker = None;
             return None;
         }
@@ -1576,7 +1576,7 @@ impl NamespacePublisher {
             // the delete; admissions from here on fail fast.
             let queued = {
                 let mut state = self.lock_state();
-                state.admission = PublisherAdmissionState::Deleted;
+                state.admission = PublisherAdmissionStatus::Deleted;
                 take_queued_waiters(&mut state)
             };
             self.compaction_cancellation.cancel();

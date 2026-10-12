@@ -443,7 +443,7 @@ mod tests {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
             },
             child_inode_id: InodeId(child),
@@ -465,7 +465,7 @@ mod tests {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(unbind_seq),
             delta_index: 0,
-            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
         })
     }
 

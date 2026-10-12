@@ -2,7 +2,7 @@
 
 use super::deletes::apply_decisions;
 use super::fork_pins::delete_source_pin;
-use super::live_set::{LiveSet, RetirementState};
+use super::live_set::{LiveSet, RetirementStatus};
 use super::sweep::Decision;
 use crate::error::{CoreError, Result};
 use futures::TryStreamExt;
@@ -16,7 +16,7 @@ pub(super) async fn reclaim_namespace<S: ObjectStore + ?Sized>(
     live: &LiveSet,
     report: &mut GcResponse,
 ) -> Result<()> {
-    if live.retirement_state() != RetirementState::Eligible {
+    if live.retirement_state() != RetirementStatus::Eligible {
         return Ok(());
     }
     let tombstone = live

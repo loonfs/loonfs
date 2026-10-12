@@ -288,7 +288,7 @@ async fn writer_with_policy_and_byte_limit(
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
         .inline_content(policy)
-        .publication_limits(crate::PublicationLimits {
+        .publication_limits(crate::PublicationPolicy {
             max_estimated_bytes_per_namespace: NonZeroUsize::new(max_estimated_bytes_per_namespace)
                 .expect("namespace byte limit"),
             ..Default::default()
@@ -610,7 +610,7 @@ async fn appends_fill_the_wal_object_budget_before_inline_values() {
         .prepare_content(b"four")
         .await
         .expect("prepare");
-    let request = CommitRequest {
+    let request = CommitIntent {
         commit_id: CommitId::parse("put-then-append").expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,
@@ -684,7 +684,7 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
         .prepare_content(b"next")
         .await
         .expect("prepare");
-    let request = CommitRequest::single(
+    let request = CommitIntent::single(
         CommitId::parse("fallback").expect("commit"),
         loonfs_test_support::test_actor(),
         None,
@@ -892,7 +892,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
                 .expect("prepare"),
         );
     }
-    let request = CommitRequest {
+    let request = CommitIntent {
         commit_id: CommitId::parse("batch").expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,
@@ -1168,7 +1168,7 @@ async fn commit_two_values(
             .await
             .expect("prepare second value"),
     ];
-    let request = CommitRequest {
+    let request = CommitIntent {
         commit_id: CommitId::parse(label).expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,
@@ -1449,7 +1449,7 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
             .await
             .expect("prepare"),
     ];
-    let request = CommitRequest {
+    let request = CommitIntent {
         commit_id: CommitId::parse("after-fold").expect("commit"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,

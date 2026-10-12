@@ -4,7 +4,7 @@
 //! Tests grep through runtime handles and direct `GrepWorker` operations.
 
 use crate::common::{default_page_limit, is_content_object, page_limit, GrepHost};
-use loonfs::publish::{CommitRequest, FilesystemOperation};
+use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, SharedObjectStore,
 };
@@ -412,7 +412,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     }
     let commit = namespace
         .commit_prepared(
-            CommitRequest {
+            CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("thousand-file-atomic").expect("commit id"),
                 actor_id: loonfs_test_support::test_actor(),

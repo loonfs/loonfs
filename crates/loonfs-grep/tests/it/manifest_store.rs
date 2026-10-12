@@ -458,7 +458,7 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
         store.reset();
         assert!(matches!(
             publish_grep_manifest(&store, Some(&first), &next, &deadline).await,
-            Err(GrepError::CorruptIndex { .. })
+            Err(GrepError::IndexCorrupt { .. })
         ));
         assert_eq!(store.counts().puts, 0);
         store

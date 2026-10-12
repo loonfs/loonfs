@@ -20,10 +20,10 @@ use super::{acquire_download_permit, AppJson, AppQuery, BindingState, NamespaceI
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
-use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
+use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
     payload_class, ChangeSeq, DownloadOptions, ErrorCode, InodeId, ListOptions, Namespace, PinId,
-    ReadOnly, ReadView, StatOptions, TraceMode, TraceStoreKind,
+    ReadOnly, ReadView, StatOptions, TraceMode,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ApiError;
@@ -587,7 +587,7 @@ pub(super) async fn create_commit(
             .await?,
         ))
     };
-    let request = CommitRequest {
+    let request = CommitIntent {
         preconditions,
         commit_id,
         actor_id,
@@ -600,7 +600,7 @@ pub(super) async fn create_commit(
             "loonfs.put",
             operation = "put",
             mode = TraceMode::Remote.as_str(),
-            store_kind = TraceStoreKind::from(state.options.store_kind).as_str(),
+            store_kind = state.options.store_kind.as_str(),
             payload_class,
         );
         async {

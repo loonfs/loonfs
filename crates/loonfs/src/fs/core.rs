@@ -148,7 +148,7 @@ impl RuntimeCore {
     }
 
     pub(crate) fn trace_store_kind(&self) -> &'static str {
-        self.inner.config.trace_store_kind.as_str()
+        crate::trace::store_kind_label(self.inner.config.trace_store_kind)
     }
 
     pub(crate) fn record_trace_context(&self, span: &tracing::Span) {

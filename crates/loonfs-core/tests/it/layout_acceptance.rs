@@ -6,7 +6,7 @@ use crate::common::{mutation_context, namespace_engine, read_context};
 use bytes::Bytes;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::publish::{
-    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
+    CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
 use loonfs_core::{gc_namespace, GcOptions};
@@ -45,7 +45,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
     .publish_batch(
         store,
         vec![CommitCandidate::prepared(
-            CommitRequest::single(
+            CommitIntent::single(
                 loonfs_types::CommitId::generate(),
                 loonfs_test_support::test_actor(),
                 None,

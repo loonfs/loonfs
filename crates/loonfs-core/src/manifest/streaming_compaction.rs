@@ -186,7 +186,7 @@ impl MetadataCompactionCancellation {
 /// What one finished merge built, held in memory until the caller publishes
 /// it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct MetadataMergeResult {
+pub(super) struct MetadataMergeReport {
     /// The output run's segment descriptors, naming the object keys the merge
     /// wrote them to.
     pub(super) output_segments: Vec<MetadataSegmentRef>,
@@ -215,7 +215,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
     policy: MetadataLsmPolicy,
-) -> Result<MetadataMergeResult> {
+) -> Result<MetadataMergeReport> {
     let merge = GroupMerge::new(
         basis,
         index_memo,
@@ -245,7 +245,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     policy: MetadataLsmPolicy,
     cancellation: &MetadataCompactionCancellation,
-) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
+) -> Result<std::result::Result<MetadataMergeReport, MetadataCompactionJobOutcome>> {
     let merge = GroupMerge::new(
         segments,
         None,
@@ -422,7 +422,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
     input_keys: &BTreeSet<String>,
-    result: MetadataMergeResult,
+    result: MetadataMergeReport,
     cancellation: &MetadataCompactionCancellation,
     publication: &CompactionPublication,
 ) -> Result<MetadataCompactionJobOutcome> {
@@ -676,7 +676,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     output_run_no: Option<RunNo>,
     chain_filter: Option<BloomFilter>,
     keep_every_layout: bool,
-    result: MetadataMergeResult,
+    result: MetadataMergeReport,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
     /// The last input row key seen in each family, which is what lets the merge
@@ -750,9 +750,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             frozen_floor_seq,
             policy,
             input_runs,
-            result: MetadataMergeResult {
+            result: MetadataMergeReport {
                 input_bytes,
-                ..MetadataMergeResult::default()
+                ..MetadataMergeReport::default()
             },
             canonical_digest: RowDigest::default(),
             index_digest: RowDigest::default(),
@@ -765,7 +765,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     async fn run(
         mut self,
         control: &mut MergeControl<'_>,
-    ) -> Result<std::result::Result<MetadataMergeResult, MetadataCompactionJobOutcome>> {
+    ) -> Result<std::result::Result<MetadataMergeReport, MetadataCompactionJobOutcome>> {
         if let Some(stop) = self.load_chain_filter(control).await? {
             return Ok(Err(stop));
         }
@@ -1176,7 +1176,7 @@ mod tests {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
             },
             child_inode_id: InodeId(42),
@@ -1198,7 +1198,7 @@ mod tests {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(bind_seq + 1),
             delta_index: 0,
-            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
         })
     }
 

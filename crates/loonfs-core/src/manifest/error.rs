@@ -10,7 +10,7 @@ use thiserror::Error;
 /// Deliberately not named `*ErrorKind` to avoid colliding with the wire-level
 /// caller-action concept in [`loonfs_types::ErrorKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ManifestLoadFailureClass {
+pub enum ManifestLoadFailureKind {
     Corrupt,
     Store,
 }
@@ -82,9 +82,9 @@ pub enum ManifestLoadError {
 }
 
 impl ManifestLoadError {
-    pub fn failure_class(&self) -> ManifestLoadFailureClass {
+    pub fn kind(&self) -> ManifestLoadFailureKind {
         match self {
-            Self::ReadManifest { .. } | Self::ReadSegment { .. } => ManifestLoadFailureClass::Store,
+            Self::ReadManifest { .. } | Self::ReadSegment { .. } => ManifestLoadFailureKind::Store,
             Self::MissingManifest { .. }
             | Self::ManifestCodec { .. }
             | Self::ManifestNamespaceMismatch { .. }
@@ -96,7 +96,7 @@ impl ManifestLoadError {
             | Self::SegmentCodec { .. }
             | Self::SegmentDescriptorMismatch { .. }
             | Self::SegmentRowKindMismatch { .. }
-            | Self::DuplicateRevisionRow { .. } => ManifestLoadFailureClass::Corrupt,
+            | Self::DuplicateRevisionRow { .. } => ManifestLoadFailureKind::Corrupt,
         }
     }
 }

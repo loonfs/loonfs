@@ -4,7 +4,7 @@
 use crate::common::{open_runtime_async, open_runtime_with_async, store, TestRuntime};
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
+use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
     ByteStream, ChangeSeq, CommitId, CompactionStepOutcome, CreateDirectoryOptions,
     DestinationBehavior, NamespaceId, PutFileOptions, RevisionNo,
@@ -424,7 +424,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
     let content_ref = prepared.content_ref().clone();
     let first = namespace_writer
         .commit_prepared(
-            CommitRequest {
+            CommitIntent {
                 preconditions: Vec::new(),
                 commit_id: commit_id.clone(),
                 actor_id: loonfs_test_support::test_actor(),
@@ -683,7 +683,7 @@ async fn a_changed_message_on_a_direct_commit_still_conflicts() {
         .expect("open namespace");
     let commit_id = CommitId::parse("pinned-commit").expect("valid commit id");
     let request = |message: &str| {
-        CommitRequest::single(
+        CommitIntent::single(
             commit_id.clone(),
             loonfs_test_support::test_actor(),
             Some(message.to_owned()),

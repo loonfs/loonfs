@@ -4,10 +4,10 @@ use super::record::{delete_failed_pin, verify_pin_basis, write_pin, PinBasisVeri
 use crate::cache::MetadataSegmentCache;
 use crate::commit::WalPublishError;
 use crate::context::MutationContext;
-use crate::control_update::{retry_while_contended, CasAttempt};
+use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::manifest::{try_fold_wal, MetadataLsmPolicy, TryFoldWal};
+use crate::manifest::{try_fold_wal, MetadataLsmPolicy, TryFoldWalOutcome};
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{PinOwner, PinPayload};
@@ -42,9 +42,9 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
         )
         .await?
         {
-            TryFoldWal::Settled(basis) => basis,
-            TryFoldWal::RaceLost(_) => {
-                return Ok(CasAttempt::Contended(CoreError::WalPublish(
+            TryFoldWalOutcome::Settled(basis) => basis,
+            TryFoldWalOutcome::RaceLost(_) => {
+                return Ok(CasOutcome::Contended(CoreError::WalPublish(
                     WalPublishError::NumberTaken,
                 )))
             }
@@ -59,8 +59,8 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
         )
         .await
         {
-            Ok(pin) => Ok(CasAttempt::Settled(pin)),
-            Err(error @ CoreError::CheckpointUnavailable(_)) => Ok(CasAttempt::Contended(error)),
+            Ok(pin) => Ok(CasOutcome::Settled(pin)),
+            Err(error @ CoreError::CheckpointUnavailable(_)) => Ok(CasOutcome::Contended(error)),
             Err(error) => Err(error),
         }
     })

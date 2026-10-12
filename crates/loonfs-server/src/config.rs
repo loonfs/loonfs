@@ -21,7 +21,7 @@ pub use loonfs_objectstore::StoreConfig;
 /// Overrides the embedded writer's inline content policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct InlineContentOverrides {
+pub struct InlineContentConfig {
     #[serde(
         serialize_with = "serialize_inline_content_threshold",
         deserialize_with = "deserialize_inline_content_threshold"
@@ -32,7 +32,7 @@ pub struct InlineContentOverrides {
     pub inline_content_tail_limit_bytes: Option<usize>,
 }
 
-impl Default for InlineContentOverrides {
+impl Default for InlineContentConfig {
     fn default() -> Self {
         Self {
             inline_content_threshold_bytes: loonfs::InlineContentPolicy::default()
@@ -77,7 +77,7 @@ where
     }
 }
 
-impl InlineContentOverrides {
+impl InlineContentConfig {
     pub(crate) fn resolve(&self) -> loonfs::InlineContentPolicy {
         let defaults = loonfs::InlineContentPolicy::default();
         loonfs::InlineContentPolicy {
@@ -102,7 +102,7 @@ impl InlineContentOverrides {
 /// are the runtime's publication limits.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PublicationLimitsOverrides {
+pub struct PublicationLimitsConfig {
     pub max_requests: Option<std::num::NonZeroUsize>,
     pub max_requests_per_namespace: Option<std::num::NonZeroUsize>,
     pub max_estimated_bytes: Option<std::num::NonZeroUsize>,
@@ -110,11 +110,11 @@ pub struct PublicationLimitsOverrides {
     pub max_concurrent_publications: Option<std::num::NonZeroUsize>,
 }
 
-impl PublicationLimitsOverrides {
+impl PublicationLimitsConfig {
     /// The per-namespace limits the server's runtime applies.
-    pub(crate) fn resolve(&self) -> loonfs::PublicationLimits {
-        let defaults = loonfs::PublicationLimits::default();
-        loonfs::PublicationLimits {
+    pub(crate) fn resolve(&self) -> loonfs::PublicationPolicy {
+        let defaults = loonfs::PublicationPolicy::default();
+        loonfs::PublicationPolicy {
             max_requests_per_namespace: self
                 .max_requests_per_namespace
                 .unwrap_or(defaults.max_requests_per_namespace),
@@ -165,13 +165,13 @@ pub struct ServerConfig {
     pub max_concurrent_compactions: usize,
     /// Shared request and concurrency limits for namespace publications.
     #[serde(default)]
-    pub publication: PublicationLimitsOverrides,
+    pub publication: PublicationLimitsConfig,
     /// Defaults to a 64 KiB threshold; `false` disables inline writes in TOML.
     #[serde(default)]
-    pub inline_content: InlineContentOverrides,
+    pub inline_content: InlineContentConfig,
     /// Limits of the one metadata cache the server's runtime reads through.
     #[serde(default)]
-    pub metadata_cache: MetadataCacheOverrides,
+    pub metadata_cache: MetadataCacheConfig,
     /// The node-local cache of encoded metadata blocks, if this deployment
     /// keeps one. Absent means no local cache: every metadata block read
     /// that misses the decoded cache goes to object storage, which is the
@@ -451,7 +451,7 @@ pub struct LocalCacheConfig {
 /// cache the server builds at startup. Omitted fields are derived when sized.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MetadataCacheOverrides {
+pub struct MetadataCacheConfig {
     pub max_segment_bytes: Option<usize>,
     pub max_head_state_bytes: Option<usize>,
 }
@@ -1117,7 +1117,7 @@ mod tests {
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{
-        load_server_config, InlineContentOverrides, PublicationLimitsOverrides, ServerConfigError,
+        load_server_config, InlineContentConfig, PublicationLimitsConfig, ServerConfigError,
         AUTH_TOKEN_ENV, CONTENT_TOKEN_SECRET_ENV, DISK_BLOCK_BYTES, MIN_DISK_BYTES,
     };
     use loonfs_test_support::EnvGuard;
@@ -1900,7 +1900,7 @@ root = "/tmp/loonfs-server"
                 .get(),
             defaults.inline_content_fold_at_bytes
         );
-        assert_eq!(InlineContentOverrides::default().resolve(), defaults);
+        assert_eq!(InlineContentConfig::default().resolve(), defaults);
         for (source, threshold) in [
             ("", Some(64 * 1024)),
             (
@@ -1911,22 +1911,21 @@ root = "/tmp/loonfs-server"
             ("inline_content_threshold_bytes = 0", Some(0)),
             ("inline_content_threshold_bytes = false", None),
         ] {
-            let overrides: InlineContentOverrides = toml::from_str(source).expect("overrides");
+            let overrides: InlineContentConfig = toml::from_str(source).expect("overrides");
             assert_eq!(
                 overrides.resolve().inline_content_threshold_bytes,
                 threshold
             );
         }
         assert!(
-            toml::from_str::<InlineContentOverrides>("inline_content_threshold_bytes = true")
-                .is_err()
+            toml::from_str::<InlineContentConfig>("inline_content_threshold_bytes = true").is_err()
         );
     }
 
     #[test]
     fn publication_overrides_are_strict_and_positive() {
-        let defaults: PublicationLimitsOverrides = toml::from_str("").expect("empty overrides");
-        assert_eq!(defaults.resolve(), loonfs::PublicationLimits::default());
+        let defaults: PublicationLimitsConfig = toml::from_str("").expect("empty overrides");
+        assert_eq!(defaults.resolve(), loonfs::PublicationPolicy::default());
         for field in [
             "max_requests",
             "max_requests_per_namespace",
@@ -1934,16 +1933,16 @@ root = "/tmp/loonfs-server"
             "max_estimated_bytes_per_namespace",
             "max_concurrent_publications",
         ] {
-            assert!(toml::from_str::<PublicationLimitsOverrides>(&format!("{field} = 0")).is_err());
+            assert!(toml::from_str::<PublicationLimitsConfig>(&format!("{field} = 0")).is_err());
         }
-        assert!(toml::from_str::<PublicationLimitsOverrides>("max_requsets = 10").is_err());
-        let overrides: PublicationLimitsOverrides =
+        assert!(toml::from_str::<PublicationLimitsConfig>("max_requsets = 10").is_err());
+        let overrides: PublicationLimitsConfig =
             toml::from_str("max_requests = 12\nmax_requests_per_namespace = 3").expect("overrides");
         assert_eq!(overrides.max_requests, std::num::NonZeroUsize::new(12));
         assert_eq!(overrides.resolve().max_requests_per_namespace.get(), 3);
         assert_eq!(
             overrides.resolve().max_estimated_bytes_per_namespace,
-            loonfs::PublicationLimits::default().max_estimated_bytes_per_namespace
+            loonfs::PublicationPolicy::default().max_estimated_bytes_per_namespace
         );
     }
 
@@ -2333,10 +2332,7 @@ root = "/tmp/loonfs-server"
         );
 
         let config = load_server_config(&path).expect("load config");
-        assert_eq!(
-            config.metadata_cache,
-            super::MetadataCacheOverrides::default()
-        );
+        assert_eq!(config.metadata_cache, super::MetadataCacheConfig::default());
         assert_eq!(config.manifest_revalidation_interval_ms, None);
         assert_eq!(config.max_read_working_bytes, None);
     }
@@ -2366,7 +2362,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.max_read_working_bytes, Some(8192));
         assert_eq!(
             config.metadata_cache,
-            super::MetadataCacheOverrides {
+            super::MetadataCacheConfig {
                 max_segment_bytes: Some(16384),
                 max_head_state_bytes: Some(4096),
             }
@@ -2394,7 +2390,7 @@ root = "/tmp/loonfs-server"
         let config = load_server_config(&path).expect("load config");
         assert_eq!(
             config.metadata_cache,
-            super::MetadataCacheOverrides {
+            super::MetadataCacheConfig {
                 max_segment_bytes: Some(0),
                 max_head_state_bytes: Some(0),
             }
