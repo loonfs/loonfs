@@ -33,7 +33,7 @@ This section describes how to keep a design simple.
 
 - **Remove code before you add a layer.** If a change can be made by removing code, that's better than adding an abstraction. Use few abstractions, and only ones that match a concept in the domain. For example, the fold used to pick one of three write paths based on the sizes involved (an in-memory merge, a streamed put, or a provider assembly). The provider adapters already knew how to make that choice, so the fold now writes every extent with one `assemble` call, and the three paths are gone.
 
-- **Fix a bug by removing the wrong rule, not by adding a guard.** When a bug comes from a wrong rule or a special path, remove the rule or the path. A guard adds code, and it leaves the wrong rule in place for the next change to run into. For example, the planner avoids copying the WAL tail by borrowing it, not by caching the copy.
+- **Fix a bug by removing the wrong rule, not by adding a guard.** When a bug comes from a wrong rule or a special path, remove the rule or the path. A guard adds code, and it leaves the wrong rule in place for the next change to run into.
 
 - **Count the costs before you design.** Count the round trips, bytes, and states that a design needs for the largest namespace the limits allow. Count requests before bytes, because one GET to object storage takes tens of milliseconds.
 
@@ -106,7 +106,7 @@ This section describes how errors are defined and formatted.
 
 This section describes how to use types so that an invalid state can't be represented.
 
-- **Represent a lifecycle, a mode, or an outcome as one enum**, where each variant contains only its own fields. A set of booleans, a bool next to an `Option`, or a sentinel value (`u64::MAX`, revision `0`, or a zero-filled count) that stands in for a variant is a bug, because it allows combinations that don't mean anything. Two examples are `WriterSessionStatus { Unacquired, Acquired(..), Fenced(..) }` and `PagerState { NotStarted, More(cursor), Done }`.
+- **Represent a lifecycle, a mode, or an outcome as one enum**, where each variant contains only its own fields. A set of booleans, a bool next to an `Option`, or a sentinel value (`u64::MAX`, revision `0`, or a zero-filled count) that stands in for a variant is a bug, because it allows combinations that don't mean anything. Two examples are `WriterSessionStatus { Unclaimed, Claimed(..), Fenced(..) }` and `PagerState { NotStarted, More(cursor), Done }`.
 
 - **Pass a choice across a module boundary as a two-variant enum, not a bool.** The enum's name describes the choice (`DestinationBehavior`, `AttributeInclusion`), so a call site says what it's asking for instead of passing `true`. A private helper can take a bool.
 
@@ -346,7 +346,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   | `State` | A struct of current values | `MetadataState` |
   | `Kind` | Which shape a value has (it can include data) | `InodeKind` |
   | `Outcome` | An enum of how one step ended | `CompactionStepOutcome` |
-  | `Report` | A struct of what one pass did | `GcReport` |
+  | `Report` | A struct of what one pass did | `GrepGcReport` |
   | `Error` | An error enum | `CoreError` |
   | `Id` | An identifier newtype | `NamespaceId` |
 
@@ -394,7 +394,7 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
 
 - **Use comments to explain why the code is written the way it is.** Write them in full sentences. A comment explains a surprising invariant, a deliberate departure from a rule, or a safety argument. It doesn't narrate what the next line does, repeat a doc, mark a section, point to another place in the code, or record a follow-up, because those comments go stale as the code changes. For example: "Treat a poisoned lock as fatal because another thread panicked while updating the session state."
 
-- **Write the first paragraph of a rustdoc as one sentence.** A function's doc starts with a verb in the third person ("Lists the children of a directory path."), and the doc of a type, field, or variant starts with a noun phrase. Put every identifier in backticks, and describe preconditions and failure modes in prose. Durable and API behavior is defined in `docs/specs/`, so a doc links to the spec instead of restating it. The docs on `ToSchema` types become the OpenAPI descriptions, so they can be longer. The four published crates enforce `missing_docs`.
+- **Write the first paragraph of a rustdoc as one sentence.** A function's doc starts with a verb in the third person ("Lists the children of a directory path."), and the doc of a type, field, or variant starts with a noun phrase. Put every identifier in backticks, and describe preconditions and failure modes in prose. Durable and API behavior is defined in `docs/specs/`, so a doc links to the spec instead of restating it. The docs on `ToSchema` types become the OpenAPI descriptions, so they can be longer. `loonfs`, `loonfs-client`, `loonfs-types`, and `loonfs-objectstore` enforce `missing_docs`.
 
 - **Include the reason in every allow attribute**, in `reason = "..."`.
 
@@ -453,11 +453,9 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
 
 - **Write scripts in Rust, through `xtask`.** Use POSIX sh only where a script has to be sh (the installer and release packaging), and don't embed Python in a shell script.
 
-- **Run the CI checks before every push**, from the worktree root: fmt, clippy with `-D warnings`, the MSRV check, and the test suites. Run them again after a rebase or a merge, because a rebase or merge that applies without conflicts can still break the build or the tests.
+- **Run the CI checks before every push**, from the repository root: fmt, clippy with `-D warnings`, the MSRV check, and the test suites. Run them again after a rebase or a merge, because a rebase or merge that applies without conflicts can still break the build or the tests.
 
 ### Git
-
-- **Use `conor/<kebab-topic>` for branch names.**
 
 - **Write a commit message as one line, `type(scope): summary`**, with the summary in lowercase, starting with a verb, such as `fix(cli): rewrite the command help text`.
 
