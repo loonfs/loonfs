@@ -1,6 +1,8 @@
 # LoonFS Object Storage Provider Reference
 
-This document is a non-normative reference. It lists provider limits and performance data points that inform LoonFS design work, and it isn't a substitute for provider conformance tests.
+This document lists provider limits and performance data points that inform LoonFS design work, and the requirements that a bucket's configuration and a LoonFS provider adapter MUST meet. It isn't a substitute for provider conformance tests.
+
+The key word MUST in this document is to be interpreted as described in BCP 14 ([RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174)) when, and only when, it appears in capitals.
 
 ## 1. Frequently Used Data Points
 
@@ -79,7 +81,7 @@ Every provider that supports direct writes also supports direct reads.
 
 The GCS adapter uses native V4 signed URLs. It doesn't use the GCS S3-interoperability API, and it doesn't implement multipart uploads, even though GCS documents an XML multipart API.[^46] The adapter's own large creates and extensions use the JSON API, with the service account's OAuth token.
 
-Browser clients send direct transfers to the provider. The bucket's CORS configuration must:
+Browser clients send direct transfers to the provider. The bucket's CORS configuration MUST:
 
 - allow the application origin,
 - allow the `PUT` and `GET` methods,
@@ -111,7 +113,7 @@ The server doesn't keep a proxied upload's whole body in memory. It hashes the p
 
 Every built-in provider has a real incremental write path. For a cloud provider, the incoming stream is regrouped into provider multipart parts, and the local filesystem provider writes chunks to a staging file. So the server keeps only one part or chunk of a proxied upload in memory, whatever the object's total size.
 
-Azure Blob Storage isn't supported yet. A native adapter must:
+Azure Blob Storage isn't supported yet. A native adapter MUST:
 
 1. Send each block's CRC-64 as the transactional checksum that the service verifies.
 2. Copy source ranges with Put Block From URL, under the same check.

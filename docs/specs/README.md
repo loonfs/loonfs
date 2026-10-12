@@ -16,11 +16,11 @@ This section lists the documents in the specification and suggests an order for 
 | [Architecture](architecture.md) | How reads, writes, forks, and maintenance fit together. |
 | [Storage format](format.md) | Required object keys, stored records, encodings, publication protocols, and collection rules. |
 | [API](api.md) | API groups, capability discovery, errors, operations, and the HTTP binding. |
-| [Object-storage providers](object-storage-providers.md) | Reference information about provider constraints and supported transfer behavior. |
+| [Object-storage providers](object-storage-providers.md) | Provider constraints, supported transfer behavior, and the requirements for bucket configuration and provider adapters. |
 | [OpenAPI](openapi.json) | Generated schemas for the v0 HTTP API. |
 | [Browser-proxy OpenAPI](openapi-proxy.json) | Generated schemas for clients that address namespaces by alias. |
 
-The storage format is mandatory for a conforming implementation. API requirements apply to the API groups and features that an implementation exposes. The glossary and the architecture overview explain the model, and the format and API documents define its requirements.
+The storage format is mandatory for a conforming implementation. API requirements apply to the API groups and features that an implementation exposes. The glossary and the architecture overview explain the model, and the format, API, and provider documents define its requirements.
 
 For a first read, start with the architecture overview, and then read the format's sections from [The storage model](format.md#1-the-storage-model) through [Publishing a commit](format.md#6-publishing-a-commit). The sections from [Materializing metadata](format.md#7-materializing-metadata) through [Encodings, versions, and extensions](format.md#12-encodings-versions-and-extensions) describe maintenance and lifecycle protocols. The appendices contain the exact fields, row keys, byte encodings, fingerprints, and timing relationships needed to implement the format.
 
