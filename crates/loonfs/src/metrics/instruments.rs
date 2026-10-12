@@ -18,7 +18,7 @@ use crate::{GcResponse, MetadataCompactionJobOutcome};
 use loonfs_core::cache::DecodedBlockCacheObserver;
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 trait MetricLabel: Copy + PartialEq + 'static {
     const VALUES: &'static [Self];
@@ -347,7 +347,10 @@ impl RuntimeInstruments {
         };
         let operation = sample.operation.as_str();
         let instruments = {
-            let mut registry = lock(&installed.object_store);
+            let mut registry = installed
+                .object_store
+                .lock()
+                .expect("the object-store instrument lock should not be poisoned");
             let instruments = registry.entry(operation).or_insert_with(|| {
                 ObjectStoreOperationInstruments::register(installed.recorder.as_ref(), operation)
             });
@@ -1108,14 +1111,6 @@ impl GcInstruments {
 
 fn seconds_from_ms(milliseconds: u64) -> f64 {
     milliseconds as f64 / 1_000.0
-}
-
-// A poisoned instrument registry is recovered rather than propagated:
-// reporting a metric must never be the thing that takes a runtime down.
-fn lock<T>(registry: &Mutex<T>) -> MutexGuard<'_, T> {
-    registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

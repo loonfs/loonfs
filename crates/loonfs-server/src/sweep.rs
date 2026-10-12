@@ -6,7 +6,7 @@ use loonfs::metrics::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, RESULT_ERROR, RESULT_OK,
 };
 use loonfs::{
-    ChangeSeq, ErrorCode, MaintainMetadataOptions, Maintenance, MaintenanceCancellation,
+    ChangeSeq, ErrorCode, ErrorKind, MaintainMetadataOptions, Maintenance, MaintenanceCancellation,
     NamespaceId, SharedObjectStore,
 };
 use loonfs_grep::{
@@ -17,10 +17,10 @@ use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE}
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::EffectiveLimit;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::task::JoinHandle;
@@ -66,6 +66,10 @@ struct SweepInner {
     full_interval: Duration,
     idle_session_timeout_ms: u64,
     visiting: Mutex<HashSet<NamespaceId>>,
+    /// Namespaces a terminal failure took out of the sweep, with the code of
+    /// that failure. It holds at most one entry per namespace in the store and
+    /// lasts for the life of the process.
+    skipped: Mutex<HashMap<NamespaceId, ErrorCode>>,
     slots: Semaphore,
     page_limit: EffectiveLimit,
     stop: MaintenanceCancellation,
@@ -142,6 +146,7 @@ impl Sweep {
                 full_interval: Duration::from_millis(config.full_sweep_interval_ms),
                 idle_session_timeout_ms: config.idle_session_timeout_ms,
                 visiting: Mutex::default(),
+                skipped: Mutex::default(),
                 slots: Semaphore::new(config.max_concurrent_maintenance),
                 page_limit: EffectiveLimit::new(
                     NonZeroU32::new(MAX_NAMESPACE_IDS_PER_PAGE)
@@ -254,6 +259,9 @@ impl Sweep {
 
     async fn visit(&self, namespace_id: NamespaceId, collect_garbage: bool) {
         let inner = &self.inner;
+        if self.skipped(&namespace_id) {
+            return;
+        }
         let Some(_visit) = self.claim(&namespace_id).await else {
             return;
         };
@@ -364,6 +372,12 @@ impl Sweep {
         Some((visit, permit))
     }
 
+    /// Whether a terminal failure took the namespace out of the sweep's
+    /// maintenance. Its held session still closes when it goes idle.
+    fn skipped(&self, namespace_id: &NamespaceId) -> bool {
+        lock(&self.inner.skipped).contains_key(namespace_id)
+    }
+
     async fn gc(&self, namespace_id: &NamespaceId) -> bool {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
@@ -380,14 +394,10 @@ impl Sweep {
         if inner.stop.is_cancelled() {
             return false;
         }
-        let result = match inner.maintenance.now_ms() {
-            Ok(now_ms) => grep
-                .worker
-                .gc_namespace(namespace_id, now_ms)
-                .await
-                .map(drop),
-            Err(error) => Err(GrepError::from(error)),
-        };
+        let result = grep
+            .worker
+            .gc_namespace(namespace_id, inner.maintenance.now_ms())
+            .await;
         if let Err(error) = result {
             self.record_failure(namespace_id, SweepCall::GrepGc, error.code(), &error);
             collected = false;
@@ -440,6 +450,23 @@ impl Sweep {
             return;
         }
         self.inner.metrics.visit_failures[call as usize].increment(1);
+        if is_terminal(code) {
+            if lock(&self.inner.skipped)
+                .insert(namespace_id.clone(), code)
+                .is_none()
+            {
+                self.inner.metrics.visit_skipped[call as usize].increment(1);
+            }
+            tracing::error!(
+                namespace_id = %namespace_id,
+                call = call.as_str(),
+                code = %code,
+                error = %error,
+                "maintenance sweep call failed with an error a retry can't clear; \
+                 the sweep skips the namespace until the server restarts"
+            );
+            return;
+        }
         tracing::warn!(
             namespace_id = %namespace_id,
             call = call.as_str(),
@@ -475,8 +502,25 @@ impl Drop for Visiting<'_> {
     }
 }
 
+/// Whether a failure is terminal for the sweep: a retry can't change the
+/// outcome, so later passes skip the namespace.
+fn is_terminal(code: ErrorCode) -> bool {
+    code == ErrorCode::WriterFenced
+        || matches!(
+            code.kind(),
+            ErrorKind::DataCorruption
+                | ErrorKind::Unauthorized
+                | ErrorKind::Forbidden
+                | ErrorKind::StoragePermissionDenied
+                | ErrorKind::NotSupported
+                | ErrorKind::InvalidRequest
+        )
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    mutex
+        .lock()
+        .expect("a maintenance sweep lock should not be poisoned")
 }
 
 /// A started sweep. Stop it before the runtime shuts down.
@@ -530,6 +574,7 @@ struct SweepMetrics {
     passes_failed: Arc<dyn CounterHandle>,
     pass_seconds: Arc<dyn HistogramHandle>,
     visit_failures: [Arc<dyn CounterHandle>; 4],
+    visit_skipped: [Arc<dyn CounterHandle>; 4],
     namespaces: Arc<dyn GaugeHandle>,
 }
 
@@ -555,6 +600,15 @@ impl SweepMetrics {
                 recorder.register_counter(
                     "loonfs.maintenance.sweep_visit_failures",
                     "Maintenance sweep calls that failed on one namespace, by call",
+                    &[("call", call.as_str())],
+                )
+            }),
+            visit_skipped: SweepCall::ALL.map(|call| {
+                recorder.register_counter(
+                    "loonfs.maintenance.sweep_visit_skipped",
+                    "Namespaces the maintenance sweep stopped visiting after a call failed with \
+                     an error a retry can't clear, by call. The sweep skips them until the \
+                     server restarts, so a restart is the operator action that clears them",
                     &[("call", call.as_str())],
                 )
             }),

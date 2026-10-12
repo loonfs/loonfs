@@ -212,6 +212,12 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
                 }
             };
             let ManifestKind::Settled(outcome) = outcome else {
+                tracing::error!(
+                    namespace_id = %namespace_id,
+                    object_key = %object_key,
+                    error = %error,
+                    "the outcome of a manifest publication is unknown"
+                );
                 return Err(CoreError::OutcomeUnknown {
                     object_key,
                     message: error.public_message().into_owned(),
@@ -226,7 +232,15 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
             }
             outcome
         }
-        Err(error) => return Err(CoreError::store(&object_key, &error)),
+        Err(error) => {
+            tracing::error!(
+                namespace_id = %namespace_id,
+                object_key = %object_key,
+                error = %error,
+                "manifest publication failed"
+            );
+            return Err(CoreError::store(&object_key, &error));
+        }
     };
     if matches!(outcome, ManifestPublicationOutcome::Published(_)) {
         // Publication is already durable; a failed hint update cannot undo it.

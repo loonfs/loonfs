@@ -309,7 +309,8 @@ These metrics show whether the limits in [Resource sizing](#resource-sizing) fit
 | `loonfs.publisher.sessions_open` | Gauge | Open writer sessions, and sessions whose admitted work is still finishing. A fenced session stops being counted once its work ends. |
 | `loonfs.maintenance.sweep_passes` | Counter, `result` label | A full sweep pass ends: `ok` if it listed every namespace, or `error` if the listing failed. |
 | `loonfs.maintenance.sweep_pass_seconds` | Histogram | How long one full sweep pass took. Full passes run when the server starts and every `full_sweep_interval_ms`. |
-| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The next pass tries it again. |
+| `loonfs.maintenance.sweep_visit_failures` | Counter, `call` label | One call of a sweep visit failed on one namespace: `metadata`, `grep_index`, `gc`, or `grep_gc`. The next pass tries it again, unless the failure is one that a retry can't clear. |
+| `loonfs.maintenance.sweep_visit_skipped` | Counter, `call` label | A call failed with an error that a retry can't clear, such as `namespace_corrupt`, `storage_permission_denied`, or `writer_fenced`, so the sweep stops visiting the namespace. The skip lasts until the server restarts. |
 | `loonfs.maintenance.sweep_namespaces` | Gauge | The number of namespaces that the last finished full sweep pass listed, including deleted namespaces. |
 | `loonfs.object_store.operations` | Counter, `operation`, `result`, and `key_class` labels | A store call finishes. `key_class` is `content`, `wal_object`, `namespace_manifest` (manifests and the hint), `metadata_segment`, `gc_control` (pins), `metadata` (upload sessions), or `unknown`. |
 
@@ -569,6 +570,8 @@ All the interval and idle-close settings must be positive.
 Grep queries stay correct while the index is behind. A query scans the commits after the index, and if it goes past its scan budget, it fails with `index_lagging` unless `allow_stale` is set.
 
 When a call fails on one namespace, the server logs the namespace ID and the call name, counts the failure in `loonfs.maintenance.sweep_visit_failures`, and tries the call again on the next eligible pass. The failure doesn't stop the visits to other namespaces.
+
+A failure that a retry can't clear is handled differently. When the error's kind is data corruption, unauthorized, forbidden, storage permission denied, not supported, or invalid request, or the code is `writer_fenced`, the server logs the failure at error level, counts it in `loonfs.maintenance.sweep_visit_skipped`, and skips the namespace in every later pass and tick. The skip lasts until the server restarts, so an operator clears it by fixing the cause and restarting the server.
 
 If listing the namespaces fails, the pass doesn't start any new visits. The visits already running finish, the pass ends with a warning, and the next full pass lists the namespaces again.
 

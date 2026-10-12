@@ -111,7 +111,7 @@ impl Observation {
 /// The wall clock a writer stamps into durable state.
 pub trait WallClock: std::fmt::Debug + Send + Sync {
     /// Unix milliseconds now.
-    fn now_ms(&self) -> Result<u64>;
+    fn now_ms(&self) -> u64;
 }
 
 /// The system wall clock.
@@ -119,8 +119,8 @@ pub trait WallClock: std::fmt::Debug + Send + Sync {
 pub struct SystemWallClock;
 
 impl WallClock for SystemWallClock {
-    fn now_ms(&self) -> Result<u64> {
-        Ok(current_time_ms())
+    fn now_ms(&self) -> u64 {
+        current_time_ms()
     }
 }
 

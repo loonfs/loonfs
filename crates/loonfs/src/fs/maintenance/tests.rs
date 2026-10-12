@@ -958,8 +958,8 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
 struct WeekAheadClock(u64);
 
 impl crate::WallClock for WeekAheadClock {
-    fn now_ms(&self) -> std::result::Result<u64, crate::CoreError> {
-        Ok(self.0)
+    fn now_ms(&self) -> u64 {
+        self.0
     }
 }
 
@@ -1011,10 +1011,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .expect("delete the namespace");
     writer.shutdown().await.expect("shut down the writer");
 
-    let week_ahead_ms = loonfs_core::time::SystemWallClock
-        .now_ms()
-        .expect("system clock")
-        + 7 * 24 * 60 * 60 * 1000;
+    let week_ahead_ms = loonfs_core::time::SystemWallClock.now_ms() + 7 * 24 * 60 * 60 * 1000;
     let maintenance = LoonFs::builder_with_store(store.clone())
         .writer_id("maintenance")
         .wall_clock(Arc::new(WeekAheadClock(week_ahead_ms)))

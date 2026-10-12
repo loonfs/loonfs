@@ -99,7 +99,8 @@ pub(super) async fn stored_block_section<T>(
             // so it is a warning rather than a debug line.
             tracing::warn!(
                 object_key = %metadata_segment_object_key(descriptor),
-                "local block cache entry did not decode, refetching from the store: {reason}"
+                error = %reason,
+                "local block cache entry did not decode, refetching from the store"
             );
             cache.invalidate(&key);
             None

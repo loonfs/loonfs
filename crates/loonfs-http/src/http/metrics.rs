@@ -6,7 +6,7 @@ use loonfs::metrics::{
     LATENCY_SECONDS_BOUNDARIES,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 /// The `route` label for a request that matched no route, and for one whose
 /// template arrived after the intern table filled.
@@ -74,7 +74,10 @@ impl HttpMetrics {
     ) -> &'static str {
         let route = self.route_label(matched_route);
         let (seconds, served) = {
-            let mut requests = lock(&self.requests);
+            let mut requests = self
+                .requests
+                .lock()
+                .expect("the request metrics lock should not be poisoned");
             let instruments = requests
                 .entry(route)
                 .or_insert_with(|| RequestInstruments::register(self.recorder.as_ref(), route));
@@ -110,7 +113,11 @@ impl HttpMetrics {
 
     fn route_label(&self, matched_route: Option<&str>) -> &'static str {
         match matched_route {
-            Some(route) => lock(&self.routes).intern(route),
+            Some(route) => self
+                .routes
+                .lock()
+                .expect("the route metrics lock should not be poisoned")
+                .intern(route),
             None => UNMATCHED_ROUTE,
         }
     }
@@ -210,12 +217,6 @@ fn status_class_label(status: StatusCode) -> &'static str {
         5 => "5xx",
         _ => "other",
     }
-}
-
-fn lock<T>(table: &Mutex<T>) -> MutexGuard<'_, T> {
-    table
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

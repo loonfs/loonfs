@@ -190,7 +190,12 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         .assemble(&object_key, &sources, candidate, &expected)
         .await;
     if let Err(error) = written {
-        tracing::error!(object_key, %error, "content write failed");
+        tracing::error!(
+            namespace_id = %newest.owner_namespace_id,
+            object_key = %object_key,
+            error = %error,
+            "content write failed"
+        );
         return Err(match error {
             ImmutableWriteError::DifferentObject { .. }
             | ImmutableWriteError::StoredChecksumMissing { .. } => CoreError::NamespaceCorrupt(

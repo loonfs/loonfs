@@ -115,7 +115,7 @@ impl<M> LoonFs<M> {
     }
 
     /// Reads this runtime's wall clock as unix milliseconds.
-    pub fn now_ms(&self) -> Result<u64> {
+    pub fn now_ms(&self) -> u64 {
         self.core.now_ms()
     }
 

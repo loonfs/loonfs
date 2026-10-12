@@ -279,7 +279,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Returns the current wall-clock time.
-    fn now_ms(&self) -> Result<u64> {
+    fn now_ms(&self) -> u64 {
         self.wall_clock.now_ms()
     }
 
@@ -478,7 +478,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
-            &self.mutation_context()?,
+            &self.mutation_context(),
             actor_id,
             options,
         )
@@ -501,7 +501,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             target,
             actor_id,
             snapshot_id,
-            &self.mutation_context()?,
+            &self.mutation_context(),
             Arc::new(crate::time::StdMonotonicTimer::default()),
             self.effective_run_policy(),
             self.segment_cache.as_deref(),
@@ -520,7 +520,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             options,
-            &self.mutation_context()?,
+            &self.mutation_context(),
             Arc::clone(&self.content_writes),
         )
         .await
@@ -966,7 +966,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         candidates: Vec<CommitCandidate>,
     ) -> Result<Vec<Result<Commit>>> {
-        let context = self.mutation_context()?;
+        let context = self.mutation_context();
         Ok(crate::commit_engine::publish_namespace_commits_batch(
             &self.store,
             &self.namespace_id,
@@ -999,7 +999,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             subject,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1013,7 +1013,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             subject,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1031,7 +1031,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             subject,
             options,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1052,7 +1052,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             upload_id,
             subject,
             requested,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
     }
@@ -1077,7 +1077,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             upload_id,
             subject,
             bytes,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
     }
@@ -1101,7 +1101,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             upload_id,
             subject,
             body,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
     }
@@ -1123,7 +1123,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             upload_id,
             subject,
             completion,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1150,7 +1150,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             upload_id,
             subject,
             resolve,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1178,7 +1178,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.own_catalog(catalog),
             subject_id,
             bytes,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1204,7 +1204,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         S: Clone + 'static,
     {
         let catalog = self.own_catalog(catalog);
-        let context = self.mutation_context()?;
+        let context = self.mutation_context();
         let location = match owner_location {
             Some(location) => location,
             None => ContentLocation::whole(content_ref)?,
@@ -1248,7 +1248,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             subject_id,
             body,
             StreamedPayloadKind::Request,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1286,7 +1286,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &catalog,
             upload_id,
             subject,
-            &self.mutation_context()?,
+            &self.mutation_context(),
         )
         .await
     }
@@ -1305,7 +1305,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             &self.namespace_id,
             upload_id,
             subject,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
     }
@@ -1321,7 +1321,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// listed and readable, and keeps its manifest retained, until collection
     /// deletes it. `None` keeps the checkpoint until it is deleted.
     pub async fn create_checkpoint(&self, name: String, ttl_ms: Option<u64>) -> Result<Checkpoint> {
-        let context = self.mutation_context()?;
+        let context = self.mutation_context();
         let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
         crate::pin::create_pin(
             &self.store,
@@ -1345,7 +1345,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         name: String,
         expires_at_ms: u64,
     ) -> Result<SnapshotSummary> {
-        let context = self.mutation_context()?;
+        let context = self.mutation_context();
         crate::pin::create_pin(
             &self.store,
             &self.namespace_id,
@@ -1399,7 +1399,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             checkpoint_id,
             requested_expires_at_ms,
             max_lifetime_ms,
-            &self.mutation_context()?,
+            &self.mutation_context(),
             Arc::new(crate::time::StdMonotonicTimer::default()),
         )
         .await
@@ -1407,7 +1407,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
     /// Deletes a snapshot pin. A missing id returns `snapshot_not_found`.
     pub async fn delete_snapshot(&self, checkpoint_id: &PinId) -> Result<DeleteSnapshotResponse> {
-        self.mutation_context()?;
         crate::pin::delete_snapshot(&self.store, &self.namespace_id, checkpoint_id).await
     }
 
@@ -1419,7 +1418,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// pin. Superseded manifests become garbage-collection
     /// candidates once nothing pins them.
     pub async fn fold_wal(&self) -> Result<FoldWalResponse> {
-        self.mutation_context()?;
         crate::manifest::fold_wal_with_deadline(
             &self.store,
             &self.namespace_id,
@@ -1477,7 +1475,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         target: crate::manifest::RetentionTarget,
     ) -> Result<AdvanceRetentionResponse> {
-        self.mutation_context()?;
         crate::manifest::advance_retention_floor(
             &self.store,
             self.segment_cache.as_deref(),
@@ -1488,11 +1485,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Builds the mutation context for this engine's writer identity.
-    fn mutation_context(&self) -> Result<MutationContext> {
-        Ok(MutationContext {
+    fn mutation_context(&self) -> MutationContext {
+        MutationContext {
             writer_id: self.mode.writer_id.clone(),
-            now_ms: self.now_ms()?,
-        })
+            now_ms: self.now_ms(),
+        }
     }
 }
 
@@ -1529,13 +1526,9 @@ mod tests {
             WriterId::parse("writer-a").expect("writer id"),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
-        crate::test_support::ops::create(
-            &writer.store,
-            &namespace_id,
-            &writer.mutation_context().expect("context"),
-        )
-        .await
-        .expect("bootstrap namespace");
+        crate::test_support::ops::create(&writer.store, &namespace_id, &writer.mutation_context())
+            .await
+            .expect("bootstrap namespace");
 
         let reader = NamespaceEngine::reader(
             LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -1574,13 +1567,9 @@ mod tests {
             WriterId::parse("writer-a").expect("writer id"),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         );
-        crate::test_support::ops::create(
-            &writer.store,
-            &namespace_id,
-            &writer.mutation_context().expect("context"),
-        )
-        .await
-        .expect("bootstrap namespace");
+        crate::test_support::ops::create(&writer.store, &namespace_id, &writer.mutation_context())
+            .await
+            .expect("bootstrap namespace");
         let begun = writer.begin_upload(None).await.expect("begin upload");
 
         let reader = NamespaceEngine::reader(

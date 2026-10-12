@@ -362,7 +362,7 @@ impl UploadJournal {
     fn lock(&self) -> std::sync::MutexGuard<'_, UploadState> {
         self.state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("the upload journal lock should not be poisoned")
     }
 
     fn update(&self, change: impl FnOnce(&mut UploadProgress) -> io::Result<()>) -> io::Result<()> {

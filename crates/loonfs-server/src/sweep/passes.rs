@@ -66,21 +66,23 @@ impl Sweep {
                                 .saturating_sub(inner.metadata_retry_interval_ms)
                                 < fold_due_at_ms
                     });
-            let due =
-                if !metadata_caught_up && (now_ms >= held.metadata_retry_at_ms || idle_fold_due) {
-                    Due::Metadata
-                } else if inner.grep.is_some() && (held.index_dirty || held.indexed_seq != seq) {
-                    Due::Index
-                } else if seq.is_some()
-                    && seq != held.collected_seq
-                    && now_ms.saturating_sub(held.collected_at_ms) >= inner.collection_interval_ms
-                {
-                    Due::Collection
-                } else if metadata_caught_up {
-                    Due::Close
-                } else {
-                    return;
-                };
+            let due = if self.skipped(&namespace_id) {
+                Due::Close
+            } else if !metadata_caught_up && (now_ms >= held.metadata_retry_at_ms || idle_fold_due)
+            {
+                Due::Metadata
+            } else if inner.grep.is_some() && (held.index_dirty || held.indexed_seq != seq) {
+                Due::Index
+            } else if seq.is_some()
+                && seq != held.collected_seq
+                && now_ms.saturating_sub(held.collected_at_ms) >= inner.collection_interval_ms
+            {
+                Due::Collection
+            } else if metadata_caught_up {
+                Due::Close
+            } else {
+                return;
+            };
             (seq, due)
         };
         match due {
@@ -111,14 +113,15 @@ impl Sweep {
         if let Err(error) = inner
             .namespaces
             .close_if_idle(namespace_id, seq, inner.idle_session_timeout_ms, |held| {
-                held.handle.metadata_caught_up()
-                    && (inner.grep.is_none() || (!held.index_dirty && held.indexed_seq == seq))
-                    && (held.collected_seq == seq
-                        || inner
-                            .namespaces
-                            .now_ms()
-                            .saturating_sub(held.collected_at_ms)
-                            < inner.collection_interval_ms)
+                self.skipped(namespace_id)
+                    || held.handle.metadata_caught_up()
+                        && (inner.grep.is_none() || (!held.index_dirty && held.indexed_seq == seq))
+                        && (held.collected_seq == seq
+                            || inner
+                                .namespaces
+                                .now_ms()
+                                .saturating_sub(held.collected_at_ms)
+                                < inner.collection_interval_ms)
             })
             .await
         {

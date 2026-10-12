@@ -29,7 +29,16 @@ pub(crate) async fn write_pin<S: ObjectStore + ?Sized>(
 ) -> Result<()> {
     let encoded = encode_pin(record);
     let object_key = pin(&record.namespace_id, &record.pin_id);
-    create_control_object_under_generated_id(store, &object_key, encoded).await?;
+    if let Err(error) = create_control_object_under_generated_id(store, &object_key, encoded).await
+    {
+        tracing::error!(
+            namespace_id = %record.namespace_id,
+            object_key = %object_key,
+            error = %error,
+            "pin write failed"
+        );
+        return Err(error);
+    }
     Ok(())
 }
 

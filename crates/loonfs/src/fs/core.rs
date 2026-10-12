@@ -113,16 +113,16 @@ impl RuntimeCore {
     }
 
     /// Reads the handle's wall clock as unix milliseconds.
-    pub(crate) fn now_ms(&self) -> Result<u64> {
-        Ok(self.inner.wall_clock.now_ms()?)
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.inner.wall_clock.now_ms()
     }
 
     /// Stamps a mutation by `actor` with the handle's wall clock.
-    pub(crate) fn mutation_context(&self, actor: &WriterIdentity) -> Result<MutationContext> {
-        Ok(MutationContext {
+    pub(crate) fn mutation_context(&self, actor: &WriterIdentity) -> MutationContext {
+        MutationContext {
             writer_id: actor.writer_id.clone(),
-            now_ms: self.now_ms()?,
-        })
+            now_ms: self.now_ms(),
+        }
     }
 
     /// This runtime's instrument set, for the publication, maintenance, and

@@ -231,7 +231,7 @@ impl RuntimeCore {
             Some(self.inner.metadata_segment_cache.as_ref()),
             &live.head,
             snapshot_id,
-            self.now_ms()?,
+            self.now_ms(),
         )
         .await
         .map_err(Error::from)?;

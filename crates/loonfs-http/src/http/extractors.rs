@@ -567,7 +567,9 @@ fn record_abort(
         UploadStreamAbort::TooLarge => "upload body exceeded this deployment's limit".to_owned(),
         UploadStreamAbort::Unreadable(error) => format!("upload body unreadable: {error}"),
     };
-    *abort.lock().unwrap_or_else(|err| err.into_inner()) = Some(reason);
+    *abort
+        .lock()
+        .expect("the upload abort lock should not be poisoned") = Some(reason);
     loonfs::ObjectStoreError::transport("upload body", message)
 }
 
@@ -585,7 +587,7 @@ impl UploadStreamOutcome {
         match self
             .abort
             .lock()
-            .unwrap_or_else(|err| err.into_inner())
+            .expect("the upload abort lock should not be poisoned")
             .take()
         {
             Some(UploadStreamAbort::TooLarge) => Some(upload_body_too_large_error()),

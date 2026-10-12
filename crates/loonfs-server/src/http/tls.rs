@@ -168,7 +168,7 @@ async fn handle_accept_error(error: io::Error) {
     ) {
         return;
     }
-    tracing::error!("accept error: {error}");
+    tracing::error!(error = %error, "accept error");
     accept_retry_pause().await;
 }
 

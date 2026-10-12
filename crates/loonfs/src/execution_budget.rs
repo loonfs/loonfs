@@ -7,7 +7,7 @@ use crate::CoreError;
 use loonfs_core::cache::ReadWorkingMemory;
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 #[cfg(test)]
@@ -370,7 +370,9 @@ struct Admitted {
 
 impl AdmittedTotals {
     fn lock(&self) -> MutexGuard<'_, Admitted> {
-        self.admitted.lock().unwrap_or_else(PoisonError::into_inner)
+        self.admitted
+            .lock()
+            .expect("the admission totals lock should not be poisoned")
     }
 
     fn charge(&self, estimated_bytes: usize) -> Result<(), CoreError> {
@@ -438,11 +440,17 @@ impl PermitPool {
     }
 
     fn counts(&self) -> PoolCounts {
-        *self.counts.lock().unwrap_or_else(PoisonError::into_inner)
+        *self
+            .counts
+            .lock()
+            .expect("the pool counts lock should not be poisoned")
     }
 
     fn update(&self, change: impl FnOnce(&mut PoolCounts)) {
-        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut counts = self
+            .counts
+            .lock()
+            .expect("the pool counts lock should not be poisoned");
         change(&mut counts);
         self.gauges.report(counts.running, counts.waiting);
     }

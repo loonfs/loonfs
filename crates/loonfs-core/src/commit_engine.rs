@@ -1077,23 +1077,17 @@ impl NamespaceCommitEngine {
             PublishViewEffect::Advanced { records, head } => {
                 projection.position.wal_tail_objects += 1;
                 self.invalidate_tail(&projection.position);
-                let tail_state = Arc::make_mut(&mut projection.tail_state);
-                let chunk = match tail_state.push_object(&self.namespace_id, &records) {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        // The WAL is already durable. Discard this cache; replay
-                        // and folding will report the accounting error.
-                        tracing::error!(%error, "could not update the committed WAL projection");
-                        self.invalidate_projection();
-                        return (
-                            projection.position.wal_tail_objects,
-                            tail_state.inline_bytes(),
-                            None,
-                        );
-                    }
-                };
-                if let Err(error) = projection.apply_fold_object(chunk) {
-                    tracing::error!(%error, "could not update the committed WAL projection");
+                let applied = Arc::make_mut(&mut projection.tail_state)
+                    .push_object(&self.namespace_id, &records)
+                    .and_then(|chunk| projection.apply_fold_object(chunk));
+                if let Err(error) = applied {
+                    // The WAL is already durable. Discard this cache; replay
+                    // and folding will report the accounting error.
+                    tracing::warn!(
+                        namespace_id = %self.namespace_id,
+                        error = %error,
+                        "could not update the committed WAL projection"
+                    );
                     self.invalidate_projection();
                     return (
                         projection.position.wal_tail_objects,

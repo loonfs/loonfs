@@ -29,8 +29,8 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct SettableWallClock(pub(crate) AtomicU64);
 
 impl loonfs::WallClock for SettableWallClock {
-    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
-        Ok(self.0.load(Ordering::SeqCst))
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
     }
 }
 

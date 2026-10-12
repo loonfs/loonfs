@@ -492,8 +492,8 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
 struct FixedWallClock(u64);
 
 impl loonfs::WallClock for FixedWallClock {
-    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
-        Ok(self.0)
+    fn now_ms(&self) -> u64 {
+        self.0
     }
 }
 

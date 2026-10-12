@@ -33,7 +33,7 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 /// The directory beneath the configured root that the disk tier writes.
 ///
@@ -233,13 +233,15 @@ impl FoyerStoredMetadataBlockCache {
         if self.get_failure_logged.swap(true, Ordering::Relaxed) {
             tracing::debug!(
                 cache = CACHE_NAME,
-                "local block cache lookup failed: {error}"
+                error = %error,
+                "local block cache lookup failed"
             );
         } else {
             tracing::error!(
                 cache = CACHE_NAME,
+                error = %error,
                 "local block cache lookup failed, and reads are falling back to object \
-                 storage; further failures are logged at debug: {error}"
+                 storage; further failures are logged at debug"
             );
         }
     }
@@ -299,7 +301,7 @@ impl StoredMetadataBlockCache for FoyerStoredMetadataBlockCache {
                 drop(
                     self.directory_lock
                         .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
+                        .expect("the cache directory lock should not be poisoned")
                         .take(),
                 );
                 Ok(())

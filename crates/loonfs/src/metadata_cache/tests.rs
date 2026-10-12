@@ -99,7 +99,7 @@ async fn pin_fold_reads(
                 namespace
                     .create_snapshot(
                         "snapshot",
-                        runtime.now_ms().expect("read clock") + 60_000,
+                        runtime.now_ms() + 60_000,
                         &crate::SnapshotPolicy::default(),
                     )
                     .await

@@ -13,7 +13,7 @@ use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{ErrorCode, MonotonicTimer, NamespaceId, SecretString, StdMonotonicTimer};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Semaphore;
 
 #[derive(Clone, Debug)]
@@ -139,7 +139,9 @@ impl Namespaces {
             let closing = {
                 let mut handles = self.lock();
                 if let Some(entry) = handles.get(namespace_id) {
-                    let mut held = entry.lock().unwrap_or_else(PoisonError::into_inner);
+                    let mut held = entry
+                        .lock()
+                        .expect("a held namespace lock should not be poisoned");
                     if held.closing.is_none()
                         && held.handle.session_status() != NamespaceSessionStatus::Closed
                     {
@@ -190,7 +192,9 @@ impl Namespaces {
             let Some(entry) = handles.get(namespace_id) else {
                 return Ok(None);
             };
-            let mut held = entry.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut held = entry
+                .lock()
+                .expect("a held namespace lock should not be poisoned");
             if !held.handle.is_exclusively_held()
                 || held.handle.last_published_seq() != expected_seq
                 || !is_quiet(&held)
@@ -215,7 +219,9 @@ impl Namespaces {
             let Some(entry) = handles.get(namespace_id) else {
                 return Ok(None);
             };
-            let mut held = entry.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut held = entry
+                .lock()
+                .expect("a held namespace lock should not be poisoned");
             (entry.clone(), held.begin_close())
         };
         self.finish_close(namespace_id, &entry, closing)
@@ -264,9 +270,13 @@ impl Namespaces {
         namespace_id: &NamespaceId,
         visit: impl FnOnce(&mut HeldNamespace) -> T,
     ) -> Option<T> {
-        self.lock()
-            .get(namespace_id)
-            .map(|entry| visit(&mut entry.lock().unwrap_or_else(PoisonError::into_inner)))
+        self.lock().get(namespace_id).map(|entry| {
+            visit(
+                &mut entry
+                    .lock()
+                    .expect("a held namespace lock should not be poisoned"),
+            )
+        })
     }
 
     /// Keeps a visit's facts attached to its original entry through a concurrent close.
@@ -290,7 +300,7 @@ impl Namespaces {
         if !handles.get(namespace_id).is_some_and(|entry| {
             entry
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+                .expect("a held namespace lock should not be poisoned")
                 .handle
                 .session_status()
                 == NamespaceSessionStatus::Fenced
@@ -335,6 +345,8 @@ impl Namespaces {
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<NamespaceId, Arc<Mutex<HeldNamespace>>>> {
-        self.handles.lock().unwrap_or_else(PoisonError::into_inner)
+        self.handles
+            .lock()
+            .expect("the held namespace table lock should not be poisoned")
     }
 }

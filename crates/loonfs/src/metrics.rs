@@ -195,7 +195,10 @@ impl DefaultMetricsRecorder {
     /// Instruments are read independently, so a snapshot is not atomic across
     /// all values.
     pub fn snapshot(&self) -> MetricsSnapshot {
-        let registry = self.lock_registry();
+        let registry = self
+            .registry
+            .lock()
+            .expect("the instrument registry lock should not be poisoned");
         MetricsSnapshot {
             entries: registry
                 .iter()
@@ -209,17 +212,6 @@ impl DefaultMetricsRecorder {
         }
     }
 
-    // A poisoned registry is recovered rather than propagated: every
-    // critical section here inserts one map entry, and one panicked
-    // registration must not take the runtime's metrics down with it.
-    fn lock_registry(
-        &self,
-    ) -> std::sync::MutexGuard<'_, BTreeMap<InstrumentKey, RegisteredInstrument>> {
-        self.registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     /// Returns the instrument registered under `key`, installing `build`'s
     /// if there is none.
     fn register(
@@ -227,7 +219,9 @@ impl DefaultMetricsRecorder {
         key: InstrumentKey,
         build: impl FnOnce() -> RegisteredInstrument,
     ) -> RegisteredInstrument {
-        self.lock_registry()
+        self.registry
+            .lock()
+            .expect("the instrument registry lock should not be poisoned")
             .entry(key)
             .or_insert_with(build)
             .clone()

@@ -146,7 +146,7 @@ impl Maintenance {
     }
 
     async fn count_live_checkpoints(&self, namespace_id: &NamespaceId) -> Result<(u64, u64)> {
-        let now_ms = self.core.now_ms()?;
+        let now_ms = self.core.now_ms();
         let page_limit = loonfs_types::PaginationPolicy::default().max_limit();
         let mut cursor = None;
         let mut live_checkpoints = 0_u64;
@@ -240,7 +240,7 @@ impl Maintenance {
         } else {
             0
         };
-        let now_ms = self.core.now_ms()?;
+        let now_ms = self.core.now_ms();
         let fold = options.fold_is_due(status.wal_tail_objects, inline_bytes)
             || options.idle_fold_is_due(status.wal_tail_newest_commit_at_ms, now_ms);
         let response = self
@@ -707,7 +707,7 @@ impl Maintenance {
             Some(segment_cache.as_ref()),
             namespace_id,
             options,
-            &self.core.mutation_context(&self.actor)?,
+            &self.core.mutation_context(&self.actor),
         )
         .await
         .map_err(Error::Core)?;

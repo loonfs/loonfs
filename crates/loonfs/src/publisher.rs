@@ -231,14 +231,21 @@ impl NamespaceSession {
 }
 
 impl RegistryShared {
-    // Recover the inner state after poisoning. These critical sections only
-    // update fields, and worker panic containment is intended to keep the
-    // registry usable after a publication panics.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock_state(&self.state)
     }
+}
+
+/// Locks registry and publisher state, recovering a lock that a contained
+/// panic poisoned.
+///
+/// The registry contains panics by design: a panic ends its own session, and
+/// the table, the other sessions, and the drain must keep working. Every
+/// critical section under these locks only updates fields.
+fn lock_state<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl PublisherRegistry {
@@ -278,8 +285,8 @@ impl PublisherRegistry {
     /// A session whose last handle dropped stays in the table until its
     /// admitted work finishes, and an open before then continues it: a
     /// second session would acquire a new epoch and fence that work. A fenced
-    /// session cannot continue: an open fails while its work ends, then starts
-    /// a new session even while old handles are held.
+    /// or panicked session cannot continue: an open fails while its work
+    /// ends, then starts a new session even while old handles are held.
     pub(crate) fn open_session(
         &self,
         namespace_id: &NamespaceId,
@@ -289,7 +296,7 @@ impl PublisherRegistry {
             return Err(CoreError::ShuttingDown);
         }
         if let Some(live) = state.sessions.get(namespace_id) {
-            if live.publisher.session_is_fenced() {
+            if live.publisher.session_is_fenced() || live.publisher.session_panicked() {
                 if !live.publisher.lock_state().has_ended(false) {
                     return Err(CoreError::WriterSessionClosed {
                         namespace_id: namespace_id.clone(),
@@ -490,7 +497,9 @@ impl EngineSlot {
 /// Admission state for a namespace publisher.
 ///
 /// A single enum preserves precedence: after deletion succeeds, the
-/// publisher remains `Deleted` even if registry shutdown closes admission.
+/// publisher remains `Deleted` even if registry shutdown closes admission or
+/// a later task panics, and a panicked session stays `Panicked` through a
+/// shutdown or a close.
 enum PublisherAdmissionStatus {
     Open,
     /// Set by the registry's admission close. Later admissions fail with
@@ -499,6 +508,10 @@ enum PublisherAdmissionStatus {
     /// Set by [`NamespaceSession::close`]. Later admissions fail with
     /// `writer_session_closed`; everything already queued keeps publishing.
     SessionClosed,
+    /// Terminal: set when a publication, fold, compaction, or delete panics.
+    /// Every waiter fails, no later work is admitted, and a new open starts a
+    /// new session.
+    Panicked,
     /// Terminal: set once a delete succeeds. Admissions fail fast from then
     /// on without touching the store.
     Deleted,
@@ -535,8 +548,12 @@ impl NamespacePublisherState {
     /// closed or its namespace deleted.
     fn has_ended(&self, held: bool) -> bool {
         let deleted = matches!(self.admission, PublisherAdmissionStatus::Deleted);
-        let over =
-            !held || deleted || matches!(self.admission, PublisherAdmissionStatus::SessionClosed);
+        let over = !held
+            || deleted
+            || matches!(
+                self.admission,
+                PublisherAdmissionStatus::SessionClosed | PublisherAdmissionStatus::Panicked
+            );
         // A deleted session's worker takes nothing more from its queue.
         let worker_running = !deleted
             && self
@@ -704,14 +721,8 @@ impl NamespacePublisher {
         }
     }
 
-    /// Recovers a poisoned lock rather than propagating, for the same reason
-    /// as [`RegistryShared::lock_state`]: every critical section here is a
-    /// plain field update, and one panicked publication must not leave the
-    /// namespace permanently unwritable.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, NamespacePublisherState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock_state(&self.state)
     }
 
     /// Open becomes closed; a delete that already landed is terminal and
@@ -762,8 +773,8 @@ impl NamespacePublisher {
     /// Removes this session from the table once it has ended and nothing it
     /// admitted is still running. Dropping the last handle, the worker's
     /// exit, the fold's exit, a close, and a landed delete each call this,
-    /// so whichever of them comes last removes the session. Fenced sessions
-    /// end even while handles are held.
+    /// so whichever of them comes last removes the session. Fenced and
+    /// panicked sessions end even while handles are held.
     /// A session the registry has forgotten never starts a task and never
     /// holds queued work. Admission and task starts hold the writer-session
     /// lock through their decision, so fencing prevents both before removal.
@@ -778,7 +789,7 @@ impl NamespacePublisher {
             }
             _ => return,
         };
-        let held = held && !self.session_is_fenced();
+        let held = held && !self.session_is_fenced() && !self.session_panicked();
         if !self.lock_state().has_ended(held) {
             return;
         }
@@ -798,6 +809,7 @@ impl NamespacePublisher {
             PublisherAdmissionStatus::SessionClosed => Err(CoreError::WriterSessionClosed {
                 namespace_id: self.namespace_id.clone(),
             }),
+            PublisherAdmissionStatus::Panicked => Err(session_ended_after_panic()),
             PublisherAdmissionStatus::Deleted => Err(self.namespace_deleted()),
         }
     }
@@ -807,10 +819,7 @@ impl NamespacePublisher {
     fn unfenced_session(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, WriterSessionStatus>, CoreError> {
-        let session = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = lock_state(&self.session);
         if let WriterSessionStatus::Fenced(fence) = &*session {
             return Err(CoreError::WriterFenced(fence.clone()));
         }
@@ -818,12 +827,13 @@ impl NamespacePublisher {
     }
 
     fn session_is_fenced(&self) -> bool {
+        matches!(*lock_state(&self.session), WriterSessionStatus::Fenced(_))
+    }
+
+    fn session_panicked(&self) -> bool {
         matches!(
-            *self
-                .session
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            WriterSessionStatus::Fenced(_)
+            self.lock_state().admission,
+            PublisherAdmissionStatus::Panicked
         )
     }
 
@@ -1115,12 +1125,8 @@ impl NamespacePublisher {
     /// panics, each request in the batch receives `commit_outcome_unknown`
     /// because the panic may have occurred before or after the WAL put. Callers
     /// can retry with the same commit ID and use the durable receipt to resolve
-    /// the outcome. The worker then continues with queued work.
+    /// the outcome. The panic then ends the session.
     async fn publish_batch(&self, candidates: Vec<BatchCandidate>) {
-        let taken_commit_ids = candidates
-            .iter()
-            .map(|candidate| candidate.commit_id.clone())
-            .collect::<Vec<_>>();
         if AssertUnwindSafe(self.publish_taken_batch(candidates))
             .catch_unwind()
             .await
@@ -1128,25 +1134,11 @@ impl NamespacePublisher {
         {
             return;
         }
-        self.record_panic();
         // A panic can follow the WAL put, so the cached tail may omit committed bytes.
         if let Some(engine) = self.engine.lock().await.engine.as_mut() {
             engine.invalidate_projection();
         }
-        let orphaned_waiters = {
-            let mut state = self.lock_state();
-            taken_commit_ids
-                .into_iter()
-                .filter_map(|commit_id| state.in_flight.remove(&commit_id))
-                .flat_map(|request| request.waiters)
-                .collect::<Vec<_>>()
-        };
-        for waiter in orphaned_waiters {
-            let _ = waiter.send(Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
-                "publish task aborted mid-batch".to_owned(),
-            ))
-            .into()));
-        }
+        self.record_panic();
     }
 
     async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) {
@@ -1181,11 +1173,8 @@ impl NamespacePublisher {
         let (results, retry_count) = async {
             let context = match self.writer.upgrade() {
                 Some(writer) => self.runtime_core.mutation_context(&writer.identity),
-                None => Err(CoreError::ShuttingDown.into()),
-            };
-            let context = match context {
-                Ok(context) => context,
-                Err(error) => {
+                None => {
+                    let error = Error::Core(CoreError::ShuttingDown);
                     return (candidates.iter().map(|_| Err(error.clone())).collect(), 0);
                 }
             };
@@ -1331,11 +1320,14 @@ impl NamespacePublisher {
     }
 
     /// Starts a fold task after its triggering publication releases the engine.
-    /// A panicked fold is retried by the next publish over the threshold. The
-    /// drain reports the contained panic. A fold that publishes starts the
-    /// session's compaction after it releases its fold permit.
+    /// A panicked fold ends the session, and the drain reports the contained
+    /// panic. A fold that publishes starts the session's compaction after it
+    /// releases its fold permit.
     fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
+        if matches!(state.admission, PublisherAdmissionStatus::Panicked) {
+            return None;
+        }
         let _session = self.unfenced_session().ok()?;
         if state
             .fold
@@ -1361,8 +1353,8 @@ impl NamespacePublisher {
     }
 
     /// Starts the session's metadata compaction unless one is running or the
-    /// session no longer admits work. A panicked compaction is retried after
-    /// the next fold. The drain reports the contained panic.
+    /// session no longer admits work. A panicked compaction ends the session,
+    /// and the drain reports the contained panic.
     fn start_compaction(&self) {
         let mut state = self.lock_state();
         let Ok(_session) = self.admitted_session(&state) else {
@@ -1494,20 +1486,6 @@ impl NamespacePublisher {
                 .as_mut()
                 .and_then(NamespaceCommitEngine::begin_wal_fold)
         };
-        match self.runtime_core.now_ms() {
-            Ok(_) => {}
-            Err(error) => {
-                phase_event!(
-                    self.runtime_core,
-                    "wal_fold",
-                    self.namespace_id,
-                    tracing::Level::WARN,
-                    error = %error.public_message(),
-                    "WAL-tail fold failed"
-                );
-                return false;
-            }
-        };
         let started_at_ms = self.timer.monotonic_now_ms();
         let segment_cache = self.runtime_core.metadata_segment_cache();
         let result = loonfs_core::fold_wal_tail(
@@ -1567,8 +1545,8 @@ impl NamespacePublisher {
         {
             Ok(outcome) => outcome,
             Err(_) => {
-                // Contain deletion panics so the worker can continue. Deletion has no commit
-                // receipt for reconciliation, so report an internal error to its callers.
+                // Deletion has no commit receipt for reconciliation, so its
+                // callers hear an internal error, and the panic ends the session.
                 self.record_panic();
                 Err(CoreError::Internal("delete task aborted mid-delete".to_owned()).into())
             }
@@ -1628,9 +1606,47 @@ impl NamespacePublisher {
         }
     }
 
+    /// Ends the session after a contained panic.
+    ///
+    /// Counts the panic for the drain, makes the session refuse every later
+    /// commit, fold, compaction, and delete, and fails every waiter. A commit
+    /// the worker already took may have reached its WAL put, so its waiters
+    /// receive `commit_outcome_unknown` and can retry with the same commit ID
+    /// to replay the receipt. Work still in the queue never started, so its
+    /// waiters receive an internal error. The work that panicked is never
+    /// retried, because a panic is a bug, not a transient condition. A
+    /// successful delete stays `Deleted`.
     fn record_panic(&self) {
         if let Some(shared) = self.shared.upgrade() {
             shared.panicked_units.fetch_add(1, Ordering::SeqCst);
+        }
+        let (queued, in_flight) = {
+            let mut state = self.lock_state();
+            if !matches!(state.admission, PublisherAdmissionStatus::Deleted) {
+                state.admission = PublisherAdmissionStatus::Panicked;
+            }
+            let queued = take_queued_waiters(&mut state);
+            let in_flight = state
+                .in_flight
+                .drain()
+                .flat_map(|(_, request)| request.waiters)
+                .collect::<Vec<_>>();
+            (queued, in_flight)
+        };
+        self.compaction_cancellation.cancel();
+        self.forget_if_ended();
+        for waiter in queued.commits {
+            let _ = waiter.send(Err(session_ended_after_panic().into()));
+        }
+        for waiter in queued.deletes {
+            let _ = waiter.send(Err(session_ended_after_panic().into()));
+        }
+        for waiter in in_flight {
+            let _ = waiter.send(Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
+                "the writer session ended after a contained panic while the commit was publishing"
+                    .to_owned(),
+            ))
+            .into()));
         }
     }
 
@@ -1871,6 +1887,11 @@ struct QueuedWaiters {
 
 /// Empties the queue and hands back every waiter it held. Called once the
 /// delete barrier lands: nothing queued behind a tombstone may publish.
+/// The error every waiter of a session that a contained panic ended receives.
+fn session_ended_after_panic() -> CoreError {
+    CoreError::Internal("writer session ended after a contained panic".to_owned())
+}
+
 fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
     let mut waiters = QueuedWaiters::default();
     for item in std::mem::take(&mut state.queue) {

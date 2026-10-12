@@ -598,7 +598,7 @@ pub(super) async fn complete_upload(
         completed.response,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         completed.evidence.as_ref(),
-        state.runtime.now_ms().map_err(ApiResponseError::runtime)?,
+        state.runtime.now_ms(),
     )?))
 }
 
@@ -691,7 +691,7 @@ pub(super) async fn get_upload(
         view.session,
         ContentTokenVerifier::new(state.options.content_token_secret.expose()),
         view.evidence.as_ref(),
-        state.runtime.now_ms().map_err(ApiResponseError::runtime)?,
+        state.runtime.now_ms(),
     )?))
 }
 

@@ -43,8 +43,8 @@ impl loonfs_types::MonotonicTimer for SettableWallClock {
 }
 
 impl loonfs::WallClock for SettableWallClock {
-    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
-        Ok(self.0.load(Ordering::SeqCst))
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -207,7 +207,7 @@ async fn seed_writer(store: &SharedObjectStore) -> (LoonFs<Writable>, u64) {
         .build()
         .await
         .expect("build the seed writer");
-    let now_ms = writer.now_ms().expect("read the clock");
+    let now_ms = writer.now_ms();
     (writer, now_ms)
 }
 
@@ -481,6 +481,103 @@ async fn a_sweep_survives_a_failing_namespace() {
         server.wal_tail_objects(&names[1]).await,
         0,
         "the next pass tries the failed namespace again"
+    );
+}
+
+#[tokio::test]
+async fn a_corrupt_namespace_is_counted_and_skipped_by_later_passes() {
+    let directory = tempdir().expect("tempdir");
+    let store: SharedObjectStore = local_store(directory.path());
+    let names = ["healthy", "corrupt"].map(namespace_id);
+    let (writer, now_ms) = seed_writer(&store).await;
+    for namespace_id in &names {
+        seed_unfolded_tail(&writer, namespace_id).await;
+    }
+    writer.shutdown().await.expect("stop the writer");
+    let manifests = keys_under(
+        store.as_ref(),
+        &loonfs_objectstore::keys::metadata_manifest_prefix(&names[1]),
+    )
+    .await;
+    let mut originals = Vec::new();
+    for key in &manifests {
+        originals.push(
+            store
+                .get(key, None)
+                .await
+                .expect("read a manifest")
+                .expect("the manifest exists"),
+        );
+        store
+            .put_overwrite(key, bytes::Bytes::from_static(b"not a manifest"))
+            .await
+            .expect("corrupt a manifest");
+    }
+    let config = sweep_config(None);
+    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
+    let skipped = || {
+        server.counter(
+            "loonfs.maintenance.sweep_visit_skipped",
+            &[("call", "metadata")],
+        )
+    };
+
+    server.sweep.run_pass(false).await.expect("list namespaces");
+    assert_eq!(skipped(), 1);
+    for (key, bytes) in manifests.iter().zip(originals) {
+        store
+            .put_overwrite(key, bytes)
+            .await
+            .expect("restore a manifest");
+    }
+
+    server.sweep.run_pass(false).await.expect("list namespaces");
+    assert_eq!(server.wal_tail_objects(&names[0]).await, 0);
+    assert!(
+        server.wal_tail_objects(&names[1]).await > 0,
+        "a later pass does not visit a namespace a terminal failure took out"
+    );
+    assert_eq!(skipped(), 1);
+
+    let namespaces = &server.sweep.inner.namespaces;
+    drop(namespaces.open(&names[1]).await.expect("hold the session"));
+    server.tick_after(config.idle_session_timeout_ms + 1).await;
+    assert!(
+        namespaces.held_ids().is_empty(),
+        "a skipped namespace's idle session still closes"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_head_failure_is_retried_by_the_next_pass() {
+    let directory = tempdir().expect("tempdir");
+    let store: SharedObjectStore = local_store(directory.path());
+    let namespace_id = namespace_id("raced");
+    let (writer, now_ms) = seed_writer(&store).await;
+    seed_unfolded_tail(&writer, &namespace_id).await;
+    writer.shutdown().await.expect("stop the writer");
+    let server =
+        SweepServer::start(store.clone(), &sweep_config(None), now_ms + 20 * MINUTE_MS).await;
+
+    server.sweep.record_failure(
+        &namespace_id,
+        super::SweepCall::Metadata,
+        loonfs::ErrorCode::StaleHead,
+        &"a racing publication moved the head",
+    );
+    server.sweep.run_pass(false).await.expect("list namespaces");
+
+    assert_eq!(
+        server.wal_tail_objects(&namespace_id).await,
+        0,
+        "the next pass visits a namespace whose failure can clear"
+    );
+    assert_eq!(
+        server.counter(
+            "loonfs.maintenance.sweep_visit_skipped",
+            &[("call", "metadata")]
+        ),
+        0
     );
 }
 

@@ -297,12 +297,10 @@ impl ProgressReporter {
             .saturating_sub(self.started_at_ms)
     }
 
-    /// Recovers a poisoned lock rather than failing a transfer over it: the
-    /// state behind it is a byte count nobody's correctness rests on.
     fn lock(&self) -> std::sync::MutexGuard<'_, ProgressState> {
         self.state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("the progress lock should not be poisoned")
     }
 
     fn report(&self, state: &mut ProgressState, now_ms: u64) {

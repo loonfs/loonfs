@@ -473,7 +473,7 @@ pub(super) async fn create_snapshot(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
-    let now_ms = state.runtime.now_ms().map_err(ApiResponseError::runtime)?;
+    let now_ms = state.runtime.now_ms();
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let namespace = state
         .namespaces
@@ -580,7 +580,7 @@ pub(super) async fn extend_snapshot(
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<SnapshotSummary>, ApiResponseError> {
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
-    let now_ms = state.runtime.now_ms().map_err(ApiResponseError::runtime)?;
+    let now_ms = state.runtime.now_ms();
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let namespace = state
         .namespaces
@@ -879,7 +879,7 @@ pub(super) async fn run_maintenance(
             if !state.options.maintains_grep_index {
                 return Err(grep_index_not_maintained().await);
             }
-            let now_ms = maintenance.now_ms().map_err(ApiResponseError::runtime)?;
+            let now_ms = maintenance.now_ms();
             return loonfs_grep::gc_grep(state.grep_worker(), &namespace_id, now_ms)
                 .await
                 .map(Json)

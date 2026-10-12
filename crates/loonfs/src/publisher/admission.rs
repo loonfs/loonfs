@@ -7,7 +7,7 @@ use crate::{ExecutionBudget, PublicationPolicy};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::oneshot;
 
 /// Admits one runtime's publication requests against its per-namespace
@@ -42,7 +42,7 @@ impl PublicationAdmission {
     fn lock_namespaces(&self) -> MutexGuard<'_, HashMap<NamespaceId, RequestWeight>> {
         self.namespaces
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .expect("the namespace admission lock should not be poisoned")
     }
 
     #[cfg(test)]

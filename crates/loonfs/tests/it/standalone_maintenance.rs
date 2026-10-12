@@ -17,8 +17,8 @@ use std::sync::Arc;
 struct FixedWallClock(u64);
 
 impl WallClock for FixedWallClock {
-    fn now_ms(&self) -> Result<u64, loonfs::CoreError> {
-        Ok(self.0)
+    fn now_ms(&self) -> u64 {
+        self.0
     }
 }
 

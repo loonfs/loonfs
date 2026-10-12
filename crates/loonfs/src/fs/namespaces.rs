@@ -182,7 +182,7 @@ pub(crate) async fn delete_namespace_with_engine(
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
     options: DeleteNamespaceOptions,
 ) -> Result<DeleteNamespaceResponse> {
-    let context = core.mutation_context(&writer.identity)?;
+    let context = core.mutation_context(&writer.identity);
     let result = engine
         .delete_namespace(core.store(), options, &context)
         .await

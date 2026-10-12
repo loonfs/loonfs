@@ -18,7 +18,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// One object-store call sample delivered to an object-store metrics recorder.
@@ -281,21 +281,21 @@ pub struct VecObjectStoreMetricsRecorder {
 }
 
 impl VecObjectStoreMetricsRecorder {
-    fn lock(&self) -> MutexGuard<'_, Vec<ObjectStoreMetricSample>> {
-        self.samples
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     /// Returns a copy of all recorded samples.
     pub fn samples(&self) -> Vec<ObjectStoreMetricSample> {
-        self.lock().clone()
+        self.samples
+            .lock()
+            .expect("the metric sample lock should not be poisoned")
+            .clone()
     }
 }
 
 impl ObjectStoreMetricsRecorder for VecObjectStoreMetricsRecorder {
     fn record(&self, sample: ObjectStoreMetricSample) {
-        self.lock().push(sample);
+        self.samples
+            .lock()
+            .expect("the metric sample lock should not be poisoned")
+            .push(sample);
     }
 }
 
@@ -308,12 +308,6 @@ pub struct JsonlObjectStoreMetricsRecorder {
 }
 
 impl JsonlObjectStoreMetricsRecorder {
-    fn lock(&self) -> MutexGuard<'_, BufWriter<File>> {
-        self.writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     /// Creates or truncates a JSONL output file, creating missing parent directories.
     ///
     /// The operation fails when directories or the output file cannot be created.
@@ -333,13 +327,19 @@ impl JsonlObjectStoreMetricsRecorder {
     ///
     /// The operation fails when the filesystem cannot accept pending bytes.
     pub fn flush(&self) -> io::Result<()> {
-        self.lock().flush()
+        self.writer
+            .lock()
+            .expect("the metric writer lock should not be poisoned")
+            .flush()
     }
 }
 
 impl ObjectStoreMetricsRecorder for JsonlObjectStoreMetricsRecorder {
     fn record(&self, sample: ObjectStoreMetricSample) {
-        let mut writer = self.lock();
+        let mut writer = self
+            .writer
+            .lock()
+            .expect("the metric writer lock should not be poisoned");
         let _ = serde_json::to_writer(&mut *writer, &sample);
         let _ = writer.write_all(b"\n");
     }

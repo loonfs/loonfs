@@ -96,7 +96,7 @@ impl<M> Namespace<M> {
                 .await?;
         }
         self.core.record_trace_context(&tracing::Span::current());
-        let now_ms = self.core.now_ms()?;
+        let now_ms = self.core.now_ms();
         let requested = request.limit.as_usize();
         let mut cursor = request.cursor;
         let mut snapshots = Vec::with_capacity(requested);
@@ -201,7 +201,7 @@ impl Namespace<Writable> {
         max_live: usize,
         additional_live: usize,
     ) -> Result<()> {
-        let now_ms = self.core.now_ms()?;
+        let now_ms = self.core.now_ms();
         let page_limit = loonfs_types::PaginationPolicy::default().max_limit();
         let engine = self
             .core

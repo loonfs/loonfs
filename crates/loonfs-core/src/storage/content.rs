@@ -592,7 +592,7 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
                         let chunk = chunk?;
                         observed
                             .lock()
-                            .unwrap_or_else(|err| err.into_inner())
+                            .expect("the streamed payload lock should not be poisoned")
                             .update(&chunk);
                         return Ok(Some((chunk, (body, request_check, completion_allowed))));
                     }
@@ -626,7 +626,9 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     );
     checked?;
     let observed = std::mem::replace(
-        &mut *observed.lock().unwrap_or_else(|err| err.into_inner()),
+        &mut *observed
+            .lock()
+            .expect("the streamed payload lock should not be poisoned"),
         StreamedPayload::new(store.checksum_algorithm()),
     );
     let already_present = match stored {
