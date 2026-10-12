@@ -72,15 +72,15 @@ pub(crate) struct Cli {
     /// `LOONFS_NAMESPACE`, then the profile default.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
     pub(crate) namespace: Option<String>,
-    /// Subject id to act as. Precedence is `--subject-id`,
-    /// `LOONFS_SUBJECT_ID`, the profile, then the actor id.
+    /// Subject ID to act as. Precedence is `--subject-id`,
+    /// `LOONFS_SUBJECT_ID`, the profile, then the actor ID.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
     pub(crate) subject_id: Option<String>,
-    /// Principal scope for an ACL namespace or a subject's principal ids.
+    /// Principal scope for an ACL namespace or a subject's principal IDs.
     /// Subject precedence is the flag, `LOONFS_PRINCIPAL_SCOPE`, then the profile.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
     pub(crate) principal_scope: Option<String>,
-    /// Comma-separated principal ids whose grants apply. Precedence is
+    /// Comma-separated principal IDs whose grants apply. Precedence is
     /// `--principals`, `LOONFS_PRINCIPALS`, then the profile. Without
     /// principals the CLI acts as the token holder.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
@@ -92,10 +92,10 @@ pub(crate) struct Cli {
     /// `shutting_down`, and transport errors.
     #[arg(long, global = true)]
     pub(crate) no_retry: bool,
-    /// Never prompt; fail instead when input would be required.
+    /// Never prompt. Fail instead when input would be required.
     #[arg(long, global = true)]
     pub(crate) no_input: bool,
-    /// Say nothing about a transfer while it runs.
+    /// Don't show progress while a transfer runs.
     #[arg(long, global = true)]
     pub(crate) no_progress: bool,
     #[command(subcommand)]
@@ -169,8 +169,8 @@ pub(crate) enum Command {
         command: SnapshotCommand,
     },
     /// Set the default namespace for a profile.
-    /// This sets the interactive default; concurrent automation should pass
-    /// `--namespace` or set `LOONFS_NAMESPACE`.
+    /// This sets the interactive default. Automation that runs concurrently
+    /// should pass `--namespace` or set `LOONFS_NAMESPACE` instead.
     Use(NamespaceUseArgs),
     /// Show the selected profile and namespace.
     Current(CurrentArgs),
@@ -383,7 +383,7 @@ pub(crate) struct ProfileCreateS3Args {
     /// AWS credential source.
     #[arg(long, value_name = "ambient|static", value_hint = ValueHint::Other)]
     pub credential_source: Option<String>,
-    /// Static access key id.
+    /// Static access key ID.
     #[arg(long, value_hint = ValueHint::Other)]
     pub access_key_id: Option<String>,
     /// Static secret access key.
@@ -412,7 +412,7 @@ pub(crate) struct ProfileCreateR2Args {
     /// R2 bucket name.
     #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
-    /// Cloudflare account id.
+    /// Cloudflare account ID.
     #[arg(long, value_hint = ValueHint::Other)]
     pub account_id: Option<String>,
     /// R2 endpoint URL.
@@ -421,7 +421,7 @@ pub(crate) struct ProfileCreateR2Args {
     /// R2 credential source.
     #[arg(long, value_name = "ambient|static", value_hint = ValueHint::Other)]
     pub credential_source: Option<String>,
-    /// Static access key id.
+    /// Static access key ID.
     #[arg(long, value_hint = ValueHint::Other)]
     pub access_key_id: Option<String>,
     /// Static secret access key.
@@ -472,7 +472,7 @@ pub(crate) struct ProfileCreateRemoteArgs {
     /// Remote LoonFS server URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
-    /// Remote bearer token to store; omitted profiles use LOONFS_AUTH_TOKEN at request time.
+    /// Remote bearer token to store. A profile without one uses LOONFS_AUTH_TOKEN at request time.
     #[arg(long, value_hint = ValueHint::Other)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust.
@@ -498,7 +498,7 @@ pub(crate) enum ProfileUpdateCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProfileUpdateActorArgs {
-    /// Sets the profile's actor ID.
+    /// Actor ID to save in the profile.
     #[arg(long)]
     pub actor_id: Option<String>,
     #[arg(from_global)]
@@ -522,7 +522,7 @@ pub(crate) struct ProfileUpdateS3Args {
     /// AWS credential source.
     #[arg(long, value_name = "ambient|static")]
     pub credential_source: Option<String>,
-    /// Static access key id.
+    /// Static access key ID.
     #[arg(long)]
     pub access_key_id: Option<String>,
     /// Static secret access key.
@@ -554,7 +554,7 @@ pub(crate) struct ProfileUpdateR2Args {
     /// R2 credential source.
     #[arg(long, value_name = "ambient|static", value_hint = ValueHint::Other)]
     pub credential_source: Option<String>,
-    /// Static access key id.
+    /// Static access key ID.
     #[arg(long, value_hint = ValueHint::Other)]
     pub access_key_id: Option<String>,
     /// Static secret access key.
@@ -563,7 +563,7 @@ pub(crate) struct ProfileUpdateR2Args {
     /// R2 endpoint URL.
     #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
-    /// Cloudflare account id.
+    /// Cloudflare account ID.
     #[arg(long, value_hint = ValueHint::Other)]
     pub account_id: Option<String>,
     /// Optional object-key prefix.
@@ -610,7 +610,7 @@ pub(crate) struct ProfileUpdateRemoteArgs {
     pub name: String,
     #[arg(long, value_hint = ValueHint::Url)]
     pub server_url: Option<String>,
-    /// Remote bearer token to store; an empty value clears the stored token.
+    /// Remote bearer token to store. An empty value clears the stored token.
     #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an
@@ -702,12 +702,12 @@ pub(crate) enum NamespaceCommand {
     Create(NamespaceCreateArgs),
     /// Show a namespace's current status.
     Show(NamespaceShowArgs),
-    /// Permanently delete a namespace and retire its id.
+    /// Delete a namespace. The deletion can't be undone.
     Delete(NamespaceDeleteArgs),
     /// Fork a namespace into a new one.
     ///
     /// The fork shares the source's existing content and metadata objects
-    /// without copying the filesystem. Forking the current head may first
+    /// without copying the filesystem. Forking the current head might first
     /// fold the source's outstanding WAL tail.
     Fork(NamespaceForkArgs),
 }
@@ -716,7 +716,7 @@ pub(crate) enum NamespaceCommand {
 pub(crate) struct NamespaceShowArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Namespace to show; selection defaults apply when omitted.
+    /// Namespace to show. When omitted, the usual namespace selection applies.
     #[arg(value_hint = ValueHint::Other, conflicts_with = "namespace")]
     pub namespace_id: Option<String>,
 }
@@ -744,16 +744,18 @@ pub(crate) struct NamespaceCreateArgs {
     pub request: RequestBehaviorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: String,
-    /// Access mode, fixed for the namespace's life.
+    /// Access mode. It can't be changed after the namespace is created.
     #[arg(long, value_enum, default_value_t = NamespaceAccessArg::Unrestricted)]
     pub access: NamespaceAccessArg,
     /// Principal scope of an ACL namespace.
     #[arg(from_global)]
     pub principal_scope: Option<String>,
-    /// A principal granted `admin` on the root at creation; repeatable.
+    /// A principal to grant `admin` on the root at creation. Repeat the flag
+    /// for more principals.
     #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
     pub administrators: Vec<String>,
-    /// How sibling names compare, fixed for the namespace's life.
+    /// How sibling names are compared. It can't be changed after the
+    /// namespace is created.
     #[arg(long, value_enum, default_value_t = NamespaceNamingArg::CaseInsensitive)]
     pub naming: NamespaceNamingArg,
 }
@@ -831,7 +833,7 @@ pub(crate) struct CommitArgs {
     /// Annotation recorded on the commit and shown by `loonfs changes`.
     #[arg(short = 'm', long)]
     pub message: Option<String>,
-    /// Idempotency key for the commit; generated when absent.
+    /// Idempotency key for the commit. One is generated when omitted.
     #[arg(long, value_hint = ValueHint::Other)]
     pub commit_id: Option<String>,
 }
@@ -887,7 +889,7 @@ pub(crate) struct AccessSetArgs {
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
-    /// A grant as `principal=right[,right...]`; repeat the flag for more
+    /// A grant as `principal=right[,right...]`. Repeat the flag for more
     /// principals. Rights are read, history, write, create, remove, share,
     /// manage, and admin (root only).
     #[arg(long = "grant")]
@@ -895,12 +897,13 @@ pub(crate) struct AccessSetArgs {
     /// Stop inheritance at this directory.
     #[arg(long)]
     pub boundary: bool,
-    /// Replace only while the path still resolves to this inode; a raced
-    /// rebinding fails instead of changing a different inode's access.
+    /// Replace only while the path still resolves to this inode. If the path
+    /// now points to another inode, the command fails instead of changing
+    /// that inode's access.
     #[arg(long, value_parser = parse_public_inode_id)]
     pub expected_inode_id: Option<InodeId>,
     /// Replace only while the row is still at this access revision. Needs
-    /// --expected-inode-id, which names the row.
+    /// --expected-inode-id, which identifies the row.
     #[arg(long, value_hint = ValueHint::Other, requires = "expected_inode_id")]
     pub expected_revision: Option<u64>,
     #[command(flatten)]
@@ -916,7 +919,7 @@ pub(crate) struct FilesystemAnnotateArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Attribute to write, as `key=value`. The key ends at the first `=`, so
-    /// the value may contain more of them. Repeat the flag to write more.
+    /// the value can contain more of them. Repeat the flag to write more.
     #[arg(long = "set", conflicts_with = "attributes_json")]
     pub sets: Vec<String>,
     /// Attribute key to remove. Repeat the flag to remove more.
@@ -924,13 +927,14 @@ pub(crate) struct FilesystemAnnotateArgs {
     pub removes: Vec<String>,
     /// The whole update as one JSON object, `{"set": {...}, "remove": [...]}`,
     /// with values as strings, for example `{"set": {"owner": "ada"}}`.
-    /// This is how a script passes an update it built. Cannot be combined with
-    /// --set or --remove. Named for what it carries because --json is already
-    /// the global output-format flag.
+    /// Scripts use it to pass an update they built. It can't be combined with
+    /// --set or --remove. (It isn't called --json, because --json is the
+    /// global output-format flag.)
     #[arg(long)]
     pub attributes_json: Option<String>,
-    /// Update only while the path still resolves to this inode; a raced
-    /// rebinding fails instead of annotating a different inode.
+    /// Update only while the path still resolves to this inode. If the path
+    /// now points to another inode, the command fails instead of annotating
+    /// that inode.
     #[arg(long, value_parser = parse_public_inode_id)]
     pub expected_inode_id: Option<InodeId>,
     /// Update only while the inode's attribute revision is still this one.
@@ -1000,7 +1004,7 @@ pub(crate) struct FilesystemCatArgs {
 pub(crate) struct FilesystemGrepArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Pattern in the Rust regex dialect; `^`/`$` anchor lines.
+    /// Pattern in the Rust regex dialect. `^` and `$` match at line boundaries.
     #[arg(value_hint = ValueHint::Other)]
     pub pattern: String,
     /// Restrict matches to files under this absolute path prefix.
@@ -1029,7 +1033,7 @@ pub(crate) struct FilesystemGetArgs {
     /// Where to write the download. Defaults to the remote file or directory
     /// name. Use `-` to stream one file to stdout. File downloads are streamed
     /// to a temporary path and moved into place after verification. Stdout
-    /// cannot be rolled back if verification fails after bytes are written.
+    /// can't be rolled back if verification fails after bytes are written.
     #[arg(value_hint = ValueHint::AnyPath)]
     pub local_destination: Option<String>,
     /// Download a directory and its contents. The destination is the root of
@@ -1056,16 +1060,17 @@ pub(crate) struct FilesystemPutArgs {
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     /// Local file to upload, or `-` to read standard input. A large file
-    /// and a pipe are both read once and never held whole, so what a put
-    /// costs in memory does not follow what it uploads. Reading `-` needs
-    /// an explicit remote path.
+    /// and a pipe are both read once and never kept in memory whole, so a
+    /// put's memory use doesn't grow with the size of the upload. Reading
+    /// `-` requires an explicit remote path.
     #[arg(value_hint = ValueHint::AnyPath)]
     pub local_path: String,
     #[arg(value_hint = ValueHint::Other)]
     pub remote_path: Option<String>,
-    /// Upload the directory tree rooted at `local_path`. Every file lands
-    /// as its own commit with bounded concurrency, so progress is per file
-    /// and a partial failure reruns per file.
+    /// Upload the directory tree rooted at `local_path`. Each file is its
+    /// own commit, uploaded with bounded concurrency, so progress is
+    /// reported per file, and a rerun after a partial failure works file by
+    /// file.
     #[arg(short, long)]
     pub recursive: bool,
     /// Replace the remote destination if it already exists.
@@ -1088,7 +1093,7 @@ pub(crate) struct FilesystemAppendArgs {
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
     /// Local file whose bytes to append, or `-` to read standard input. One
-    /// append carries from 1 byte to 256 KiB.
+    /// append can add from 1 byte to 256 KiB.
     #[arg(value_hint = ValueHint::AnyPath)]
     pub local_path: String,
     /// The file to append to. It must already exist.
@@ -1114,8 +1119,8 @@ pub(crate) struct FilesystemTransferArgs {
     pub source_path: String,
     #[arg(value_hint = ValueHint::Other)]
     pub destination_path: String,
-    /// Copy the directory tree rooted at `source_path` (cp only; mv moves
-    /// a directory in one commit without -r).
+    /// Copy the directory tree rooted at `source_path`. Only cp accepts -r
+    /// (mv moves a directory in one commit without it).
     #[arg(short, long)]
     pub recursive: bool,
     /// Replace the destination if it already exists.
@@ -1155,10 +1160,10 @@ pub(crate) struct FilesystemUndeleteArgs {
     pub target: TargetSelectorArgs,
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
-    /// Destination path for the recovered file or directory. Omit to
-    /// restore in place: the entry re-binds under the parent and name its
-    /// deletion recorded, which lands correctly even when the enclosing
-    /// directories were renamed since.
+    /// Destination path for the recovered file or directory. Omit it to
+    /// restore the item in place, under the parent and name recorded with
+    /// its deletion. That works even if the enclosing directories were
+    /// renamed since.
     #[arg(value_hint = ValueHint::Other)]
     pub destination_path: Option<String>,
     /// Inode ID of the deleted item, as reported by `rm` and the change
@@ -1167,7 +1172,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     pub inode: InodeId,
     /// Committed sequence of the delete being recovered, as reported by
     /// `rm` and the change feed. Scopes recovery to that exact deletion,
-    /// so a stale command cannot cancel a later delete.
+    /// so a stale command can't cancel a later delete.
     #[arg(long)]
     pub deletion_seq: u64,
     #[command(flatten)]
@@ -1226,7 +1231,7 @@ pub(crate) struct SnapshotTargetArgs {
 pub(crate) struct SnapshotCreateArgs {
     #[command(flatten)]
     pub target: SnapshotTargetArgs,
-    /// Snapshot label. Labels do not need to be unique.
+    /// Snapshot label. Labels don't need to be unique.
     #[arg(long)]
     pub name: String,
     /// How long the snapshot remains available, in milliseconds.
@@ -1246,7 +1251,7 @@ pub(crate) struct SnapshotListArgs {
 pub(crate) struct SnapshotExtendArgs {
     #[command(flatten)]
     pub target: SnapshotTargetArgs,
-    /// Snapshot id to extend.
+    /// Snapshot ID to extend.
     #[arg(value_hint = ValueHint::Other)]
     pub snapshot_id: String,
     /// New lifetime from now, in milliseconds.
@@ -1258,7 +1263,7 @@ pub(crate) struct SnapshotExtendArgs {
 pub(crate) struct SnapshotDeleteArgs {
     #[command(flatten)]
     pub target: SnapshotTargetArgs,
-    /// Snapshot id to delete.
+    /// Snapshot ID to delete.
     #[arg(value_hint = ValueHint::Other)]
     pub snapshot_id: String,
 }
@@ -1317,9 +1322,9 @@ pub(crate) struct MaintenanceRecoverAdministratorArgs {
 pub(crate) enum MaintenanceCheckpointCommand {
     /// Pin the namespace's current state in a new checkpoint.
     ///
-    /// Every call creates a new checkpoint; the name is a label, not a key.
+    /// Every call creates a new checkpoint. The name is a label, not a key.
     Create(MaintenanceCheckpointArgs),
-    /// List existing checkpoint pins in checkpoint-id order.
+    /// List existing checkpoint pins in checkpoint ID order.
     ///
     /// Expired pins remain listed until garbage collection deletes them.
     List(MaintenanceCheckpointListArgs),
@@ -1362,13 +1367,13 @@ pub(crate) struct MaintenanceIndexEnableArgs {
     /// backfill.
     #[arg(long)]
     pub no_wait: bool,
-    /// Give up after this many steps: one bounded index step where the
-    /// profile is embedded, one status check where it is remote. Exits
+    /// Stop after this many steps (one bounded index step on an embedded
+    /// profile, or one status check on a remote profile). The command exits
     /// nonzero and reports how far the index got.
     #[arg(long)]
     pub max_steps: Option<u64>,
-    /// Give up after this many milliseconds. Exits nonzero and reports how
-    /// far the index got.
+    /// Stop after this many milliseconds. The command exits nonzero and
+    /// reports how far the index got.
     #[arg(long)]
     pub deadline_ms: Option<u64>,
 }
@@ -1384,11 +1389,11 @@ pub(crate) struct MaintenanceRetentionAdvanceArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Advance the floor to this sequence, or to the folded manifest head
-    /// when that is lower.
+    /// when that's lower.
     #[arg(long, conflicts_with = "before")]
     pub to_seq: Option<u64>,
-    /// Advance the floor to the last commit committed at or before this Unix
-    /// time in milliseconds.
+    /// Advance the floor to the last commit made at or before this Unix
+    /// time, in milliseconds.
     #[arg(long, value_name = "UNIX_MS")]
     pub before: Option<u64>,
 }
@@ -1400,8 +1405,8 @@ pub(crate) struct MaintenanceCheckpointArgs {
     /// Label recorded on the checkpoint record (a label, not a key).
     #[arg(long)]
     pub name: String,
-    /// Optional lifetime; the record expires this many milliseconds from
-    /// now. Omitted means the pin holds until deleted.
+    /// Optional lifetime. The record expires this many milliseconds from
+    /// now. Without it, the pin lasts until it's deleted.
     #[arg(long)]
     pub ttl_ms: Option<u64>,
 }
@@ -1418,7 +1423,7 @@ pub(crate) struct MaintenanceCheckpointListArgs {
 pub(crate) struct MaintenanceCheckpointDeleteArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Checkpoint id to delete.
+    /// Checkpoint ID to delete.
     #[arg(value_hint = ValueHint::Other)]
     pub checkpoint_id: String,
 }
@@ -1464,7 +1469,7 @@ pub(crate) struct RuntimeBehavior {
     pub json: bool,
     pub no_input: bool,
     pub interactive: bool,
-    /// How a transfer that takes human time says where it has got to.
+    /// How a long-running transfer reports its progress.
     pub progress: ProgressMode,
 }
 

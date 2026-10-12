@@ -1,36 +1,65 @@
 # Optional access control
 
-A namespace can carry per-item access grants that core enforces on reads and writes. Grants are ordinary metadata: they are published through the WAL, materialized into a row family, retained like attributes, and evaluated against the same view that validates a commit. The application owns identity, group membership, role names, and sharing workflows. Core owns the stable rights, the grants, the inheritance boundaries, and the decision.
+A namespace can have per-item access grants, which LoonFS core enforces on reads and writes. Grants are ordinary metadata. They're published through the WAL, materialized into a row family, retained like attributes, and evaluated against the same view that a commit is validated against. The application is responsible for identity, group membership, role names, and sharing workflows. Core defines the stable set of rights, stores the grants and the inheritance boundaries, and evaluates every access check.
 
-A namespace chooses its access mode at creation and never changes it. In the default unrestricted mode, the bearer token identifies the backend, the backend authorizes callers at namespace granularity, and core performs no permission lookups. In an ACL namespace, per-subject operations require a subject context. There is no switch that makes an ACL namespace unrestricted.
+A namespace's access mode is set when the namespace is created, and it can't be changed. In the default unrestricted mode, the bearer token identifies the backend, the backend authorizes callers for whole namespaces, and core doesn't look up any permissions. In an ACL (access control list) namespace, per-subject operations require a subject context. No setting makes an ACL namespace unrestricted.
 
-The [storage format](../specs/format.md#18-access-rows) defines access rows, the access mode, and effective rights. The API specification defines the [identity headers](../specs/api.md#identity-headers), the `update_access` operation, and the [rights each operation requires](../specs/api.md#authorization-in-acl-namespaces). This note explains the model and why it takes this shape.
+In the storage format, [Access rows](../specs/format.md#18-access-rows) defines access rows, the access mode, and effective rights. The API specification defines the identity headers, the `update_access` operation, and the rights each operation requires (see [Identity headers](../specs/api.md#identity-headers) and [Authorization in ACL namespaces](../specs/api.md#authorization-in-acl-namespaces)). This note explains the model and why it takes this shape.
 
 ## Goals and limits
 
-The model gives a hosted product familiar sharing inside one namespace: viewer and editor roles, limited-access folders, upload-only drop boxes, and delegated administration. Permission changes are atomic with hierarchy changes, including moves. There is one filesystem planner, one publication pipeline, and one authoritative permission state. An unrestricted namespace performs no additional object-store operations and consults no access row; the access mode is read from the manifest that every request already loads.
+This section describes what the access model supports and what it leaves out.
 
-The model has no explicit deny entries, per-item ownership or ownership transfer, "this folder only" grants that do not inherit, conversion between modes, permanent erasure as a permission, commenting or preview-only roles, or mounts. No index answers "what can this principal reach".
+The model supports familiar sharing for a hosted product inside one namespace, such as viewer and editor roles, limited-access folders, upload-only drop boxes, and delegated administration. Permission changes are atomic with hierarchy changes, including moves. There's one filesystem planner, one publication pipeline, and one authoritative permission state. In an unrestricted namespace, LoonFS makes no additional object-store requests and reads no access rows, because the access mode is read from the manifest that every request already loads.
 
-Core access control defends against backend authorization bugs at item granularity and gives one evaluation point for every read surface. It does not defend against the holder of the deployment token, which asserts the subject and its principals. Ordering is a separate matter from trust: an authority change made on behalf of ordinary subjects is ordered with the commits it affects, whoever submitted it.
+The model doesn't include:
 
-Each surface of an ACL namespace is exactly one of: authorized per subject, administrator-only, or token holder. Nothing is partially filtered. The change feed is administrator-only because there is no rule for `moved` and `deleted` events whose source or destination the subject cannot see. A client that synchronizes through the change feed would therefore need administrator authority, so ACL namespaces do not suit such clients.
+- explicit deny entries,
+- per-item ownership or ownership transfer,
+- "this folder only" grants that don't inherit,
+- conversion between modes,
+- permanent erasure as a permission,
+- commenting or preview-only roles, or
+- mounts.
+
+There's also no index for finding everything that a principal can reach.
+
+Core access control protects each item against bugs in the backend's authorization, and it provides one evaluation point for every read surface. It doesn't protect against the holder of the deployment token, because the token holder asserts the subject and its principals. Ordering is a separate matter from trust. An authority change made on behalf of ordinary subjects is ordered with the commits it affects, whoever submitted it.
+
+Each surface of an ACL namespace is exactly one of these:
+
+- authorized per subject,
+- administrator-only, or
+- token holder only.
+
+Nothing is partially filtered, and the change feed is administrator-only.
+
+Why is the change feed administrator-only? There's no rule for `moved` and `deleted` events whose source or destination the subject can't see. So a client that synchronizes through the change feed would need administrator authority, and ACL namespaces don't suit such clients.
 
 ## Principals, subjects, and actors
 
-Grants name principals by opaque ids that the application assigns and never recycles. Core does not distinguish a user from a group from a public audience; the application resolves membership and sends the applicable principal ids with each request. Each ACL namespace records a principal scope in its manifest, and core refuses a subject from another scope before it reads any grant.
+This section describes who a request acts as, and which grants apply to it.
 
-The actor is attribution, and the subject is who the request acts as. The subject id defaults to the actor, so a separate `Loonfs-Subject` header is needed only when the two differ, such as during support impersonation. The [identity header table](../specs/api.md#identity-headers) lists which operations read each header and which require it.
+A grant identifies a "principal" by an opaque ID that the application assigns and never reuses. Core doesn't distinguish between a user, a group, and a public audience. The application resolves membership, and it sends the applicable principal IDs with each request. Each ACL namespace records a principal scope in its manifest, and core rejects a subject from another scope before it reads any grant.
 
-Core does not assume that the subject id appears in the principal set; the application includes it when the subject holds direct grants. The number of principals per request has a fixed cap, advertised in the capability document. The application fits under it, and core needs no index to admit a request.
+The "actor" is who the request is attributed to, and the "subject" is who the request acts as. The subject ID defaults to the actor, so a request needs a separate `Loonfs-Subject` header only when the two are different, such as during support impersonation. The table in [Identity headers](../specs/api.md#identity-headers) lists which operations read each header and which ones require it.
 
-In an ACL namespace, an upload session records the subject id at creation, and only that subject can use the session. Creating an upload checks no rights: the application admits and limits staging, and the commit authorizes the destination. The subject id joins the semantic commit fingerprint beside the actor id, so a retry with the same commit id and a different subject answers `commit_id_reuse_conflict`. A retained receipt is returned to the same subject and actor regardless of their current rights, because the write already committed and the receipt reveals nothing that the subject did not author.
+Core doesn't assume that the subject ID is in the principal set, so the application includes it when the subject has direct grants. The number of principals in a request is capped, and the capability document advertises the cap. The application keeps each request under the cap, and core doesn't need an index to admit a request.
+
+In an ACL namespace, an upload session records the subject ID when the session is created, and only that subject can use the session. Creating an upload doesn't check any rights. The application admits and limits staging, and the commit authorizes the destination. The semantic commit fingerprint includes the subject ID alongside the actor ID, so a retry with the same commit ID and a different subject fails with `commit_id_reuse_conflict`. A retained receipt is returned to the same subject and actor, whatever their current rights are.
+
+Why is a receipt returned without checking current rights? The write has already committed, and the receipt reveals nothing that the subject didn't author.
 
 ## Rights
 
-The format stores two kinds of thing: directory bindings, which belong to the parent directory, and inode rows, which belong to the item. Rights mirror that split. `create` and `remove` govern a directory's entries. `read`, `history`, and `write` govern an item's own data. `share` and `manage` govern the item's access row, and `admin` exists only on the root row.
+The format stores two kinds of rows: directory bindings, which belong to the parent directory, and inode rows, which belong to the item. Rights follow the same split:
 
-The application composes roles from these rights and stores the resulting grants. Changing what a role name means never changes a stored grant. These are reference bundles:
+- `create` and `remove` apply to a directory's entries.
+- `read`, `history`, and `write` apply to an item's own data.
+- `share` and `manage` apply to the item's access row.
+- `admin` exists only on the root row.
+
+The application builds roles from these rights and stores the resulting grants, so changing what a role name means never changes a stored grant. These are the reference bundles:
 
 | Role | read | history | write | create | remove | share | manage |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -41,86 +70,104 @@ The application composes roles from these rights and stores the resulting grants
 | Editor | Yes | Yes | Yes | Yes | Yes | Policy | |
 | Manager | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 
-"Policy" means the application decides whether its Editor bundle includes `share`. Administrator is not a bundle; it is the `admin` right on the root row.
+"Policy" means that the application chooses whether its Editor bundle includes `share`. Administrator isn't a bundle. It's the `admin` right on the root row.
 
 ## Effective rights
 
-A grant on a directory applies to the directory and every descendant, until a directory marked as a boundary stops inheritance. The boundary is the only subtractive concept in the model. There are no deny entries, so the union of grants along a chain does not depend on order.
+This section describes how grants on an item and its ancestors combine into a subject's effective rights.
 
-The walk is the one every read already performs to find a covering subtree tombstone, and the path depth limit bounds it. A listing computes the directory's effective rights once, and each child inherits them in constant time; only a child whose own row is a boundary differs.
+A grant on a directory applies to the directory and every descendant, until a directory marked as a "boundary" stops inheritance. The boundary is the only subtractive concept in the model. There are no deny entries, so the union of grants along a chain of ancestors doesn't depend on order.
 
-A deleted item's own row and boundary are evaluated first. Only then does the walk follow the parent saved in the tombstone into that parent's current ancestry. The tombstone repairs one missing edge; it never replaces or bypasses the item's own row. Deletion therefore needs no descendant scan.
+To find the effective rights, LoonFS walks the item's ancestors. Every read already performs this walk to find a covering subtree tombstone, and the path depth limit bounds it. A listing computes the directory's effective rights once, and each child inherits them in constant time. Only a child whose own row is a boundary has different rights.
+
+For a deleted item, LoonFS evaluates the item's own row and boundary first. Only then does the walk follow the parent saved in the tombstone into that parent's current ancestors. The tombstone fills in one missing link to the parent, and it never replaces or bypasses the item's own row. So deletion doesn't need to scan descendants.
 
 ## Names, paths, and hidden items
 
-Names belong to the directory. A subject with `read` on a directory sees every entry's name, kind, and inode id, including a boundary folder that the subject cannot open. Attributes are returned only for children the subject can `read`. A product that prefers to hide such folders from listings needs a per-listing filter or an additional right.
+This section describes what a subject can see of names, paths, and items that it has limited rights on.
 
-Path resolution never requires rights on intermediate directories. Only the resolved target is checked, plus the parents that an operation mutates. Sharing one file directly grants rights on that inode alone. Its siblings stay hidden, because listing the parent needs `read` on the parent, and the file's entry response does not name its parent.
+Names belong to the directory. A subject with `read` on a directory sees every entry's name, kind, and inode ID, including a boundary folder that the subject can't open. Attributes are returned only for children that the subject can `read`. A product that prefers to hide such folders from listings needs a per-listing filter or an additional right.
 
-An item on which the subject holds no right answers `path_not_found` or `inode_not_found`, with no distinction from absence. An item on which the subject holds some right, but not the one the operation needs, answers `forbidden`. A subject that holds `write` but not `read` on a file therefore receives `forbidden` when it reads that file.
+Resolving a path never requires rights on the intermediate directories. LoonFS checks only the resolved target, plus the parents that an operation changes. Sharing one file directly grants rights on that inode alone. Its siblings stay hidden, because listing the parent needs `read` on the parent, and the file's entry response doesn't identify its parent.
+
+An operation on an item fails in one of two ways, depending on the subject's rights:
+
+- If the subject has no right on the item, the request fails with `path_not_found` or `inode_not_found`, the same as if the item didn't exist.
+- If the subject has some right on the item, but not the one the operation needs, the request fails with `forbidden`. For example, a subject that has `write` but not `read` on a file gets `forbidden` when it reads that file.
 
 ## Authorizing operations
 
-Commit operations are authorized in request order against the tentative view, inside the planner's per-operation loop. An operation therefore sees the effects of earlier operations in the request and of earlier accepted commits in the batch. A retry after a lost numbered WAL put plans again from scratch, so it authorizes again.
+LoonFS authorizes a commit's operations in request order, against the tentative view, inside the planner's per-operation loop. So each operation sees the effects of earlier operations in the request, and of commits that were accepted earlier in the batch. A retry after a lost numbered WAL put plans again from scratch, so it's authorized again.
 
-Trash and grep pages can be shorter than their limit and still carry a cursor. A short page reveals that hidden entries exist; grep's candidate budget already makes the same disclosure.
+Trash and grep pages can be shorter than their limit and still include a cursor. A short page reveals that hidden entries exist. (Grep's candidate budget already reveals the same information.)
 
-Presigned download URLs remain valid for their lifetime after issue, and in-flight streams cannot be retracted. Both are stated limits of the design.
+A presigned download URL stays valid for its whole lifetime after it's issued, and a stream that's in progress can't be retracted. Both are stated limits of the design.
 
 ## Moves and relocation
 
-A move places an inode in a new inheritance context. Whatever the destination's ancestors grant, the moved inode and its descendants inherit after the move, with the inode's history and direct grants intact. A copy is different: it creates a new inode with no history and no direct grants, and the copier needs `read` on the source. A copy therefore discloses only bytes that the copier could already read and could upload again anywhere it holds `create`.
+A move places an inode in a new inheritance context. After the move, the moved inode and its descendants inherit whatever the destination's ancestors grant, and the inode keeps its history and direct grants. A copy is different. It creates a new inode with no history and no direct grants, and the copier needs `read` on the source. So a copy discloses only bytes that the copier could already read, and could upload again anywhere it has `create`.
 
-The rule treats the implicit grant that a move performs exactly like an explicit grant. A move that changes any principal's effective rights on the moved inode is authorized as if the mover had granted those rights directly. A move that confers nothing needs entry rights only.
+LoonFS treats the implicit grant that a move performs exactly like an explicit grant. If a move changes any principal's effective rights on the moved inode, it's authorized as if the mover had granted those rights directly. A move that confers nothing needs only entry rights.
 
-This has several consequences:
+This rule has several consequences:
 
 - Reorganizing within one context, including a rename, confers nothing and needs only entry rights.
-- A boundary folder can move anywhere, because its own boundary means its context never changes.
-- A subject who can read and organize a file but cannot share it cannot move it into a folder that another principal can read.
-- A subject without `read` on an item cannot gain it by moving the item, even with `share`, because the gain is not a subset of what the subject holds.
-- The rule covers gains only. A move that removes other principals' access is an organizing action. A product that wants to restrict it, for example moving items into personal boundaries, does so by policy.
-- One evaluation at the moved inode covers the subtree. Descendants below a boundary are unaffected, and descendants with direct grants gain at most what the moved inode gains.
-- The check costs two ancestor walks and no descendant scan, and writes no rows. The conferred rights are inherited from the destination.
+- A boundary folder can be moved anywhere, because its own boundary means that its context never changes.
+- A subject who can read and organize a file, but can't share it, can't move it into a folder that another principal can read.
+- A subject without `read` on an item can't gain `read` by moving the item, even with `share`, because the gain isn't a subset of the rights the subject has.
+- The rule covers only gains. A move that removes other principals' access is an organizing action. A product that wants to restrict such moves (for example, moving items into personal boundaries) does so with its own policy.
+- One evaluation at the moved inode covers the subtree. Descendants below a boundary aren't affected, and descendants with direct grants gain at most what the moved inode gains.
+- The check costs two ancestor walks and no descendant scan, and it writes no rows. The conferred rights are inherited from the destination.
 
-An undelete to a destination other than the original parent runs the same rule, with the saved original parent as the source. An undelete in place confers nothing.
+An undelete to a destination other than the original parent uses the same rule, with the saved original parent as the source. An undelete in place confers nothing.
 
 ## Recursive deletion
 
-Deleting a directory writes one subtree tombstone and inspects no descendants. A limited-access boundary therefore protects confidentiality, but it does not prevent an authorized manager of an ancestor from making the subtree unavailable through recoverable deletion.
+Deleting a directory writes one subtree tombstone and doesn't inspect any descendants. So a limited-access boundary protects confidentiality, but it doesn't stop an authorized manager of an ancestor from making the subtree unavailable with a recoverable deletion.
 
-The deleter never sees the restricted subtree's bytes or names. Anyone with `remove` on the original parent can recover the deletion. A restricted descendant's manager may need an ancestor manager or an administrator to restore the deletion root, because only the root of a deletion can be undeleted. Permanent erasure is outside this permission model.
+The deleter never sees the restricted subtree's bytes or names. Anyone with `remove` on the original parent can recover the deletion. A restricted descendant's manager might need an ancestor's manager or an administrator to restore the deletion root, because only the root of a deletion can be undeleted. Permanent erasure is outside this permission model.
 
-Recursive copy and recursive read have no server-side operation. The CLI performs them as sequences of ordinary operations, and each is authorized on its own.
+There's no server-side operation for a recursive copy or a recursive read. The CLI performs them as sequences of ordinary operations, and each operation is authorized on its own.
 
 ## Administrators
 
-Manifests and WAL objects are numbered independently, and the writer revalidates the manifest on an interval rather than before every put. Authority stored only in the manifest would therefore not be ordered with commits. Administrators are instead a right on the root inode's row, and that right changes through the writer like any grant.
+Administrators are a right on the root inode's row, and that right changes through the writer like any other grant.
 
-`admin` is consulted only through the root-row check. It never appears in a chain union, boundaries do not apply to it, and administrator principals are skipped when a move's gain is computed. Ordinary grants on the root remain subject to boundaries, so a namespace-wide membership still respects limited-access folders.
+LoonFS consults `admin` only in the root-row check. It never appears in a union of grants along a chain, boundaries don't apply to it, and administrator principals are skipped when LoonFS computes a move's gain. Ordinary grants on the root are still subject to boundaries, so a namespace-wide membership still respects limited-access folders.
 
-The genesis administrators come from the manifest's immutable `access` field, which the genesis view materializes as the root row at access revision 0. Later revisions supersede it in commit order. The manifest keeps only the mode and the principal scope for authorization, and neither ever changes.
+The genesis administrators come from the manifest's immutable `access` field, which the genesis view materializes as the root row at access revision 0. Later revisions replace it in commit order. For authorization, the manifest keeps only the mode and the principal scope, and neither one can be changed.
 
-Core permits removing the last administrator; warning the user is the application's job. The `recover_administrator` maintenance job restores an administrator. That job publishes a root-row access revision through the writer, attributed to the request's actor and with no subject check. It is a commit, so it is ordered like every other.
+Core allows removing the last administrator, and warning the user is the application's job. The `recover_administrator` maintenance job restores an administrator. It publishes a root-row access revision through the writer, attributed to the request's actor, without a subject check. That revision is a commit, so it's ordered like every other commit.
+
+Why isn't administrator authority stored in the manifest? Manifests and WAL objects are numbered independently, and the writer revalidates the manifest on an interval instead of before every put. So authority stored only in the manifest wouldn't be ordered with commits.
 
 ## Delegation and boundaries
 
-`share` lets a subject add or remove any grant whose rights are a subset of its own effective rights on that inode, while leaving the boundary unchanged. `manage` allows any change to the row except an `admin` assignment. Group and public audiences are principal ids, and core does not distinguish them from users.
+This section describes how a subject changes access for other principals.
 
-Setting or clearing a boundary is one `update_access` that carries the new boundary flag and the complete direct grant map, authorized against the preceding state and published atomically. Core copies no grants when a boundary is set. An application can offer "preserve current access" as a convenience that previews the resulting direct grants, checks the per-row cap, and explains that the retained grants stop following the ancestors. That transformation is application behavior, never core behavior.
+Two rights allow a subject to change an item's access row:
 
-Core does not prevent a manager from removing its own `manage`. Previewing that change is the application's job, and an administrator can restore it.
+- `share` lets a subject add or remove any grant whose rights are a subset of its own effective rights on that inode, without changing the boundary.
+- `manage` allows any change to the row except assigning `admin`.
+
+Group and public audiences are principal IDs, and core doesn't distinguish them from users.
+
+Setting or clearing a boundary is one `update_access` operation that includes the new boundary flag and the complete map of direct grants. LoonFS authorizes it against the preceding state and publishes it atomically. Core doesn't copy any grants when a boundary is set. An application can offer "preserve current access" as a convenience that previews the resulting direct grants, checks the per-row cap, and explains that the retained grants stop following the ancestors. That transformation is always application behavior, never core behavior.
+
+Core doesn't stop a manager from removing its own `manage` right. Previewing that change is the application's job, and an administrator can restore the right.
 
 ## Why grants are their own rows
 
-Grants are not attributes and not an extension. A copy propagates the source's attribute map onto the new inode, which grants must never do. An extension must be rebuildable from core state and invisible to core reads, which authoritative grants cannot be.
+Grants aren't stored as attributes or as an extension. A copy applies the source's attribute map to the new inode, which must never happen to grants. An extension must be rebuildable from core state and invisible to core reads, and authoritative grants can't be.
 
 ## Ordering and revocation
 
-1. Every authority that commit authorization consults is a row on the same view the write validates against: the inode rows and the root row.
-2. Commits are ordered by numbered WAL puts through the namespace's single writer session. A revocation accepted at sequence N is observed by every commit validated after it, in the same batch or a later one. A commit authorized before N and not yet published plans again on retry and is refused.
-3. A revocation is acknowledged only after loading a view that includes every earlier put, whether or not the earlier put's submitter has heard its result. A timeout on the earlier write does not establish that it was not published.
-4. Readers observe a revocation on their next read after it publishes, because every warm read probes the next WAL number.
-5. Snapshot reads authorize at the current head, for the historical inode returned.
-6. Receipt replay returns the original result to the same subject and actor without authorizing again.
-7. Group membership freshness belongs to the application, per request.
+Access changes follow these ordering and revocation rules:
+
+1. Every authority that commit authorization checks is a row in the same view that the write is validated against (the inode rows and the root row).
+2. Commits are ordered by numbered WAL puts through the namespace's single writer session. A revocation accepted at sequence N applies to every commit validated after it, in the same batch or a later one. A commit that was authorized before N, and isn't published yet, is planned again on retry and refused.
+3. LoonFS acknowledges a revocation only after it loads a view that includes every earlier put, whether or not the earlier put's submitter has received its result. A timeout on the earlier write doesn't show that the write wasn't published.
+4. A reader sees a revocation on its next read after the revocation is published, because every warm read probes the next WAL number.
+5. A snapshot read is authorized at the current head, for the historical inode that it returns.
+6. Replaying a receipt returns the original result to the same subject and actor without authorizing again.
+7. The application is responsible for the freshness of group membership, on each request.

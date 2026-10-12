@@ -1,44 +1,55 @@
 # Content search index
 
-LoonFS supports grep-style regular-expression queries through a derived content index. The index narrows the files that need to be read, then the query implementation checks those files against the original pattern. Index maintenance runs separately from metadata maintenance and does not delay a file's metadata commit until its content has been indexed.
+LoonFS supports grep-style regular-expression queries through a derived content index. The index narrows down the files that a query needs to read, and then the query checks those files against the original pattern. Index maintenance runs separately from metadata maintenance, so a file's metadata commit doesn't wait until its content has been indexed.
 
-The index is stored under the namespace's grep extension prefix. It can be rebuilt from filesystem state, and core readers do not need to decode it to read the namespace. This document explains its contents, build process, query behavior, and collection rules. The durable encodings are defined in the [storage format](../specs/format.md).
+The index is stored under the namespace's grep extension prefix. It can be rebuilt from filesystem state, and core readers don't need to decode it to read the namespace. This note explains what the index contains, how it's built, how queries use it, and how its objects are collected. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines the durable encodings.
 
 ## The approach
 
-Many regular expressions require particular literal bytes in every match. A trigram index records every three-byte substring of eligible content. Query planning extracts gram requirements from the pattern, uses posting lists to find candidate revisions, and runs the original regular expression over their contents.
+This section describes how a trigram index narrows a regular-expression search.
+
+Many regular expressions require particular literal bytes in every match. A "trigram index" records every three-byte substring (a "gram") of eligible content. To run a query, LoonFS extracts the grams that the pattern requires, uses posting lists to find candidate revisions, and runs the original regular expression over their contents.
 
 ```text
 pattern -> required grams -> candidate revisions
         -> visibility and scope checks -> content verification -> matches
 ```
 
-For example, the literal `invoice` requires the grams `inv`, `nvo`, `voi`, `oic`, and `ice`. A file missing any of those grams cannot contain the literal. A file containing all five may still fail to match: the grams could occur in separate locations. The final content check removes those false positives.
+For example, the literal `invoice` requires the grams `inv`, `nvo`, `voi`, `oic`, and `ice`. A file that's missing any of those grams can't contain the literal. A file that contains all five might still not match, because the grams could occur in separate places. The final content check removes those false positives.
 
-There are two distinct correctness requirements. First, every reported match must pass the actual pattern and visibility checks. Second, every eligible revision covered by the index's completed watermark must have the required postings. Verification can remove an extra candidate, but it cannot recover a matching file that never became a candidate.
+The index has two separate correctness requirements:
 
-Newer, unindexed revisions are therefore scanned exhaustively within the query's tail budget. An index-only result is returned only when the caller explicitly permits stale results.
+- Every reported match must pass the actual pattern and the visibility checks.
+- Every eligible revision covered by the index's completed watermark must have the required postings.
+
+Verification can remove an extra candidate, but it can't recover a matching file that never became a candidate. So LoonFS scans newer, unindexed revisions exhaustively, within the query's tail budget. It returns an index-only result only when the caller explicitly allows stale results.
 
 ## What gets indexed
 
-Eligibility is evaluated during indexing rather than upload. The rule has two conditions:
+This section describes which revisions the index includes.
+
+LoonFS checks whether content is eligible when it indexes the content, not when the content is uploaded. Content is eligible when it meets both of these conditions:
 
 | Condition | Rule |
 | --- | --- |
 | Content size | At most 8 MiB. |
 | Text sample | The first 8 KiB contains no NUL byte and passes the UTF-8 sample check. |
 
-An incomplete final UTF-8 character is accepted when it follows a nonempty valid prefix. The sample is a text-detection heuristic, not a guarantee about every byte in the file. Files that fail the rule are excluded from both indexed search and the unindexed-tail scan. No filename-extension list is used, so extensionless files such as `README` and `Makefile` are evaluated in the same way as named text formats.
+The sample check accepts an incomplete final UTF-8 character when it follows a nonempty valid prefix. The sample is a heuristic for detecting text, not a guarantee about every byte in the file. Files that fail the rule are left out of both indexed search and the scan of the unindexed tail. LoonFS doesn't use a list of filename extensions, so files without an extension, such as `README` and `Makefile`, are checked the same way as files in formats with a known text extension.
 
-Builders and queries must apply the same eligibility rule. Otherwise, a builder could advance its watermark past a file that a query considers searchable even though the file has no postings. The size cap and sampling rule are therefore part of the versioned search semantics, not independent deployment tunables.
+Index builders and queries must apply the same eligibility rule. So the size cap and the sampling rule are part of the versioned search semantics, not deployment settings that can be tuned on their own. Attributes don't override eligibility.
 
-Attributes do not override eligibility. A text or binary override would need the builder, queries, and rebuilds to change together.
+Why must builders and queries use the same rule? Otherwise, a builder could advance its watermark past a file that a query considers searchable, even though the file has no postings.
+
+Why can't an attribute mark a file as text or binary? An override like that would need the builder, queries, and rebuilds to change together.
 
 ## Postings
 
-The tokenizer extracts every overlapping three-byte window after folding ASCII letters to lowercase. Grams are byte sequences rather than Unicode characters. This supports common ASCII case-insensitive searches without storing separate postings for each case, but it does not implement general Unicode case folding.
+This section describes the posting rows that the index stores.
 
-Each posting identifies `(inode_id, revision_no)`. It does not contain a path. Renames can therefore change result paths without requiring posting rewrites; paths are resolved from metadata at query time.
+The tokenizer folds ASCII letters to lowercase, and then extracts every overlapping three-byte window. Grams are byte sequences, not Unicode characters. This folding supports common case-insensitive ASCII searches without storing separate postings for each case, but it doesn't implement general Unicode case folding.
+
+Each posting identifies `(inode_id, revision_no)`, and it doesn't contain a path. Paths are resolved from metadata when a query runs, so a rename can change the paths in results without rewriting any postings.
 
 A posting row has this structure:
 
@@ -47,15 +58,17 @@ key:      gram-{six lowercase hex characters}-{first inode id:020}
 payload:  a packed batch of (inode_id, revision_no) pairs
 ```
 
-The target is approximately 256 postings per row. The batch stores its count, the first inode ID and revision number, then subsequent inode deltas and absolute revision numbers as unsigned varints. The pairs are ordered, and rows for a gram are read together.
+The writer's target is about 256 postings per row. The batch stores its count, then the first inode ID and revision number, and then the later inode deltas and absolute revision numbers, all as unsigned varints. The pairs are ordered, and the rows for a gram are read together.
 
-Batching reduces per-row overhead while retaining the segment and iteration machinery used for other sorted rows. Readers union posting batches from different runs. Reorganization does not need to combine every posting for a gram into one monolithic payload to preserve correctness.
+Batching reduces the overhead of each row, and it keeps using the same segment and iteration code as other sorted rows. Readers take the union of posting batches from different runs, so reorganization doesn't need to combine every posting for a gram into one large payload to stay correct.
 
-Inode identity alone does not make an index reusable across namespaces. A fork begins without grep state or copied posting segments and is indexed independently, even though its inherited metadata contains the same inode IDs.
+Sharing inode IDs doesn't make an index reusable across namespaces. A fork starts with no grep state and no copied posting segments, and it's indexed on its own, even though its inherited metadata contains the same inode IDs.
 
 ## Segments, manifests, and discovery
 
-Grep segments use the layout in [metadata block storage](metadata-block-storage.md): prefix-compressed row keys, independently compressed data blocks, a bloom filter, an index, and per-section checksums. The payload is grep-specific. The filter key is the `gram-{hex}` part of the row key, so a negative result excludes a segment for that gram.
+This section describes how the index's objects are stored, and how a query finds the current set of segments.
+
+Grep segments use the layout described in [Metadata block storage](metadata-block-storage.md), which has prefix-compressed row keys, independently compressed data blocks, a Bloom filter, an index, and per-section checksums. Only the row payload is specific to grep. The filter key is the `gram-{hex}` part of the row key, so a negative filter result rules out a segment for that gram.
 
 ```text
 namespaces/{namespace_id}/extensions/grep/
@@ -64,160 +77,226 @@ namespaces/{namespace_id}/extensions/grep/
 └── segments/{segment_id}.sst.zst
 ```
 
-The hint records a manifest number from which discovery starts. A reader loads that manifest and probes consecutive numbers until not-found. The current manifest contains lifecycle, visible segments, the run allocator, and pending reorganization. Core manifests contain none of this state.
+The grep hint records the manifest number where discovery starts. A reader loads that manifest, and then probes the following numbers until one isn't found. The current grep manifest contains the lifecycle state, the visible segments, the run allocator, and any pending reorganization. Core manifests contain none of this state.
 
-Enablement writes the hint naming manifest 1 before creating manifest 1. Later publications write completed segments, then the next manifest with put-if-absent. A publisher that loses the race stops, and its next step loads the winner and plans again. Successful publication raises the hint by CAS; a failed raise does not undo publication.
+Enabling the index writes a hint that points to manifest 1, and then creates manifest 1. Each later publication works in these steps:
 
-Queries check for a successor to their cached manifest on every request. A present successor requires discovery again, and so does an answer that arrives `READ_REVALIDATION_BOUND_MS` or more after the manifest's previous check. The hint can lag and does not replace this freshness check. The [grep format](../specs/format.md#appendix-d-grep-extension-format) defines identity and checksum validation.
+1. The publisher writes the completed segments.
+2. It creates the next manifest with put-if-absent. A publisher that loses the race stops, and its next step loads the winning manifest and plans again.
+3. After a successful publication, it raises the hint with compare-and-swap. If raising the hint fails, the publication still stands.
+
+On every request, a query checks whether its cached manifest has a successor. The query runs discovery again if a successor exists, or if the response arrives `READ_REVALIDATION_BOUND_MS` or more after the manifest's previous check. The hint can lag, so it doesn't replace this freshness check. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines how identity and checksums are validated.
 
 ## Index lifecycle
 
-The lifecycle has three states:
+An index is in one of three lifecycle states, and the current grep manifest records the state along with its position:
 
 | State | Position and behavior |
 | --- | --- |
-| `disabled` | No query-visible segment set and no pending reorganization. |
-| `backfilling` | A checkpoint ID, `captured_seq`, and optional last-consumed `cursor_inode_id`. Queries are unavailable. |
-| `active` | An incremental cursor consisting of `built_through_seq` and `next_event_index`. Queries can use the completed index plus the unindexed tail. |
+| `disabled` | No segment set that queries can see, and no pending reorganization. |
+| `backfilling` | A checkpoint ID, `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
+| `active` | An incremental cursor made of `built_through_seq` and `next_event_index`. Queries can use the completed index plus the unindexed tail. |
 
-A zero `next_event_index` denotes a completed commit boundary. A nonzero value identifies the next event to process within `built_through_seq`; that commit is only partly indexed. Consumers must not interpret the sequence alone as complete coverage of that commit. HTTP status serialization may omit a zero event index; the durable encoding has its own field-presence rules.
+```text
+                             +-- rebuild from a new checkpoint --+
+                             v                                   |
++----------+  enable  +-------------+  final backfill step  +--------+
+| disabled | -------> | backfilling | --------------------> | active |
++----------+          +-------------+                       +--------+
+     ^                       |                                   |
+     |                       |              disable              |
+     +-----------------------+-----------------------------------+
+```
 
-A single request operation can produce multiple change events. The event index is an offset within the commit's ordered events, not a count of request operations.
+A `next_event_index` of zero means the cursor is at a completed commit boundary. A nonzero value identifies the next event to process within `built_through_seq`, so that commit is only partly indexed. A consumer must not treat the sequence alone as complete coverage of that commit. The HTTP status response can leave out an event index of zero, but the durable encoding has its own rules for which fields are present.
 
-Disabling the index publishes a `disabled` manifest with no segment references. The operation does not synchronously delete the previous objects. An in-progress worker that encounters the disabled publication stops rather than republishing its earlier state.
+One request operation can produce several change events, so the event index is an offset within the commit's ordered events, not a count of request operations.
+
+Disabling the index publishes a `disabled` manifest with no segment references. The operation doesn't delete the previous objects synchronously. A worker that's in progress when it finds the disabled manifest stops, instead of publishing its earlier state again.
 
 ## Building the index
 
+A worker builds the index in two phases, first with a backfill from a checkpoint, and then incrementally from the change feed.
+
 ### Initial backfill
 
-Enablement creates an expiring user checkpoint at the namespace head, then publishes a backfilling manifest with that checkpoint ID, target sequence, and no inode cursor.
+Enabling the index creates an expiring user checkpoint at the namespace head, and then publishes a `backfilling` manifest with that checkpoint ID, the target sequence, and no inode cursor.
 
-Each bounded build step enumerates files from the checkpoint in ascending inode order. It reads one current revision per retained file, including deleted files, applies the eligibility rule, extracts grams, and writes new delta segments. The segment set and last-consumed inode are published together in the next numbered grep manifest.
+Each bounded build step:
 
-The final backfill step changes the lifecycle to `active` at the captured sequence and releases the checkpoint. Writes committed after that sequence are then processed through the change feed. They do not change the fixed target of the backfill already in progress.
+1. Lists files from the checkpoint in ascending inode order.
+2. Reads one current revision of each retained file, including deleted files.
+3. Applies the eligibility rule and extracts grams.
+4. Writes new delta segments.
+5. Publishes the segment set and the last inode it consumed together, in the next numbered grep manifest.
 
-If the checkpoint or necessary change history becomes unavailable, the worker abandons the incomplete build and begins another checkpointed backfill. It does not report the partial index as complete.
+The final backfill step changes the lifecycle state to `active` at the captured sequence, and releases the checkpoint. Writes committed after that sequence are then processed through the change feed. They don't change the target of the backfill that's already in progress, which was set when the backfill started.
+
+If the checkpoint, or change history that the worker needs, becomes unavailable, the worker abandons the incomplete build and starts another backfill from a new checkpoint. It doesn't report the partial index as complete.
 
 ### Incremental builds
 
-An active worker resumes the change feed from its sequence/event cursor. It indexes the eligible revisions published by those events and advances the cursor in the same numbered manifest publication that publishes their segment references.
+An active worker resumes the change feed from its cursor (a sequence and an event index). It indexes the eligible revisions that those events publish, and it advances the cursor in the same numbered manifest publication that publishes their segment references.
 
-Moves, deletes, and undeletes do not publish new content revisions in those events, so they do not require new postings. Their effect on visibility and paths is evaluated against metadata during queries. Operations that append a new revision are processed as revision events even when the underlying bytes were already stored.
+Moves, deletes, and undeletes don't publish new content revisions in those events, so they don't need new postings. Queries check their effect on visibility and paths against metadata. Operations that append a new revision are processed as revision events, even when the underlying bytes were already stored.
 
-The default build budget is 256 files or 64 MiB per step. Build batches are bounded, but the total cost of backfilling a namespace still depends on the eligible corpus. Failed attempts or a restarted backfill can read content again.
+By default, the build budget is 256 files or 64 MiB per step. Each batch is bounded, but the total cost of backfilling a namespace still depends on how much eligible content it has. Failed attempts, or a restarted backfill, can read content again.
 
-The index does not prevent the namespace's retention floor from advancing. If incremental history required by the worker has been removed, the worker rebuilds from a new checkpoint.
+The index doesn't stop the namespace's retention floor from advancing. If the change history that the worker needs has been removed, the worker rebuilds the index from a new checkpoint.
 
 ## Maintenance scheduling
 
-The reference server drives `GrepWorker` from its maintenance sweep, beside core metadata maintenance. Each visit runs build steps while each one publishes, at most 16, then one reorganization step once the index is up to date. A collection pass also runs grep garbage collection. A failure for one namespace is logged and tried again on the next pass, and it does not delay unrelated namespaces.
+This section describes when the reference server and the CLI run index work.
 
-A second pass every five seconds builds the index of each writer session the server holds whose last published seq moved since that pass last indexed it, so a commit through that server is indexed within seconds. The sweep and that pass never build one namespace's index at the same time. Enabling the index publishes the backfill, and the next sweep pass starts it. Queries do not schedule work.
+The reference server runs `GrepWorker` from its maintenance sweep, alongside core metadata maintenance. Each visit runs build steps for as long as each step publishes, up to 16 steps, and then runs one reorganization step once the index is up to date. A collection pass also runs grep garbage collection. A failure for one namespace is logged and retried on the next pass, and it doesn't delay unrelated namespaces.
 
-A query-only server builds no index and rejects index mutations. No grep operation enumerates namespaces; the sweep lists them from the store.
+Every five seconds, a second pass checks each writer session that the server has open. If the session's last published sequence has moved since that pass last indexed it, the pass builds that namespace's index, so a commit through that server is indexed within seconds. The sweep and that pass never build the same namespace's index at the same time. Enabling the index publishes the backfill, and the next sweep pass starts it. Queries don't schedule any work.
 
-Embedded CLI profiles run no index work after a write. `loonfs maintenance index enable` captures a target sequence and runs bounded build steps until the index reaches it. Later namespace writes do not extend that target. `--no-wait` returns after enablement. `--max-steps` and `--deadline-ms` bound the wait; when either runs out, the command prints its progress and exits nonzero. Repeating the command brings an index that has fallen behind up to the namespace head.
+A query-only server doesn't build indexes, and it rejects index mutations. No grep operation lists namespaces. The sweep lists them from the store.
 
-Build and reorganization do not collect garbage. Grep garbage collection is its own call, described below.
+Embedded CLI profiles don't run any index work after a write. `loonfs maintenance index enable` captures a target sequence and runs bounded build steps until the index reaches it. Later writes to the namespace don't extend that target. The command has these options:
+
+- `--no-wait` returns after the index is enabled.
+- `--max-steps` and `--deadline-ms` limit the wait. When either one runs out, the command prints its progress and exits with a nonzero status.
+
+Running the command again brings an index that has fallen behind up to the namespace head.
+
+Building and reorganizing the index don't collect garbage. Grep garbage collection is a separate call (see [Grep garbage collection](#grep-garbage-collection)).
 
 ## Reorganization
 
-The index uses three tiers: delta, mid, and base. Delta runs are merged into mid runs; accumulated mid runs are merged with the base into a new base.
+Reorganization merges the index's runs across three tiers: delta, mid, and base. Delta runs are merged into mid runs, and accumulated mid runs are merged with the base into a new base.
 
-The thresholds count logical runs, not physical segments. Every build publication that writes rows allocates one `run_no` for its batch from `next_run_no`. A run can contain several segments without changing the reorganization count. Separate backfill batches remain separate runs even though they share the same captured target sequence.
+The thresholds count logical runs, not physical segments. Every build publication that writes rows allocates one `run_no` for its batch from `next_run_no`. A run can contain several segments, and it still counts as one run toward reorganization. Separate backfill batches stay separate runs, even though they share the same captured target sequence.
 
-With eight delta runs per mid run and eight mid runs per base rewrite, a simplified sequence of full batches produces a base rewrite about once per 64 build runs. A two-tier scheme rewriting the base after every eight delta runs would rewrite it eight times as often in that example. This is a constant-factor reduction; a fixed three-tier structure does not establish logarithmic cumulative write amplification as the corpus grows.
+With eight delta runs per mid run, and eight mid runs per base rewrite, a simplified sequence of full batches rewrites the base about once every 64 build runs. A two-tier scheme that rewrote the base after every eight delta runs would rewrite it eight times as often in that example. This is a constant-factor reduction. Because the structure always has three tiers, it doesn't provide logarithmic cumulative write amplification as the corpus grows.
 
 ### Processing a reorganization in steps
 
-A reorganization records the exact input segment set it will consume. It then scans the gram keyspace in bounded row-count steps, writing output segments at the selected tier and publishing progress after each step.
+A reorganization first records the exact set of input segments that it will merge. It then scans the gram key space in steps that each process a bounded number of rows. Each step writes output segments at the selected tier and publishes its progress.
 
-Until the scan completes, both inputs and completed outputs remain referenced and query-visible. This is safe for add-only postings because readers union the batches: repeated postings do not create missing candidates. It is not a general rule for replacing metadata rows with different retention semantics.
+Until the scan completes, both the inputs and the completed outputs stay referenced and visible to queries. Segments published after the reorganization selected its inputs aren't part of that reorganization, and they stay referenced when it completes. The final step removes the selected inputs, and keeps the completed outputs and the unrelated segments.
 
-Segments published after the input snapshot was selected are excluded from that reorganization and remain referenced at completion. The final step removes the selected inputs and retains the completed outputs and unrelated segments.
+The row budget can be exceeded for rows with equal keys. All the rows with the same key are processed together before the cursor moves past that key.
 
-The row budget is soft for equal keys. All rows with the same key are processed together before the cursor advances beyond that key. Splitting that group while recording an exclusive last-key cursor could skip its remaining rows on resume.
+The manifest records each segment's `level` (`0`, `1`, or `2`) and `run_no`, and the index's `next_run_no`. An in-progress reorganization records its `output_level`, its output `run_no` (which doesn't change during the reorganization), its selected inputs, its outputs, and its cursor. A replacement worker resumes from the last manifest that was published successfully.
 
-The manifest records the segment `level` (`0`, `1`, or `2`), `run_no`, and `next_run_no`. The in-progress reorganization records its `output_level`, fixed output `run_no`, selected inputs, outputs, and cursor. A replacement worker resumes from the last successfully published manifest.
+Why can queries see both the inputs and the outputs? Postings are add-only, and readers take the union of the batches, so a posting that appears twice doesn't cause a missed candidate. This isn't a general rule for replacing metadata rows that have different retention semantics.
+
+Why aren't rows with equal keys split across steps? If a step split that group and recorded an exclusive last-key cursor, a resumed reorganization could skip the group's remaining rows.
 
 ### Old postings
 
-The index does not remove postings solely because their revisions later become unobservable. Queries filter those candidates against current metadata before reporting results. Removing the postings requires a separate, correct liveness policy; it is not implied by routine segment merging.
+The index doesn't remove a posting just because its revision can no longer be observed. Queries filter those candidates against current metadata before they report results. Removing those postings would need a separate, correct liveness policy. Routine segment merging doesn't remove them.
 
-This means the index can grow with historical revisions, not only the current visible files. The impact depends on the workload and should be measured rather than hidden by an index-size estimate based only on the current corpus.
+So the index can grow with historical revisions, not just with the files that are currently visible. How much it grows depends on the workload. It should be measured, instead of being hidden by an index-size estimate that's based only on the current files.
 
 ## Queries
 
-The serving deployment must advertise the query capability, and the namespace must have a usable grep index. A capability declaration is not evidence that backfill is complete for every namespace.
+This section describes how a grep query runs.
 
-The endpoint is `GET /v0/namespaces/{ns}/grep`. Requests specify the pattern, case sensitivity, optional path-prefix scope, and optional cursor. `allow_scan` permits bounded scanning for a pattern that cannot be narrowed through grams. `allow_stale` permits indexed-only results when the unindexed tail cannot be scanned within the applicable budget.
+To run a query, the serving deployment must advertise the query capability, and the namespace must have a usable grep index. Advertising the capability doesn't show that backfill is complete for every namespace.
 
-Patterns use the Rust `regex` dialect, without backreferences or lookaround. Pattern syntax and the planner's interpretation must agree with the final verifier.
+The endpoint is `GET /v0/namespaces/{ns}/grep`. A request includes the pattern, case sensitivity, an optional path-prefix scope, and an optional cursor. It can also set two flags:
+
+- `allow_scan` allows a bounded scan for a pattern that grams can't narrow.
+- `allow_stale` allows indexed-only results when the unindexed tail can't be scanned within the applicable budget.
+
+Patterns use the Rust `regex` dialect, without backreferences or lookaround. The planner must interpret the pattern syntax the same way as the final verifier.
 
 ### Planning
 
-The planner derives constraints that every match must satisfy. Its implementation represents the plan as an AND of sets of alternative grams: a candidate must satisfy every set by containing at least one of that set's grams.
+The planner derives constraints that every match must satisfy. It represents the plan as an AND of sets of alternative grams, so a candidate must contain at least one gram from every set.
 
-For concatenated literal text, the required trigrams can be intersected directly. For alternatives, the constraints must preserve every matching branch. When a constraint cannot be established safely, the planner omits it. Fewer constraints increase the candidate set but do not omit valid matches.
+For concatenated literal text, the planner can intersect the required trigrams directly. For alternatives, the constraints must keep every branch that could match. When the planner can't establish a constraint safely, it leaves the constraint out. Fewer constraints produce more candidates, but they don't cause valid matches to be missed.
 
-ASCII-case-folded grams are useful for common case-insensitive patterns. A non-ASCII case alternative may not map to the same indexed bytes. The planner must weaken that constraint rather than assume the index implements Unicode case folding.
+Grams folded to ASCII lowercase work well for common case-insensitive patterns. A non-ASCII case alternative might not map to the same indexed bytes, so the planner must weaken that constraint instead of assuming that the index implements Unicode case folding.
 
-A valid pattern with no useful required grams, such as `.*` or a single character, is rejected as unindexable by default. `allow_scan` permits an explicitly bounded scan instead. Syntax errors and valid-but-unindexable patterns are different outcomes.
+By default, LoonFS rejects a valid pattern that has no useful required grams (such as `.*` or a single character) as unindexable. With `allow_scan`, it runs an explicitly bounded scan instead. A syntax error and a valid pattern that can't be indexed are different outcomes.
 
 ### Candidate selection and verification
 
-Within a page, execution uses one read view. For each required gram, it excludes disjoint segment ranges, checks bloom filters, and reads posting batches. Sorted intersections and unions produce candidate inode/revision pairs.
+Each page of results uses one read view, and the query works through it in these steps:
 
-Candidates are then resolved in batches against that read view: visibility, current revision, and current path. A posting for an older revision is not a match against a file's current revision. Path-prefix filtering applies to the resolved path, not a path cached when the posting was created.
+1. For each required gram, the query skips segments whose key ranges don't include the gram, checks Bloom filters, and reads posting batches. Sorted intersections and unions of those batches produce candidate (inode, revision) pairs.
+2. It resolves the candidates in batches against that read view, to find each one's visibility, current revision, and current path.
+3. For each remaining candidate, it reads the referenced content, verifies it, and runs the original pattern. Content reads use limited concurrency.
 
-For each remaining candidate, the server reads the referenced content, verifies it, and runs the original pattern. Content reads use limited concurrency. The response contains line-oriented matches rather than a streaming file response.
+A posting for an older revision isn't a match against a file's current revision. Path-prefix filtering applies to the resolved path, not to a path cached when the posting was created. The response contains line-oriented matches, not a streaming file response.
 
-A match identifies the inode, revision, derived absolute path, one-based line number, byte offset, and matching line. Lines longer than 512 bytes are truncated, with `line_truncated` indicating that truncation. Matches are ordered by inode ID and byte offset.
+Each match identifies the inode, the revision, the derived absolute path, the line number (starting at 1), the byte offset, and the matching line. A line longer than 512 bytes is truncated, and `line_truncated` shows that it was. Matches are ordered by inode ID and byte offset.
 
 ### Pagination
 
-A page is bounded by both its match limit and its verified-candidate budget. A pattern with many false-positive candidates must not trigger an unlimited content scan merely because it produces few matches.
+A page is limited by both its match limit and its budget of verified candidates.
 
-The continuation records scan progress, including candidates that produced no matches, rather than only the last emitted match. It is bound to the result-selecting request fields: pattern, case flag, path scope, `allow_scan`, and `allow_stale`. Reusing it with different request semantics is rejected.
+The continuation cursor records the scan's progress, including candidates that produced no matches, not just the last match that was returned. It's bound to the request fields that select results (the pattern, the case flag, the path scope, `allow_scan`, and `allow_stale`), and a request that reuses it with different values for those fields is rejected.
 
-Each page reports the namespace `head_seq` used for that page. All metadata phases within the page share that view, but later pages can observe a newer head. A grep request has no snapshot selector, so a multipage search is not held at one durable snapshot.
+Each page reports the namespace `head_seq` that it used. Every metadata phase within the page uses that view, but later pages can see a newer head. A grep request has no snapshot selector, so a search across several pages isn't kept at one durable snapshot.
+
+Why does a page need a candidate budget as well as a match limit? A pattern with many false-positive candidates produces few matches, and it must not trigger an unlimited content scan just because of that.
 
 ## Freshness and the unindexed tail
 
-At a completed watermark, the index contains the postings needed for eligible revisions through that boundary. Revisions after it, up to the head of the query's read view, are enumerated from the change feed and checked exhaustively with the same eligibility rule and verifier. A partly indexed commit must be treated according to its event cursor rather than assumed complete from its sequence alone.
+This section describes how a query covers revisions that the index doesn't include yet.
 
-For example, an index completed through sequence 100 can still return a current result at head 103 by considering the new revisions from commits 101 through 103. A metadata-only rename in that interval changes a result's path through the read view without requiring a new content posting.
+At a completed watermark, the index contains the postings needed for eligible revisions through that boundary. The query lists the revisions after the watermark, up to the head of its read view, from the change feed, and checks them exhaustively with the same eligibility rule and verifier. A partly indexed commit must be handled according to its event cursor, not assumed to be complete because of its sequence.
 
-If the tail exceeds the query's budget, the default is a typed `index_lagging` error. With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, together with the index and head positions. Stale results remain subject to visibility and content verification; they may omit eligible revisions that are not yet indexed. If the tail's change history is below the retention floor, the query answers `rebootstrap_required`, with or without `allow_stale`. The worker's next step rebuilds from a new checkpoint.
+For example, an index completed through sequence 100 can still return a current result at head 103, because the query also checks the new revisions from commits 101 to 103. A metadata-only rename in that range changes a result's path through the read view, without needing a new content posting.
 
-Index maintenance reduces this gap when it runs. Core WAL-tail backpressure does not, by itself, bound grep lag: metadata can be folded while grep maintenance remains behind. The query's tail budget and explicit stale-result option define the behavior when the gap is too large.
+If the tail is larger than the query's budget:
+
+- By default, the query fails with an `index_lagging` error.
+- With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, along with the index and head positions. Stale results still go through visibility checks and content verification, but they might leave out eligible revisions that aren't indexed yet.
+
+If the tail's change history is below the retention floor, the query returns `rebootstrap_required`, with or without `allow_stale`. The worker's next step rebuilds the index from a new checkpoint.
+
+Index maintenance reduces this gap when it runs. Core backpressure on the WAL tail doesn't limit grep lag by itself, because metadata can be folded while grep maintenance is still behind. When the gap is too large, the query's tail budget and the explicit stale-result option determine what happens.
 
 ## Grep garbage collection
 
-Grep GC is namespace-scoped. It runs through `loonfs maintenance grep-gc`, `POST /v0/maintenance/namespaces/{ns}/runs` with `kind: "grep_gc"`, or the reference server's sweep on each collection pass. Index building and reorganization do not run it.
+Grep garbage collection deletes grep manifests and segments that are no longer needed. Each call covers one namespace, and it runs through any of these:
 
-Each call loads the current manifest, builds its live segment set, and scans the manifest and segment collections from beginning to end. It uses a fixed call clock and stores no progress cursor. Invalid or unreadable roots fail before deletion.
+- `loonfs maintenance grep-gc`
+- `POST /v0/maintenance/namespaces/{ns}/runs` with `kind: "grep_gc"`
+- the reference server's sweep, on each collection pass
 
-Manifest numbers at or above the observed hint remain for discovery. A manifest below the current one, and every segment it lists, stays while its immediate successor is younger than ordinary grace. A successor without a provider timestamp counts as young. Once that rule releases a manifest below the hint, its own provider age must meet ordinary grace. The current manifest retains its listed segments, including pending reorganization inputs and outputs. An unreferenced segment must be strictly older than 24 hours.
+Building and reorganizing the index don't run it.
 
-Every output-producing step checks the bounded metadata publication budget before creating its next manifest. That budget and the collection age gates protect concurrent builds. A failed or interrupted step can leave segments for later collection.
+Each call loads the current manifest, builds its set of live segments, and scans the manifest and segment collections from beginning to end. It uses one clock value for the whole call, and it stores no progress cursor. If a root is invalid or unreadable, the call fails before it deletes anything.
 
-For a missing or deleted core namespace, an explicit call can reap the entire grep prefix after ordinary grace. Core and grep collectors operate on separate object families. Neither collector resumes a durable GC run from a previous call.
+The collector keeps objects under these rules:
+
+- Manifest numbers at or above the observed hint stay, so discovery can use them.
+- A manifest below the current one, and every segment it lists, stays while its immediate successor is younger than the ordinary grace. A successor without a provider timestamp counts as young.
+- Once that rule no longer keeps a manifest below the hint, the manifest's own provider age must meet the ordinary grace before it's deleted.
+- The current manifest keeps every segment it lists, including the inputs and outputs of a pending reorganization.
+- An unreferenced segment must be strictly older than 24 hours before it's deleted.
+
+Every step that produces output checks the bounded metadata publication budget before it creates its next manifest. That budget and the collection age rules protect concurrent builds. A failed or interrupted step can leave segments behind for a later collection.
+
+If the core namespace is missing or deleted, an explicit call can delete the entire grep prefix after the ordinary grace. The core and grep collectors work on separate families of objects, and neither one resumes a durable collection run from a previous call.
 
 ## Costs and defaults
 
-The main costs are reading content to build the index, reading and rewriting posting segments during reorganization, and reading candidate content during queries. Selectivity determines how much of the last cost can be avoided.
+The index has three main costs:
 
-An eligible revision is read and tokenized during its build attempt. Retries and restarted backfills can repeat that work. Fixed build budgets limit an invocation, not the total work required to index an arbitrarily large namespace.
+- reading content to build the index,
+- reading and rewriting posting segments during reorganization, and
+- reading candidate content during queries.
 
-The following distinctions matter for compatibility and tuning:
+A pattern's selectivity determines how much of the last cost can be avoided.
+
+Each eligible revision is read and tokenized during its build attempt, and retries and restarted backfills can repeat that work. The build budgets limit one invocation, not the total work needed to index an arbitrarily large namespace.
+
+These distinctions matter for compatibility and tuning:
 
 | Category | Rules or settings |
 | --- | --- |
-| Versioned search semantics | ASCII-folded byte trigrams, eligibility cap and sample rule, posting keys, packed posting encoding. |
+| Versioned search semantics | ASCII-folded byte trigrams, the eligibility cap and sample rule, posting keys, and the packed posting encoding. |
 | Build defaults | 256 files or 64 MiB per step. |
-| Reorganization defaults | Eight delta runs and eight mid runs per trigger, with a bounded step row target. |
-| Posting writer target | Approximately 256 postings per row. |
+| Reorganization defaults | Eight delta runs and eight mid runs per trigger, with a bounded row target for each step. |
+| Posting writer target | About 256 postings per row. |
 | Serving limits | Match count, candidate verification, matching-line length, content-read concurrency, and unindexed-tail budgets. |
 
-Writer targets and serving budgets are not alternate interpretations of stored postings. Changes to tokenization or eligibility require a new version and a rebuild strategy. Rebuildability permits replacement of derived state; it does not make a large rebuild inexpensive.
+Writer targets and serving budgets don't change how stored postings are interpreted. A change to tokenization or eligibility needs a new version and a rebuild strategy. Because the index can be rebuilt, its derived state can be replaced, but that doesn't make a large rebuild inexpensive.

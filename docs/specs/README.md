@@ -1,12 +1,14 @@
 # LoonFS specification
 
-LoonFS is a filesystem built on object storage. Each namespace has a directory tree, file revision history, and an ordered log of metadata changes. Files retain their inode identities when renamed or moved. Forks start from an existing namespace's state and share its stored objects while maintaining independent subsequent history.
+LoonFS is a filesystem built on object storage. Each [namespace](glossary.md#namespace) has a directory tree, a revision history for each file, and an ordered log of metadata changes. A file keeps its inode identity when it's renamed or moved. A [fork](glossary.md#fork) starts from an existing namespace's state and shares that namespace's stored objects, but its later history is separate.
 
-An uploaded file is written in two steps: store and verify the bytes, then commit the metadata that references them. A small file can instead carry its bytes inline in the commit. Creating the next numbered write-ahead log (WAL) object commits its records. [Format section 1.5](format.md#15-file-contents-and-ownership) defines when file content becomes durable. Readers discover the current manifest and WAL tip, then combine materialized metadata with later commits.
+An uploaded file is written in two steps. First the bytes are stored and verified, and then the metadata that references them is committed. A small file's bytes can instead be included inline in the commit. Successfully writing the next numbered write-ahead log (WAL) object commits every record in it. [File contents and ownership](format.md#15-file-contents-and-ownership) defines when file content becomes durable. To read a namespace, a reader finds the current [manifest](glossary.md#manifest) and the [WAL tip](glossary.md#wal-tip), and then combines the materialized metadata with later commits.
 
-Object storage contains all required recovery state, including control records, retained metadata, and file content. Some of a fork's dependencies can be stored under an ancestor's prefix. Local caches and derived search indexes can be rebuilt, but required manifests, metadata segments, and pins must be retained according to the format rules.
+All the state needed for recovery is stored in object storage, including control records, retained metadata, and file content. Some of the objects a fork depends on can be stored under an ancestor's prefix. Local caches and derived search indexes can be rebuilt, but the required manifests, metadata segments, and pins must be kept according to the format rules.
 
 ## Reading guide
+
+This section lists the documents in the specification and suggests an order for reading them.
 
 | Document | What it covers |
 | --- | --- |
@@ -14,16 +16,18 @@ Object storage contains all required recovery state, including control records, 
 | [Architecture](architecture.md) | How reads, writes, forks, and maintenance fit together. |
 | [Storage format](format.md) | Required object keys, stored records, encodings, publication protocols, and collection rules. |
 | [API](api.md) | API groups, capability discovery, errors, operations, and the HTTP binding. |
-| [Object-storage providers](object-storage-providers.md) | Reference information about provider constraints and supported transfer behavior. |
+| [Object-storage providers](object-storage-providers.md) | Provider constraints, supported transfer behavior, and the requirements for bucket configuration and provider adapters. |
 | [OpenAPI](openapi.json) | Generated schemas for the v0 HTTP API. |
 | [Browser-proxy OpenAPI](openapi-proxy.json) | Generated schemas for clients that address namespaces by alias. |
 
-The storage format is mandatory for a conforming implementation. API requirements apply to the groups and features that an implementation exposes. The glossary and architecture overview explain the model; the format and API documents define its requirements.
+The storage format is mandatory for a conforming implementation. API requirements apply to the API groups and features that an implementation exposes. The glossary and the architecture overview explain the model, and the format, API, and provider documents define its requirements.
 
-For a first read, start with the architecture overview and sections 1–6 of the format. Sections 7–12 describe maintenance and lifecycle protocols. The appendices contain the exact fields, row keys, byte encodings, fingerprints, and timing relationships needed to implement the format.
+For a first read, start with the architecture overview, and then read the format's sections from [The storage model](format.md#1-the-storage-model) through [Publishing a commit](format.md#6-publishing-a-commit). The sections from [Materializing metadata](format.md#7-materializing-metadata) through [Encodings, versions, and extensions](format.md#12-encodings-versions-and-extensions) describe maintenance and lifecycle protocols. The appendices contain the exact fields, row keys, byte encodings, fingerprints, and timing relationships needed to implement the format.
 
 ## Scope
 
-The format specifies behavior that another implementation must preserve to read, write, or collect the same store safely. The API specifies operations that clients can call. Process boundaries, queues, cache policies, schedulers, and client-side databases are implementation choices.
+This section describes what the specification defines and what it leaves to each implementation.
 
-Implementations may expose direct filesystem commands, an embedded runtime, or an upload/commit/change-feed interface. All use the same namespace identities, commit boundary, and retention rules. Sharing a storage format does not require sharing a runtime architecture.
+The format specifies the behavior that another implementation must preserve to read, write, or garbage collect the same store safely. The API specifies the operations that clients can call. Process boundaries, queues, cache policies, schedulers, and client-side databases are implementation choices.
+
+An implementation can expose direct filesystem commands, an embedded runtime, or an interface built on uploads, commits, and the change feed. All of them use the same namespace identities, commit boundary, and retention rules. Implementations that share the storage format can still have different runtime architectures.

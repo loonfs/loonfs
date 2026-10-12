@@ -1,14 +1,14 @@
 # Deploy LoonFS to Cloudflare
 
-This runs one LoonFS server in a Cloudflare Container. R2 stores the data, so
-restarting the Container does not delete it.
+This directory deploys one LoonFS server to a Cloudflare Container. R2 stores the data, so restarting the Container doesn't delete it. To run the server on your own host or on Kubernetes instead, see [Self-hosting LoonFS](../../docs/self-hosting.md).
 
-You need Workers Paid, R2, Node.js 22 or newer, and a running Docker engine.
-Create an R2 bucket and an R2 API token with Object Read & Write access.
+Before you start, you need Workers Paid, R2, Node.js 22 or newer, and a running Docker engine. Create an R2 bucket, and an R2 API token with Object Read & Write access.
 
-Run these commands from this directory.
+Run the commands below from this directory.
 
 ## 1. Install and sign in
+
+Install the dependencies and sign in to Cloudflare:
 
 ```bash
 npm ci
@@ -17,7 +17,7 @@ npx wrangler login
 
 ## 2. Set configuration
 
-Choose your Cloudflare account, R2 bucket, and a unique key prefix:
+Choose your Cloudflare account, your R2 bucket, and a unique key prefix:
 
 ```bash
 export CLOUDFLARE_ACCOUNT_ID="your-account-id"
@@ -43,9 +43,11 @@ printf '%s' "$AWS_ACCESS_KEY_ID" | npx wrangler secret put AWS_ACCESS_KEY_ID
 printf '%s' "$AWS_SECRET_ACCESS_KEY" | npx wrangler secret put AWS_SECRET_ACCESS_KEY
 ```
 
-Save `LOONFS_AUTH_TOKEN`. You will need it to connect to the server.
+Save `LOONFS_AUTH_TOKEN`, because you'll need it to connect to the server.
 
 ## 4. Deploy
+
+Run the type check, and then deploy:
 
 ```bash
 npm run typecheck
@@ -55,22 +57,24 @@ npx wrangler deploy \
   --var "LOONFS_R2_KEY_PREFIX:$LOONFS_R2_KEY_PREFIX"
 ```
 
-Wrangler prints the server URL. Future deployments can use `npm run deploy`.
+Wrangler prints the server URL. For later deployments, you can run `npm run deploy`.
 
 ## 5. Test
 
-Install the `loonfs` CLI, then run:
+Install the `loonfs` CLI, and then run:
 
 ```bash
 export LOONFS_SERVER_URL="https://loonfs-cloudflare.<your-subdomain>.workers.dev"
 ./smoke-test.sh
 ```
 
-The test checks the server, R2 access, and an upload and download.
+The smoke test checks the server, R2 access, and a file upload and download.
 
 ## Important details
 
-- Keep `max_instances` set to `1`. LoonFS expects one active server writer.
-- The first request may take a few minutes while the Container starts.
-- The Container stops after ten idle minutes and starts again on demand.
+Keep these details in mind when you run the server on Cloudflare:
+
+- Keep `max_instances` set to `1`, because LoonFS expects one active server writer.
+- The first request can take a few minutes while the Container starts.
+- The Container stops after ten idle minutes, and it starts again when a request arrives.
 - `/health` and `/readiness` are public. `/metrics` and `/v0/*` require the auth token.

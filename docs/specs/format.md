@@ -1,23 +1,27 @@
 # LoonFS storage format
 
-LoonFS stores a directory tree, file revision history, and the metadata needed to read and update both in object storage. File contents are stored separately from metadata. File content is durable no later than the commit that references it; section 1.5 describes the uploaded and inline paths.
+This document describes how LoonFS stores a filesystem in object storage: the objects it writes, how they're encoded, and the rules for reading, writing, and maintaining them. An implementation that follows these rules can read and write any LoonFS namespace, and it doesn't have to offer the LoonFS HTTP API (the [API specification][api-spec] defines that interface separately).
 
-For example, an upload may finish even though the subsequent metadata commit fails. The uploaded object exists, but no file references it. To recover the filesystem after a restart, a reader needs a durable record of which changes were committed.
+A filesystem in object storage has to recover from a crash at any point. For example, an upload might finish, and then the metadata commit that references it might fail. The uploaded object exists, but it isn't referenced by any undeleted file. To recover after a restart, a reader needs a durable record of which changes were committed.
 
-LoonFS records committed changes in an immutable write-ahead log, or WAL. Each WAL object has the next number in the namespace’s log; creating that object commits its records. Periodically, the committed metadata is written into sorted segments, with a numbered manifest listing the segments required to read the directory tree and retained history. A small hint records where discovery can begin. Readers verify the numbered objects and probe forward to find later publications.
+LoonFS keeps that record in an immutable write-ahead log (WAL). WAL objects are numbered in order (1, 2, 3, ...). To commit a batch of changes, a writer writes them into the next WAL object, and once that object is durably written to object storage, every change in it is committed. Periodically, LoonFS writes the committed metadata into sorted segments and publishes a numbered manifest that lists the segments a reader needs. A small hint records a recent manifest number, so readers know where to start looking for the current manifest.
 
-Everything required for recovery is stored in object storage. This includes control records and the metadata and content referenced by retained views; preserving only the latest file bytes is insufficient. Local databases and caches can be rebuilt.
+File contents are stored separately from metadata, in content objects. File content is durable no later than the commit that references it ([File contents and ownership](#15-file-contents-and-ownership) describes the two ways content becomes durable).
 
-This specification defines the storage layout, encodings, read and write protocols, and maintenance rules required for format conformance. An implementation can conform without exposing the LoonFS HTTP API. The [API specification][api-spec] defines that interface separately.
+Everything needed to recover a namespace is stored in object storage. That includes the control records, and the metadata and content of every retained view (keeping only the latest version of each file isn't enough). Local databases and caches can be rebuilt.
 
-“Must” and “must not” describe format requirements. Examples explain those requirements but do not introduce additional fields or behavior. Implementation defaults are labeled separately from format requirements. Absolute timestamps are Unix milliseconds. Budgets, lease lifetimes, and grace windows are durations in milliseconds.
+The key words MUST and MUST NOT in this document are to be interpreted as described in BCP 14 ([RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174)) when, and only when, they appear in capitals. This document also follows these conventions:
+
+- Examples explain requirements, but they don't add fields or behavior.
+- Implementation defaults are labeled as defaults, and they aren't format requirements.
+- Absolute timestamps are Unix milliseconds. Budgets, lease lifetimes, and grace periods are durations in milliseconds.
 
 ## Contents
 
 | Section | Subject |
 | --- | --- |
-| [1. The storage model](#1-the-storage-model) | Namespaces, inodes, names, revisions, deletion, and attributes |
-| [2. Objects and references](#2-objects-and-references) | Object keys, numbered manifests and WAL, and discovery hints |
+| [1. The storage model](#1-the-storage-model) | Namespaces, inodes, names, revisions, deletion, attributes, and access |
+| [2. Objects and references](#2-objects-and-references) | Object keys, numbered manifests and WAL objects, and the hint |
 | [3. Object-storage requirements](#3-object-storage-requirements) | Conditional writes, reads, listings, and provider assumptions |
 | [4. Reading a namespace](#4-reading-a-namespace) | Recovery, visibility, path lookup, and content verification |
 | [5. Uploading content](#5-uploading-content) | Upload sessions, direct transfers, and admission proofs |
@@ -28,6 +32,7 @@ This specification defines the storage layout, encodings, read and write protoco
 | [10. Retention and compaction](#10-retention-and-compaction) | History boundaries and metadata rewrites |
 | [11. Garbage collection](#11-garbage-collection) | Reference roots, collection safety, and complete passes |
 | [12. Encodings, versions, and extensions](#12-encodings-versions-and-extensions) | Compatibility rules and extension boundaries |
+| [13. Alternatives considered](#13-alternatives-considered) | Designs that were considered and not used |
 | [Appendix A](#appendix-a-durable-records-and-byte-encodings) | Record fields, row keys, and block encoding |
 | [Appendix B](#appendix-b-semantic-commit-fingerprints) | Exact fingerprint canonicalization |
 | [Appendix C](#appendix-c-timing-and-size-reference) | Timing assumptions, constants, and implementation defaults |
@@ -35,160 +40,222 @@ This specification defines the storage layout, encodings, read and write protoco
 
 ## 1. The storage model
 
+This section describes the logical model that the stored objects represent: namespaces, inodes, commits, directory bindings, names, file contents, deletions, attributes, and access rows.
+
 ### 1.1 Namespaces and identity
 
-A namespace is a directory tree with its own ordered metadata history. A namespace id names one lifetime. Deletion publishes a tombstone that remains the current manifest forever. A create or fork into a deleted id answers `namespace_deleted`.
+A "namespace" is a directory tree with its own ordered history of changes. A namespace ID identifies one namespace from its creation to its deletion, and it can't be reused. Deleting a namespace publishes a final manifest, the "namespace tombstone", which remains the namespace's current manifest. A create or fork that uses a deleted namespace's ID returns `namespace_deleted`.
 
-Each namespace starts with manifest number 1. Its current manifest records its identity, creation time, lifecycle, and writer authority. The manifest and later WAL objects together describe the current metadata state. Creating manifest 1 with put-if-absent installs the namespace.
+A namespace is created when its manifest 1 is written with put-if-absent. The current manifest records the namespace's identity, creation time, lifecycle status, and writer authority. Together, the current manifest and the WAL objects after it describe the namespace's current metadata.
 
-An item reference uses `(namespace_id, inode_id)`. A commit position uses `(namespace_id, committed_seq)`. Inode IDs are integers in storage. The public API represents the same IDs as strings such as `ino_42`.
+Two pairs identify things across namespaces:
 
-A fork is a new namespace initialized from a retained view of another namespace. It starts with the same files while sharing their stored objects; subsequent commits belong to the target's independent history. Section 9 describes how the shared objects remain retained.
+- An item is identified by `(namespace_id, inode_id)`.
+- A commit position is identified by `(namespace_id, committed_seq)`.
 
-The root directory has inode ID `1`. A newly created namespace starts at sequence `0`, with inode ID `2` available for allocation. New inode IDs are allocated monotonically as part of metadata publication. Renaming a file does not change its inode ID. Deleting a file and creating another at the same path allocates a different ID.
+Inode IDs are integers in storage. The public API represents the same IDs as strings, such as `ino_42`.
 
-Version 1 defines two inode kinds: `dir` and `file`. Section 12.5 reserves a third kind, `link`. An inode records the item's kind and creation metadata. Its current parent and name are represented by directory bindings, and its file contents are represented by revisions. Neither the path nor the current content reference is stored on the inode row itself.
+A "fork" is a new namespace that starts from a retained view of another namespace. It starts with the same files and shares their stored objects, and later commits only change the fork. [Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks) describes how the shared objects are kept.
+
+The root directory has inode ID 1. A new namespace starts at sequence 0, with inode ID 2 as the next ID to allocate. New inode IDs are allocated in increasing order as part of metadata publication. Renaming a file doesn't change its inode ID, but deleting a file and creating another one at the same path allocates a new ID.
+
+Version 1 of the format defines two inode kinds, `dir` and `file`. ([Reserved functionality](#125-reserved-functionality) reserves a third kind, `link`.) An inode row records only the item's kind and creation metadata. The item's current parent and name are stored as directory bindings, and its contents are stored as file revisions, so neither the path nor the current content reference is stored on the inode row.
 
 ### 1.2 Commits and revisions
 
-A logical commit is one successfully published mutation request. A request can contain several operations, but those operations are published together at one namespace sequence, `seq`.
+A "commit" is one successfully published mutation request. A request can contain several operations, and they're all published together at one namespace sequence number (`seq`).
 
-A file revision is the content state of one file inode. Its `revision_no` is scoped to that file. Namespace sequences and file revision numbers are different counters: a namespace may process many renames, directory operations, and writes to other files between two revisions of a particular file.
+A "file revision" is one version of a file's contents. Each file revision is assigned a revision number (`revision_no`) that's scoped to its file. Sequence numbers and revision numbers are separate counters, and a namespace can commit many renames, directory changes, and writes to other files between two revisions of one file.
 
-For example, a file might pass through the following history. The sequence values are illustrative.
+For example, a file might go through the following history (the sequence values are illustrative):
 
 | Namespace sequence | Operation | Result |
 | --- | --- | --- |
 | 17 | Create `/reports/Report.txt` | Allocate inode `42`, bind the name, and publish file revision `1`. |
-| 18 | Rename it to `/reports/Final.txt` | Keep inode `42` and revision `1`; replace the directory binding. |
-| 19 | Replace its contents | Keep inode `42` and publish revision `2`. |
-| 20 | Delete `/reports/Final.txt` | Remove that binding and record a deletion for inode `42`. |
-| 21 | Undelete that deletion | Rebind inode `42`; retain its revision history. |
+| 18 | Rename it to `/reports/Final.txt` | Keep inode `42` and revision `1`, and replace the directory binding. |
+| 19 | Replace its contents | Keep inode `42`, and publish revision `2`. |
+| 20 | Delete `/reports/Final.txt` | Remove the binding, and record a deletion for inode `42`. |
+| 21 | Undelete it | Bind inode `42` again, and keep its revision history. |
 
-The directory state at sequence 18 and the file content state at sequence 19 are reconstructed from different metadata rows. The inode row remains unchanged in both cases.
+The directory state at sequence 18 and the file's contents at sequence 19 are read from different metadata rows, and the inode row doesn't change in either case.
 
 ### 1.3 Directory bindings
 
-A directory slot is a parent inode and a name key, `(parent_inode_id, name_key)`. The slot's value is either bound to one child inode or unbound. A bound value stores `display_name`, which preserves the caller's spelling, and the child's kind and creation attribution, which never change for the life of an inode. The derived `name_key` is used for sibling-name comparison.
+A "directory binding" places an item in the tree. It links a "directory slot", which is a parent inode and a name key (`parent_inode_id`, `name_key`), to one child inode. A slot is either bound to a child or unbound. A bound slot stores:
 
-Each binding change writes a `direntry_binding` row. Its `committed_seq` and `delta_index` are the row's own position in namespace history. At sequence `N`, a slot's value is the row with the greatest `(committed_seq, delta_index)` whose sequence is at or below `N`. If that row is unbound, or the slot has no such row, the name is available. When one commit changes a slot more than once, the last delta wins.
+- the display name (`display_name`), exactly as the caller provided it, and
+- the child's kind and creation attribution, which never change for the life of the inode.
 
-The `direntry_binds` family orders these rows by slot, and the `direntry_child_binds` family orders the same rows by child. A child's current parent is found in the child index with the same rule. Commit validation allows at most one child per slot and at most one parent per child. A bind must name a child with no current binding, unless the same operation unbinds that binding first. A move unbinds the child's old slot before it binds the new one. The two indexes therefore agree at every read sequence.
+LoonFS compares sibling names by their name key, which is derived from the display name (see [Names and paths](#14-names-and-paths)).
 
-A bind writes a bound value to both indexes. An unbind writes an unbound value to both, with the parent, name key, and child from its WAL delta. The WAL delta also names the bind it removes by sequence and delta index, and validation checks that this bind is the current binding. The materialized row stores only the unbind's own position. An unbound value is a tombstone for older values of its slot or child. Section 10.3 defines when it can be removed.
+Each binding change writes a directory binding row (`direntry_binding`). The row records its own position in the namespace history: the sequence number of its commit (`committed_seq`) and its position within that commit (`delta_index`). To find a slot's value at sequence `N`, a reader takes the slot's row with the greatest position whose sequence is at or below `N`. If that row is unbound, or the slot has no such row, the name is available. When one commit changes a slot more than once, the last change wins.
+
+LoonFS stores the same binding rows in two indexes, so it can look them up from either side:
+
+- `direntry_binds` orders the rows by slot, to find the child at a name.
+- `direntry_child_binds` orders the rows by child, to find a child's current parent (using the same rule).
+
+Commit validation allows at most one child per slot and at most one parent per child. A bind MUST refer to a child that has no current binding, unless the same operation removes that binding first. A move removes the child's old binding before it binds the new one. Because of these rules, the two indexes agree at every read sequence.
+
+A bind writes a bound value to both indexes. An unbind writes an unbound value to both, with the parent, name key, and child from its WAL delta. The WAL delta also identifies the bind it removes, by sequence and delta index, and validation checks that this bind is the current binding. (The materialized row stores only the unbind's own position.) An unbound value acts as a tombstone for older values of its slot or child, and [Row retention during a base compaction](#103-row-retention-during-a-base-compaction) defines when it can be removed.
 
 ### 1.4 Names and paths
 
-Display names are stored without rewriting their spelling. A display name must be non-empty and at most 255 UTF-8 bytes. It must not contain `/`, any Unicode control character in general category `Cc`, or any of `: ? * | " < > \`. The names `.` and `..`, entirely whitespace names, and names ending in a space or dot are invalid.
+LoonFS stores each display name exactly as the caller provided it. A display name MUST follow these rules:
 
-The following device names are also reserved, compared case-insensitively and without an extension: `CON`, `PRN`, `AUX`, `NUL`, `COM1` through `COM9`, and `LPT1` through `LPT9`.
+- It's between 1 and 255 UTF-8 bytes long.
+- It doesn't contain `/`, any Unicode control character (general category `Cc`), or any of `: ? * | " < > \`.
+- It isn't `.` or `..`, it isn't made up entirely of whitespace, and it doesn't end in a space or a dot.
+- It isn't a reserved device name: `CON`, `PRN`, `AUX`, `NUL`, `COM1` through `COM9`, or `LPT1` through `LPT9`. These are compared case-insensitively and without the extension, so `con.txt` is also reserved.
 
-These restrictions are intended to reduce common cross-platform naming problems. They are LoonFS's name grammar, not a guarantee that every external filesystem, archive tool, or sync client accepts every possible tree.
+These rules avoid common cross-platform naming problems. They're LoonFS's own name grammar, not a guarantee that every external filesystem, archive tool, or sync client accepts every tree LoonFS can store.
 
-Each namespace records a naming mode in its manifest, fixed at creation. A fork copies the source's mode. The mode selects how a display name maps to its name key:
+Every namespace has a "naming mode", which controls how names are compared. The mode is stored in the manifest and set when the namespace is created, and it can't be changed (a fork uses its source's mode). LoonFS derives a name key from each display name using the namespace's mode, and it compares and looks up sibling names by their keys:
 
-| Mode | Name key |
-| --- | --- |
-| `case_insensitive` | NFC normalization, then full Unicode default, non-Turkic case folding, then NFC normalization again. This is the default. |
-| `case_sensitive` | NFC normalization only. |
+- `case_insensitive` (the default): NFC normalization, then full Unicode default case folding (not the Turkic variant), then NFC normalization again.
+- `case_sensitive`: NFC normalization only.
 
-Both normalization and folding use Unicode 17.0.0 data. Admission and lookup in a namespace use its mode. Name keys follow the same character restrictions as display names, with a 768-byte limit. Every key derived from a valid display name fits: normalization and case folding expand a name at most threefold in bytes.
+Both modes use Unicode 17.0.0 data. Validating new names and looking up existing names both use the namespace's mode. Name keys follow the same character rules as display names, with a 768-byte limit. Every key derived from a valid display name fits within that limit, because normalization and case folding expand a name by at most three times in bytes.
 
-For example, `Report.txt` and `report.txt` have the same name key in a `case_insensitive` namespace, so they cannot be separate siblings there. In a `case_sensitive` namespace their keys differ, and they can be siblings. In both modes, a precomposed `é` and an `e` followed by a combining acute accent have the same key. The chosen display spelling is always preserved. The [name-folding fixtures][name-vectors] list each mode's key for normalization and case-folding cases beyond ASCII.
+For example, `Report.txt` and `report.txt` have the same name key in a `case_insensitive` namespace, so they can't be siblings there. In a `case_sensitive` namespace, their keys are different, and they can be siblings. In both modes, a precomposed `é` and an `e` followed by a combining acute accent have the same key. The display name always keeps the caller's spelling. The [name-folding fixtures][name-vectors] list each mode's key for normalization and case-folding cases beyond ASCII.
 
-The display-name restrictions above do not depend on the mode. A `case_sensitive` namespace still compares the reserved device names case-insensitively.
+The display-name rules above don't depend on the mode, so a `case_sensitive` namespace still compares reserved device names case-insensitively.
 
-An absolute path starts with exactly one `/`. It has no empty components, repeated separators, or trailing `/`, except for the root path `/`. A canonical path is limited to 4,096 UTF-8 bytes and 128 components. Noncanonical input is rejected rather than rewritten. These are limits on canonical paths; they do not establish universal compatibility with external filesystem path limits. They bound request paths; a path derived from stored names may exceed them, and inode-addressed reads still serve it.
+A mode's mapping can't change once a namespace has rows, because the namespace's stored slots contain keys derived with that mapping. A change to either mapping would change the format's meaning, even if the serialized fields stayed the same. Implementations MUST preserve the Unicode behavior specified here (converting to lowercase isn't enough).
 
-Each mode's mapping is frozen once a namespace holds rows, because its stored slots hold keys derived by that mapping. A change to either mapping changes the format semantics, even if the serialized fields stay the same. Implementations must preserve the Unicode behavior specified here; lowercase conversion alone is insufficient.
+An absolute path starts with exactly one `/`. It has no empty components, repeated separators, or trailing `/`, except for the root path `/`. A canonical path is at most 4,096 UTF-8 bytes and 128 components. LoonFS rejects noncanonical input instead of rewriting it.
+
+These limits apply to request paths, and they don't promise compatibility with other filesystems' path limits. A path built from stored names can be longer than the limits, and reads by inode still return it.
 
 ### 1.5 File contents and ownership
 
-Each file revision contains one `ContentRef`. The current kind, `blob_v1`, names the first `size_bytes` bytes of a chain, verified by the reference's checksum. Those bytes are the file bytes; LoonFS does not add an envelope around the content object. `blob_v1` is the only content reference kind. Content derived from other content, such as an append, is a source of the bytes behind an ordinary `blob_v1` reference, never a second kind.
+Each file revision has one content reference (`ContentRef`). The only kind of content reference is `blob_v1`, which identifies the first `size_bytes` bytes of a chain and includes a checksum of those bytes. Those bytes are the file's bytes (LoonFS doesn't add an envelope around them). Content derived from other content, such as an append, is still stored behind an ordinary `blob_v1` reference, never a second kind of reference.
 
-A content object is immutable. A chain is the append-only bytes of one content ID. Its bytes may lie in several objects. A layout names those objects as ordered extents. Each extent records its owner namespace, content ID, object, offset in that object, and length.
+A content reference contains:
 
-A reference contains the original owner namespace, a random content ID, the size of the prefix it names, and a checksum of that prefix. Two references with one content ID can name different prefixes of one chain. A reference contains no bucket address or object-store path. Its revision delta names the objects its bytes need, apart from bytes carried as WAL pieces or retained through the same chain's earlier revisions. Copies and restores carry layouts that cover their references. Validation materializes any pending pieces those layouts need.
+- the original owner namespace,
+- a random content ID,
+- the size of the prefix it refers to, and
+- a checksum of that prefix.
 
-The whole object sits at the chain's own key. Span objects sit beside it and are named by the chain offsets they were written for:
+A reference contains no bucket address or object-store path. The owner namespace and content ID determine where the bytes are stored.
+
+A "chain" is the bytes stored under one content ID. A chain grows when a file is appended to, and each reference refers to a prefix of the chain, so two references with the same content ID can refer to different lengths of one chain. For example, a log file's first revision might refer to the first 100 bytes of a chain, and after two appends, revisions 2 and 3 might refer to the first 200 and the first 210 bytes of the same chain.
+
+Content objects are immutable, so the bytes appended to a chain are written to new content objects, and a chain's bytes can be spread across several of them. A "layout" lists those objects, in chain order, as "extents". Each extent records the object's owner namespace, its content ID, the object, the offset in that object, and the length. A revision's WAL delta includes the extents its bytes need, except for bytes that are still stored as WAL pieces and bytes that are already covered by the chain's earlier revisions. Copies and restores include layouts that cover their references, and validation writes any pending pieces those layouts need to content objects.
+
+A chain's "whole object" is stored at the chain's own key. Every other object of the chain is a "span object", and its key adds the start and end chain offsets of the range it stores:
 
 ```text
 namespaces/{owner_namespace_id}/content/{content_id}
 namespaces/{owner_namespace_id}/content/{content_id}-{start:020}-{end:020}
 ```
 
-The whole object sorts before its spans. All objects of one chain are adjacent in a listing.
+The whole object sorts before its spans, so all the objects of one chain are next to each other in a listing.
 
-File content is durable no later than the commit that references it. The bytes take one of two paths:
+File content is durable no later than the commit that references it. File content can be published via one of two paths:
 
 | Path | How the bytes become durable |
 | --- | --- |
-| Uploaded | An upload session writes and verifies the content object before the commit (section 5). |
-| Inline | The WAL object that commits the revision carries the bytes as pieces (Appendix A.5), so they become durable in the same publication that makes the revision visible. A piece holds a whole value, or the bytes an append adds after bytes that are already durable. Before a fold publishes a manifest whose `folded_wal_no` covers that WAL object, it writes the pieces as immutable extents (section 7.2). |
+| Uploaded | An upload session writes and verifies the content object before the commit (see [Uploading content](#5-uploading-content)). |
+| Inline | The WAL object that commits the revision includes the bytes as "pieces" ([WAL records](#a5-wal-records)), so the bytes become durable in the same write that makes the revision visible. A piece contains a whole value, or the bytes an append adds after bytes that are already durable. Before a fold publishes a manifest whose `folded_wal_no` covers that WAL object, it writes the pieces to content objects as extents (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)). |
 
-WAL collection requires that coverage, so a WAL object is never deleted while its pieces exist only in the WAL. A reference is therefore the content's identity, not proof that the content object holds its bytes. Section 4.5 defines where a reader finds the bytes.
+Garbage collection deletes a WAL object only after a manifest covers it, and the fold that published that manifest has already written the WAL object's pieces as extents. So a WAL object is never deleted while some of its pieces exist only in the WAL. This is also why a reference identifies content but doesn't prove that a content object contains its bytes yet. [Content verification](#45-content-verification) defines where a reader finds the bytes.
 
-The original owner's manifest is not required to read inherited content. This matters for forks: a descendant can continue reading the exact objects in its pinned basis after the source namespace is deleted.
+New uploads are owned by the namespace that creates them, and inherited references keep their original owners. Forking, restoring a revision, replaying the WAL, and compacting metadata MUST NOT replace a reference's owner with the current namespace.
 
-New uploads are owned by the namespace that creates them. Inherited references retain their original owners. Forking, restoring a revision, replaying the WAL, or compacting metadata must not replace that owner with the current namespace.
+Reading inherited content doesn't require the original owner's manifest. This matters for forks, because a fork can keep reading the exact objects in its pinned basis after its source namespace is deleted.
 
-Two separate uploads of identical bytes create two objects. There is no cross-upload content deduplication. A retry within the same upload session reuses that session's identity; retry behavior does not depend on discovering another upload with identical contents.
+Two separate uploads of identical bytes create two objects, because LoonFS doesn't deduplicate content across uploads. A retry within one upload session reuses that session's content ID, so retries don't depend on finding another upload with identical bytes.
 
 ### 1.6 File and subtree deletion
 
-Deleting an item removes its current binding and records a subtree tombstone. A tombstone at a directory hides that directory and its descendants without requiring a separate tombstone for every descendant.
+Deleting an item removes its current binding and records a "tombstone" for it. The item's revisions, and everything below it, stay in place, and the tombstone hides them. A tombstone on a directory hides the directory and all of its descendants, so a deletion doesn't need a separate tombstone for every descendant.
 
-Each tombstone row stores its own position in namespace history as `committed_seq` and `delta_index`. Tombstone events are ordered by `(committed_seq, delta_index)`. A `set` event starts a deletion. A `revoke` event identifies the exact `set` event it cancels. It names that event by position, as a `DeltaPosition` value `{seq, delta_index}`. At a given sequence, the latest event for the deletion root determines whether the tombstone is active. A later `set` is a new deletion, even if an earlier deletion of the same inode was revoked.
+A tombstone is a series of events, stored as rows. Each row records its own position in the namespace history (`committed_seq` and `delta_index`), and events are ordered by position. There are two kinds of event:
 
-An undelete request identifies the deletion by inode and committed deletion sequence. Validation must confirm the currently active deletion. A request for a deletion that is no longer active returns `not_deleted`; it must not cancel a later deletion. A deletion created earlier in the same uncommitted request cannot yet be addressed by its committed deletion sequence. Only the root of a deletion can be undeleted independently; descendants hidden by that root do not each have a separate deletion to revoke.
+- A `set` event starts a deletion. It stores the removed binding (`deleted_binding`, with `parent_inode_id`, `name_key`, and `display_name`), so the name can be restored even after old binding versions are compacted.
+- A `revoke` event cancels one `set` event, which it identifies by position (a `DeltaPosition` value, `{seq, delta_index}`). A `revoke` MUST NOT contain a deleted binding.
 
-A `set` stores the removed binding in `deleted_binding`, with `parent_inode_id`, `name_key`, and `display_name`. This information remains available after old binding versions are compacted. An undelete restores that parent and name unless the request supplies a different destination. A `revoke` stores its target position and must not contain a deleted binding.
+At a given sequence, the latest event for the deletion's root inode determines whether the tombstone is active. A `set` after a revoked deletion of the same inode is a new deletion.
 
-The derived `active_deletions` family supports listing recoverable deletions in deletion-sequence order. A `set` produces a `listed` row. A revoke produces a `removed` row for the same `(deletion_seq, root_inode_id)`. Removal rows sort before listed rows, so a scan can suppress cancelled entries. Tombstone events remain authoritative.
+An undelete request identifies a deletion by its inode and the sequence it was committed at. Validation MUST confirm that this deletion is the currently active one. A request for a deletion that's no longer active returns `not_deleted`, and it MUST NOT cancel a later deletion. (A request can't undelete a deletion made earlier in the same request, because that deletion doesn't have a committed sequence yet.) An undelete restores the saved parent and name, unless the request provides a different destination. Only the root of a deletion can be undeleted, because the descendants it hides don't have deletions of their own.
 
-File deletion does not immediately delete content. Within a live namespace, file revisions and recoverable deletions are retained under the rules in [section 10](#10-retention-and-compaction). Namespace deletion is a separate lifecycle transition described in [section 9](#9-namespace-lifecycle-and-forks).
+The `active_deletions` family is derived from tombstone events, and it's used to list recoverable deletions in deletion-sequence order. A `set` produces a `listed` row, and a `revoke` produces a `removed` row for the same `(deletion_seq, root_inode_id)`. Removed rows sort before listed rows, so a scan can skip cancelled deletions. The tombstone events remain the source of truth.
+
+Deleting a file doesn't delete its content right away. In a live namespace, file revisions and recoverable deletions are kept under the rules in [Retention and compaction](#10-retention-and-compaction). Deleting a namespace is a separate operation, described in [Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks).
 
 ### 1.7 Attributes and attribution
 
-Attributes are a string-to-string map associated with an inode. They can contain application tags, display hints, or similar metadata. A rename, move, or new file revision does not modify the existing inode's attributes.
+"Attributes" are a map from strings to strings, attached to an inode. Applications use them for tags, display hints, and similar metadata. Renaming or moving an item, or writing a new file revision, doesn't change its attributes.
 
-Attribute keys are compared exactly, without normalization or case folding. A key is 1–128 UTF-8 bytes and cannot contain a Unicode `Cc` control character. Keys beginning with `loonfs.` are reserved for system use and cannot be written by callers.
+An attribute map follows these limits:
 
-Values are UTF-8 strings of at most 4,096 bytes. Empty strings and control characters are valid values. Removing a key is an explicit operation; an empty value does not remove it. A map contains at most 100 entries and at most 65,536 logical UTF-8 bytes, counting all keys and values without serialization overhead. Invalid durable maps are rejected, not truncated.
+| Part | Rule |
+| --- | --- |
+| Key | 1 to 128 UTF-8 bytes, with no Unicode `Cc` control characters. Keys are compared exactly, without normalization or case folding. Keys that start with `loonfs.` are reserved for LoonFS, and callers can't write them. |
+| Value | A UTF-8 string of at most 4,096 bytes. Empty strings and control characters are valid. |
+| Map | At most 100 entries, and at most 65,536 bytes of keys and values combined (counted as UTF-8, without serialization overhead). |
 
-An inode begins with an empty map at attribute revision `0`; that initial state has no persisted attribute row. Each accepted update increments `attributes_revision_no` by one and stores the complete resulting map. An accepted update advances the revision even when the resulting map equals the previous one. Clearing the map is a real update and must remain distinguishable from an inode whose attributes were never changed.
+Removing a key is an explicit operation, and setting a key to an empty value doesn't remove it. A durable map that breaks these limits is rejected, not truncated.
 
-Attribute revision numbers support optimistic concurrency. The API does not expose a separate history-listing interface for old attribute maps. The storage layer nevertheless retains the rows needed to reconstruct supported sequence-based views, as specified in the compaction rules.
+An inode starts with an empty map at attribute revision `0`, and that initial state has no stored row. Each accepted update increases the attribute revision number (`attributes_revision_no`) by one and stores the complete resulting map, even when the map is unchanged. Clearing the map is a real update, and it MUST remain distinguishable from an inode whose attributes were never changed.
 
-Commits also record a timestamp and optional message. An actor is a required, application-supplied opaque identifier recorded with a logical commit. LoonFS preserves it without authenticating it or resolving profile information. The application supplies a stable identifier with the identity scope it needs. An actor is attribution, not an authorization decision.
+Clients use attribute revision numbers for optimistic concurrency. The API doesn't offer a way to list old attribute maps, but the storage layer keeps the rows needed for supported sequence-based views, as the compaction rules specify.
 
-Every row that records an event copies the commit's actor and timestamp as `committed_by` and `committed_at_ms`, beside the `committed_seq` and `commit_id` of that commit. The API projects them under the names the API specification defines, such as `created_by` for an inode's creating commit and `attributes_updated_by` for its newest attribute revision.
+Every commit also records a timestamp, an optional message, and an "actor". The actor is a required, opaque identifier that the application supplies. LoonFS stores it without authenticating it or looking up any profile information, so the application chooses a stable identifier with whatever identity scope it needs. The actor records who made a change, and it plays no part in authorization.
+
+Every row that records an event copies its commit's actor and timestamp (as `committed_by` and `committed_at_ms`), along with the commit's `committed_seq` and `commit_id`. The API exposes these fields under the names the API specification defines, such as `created_by` for the commit that created an inode and `attributes_updated_by` for its newest attribute revision.
 
 | Metadata | Actor and timestamp fields |
 | --- | --- |
 | Inode, file revision, tombstone event, attribute revision, access revision, commit | `committed_by`, `committed_at_ms` |
 | Listed active deletion | `deleted_by`, `deleted_at_ms` |
-| Directory binding | `child_created_by`, `child_created_at_ms` copied from the child inode |
+| Directory binding | `child_created_by`, `child_created_at_ms`, copied from the child inode |
 
-The root inode in a newly created namespace is attributed to the actor id `loonfs`. A fork inherits the root inode from its source basis; the target manifest's creation time is the creation time of the namespace, not a rewrite of inherited inode timestamps.
+The root inode of a new namespace is attributed to the actor ID `loonfs`. A fork inherits its root inode from its source. The fork's manifest records the fork's own creation time, and the inherited inodes keep their original timestamps.
 
-These event timestamps are informational. Sequences determine order. Renaming an inode does not change its creation or content timestamps, and directories have no general modification timestamp. Lease and reclamation deadlines have a different role and are covered separately.
+Event timestamps are informational, and sequence numbers determine order. Renaming an inode doesn't change its creation or content timestamps, and directories don't have a general modification timestamp. (Lease and reclamation deadlines are a different kind of time, covered in [Timing assumptions](#33-timing-assumptions).)
 
 ### 1.8 Access rows
 
-An inode can carry an access row: a boundary flag and a map from principal to rights. A principal is an application-assigned identity such as a user, a group, or a public audience, named by an opaque id of 1 to 256 visible ASCII characters other than the comma. LoonFS stores principal ids and never resolves them.
+An inode can have an "access row", which controls what principals can do to the inode and, through inheritance, to the items below it. An access row has a boundary flag and a map from principals to rights. A "principal" is an identity that the application assigns, such as a user, a group, or a public audience. It's identified by an opaque ID of 1 to 256 visible ASCII characters, excluding the comma. LoonFS stores principal IDs, but it never resolves them.
 
-The rights are `read`, `history`, `write`, `create`, `remove`, `share`, `manage`, and `admin`. A set of rights is stored as a list of distinct names in that order. A decoder accepts the names in any order and rejects repeated names. A map holds at most 1,000 principals and at most 65,536 bytes of principal ids, and no entry has an empty set of rights. A decoder rejects a repeated principal. Invalid durable maps are rejected, not truncated.
+There are eight rights. The [API specification][api-spec] defines exactly which rights each operation requires.
 
-An inode begins at access revision `0` with no boundary and no grants; that initial state has no persisted access row. The root inode of an ACL namespace is the exception: it begins with a row at revision `0` holding the manifest's `root_grants`, materialized at genesis like the root inode row itself. Each accepted update increments `access_revision_no` by one and stores the complete resulting state. A row with no boundary and no grants is a real revision, distinguishable from an inode whose access was never changed.
+| Right | Allows |
+| --- | --- |
+| `read` | Reading the item's metadata and current content. |
+| `history` | Reading older revisions and snapshots of the item (together with `read`). |
+| `write` | Changing a file's contents or an item's attributes. |
+| `create` | Adding entries to a directory. |
+| `remove` | Removing entries from a directory. |
+| `share` | Changing the item's grants, for rights the subject has itself. |
+| `manage` | Making any change to the item's access row. |
+| `admin` | Every right on every item, when it's granted on the root inode's row. |
 
-Each namespace records an access mode in its manifest, fixed at creation: `unrestricted`, or `acl` with a `principal_scope` naming the identity domain of its principal ids and the `root_grants` the root inode holds at genesis, normally `admin` for each initial administrator. Before authorization reads a grant, the request's subject scope must match this value. A fork copies the source access mode and scope. An inode's effective rights for a set of principals are the union of those principals' grants on the inode's own row and on each ancestor's row, walking current parent bindings and stopping after a row whose boundary is set or at the root. A deletion root has no current binding; its tombstone's saved parent supplies that edge. Revisiting an inode during the walk is namespace corruption. `admin` on the root row confers every right everywhere and is never inherited. The `update_access` operation replaces an inode's row and appears in the change feed as an `access_changed` event. The API specification defines that operation and how reads, commits, and upload sessions are authorized against access rows.
+A set of rights is stored as a list of distinct names, in the order of the table above. A decoder accepts the names in any order, but it rejects repeated names. An access map has at most 1,000 principals and at most 65,536 bytes of principal IDs, and every entry has at least one right. A decoder rejects a repeated principal. A durable map that breaks these limits is rejected, not truncated.
+
+An inode starts at access revision `0`, with no boundary and no grants, and that initial state has no stored row. The exception is the root inode of an ACL namespace, which starts with a row at revision `0` that contains the manifest's `root_grants` (written when the namespace is created, like the root inode row). Each accepted update increases the access revision number (`access_revision_no`) by one and stores the complete resulting state. A row with no boundary and no grants is a real revision, distinguishable from an inode whose access was never changed.
+
+Every namespace has an "access mode", which is stored in its manifest and set when the namespace is created (a fork uses its source's access mode and scope):
+
+- `unrestricted`: requests aren't checked against any rights, and the namespace has no access rows.
+- `acl`: requests are authorized against access rows. The mode includes a `principal_scope`, which identifies the identity domain of the namespace's principal IDs, and the `root_grants` that the root inode starts with (normally `admin` for each initial administrator). Before authorization reads a grant, the request's subject scope MUST match the namespace's `principal_scope`.
+
+A set of principals' effective rights on an inode are the union of their grants on the inode's own row and on each ancestor's row. LoonFS walks up the current parent bindings, and it stops after a row whose boundary flag is set, or at the root. For example, suppose a principal has `read` on `/projects`, and `/projects/secret` has its boundary flag set. That `read` doesn't apply inside `/projects/secret`, unless the row for `/projects/secret` (or a row below it) grants it.
+
+A deletion root has no current binding, so its tombstone's saved parent is used for that step of the walk. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited.
+
+The `update_access` operation replaces an inode's access row, and it appears in the change feed as an `access_changed` event. The [API specification][api-spec] defines that operation, and how reads, commits, and upload sessions are authorized against access rows.
 
 ## 2. Objects and references
 
+This section describes the objects LoonFS stores for a namespace, how their keys are formed, and how one object refers to another.
+
 ### 2.1 Storage layout
 
-Content ownership follows section 1.5. Appendix A.8 defines the object keys.
+Each namespace's objects are stored under its own prefix ([Object keys](#a8-object-keys) lists the complete key patterns):
 
 ```text
 namespaces/{namespace_id}/
@@ -203,55 +270,61 @@ namespaces/{namespace_id}/
 └── extensions/{extension_name}/...
 ```
 
-A temporary object holds a ranged source, tail bytes, or an intermediate result for an assembly on a provider that composes objects. The assembly creates it and deletes it (section 3.2).
+Content objects are stored under their owner's prefix (see [File contents and ownership](#15-file-contents-and-ownership)). Metadata segments work the same way. A segment that a fork inherited stays under its owner's prefix, and its descriptor records the owner (`owner_namespace_id`), so readers never substitute the reading namespace into the key. Every newly written segment, including compaction output, is stored under the writing namespace's `segments/` prefix.
 
-A segment inherited by a fork can remain under an ancestor's namespace. Its descriptor records `owner_namespace_id`; the reading namespace is not substituted into the key. All newly written metadata segments, including compaction output, use the producing namespace's `segments/` prefix.
+On providers that build a new object by composing whole objects (such as GCS), an assembly writes temporary objects for the parts it can't compose directly: a range of a source object, new bytes, or an intermediate result. The assembly deletes them when it finishes (see [Immutable writes and retries](#32-immutable-writes-and-retries)).
 
-The key layout is part of the format. Other objects must not collide with these families. Core readers and collectors do not interpret extension-owned keys. Appendix A.8 lists the complete key patterns.
+The key layout is part of the format. Other objects MUST NOT use keys in these families. Core readers and garbage collection don't interpret keys under an extension's prefix.
 
 ### 2.2 Object roles and mutability
 
-| Object | Role | How it changes |
+| Object | What it stores | How it changes |
 | --- | --- | --- |
-| Namespace manifest | Namespace identity, lifecycle, writer authority, materialized file set, and retention floor | Publish the next immutable number. |
-| WAL object | Ordered commits or a writer fence after the materialized boundary | Create the next immutable number. |
-| Hint | Starting point for manifest discovery | Compare-and-swap; the number never decreases. |
-| Metadata segment | Sorted metadata rows referenced by a manifest | Write a new immutable object. |
-| Pin record | Retain one manifest for a user, snapshot, or fork | Create and delete; snapshot expiry can be extended by CAS. |
-| Upload session | Own a transfer and its completed content until publication or cleanup | Conditional lifecycle transitions. |
-| Content object, whole or span | A run of chain bytes with the provider's stored full-object checksum | Immutable. |
-| Temporary object | Bytes a provider-side assembly stages | Create, then delete. |
+| Manifest | The namespace's identity, lifecycle status, writer authority, materialized file set, and retention floor | A new manifest is published at the next number. |
+| WAL object | Commits, or a writer fence, after the materialized boundary | A new WAL object is created at the next number. |
+| Hint | A recent manifest number, where discovery starts | Compare-and-swap. The number never decreases. |
+| Metadata segment | Sorted metadata rows that a manifest references | A new immutable object is written. |
+| Pin | A reference that keeps one manifest for a user, a snapshot, or a fork | Created and deleted. A snapshot's expiry time can be extended by compare-and-swap. |
+| Upload session | One transfer and its completed content, until a commit uses it or cleanup removes it | Conditional status changes. |
+| Content object (whole or span) | A range of chain bytes, along with the provider's stored checksum of the whole object | Immutable. |
+| Temporary object | Bytes that an assembly needs as a separate object | Created, then deleted. |
 
-A manifest publication can change physical layout or control state without creating a logical commit. A WAL publication can advance logical history without creating a manifest. The hint selects neither history nor visibility: its number may lag successful publications.
+Manifests and WAL objects are immutable once they're written. A manifest publication can change the physical layout or the namespace's control state without creating a commit, and a WAL publication can add commits without creating a manifest. The hint doesn't determine history or visibility. It's a best-effort pointer, so its number can lag behind successful manifest publications.
 
 ### 2.3 Numbered objects and generated IDs
 
-Manifest and WAL numbers are independent, positive counters scoped to a namespace. Each starts at 1. Object names use twenty decimal digits, so lexicographic order matches numeric order. WAL number 2 is `wal/00000000000000000002.wal.zst`.
+Manifest numbers and WAL numbers are separate counters for each namespace, and both start at 1. Object keys use twenty decimal digits, so lexicographic order matches numeric order. For example, WAL object 2 is stored at `wal/00000000000000000002.wal.zst`.
 
-Each number names one immutable object. A publisher creates the next number with put-if-absent. Competing publishers cannot install different objects at the same number; a loser loads the winner before planning another attempt. The payload's namespace and number must agree with its key.
+Each number refers to exactly one immutable object. A publisher creates the next number with put-if-absent, so competing publishers can't write different objects at the same number. A publisher that loses loads the winning object before it plans another attempt. The namespace and number in an object's payload MUST match its key.
 
-A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies its manifest; a random suffix distinguishes separate user, snapshot, and fork pins over that manifest. The API calls a pin id a `checkpoint_id`, and a snapshot pin's id is also its `snapshot_id`; the durable record calls it `pin_id`.
+Other objects use generated IDs:
 
-Content IDs are `con_` followed by 32 random lowercase hexadecimal characters. Metadata segment IDs are also generated identities, rather than positions in publication history. A collision at a newly generated immutable key must not overwrite existing bytes.
+- A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies the pinned manifest, and the random suffix distinguishes separate user, snapshot, and fork pins on the same manifest. The durable record calls it `pin_id`, the API calls it a `checkpoint_id`, and a snapshot pin's ID is also its `snapshot_id`.
+- A content ID is `con_` followed by 32 random lowercase hexadecimal characters.
+- A metadata segment ID is also generated, instead of being derived from the segment's position in publication history.
+
+A collision at a newly generated immutable key MUST NOT overwrite the existing bytes.
 
 ### 2.4 The current manifest and WAL tip
 
-Creation and fork write the hint before manifest 1, nothing deletes a live namespace's hint, and a reader that finds no hint reports the namespace as absent without listing.
+The current manifest is the source of truth for the namespace's identity, status, writer epoch, and compactor epoch. Its runs describe the materialized metadata through the head sequence (`head_seq`), and `folded_wal_no` is the last WAL number that those runs include. The WAL objects after `folded_wal_no` contain the later commits, and the highest-numbered one is the "WAL tip".
 
-The current manifest is authoritative for the namespace's identity, status, writer epoch, and compactor epoch. Its runs describe materialized metadata through `head_seq`, and `folded_wal_no` identifies the WAL boundary already included in those runs.
+Every WAL object records the head sequence and the inode allocator's high-water mark after its commits. A fence moves the WAL number and the writer epoch forward without adding a commit, and it keeps the allocator value it started from.
 
-Every WAL object records the head sequence and inode allocation high-water mark after it. A fence advances the WAL number and writer epoch without adding a logical commit, and preserves the allocator it received.
+Creating or forking a namespace writes the hint before manifest 1, and nothing deletes the hint of a live namespace. So a reader that doesn't find a hint can report that the namespace doesn't exist, without listing any objects.
 
-The counters have different meanings:
+The namespace's counters advance at different times:
 
 | Counter | Advances when |
 | --- | --- |
-| `manifest_no` | A manifest is published, including a layout, authority, retention, or lifecycle change. |
+| `manifest_no` | A manifest is published, including for a layout, authority, retention, or lifecycle change. |
 | `wal_no` | A WAL object is created, including an empty writer fence. |
-| `seq` | A logical mutation request commits; one WAL object may contain several sequences. |
-| `revision_no` | A new content revision is committed for one file inode. |
+| `seq` | A mutation request commits. One WAL object can contain several sequences. |
+| `revision_no` | A new content revision is committed for one file. |
 
-For example, manifest 5 may cover WAL 8 through sequence 40. WAL 9 can be a fence at sequence 40, and WAL 10 can contain commits 41–43. The read view is then at sequence 43. A fold can publish manifest 6 covering WAL 10 without allocating sequence 44.
+For example, manifest 5 might cover WAL objects through 8 and sequences through 40. WAL object 9 can be a fence at sequence 40, and WAL object 10 can contain commits 41 to 43. The read view is then at sequence 43. A fold can publish manifest 6, covering WAL object 10, without allocating sequence 44.
+
+Why does the hint exist, and why can it lag? A reader needs a place to start that doesn't require listing the namespace's manifests, because object-storage listings are slow, and LoonFS keeps them off every hot path. LoonFS updates the hint after it publishes a manifest, as a separate compare-and-swap. Keeping the hint and the manifest in step would need a transaction across two objects, which object storage doesn't support. So readers treat the hint as a starting point and check for newer manifests (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
 
 ### 2.5 Manifest references
 
@@ -259,452 +332,665 @@ A durable reference to a manifest contains:
 
 | Field | Meaning |
 | --- | --- |
-| `owner_namespace_id` | Namespace storing the manifest. |
-| `manifest_no` | Number determining its object key. |
-| `head_seq` | Head sequence recorded by that manifest. |
-| `payload_checksum` | Digest that must match its stored payload. |
+| `owner_namespace_id` | The namespace that stores the manifest. |
+| `manifest_no` | The manifest's number, which determines its key. |
+| `head_seq` | The head sequence that the manifest records. |
+| `payload_checksum` | A digest that MUST match the manifest's stored payload. |
 
-A pin refers to a manifest under its own namespace and stores these manifest fields directly, using its `namespace_id` as owner. A fork basis embeds a reference to a source namespace and records the source pin ID. Segment references inside that manifest retain their own owners; not every segment must belong to the manifest's owner.
+A pin refers to a manifest in its own namespace, and it stores these fields directly, with its `namespace_id` as the owner. A fork's basis includes a reference to a manifest in the source namespace, along with the source pin's ID. The segment references inside a manifest keep their own owners, so a manifest can list segments that belong to other namespaces.
 
-Readers validate the referenced identity, sequence, and checksum. A missing or corrupt required object is an error, never permission to substitute another manifest.
+Readers validate the referenced identity, sequence, and checksum. A missing or corrupt required object is an error, and never a reason to use another manifest instead.
 
-### 2.6 The log protocol in one page
+### 2.6 A summary of the log protocol
 
-This section summarizes how commits, writer takeover, folds, discovery, and collection fit together. Sections 4, 6, 7, and 11 give the complete rules.
+This section summarizes how commits, writer takeover, folds, discovery, and garbage collection fit together. Sections 4, 6, 7, and 11 define the complete rules.
 
-Each namespace has two chains of numbered objects: manifests and WAL objects. Each chain starts at 1, and a publisher creates each object with put-if-absent at the previous number plus one. A manifest records the namespace's lifecycle, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that hold its rows through `head_seq`. A WAL object holds the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it; a fence holds no commits. The hint is mutable. It names a manifest number, manifest publications raise it by compare-and-swap, and it never decreases. Content objects hold immutable runs of file bytes. A layout names those runs in chain order. Pins are retained manifests (section 8).
+Each namespace has two sequences of numbered objects, manifests and WAL objects. Each sequence starts at 1, and a publisher creates each object with put-if-absent at the previous number plus one.
 
-A commit creates WAL `tip + 1` with put-if-absent. An acquired writer session plans the batch against the tip it discovered. The put is the commit boundary. A put that collides creates nothing; the writer discovers the new tip and plans again (section 6.3).
+```text
+                 hint (best effort)
+                   |
+                   v
+manifests:  [4]  [5]  [6]   <- current manifest, folded_wal_no = 8
 
-A writer takeover publishes the next manifest with `writer_epoch + 1`, then creates a zero-record fence at the next WAL number with that epoch. Between the manifest and the fence, the previous writer can still commit at `tip + 1`. Those commits are valid: their epoch is below the manifest's, and the fence lands above them. Once the fence lands, a stale session cannot commit. Its next put collides, and the discovery that follows finds the higher epoch and fences the session for good. Any earlier discovery that finds the higher epoch fences it the same way (section 6.1).
+WAL:        [7]  [8]  [9]  [10]  [11]   <- WAL tip
+                      |_____________|
+                      visible WAL, replayed on top of manifest 6
+```
 
-A fold needs no writer epoch, and any process may run one. It folds the WAL above the current manifest's `folded_wal_no` into new metadata segments and publishes the next manifest with `folded_wal_no` set to the tip it read. That manifest carries the predecessor's writer and compactor epochs. Before it publishes, the fold writes the pieces it covers as immutable extents (section 7.2).
+- A manifest records the namespace's lifecycle status, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that contain its rows through `head_seq`.
+- A WAL object contains the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote it. A fence contains no commits.
+- The hint is mutable. It records a manifest number, manifest publications raise it by compare-and-swap, and it never decreases.
+- Content objects store immutable ranges of file bytes, and a layout lists those ranges in chain order.
+- Pins are retained manifests (see [Pins](#8-pins)).
 
-Discovery loads the hint and the manifest it names, then probes successive manifest numbers until one is absent, rereading the hint in case it rose meanwhile. It reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first absent number. It then checks that the manifest still has no successor. If a successor appeared, or the check came `READ_REVALIDATION_BOUND_MS` or more after the manifest probe, discovery reloads the manifest and starts again. A missing or invalid WAL object also reloads the manifest; if the manifest number is unchanged, the store is corrupt (sections 4.1 and 4.2).
+A commit creates WAL object `tip + 1` with put-if-absent. An acquired writer session plans its batch against the tip it discovered, and the put is the commit boundary. A put that collides creates nothing, so the writer discovers the new tip and plans again (see [Publication and group commit](#63-publication-and-group-commit)).
 
-Collection deletes WAL objects at or below the current manifest's `folded_wal_no` and unpinned manifests below the hint it observed. It deletes each one only after its provider age reaches the reclamation grace (sections 11.2 and 11.3). It keeps a superseded manifest and every segment in its runs until the manifest's successor is one grace old. It deletes a metadata segment once no current, pinned, or kept superseded manifest lists it and the segment is older than 24 hours.
+A new writer session takes over by publishing the next manifest with `writer_epoch + 1`, and then creating a fence with that epoch at the next WAL number. Between the manifest and the fence, the previous writer can still commit at `tip + 1`. Those commits are valid, because their epoch is below the manifest's and the fence is written above them. Once the fence is written, the previous writer session can't commit. Its next put collides, the discovery that follows finds the higher epoch, and the session is fenced (it stops committing, and it doesn't reacquire authority on its own). Any earlier discovery that finds the higher epoch fences the session the same way (see [Writer ownership](#61-writer-ownership)).
 
-A publisher initiates each numbered put within a budget of the observation it planned against, and treats a put that returns after the budget as having an unknown outcome. The grace is at least the longest budget plus the provider request bound plus the clock allowance, so, under the provider requirement in section 3.1, an object can be collected only after the provider has applied or rejected every put planned against an observation older than the object (section 11.4, Appendix C.1). Readers have the matching bound: a reader trusts an absent manifest successor only within `READ_REVALIDATION_BOUND_MS` of the probe it confirms (section 4.2).
+A fold doesn't need a writer epoch, and any process can run one. A fold moves the WAL objects after the current manifest's `folded_wal_no` into new metadata segments, and it publishes the next manifest with `folded_wal_no` set to the tip it read. That manifest keeps the previous manifest's writer and compactor epochs. Before it publishes, the fold writes the pieces it covers to content objects as immutable extents (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)).
 
-What the protocol guarantees:
+To discover a namespace's current state, a reader:
 
-1. Creating WAL `n + 1` commits its records, and the visible log is the unique chain of consecutive numbers above the current manifest's `folded_wal_no` (put-if-absent numbering, section 6.3).
-2. Every acknowledged commit is in that chain or folded into the current manifest (the publication budget and the grace, section 11.4).
-3. Writer epochs never decrease along the chain and never exceed the current manifest's epoch; once a newer writer's fence has landed, no older writer commits (the claim and the fence, sections 6.1 and 4.2).
-4. A fresh discovery observes every commit acknowledged before it began (the successor check within the revalidation bound, section 4.2).
-5. A cached view never regresses, and a read served from it reflects a successor check no older than the revalidation bound (the successor probe and the revalidation bound, section 4.2).
-6. Pieces stay readable: in the WAL until a fold has written them as extents, then through the layout (content written before the manifest, sections 7.2 and 1.5).
-7. A retry with the same commit ID and request does not commit twice while its receipt is retained (the commit receipt, section 6.5).
-8. A view that revalidates within its bound never lists a collected segment: its manifest was current at its last successor check, so the manifest and its segments stay for at least one grace after that check (the superseded-manifest root and the revalidation bound, sections 11.2 and 4.2).
+1. Loads the hint and the manifest it points to.
+2. Probes the following manifest numbers until one is missing, and rereads the hint in case it was raised in the meantime.
+3. Reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first missing number.
+4. Checks that the manifest still has no successor.
+
+If a successor appeared, or the check in step 4 happened `READ_REVALIDATION_BOUND_MS` or more after the manifest probe, the reader reloads the manifest and starts again. A missing or invalid WAL object also makes the reader reload the manifest, and if the manifest number hasn't changed, the store is corrupt (see [Resolving the metadata basis](#41-resolving-the-metadata-basis) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
+
+Garbage collection deletes WAL objects at or below the current manifest's `folded_wal_no`, and unpinned manifests below the hint value it observed. It deletes each one only after the object's provider age reaches the reclamation grace (see [Reference roots](#112-reference-roots) and [Candidate and age rules](#113-candidate-and-age-rules)). It keeps a superseded manifest, and every segment in its runs, until the manifest's successor is one grace old. It deletes a metadata segment once no current, pinned, or kept superseded manifest lists it, and the segment is more than 24 hours old.
+
+Every numbered put has a time budget. A publisher starts each numbered put within a budget of the observation it planned against, and it treats a put that returns after the budget as having an unknown outcome. The reclamation grace is at least the longest budget, plus the provider request bound, plus the clock allowance. Under the provider requirement in [Required operations](#31-required-operations), an object can therefore be deleted only after the provider has applied or rejected every put planned against an observation older than the object (see [Clock and operation assumptions](#114-clock-and-operation-assumptions) and [Publication and collection timing](#c1-publication-and-collection-timing)). Readers have a matching bound. A reader trusts that a manifest has no successor only within `READ_REVALIDATION_BOUND_MS` of the probe that confirmed it (see [Replaying the visible WAL](#42-replaying-the-visible-wal)).
+
+The protocol guarantees the following:
+
+1. Successfully creating WAL object `n + 1` commits its records, and the visible log is the unbroken sequence of WAL numbers above the current manifest's `folded_wal_no` (because of put-if-absent numbering, see [Publication and group commit](#63-publication-and-group-commit)).
+2. Every acknowledged commit is in that sequence or folded into the current manifest (because of the publication budget and the grace, see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
+3. Writer epochs never decrease along the sequence, and they never exceed the current manifest's epoch. Once a newer writer's fence is written, no older writer commits (because of the claim and the fence, see [Writer ownership](#61-writer-ownership) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
+4. A fresh discovery sees every commit that was acknowledged before it began (because of the successor check within the revalidation bound, see [Replaying the visible WAL](#42-replaying-the-visible-wal)).
+5. A cached view never moves backward, and a read served from it reflects a successor check no older than the revalidation bound (because of the successor probe and the revalidation bound, see [Replaying the visible WAL](#42-replaying-the-visible-wal)).
+6. Pieces stay readable, in the WAL until a fold has written them as extents, and through the layout after that (because content is written before the manifest, see [Publishing a materialized file set](#72-publishing-a-materialized-file-set) and [File contents and ownership](#15-file-contents-and-ownership)).
+7. A retry with the same commit ID and request doesn't commit twice while its receipt is kept (because of the commit receipt, see [Commit identity and retries](#65-commit-identity-and-retries)).
+8. A view that revalidates within its bound never lists a deleted segment. Its manifest was current at its last successor check, so the manifest and its segments are kept for at least one grace after that check (because of the superseded-manifest root and the revalidation bound, see [Reference roots](#112-reference-roots) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
 
 ## 3. Object-storage requirements
 
+This section describes what LoonFS requires from an object store, and how it writes immutable objects safely on each provider.
+
 ### 3.1 Required operations
 
-The object-store layer must provide create-if-absent for immutable publication, compare-and-swap for mutable control objects, full and ranged reads, deletion, and reliable prefix enumeration. Operations must remain within the configured storage scope.
+The object-store layer MUST provide:
 
-A compare-and-swap (CAS) replaces an object only if its compare token still matches the version read by the caller. If another writer has changed that version, the update fails its precondition. Conditional updates must distinguish this result from a transport error. A confirmed precondition failure means the inspected state was not replaced. The object-store layer sends a conditional write as one request and never resends it, so its precondition failure is never caused by its own landing. A transport failure after sending a request may leave the outcome unknown.
+- create-if-absent (put-if-absent), for publishing immutable objects,
+- compare-and-swap, for mutable control objects,
+- full and ranged reads,
+- deletion, and
+- reliable prefix listing.
 
-A mutable-object read must return the bytes and the compare token for those same bytes in one observation. Reading metadata and content separately is insufficient: a concurrent update could otherwise pair one version's payload with another version's token. Compare tokens, including ETags, are opaque. They are not assumed to be content digests.
+Every operation MUST stay within the configured storage scope.
 
-Successful writes and deletes require strong consistency. Prefix enumeration returns keys in ascending lexicographic order. The collection protocols depend on this behavior; “S3 compatible” is not, by itself, evidence of conformance. The layer must also list the child prefixes directly under a prefix, in the same order and one page per provider request, starting after a given key. A host uses this listing to enumerate namespaces without listing their objects.
+A compare-and-swap (CAS) replaces an object only if the object's compare token still matches the version the caller read. If another writer has changed the object since then, the update fails its precondition. A conditional update MUST report this result separately from a transport error, because a confirmed precondition failure means the object wasn't replaced. The object-store layer sends a conditional write as one request and never resends it. (If it resent a write whose first attempt had succeeded, the second attempt would fail its precondition, and that failure would be misleading.) A transport failure after the request was sent can leave the outcome unknown.
 
-A provider must also apply each request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of the moment the client began the operation that sent it. This is the provider time that the reclamation grace reserves. The implementation cannot check this assumption. Section 11.4 explains what depends on it, and Appendix C.1 gives the numbers.
+A read of a mutable object MUST return the bytes and the compare token for those same bytes in one response. Reading them separately isn't enough, because a concurrent update could pair one version's payload with another version's token. Compare tokens (including ETags) are opaque, and LoonFS doesn't assume they're content digests.
 
-Readers determine committed state from verified manifests and numbered WAL objects. Collectors also use listings to find candidates and dependencies. In particular, namespace retirement requires a complete pin scan after deletion. The format does not assume a multi-object transaction or a snapshot across separately read control objects.
+Successful writes and deletes MUST be strongly consistent. Prefix listings return keys in ascending lexicographic order, and the garbage collection protocols depend on this behavior (being "S3 compatible" doesn't by itself mean a provider conforms). The object-store layer MUST also list the child prefixes directly under a prefix, in the same order and one page per provider request, starting after a given key. A host uses this listing to find namespaces without listing their objects.
+
+A provider MUST also apply each request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of when the client started the operation that sent it. The reclamation grace reserves this much provider time. An implementation can't check this assumption. [Clock and operation assumptions](#114-clock-and-operation-assumptions) explains what depends on it, and [Publication and collection timing](#c1-publication-and-collection-timing) lists the numbers.
+
+Readers determine committed state from verified manifests and numbered WAL objects. Garbage collection also uses listings, to find candidates and dependencies (for example, retiring a namespace requires a complete listing of its pins after deletion). The format doesn't assume transactions across objects, or a consistent snapshot across control objects that are read separately.
 
 ### 3.2 Immutable writes and retries
 
-An immutable object must not be replaced with different bytes. A collision at a newly generated content or segment key is an error; contention at the next manifest or WAL number follows its publication protocol. Where an operation retries the same object identity, it may reconcile an ambiguous write only using evidence that establishes the expected immutable contents. A mutable record created under a generated id (a pin or an upload session) is identified by the id alone: after a put with an unknown outcome, a record under that id is the creator's own, whatever its bytes now hold, because another caller can change the record as soon as it lands.
+An immutable object MUST NOT be replaced with different bytes. A collision at a newly generated content or segment key is an error, while contention for the next manifest or WAL number follows that object's publication protocol. When an operation retries the same object, it can resolve an ambiguous earlier write only with evidence that the stored object has the expected immutable contents. A mutable record created under a generated ID (a pin or an upload session) is identified by its ID alone. After a put with an unknown outcome, a record under that ID is the creator's own, whatever its bytes are now, because another caller can change the record as soon as it's written.
 
-An immutable object's identity is the full-object checksum its provider stores, including the algorithm. Each store declares one algorithm: S3, R2, S3-compatible endpoints, local storage, and the reference in-memory store use CRC-64/NVME; GCS uses CRC-32C. The local store can select CRC-32C at construction for conformance tests. A writer computes that checksum over its bytes and sends it for the provider to verify. An assembler combines verified source checksums. A provider may store a checksum it computes or a value the adapter combines from requests the provider verified. A provider that can do neither is unsupported. Writers and readers do not use writer SHA-256 metadata. Every content reference uses the store's algorithm, including inline writes, uploads, copies, restores, and appends.
+An immutable object is identified by the full-object checksum that its provider stores, including the checksum algorithm. Each store uses one algorithm:
 
-An immutable write creates its key with put-if-absent at every size. A large write sends parts and completes conditionally, so it can take longer than one publication request (C.1). An occupied key is checked with one HEAD. An equal stored checksum succeeds; a different or missing checksum fails. No bytes are read back. A retry whose earlier attempt landed succeeds by the same check.
+| Store | Algorithm |
+| --- | --- |
+| S3, R2, S3-compatible endpoints, local storage, and the in-memory reference store | CRC-64/NVME |
+| GCS | CRC-32C |
 
-A streamed immutable write computes the store's checksum as the bytes pass. Below one part it is buffered and takes the single-request create. A longer write sends parts as they arrive and completes with the full-object checksum. An occupied key uses the same comparison as a buffered write. An error in the stream prevents completion. A stream cannot be sent twice, so a transport failure is not retried.
+(The local store can be set to use CRC-32C when it's constructed, for conformance tests.)
 
-An assembly creates one immutable object from ordered source ranges followed by ordered tail pieces. Each source names an object, an optional half-open range, and the checksum of exactly those bytes. An absent range selects the whole object. The expected checksum covers the complete result. It and every source checksum use the store's algorithm. A missing source or a source shorter than its range fails the precondition. An occupied destination is checked by its stored checksum against the expected checksum.
+A writer computes the checksum over its bytes and sends it for the provider to verify, and an assembly combines the verified checksums of its sources. A provider can store a checksum it computes itself, or a value the adapter combines from requests the provider verified. A provider that can do neither isn't supported. Writers and readers don't use SHA-256 metadata from the writer. Every content reference uses the store's algorithm, including references created by inline writes, uploads, copies, restores, and appends.
 
-S3 and R2 read an assembly result below the single-request put threshold, 8 MiB, and send one create-only PUT. Each source read is at most 8 MiB and is checked against its checksum. At or above the threshold, they copy eligible parts inside the provider. S3 copies sources of at least 5 MiB in parts of at most 5 GiB. Smaller sources and tail bytes pass through the server in reads of at most 8 MiB. An uploaded part takes bytes from the next copied source when needed to reach 5 MiB, except for the final part. R2 cuts the result into 64 MiB parts, except the last. It copies a part only when it lies within one source. Other parts pass through the server. R2 receives no copy-source `If-Match` header. S3 combines the parts' CRC-64/NVME checksums before completing. A mismatch with an expected CRC aborts before completion. R2 reports no checksum for copied parts, so it checks the stored full-object CRC with HEAD after completion. A missing or different checksum fails the assembly and leaves the object for collection; a writer never deletes an immutable key, because another writer may already have accepted it. Both providers complete with `If-None-Match: *` and the expected full-object CRC.
+An immutable write creates its key with put-if-absent, at every size. A large write sends parts and completes conditionally, so it can take longer than one publication request (see [Publication and collection timing](#c1-publication-and-collection-timing)). If the key is already occupied, the writer checks it with one HEAD request. If the stored checksum is equal, the write succeeds, and if it's different or missing, the write fails. No bytes are read back, so a retry whose earlier attempt succeeded also succeeds, by the same check.
 
-GCS reads an assembly result below the same 8 MiB threshold, verifies each source, and sends one create-only media request. At or above the threshold, it composes whole sources. Ranged sources and tail bytes first become temporary objects. Each compose takes at most 32 sources, using intermediate temporary objects for longer lists. Sources are held to their generations and the destination uses `ifGenerationMatch=0`. The adapter combines source CRC-32C values before composing and checks the returned CRC against a CRC-32C expectation. Every temporary object is deleted afterwards. Failed or cancelled attempts also attempt cleanup; a crash can leave temporary objects for collection. The local store streams source ranges and tail pieces into a staging file, holding at most one 8 MiB read chunk. It checks the expected checksum before publishing with a create-only link and computes the store's selected checksum over the bytes. The in-memory test store may buffer the result before its verified put.
+A streamed immutable write computes the store's checksum as the bytes pass through. A stream shorter than one part is buffered and written with a single create request. A longer stream sends parts as they arrive and completes with the full-object checksum. An occupied key is checked the same way as for a buffered write. An error in the stream prevents completion, and because a stream can't be sent twice, a transport failure isn't retried.
 
-Small control objects use conditional single-object writes. Multipart upload is an optimization for larger payloads, not a substitute for atomic control-object CAS.
+An "assembly" creates one immutable object from an ordered list of source ranges, followed by ordered tail pieces (new bytes). Each source identifies an object, an optional half-open byte range, and the checksum of exactly those bytes. A source with no range is the whole object. The expected checksum covers the complete result, and it and every source checksum use the store's algorithm. A missing source, or a source shorter than its range, fails the precondition. An occupied destination is checked by comparing its stored checksum with the expected checksum.
 
-A large create completes conditionally where the provider accepts a precondition on completion. Where it does not, completion must still preserve immutable content identity: the adapter prevents concurrent writes through exclusive upload-session ownership and checks for an existing object before completion. An absence check alone is insufficient, because another request could write the key before completion. In either case, the session protocol in section 5 applies. See the [provider documentation][provider-spec] for each provider's path.
+Each provider adapter builds an assembly differently, depending on the size of the result:
 
-The incremental-write adapter consumes the payload before evaluating its existence precondition. A digest calculated while forwarding the stream therefore covers the complete payload even when the write is refused.
+- **S3.** Below the single-request put threshold (8 MiB), the adapter reads the sources, in reads of at most 8 MiB that are each checked against their checksums, and sends one create-only PUT. At or above the threshold, S3 copies sources of at least 5 MiB inside the provider, in parts of at most 5 GiB. Smaller sources and tail bytes pass through the server, in reads of at most 8 MiB. When an uploaded part needs more bytes to reach 5 MiB, it takes them from the next copied source (except for the final part). S3 combines the parts' CRC-64/NVME checksums before completing, and a mismatch with the expected CRC aborts before completion.
+- **R2.** Below 8 MiB, the adapter works the same way as on S3. At or above it, the adapter cuts the result into 64 MiB parts (except the last), and it copies a part inside the provider only when the part lies within one source. Other parts pass through the server. R2 doesn't receive a copy-source `If-Match` header, and it reports no checksum for copied parts, so the adapter checks the stored full-object CRC with a HEAD request after completion. A missing or different checksum fails the assembly and leaves the object for garbage collection. (A writer never deletes an immutable key, because another writer might already have accepted it.)
+- **GCS.** Below 8 MiB, the adapter reads the result, verifies each source, and sends one create-only media request. At or above it, GCS composes whole sources. Ranged sources and tail bytes first become temporary objects, and each compose takes at most 32 sources, with intermediate temporary objects for longer lists. Each source has a generation precondition, and the destination uses `ifGenerationMatch=0`. The adapter combines the sources' CRC-32C values before composing, and it checks the returned CRC against a CRC-32C expectation. Every temporary object is deleted afterwards. Failed or cancelled attempts also try to clean up, but a crash can leave temporary objects for garbage collection.
+- **Local store.** The adapter streams source ranges and tail pieces into a staging file, buffering at most one 8 MiB read chunk. It checks the expected checksum before publishing with a create-only link, and it computes the store's selected checksum over the bytes.
+- **In-memory test store.** The store can buffer the result before its verified put.
 
-A failed or cancelled multipart transfer must attempt provider-side abort. Abort failures can leave incomplete parts, so deployments also need the provider cleanup policy assumed by their adapter. An abort does not imply deletion of an already completed content object; object cleanup follows the upload's durable lifecycle.
+On S3 and R2, the adapter completes with `If-None-Match: *` and the expected full-object CRC.
+
+Small control objects use conditional single-object writes. Multipart upload is an optimization for larger payloads, and it doesn't replace compare-and-swap for control objects.
+
+A large create completes conditionally where the provider accepts a precondition on completion. Where it doesn't, completion MUST still preserve immutable content identity. The adapter prevents concurrent writes through exclusive ownership of the upload session, and it checks for an existing object before completion. An absence check alone isn't enough, because another request could write the key before completion. In either case, the session protocol in [Uploading content](#5-uploading-content) applies. The [provider documentation][provider-spec] describes each provider's path.
+
+The incremental-write adapter reads the whole payload before it evaluates its existence precondition. So a digest computed while forwarding the stream covers the complete payload, even when the write is refused.
+
+A failed or cancelled multipart transfer MUST attempt a provider-side abort. An abort can fail and leave incomplete parts behind, so deployments also need the provider cleanup policy that their adapter assumes. An abort doesn't delete a content object that has already completed. Cleanup of that object follows the upload's durable lifecycle.
 
 ### 3.3 Timing assumptions
 
-Writer fencing and commit order are based on epochs, sequences, and conditional writes. Upload admission, snapshot expiry, and reclamation also use deadlines.
+Writer fencing and commit order don't depend on clocks. They use epochs, sequence numbers, and conditional writes. Upload admission, snapshot expiry, and reclamation do use deadlines.
 
-The collection protocol assumes bounded clock error and bounded publication and provider-operation times. These assumptions are stated in [Appendix C](#appendix-c-timing-and-size-reference). A client-side timeout is not proof that a remote mutation had no effect; ambiguous operations must retain their documented unknown-outcome behavior.
-
-Section 11.4 explains the clock assumptions and their limits.
+Garbage collection assumes that clock error is bounded, and that publications and provider operations finish within bounded times. [Appendix C](#appendix-c-timing-and-size-reference) states these bounds. A client-side timeout isn't proof that a remote change had no effect, so an operation with an ambiguous outcome MUST keep its documented unknown-outcome behavior.
 
 ## 4. Reading a namespace
 
+This section describes how a reader finds a namespace's current state, decides what's visible at a sequence, and verifies file contents.
+
 ### 4.1 Resolving the metadata basis
 
-A cold read loads `hint.json`, loads the manifest at its `manifest_no`, and probes successive manifest numbers until the first not-found response. That selects the current manifest. A lagging hint is expected; it is a starting point, not a statement that later objects do not exist.
+A cold read (a read with no cached view) starts by finding the current manifest:
 
-When the probe ends after an active manifest, the reader reads the hint again. If the hint now names a higher number than the last manifest found, discovery starts again from that number, because collection may have deleted manifests below the new hint while the probe ran. Each probed manifest must be a legal successor of the one before it: identity fields equal; `folded_wal_no`, both epochs, `head_seq`, the retention floor, the allocators, and the activity counters non-decreasing; and no manifest after a tombstone, which ends the probe. A chain that fails this check is corrupt.
+1. Load `hint.json`, and load the manifest at its `manifest_no`.
+2. Probe the following manifest numbers until one returns not found. The last manifest found is the current one.
+3. If the probe ended after an active manifest, read the hint again. If the hint now points to a higher number than the last manifest found, start again from that number. (Garbage collection might have deleted manifests below the new hint while the probe ran.)
+
+The hint is expected to lag. It's a starting point, not a statement that later objects don't exist.
+
+Each probed manifest MUST be a valid successor of the one before it:
+
+- Its identity fields are equal.
+- Its `folded_wal_no`, both epochs, `head_seq`, retention floor, allocators, and activity counters are the same or higher.
+- It doesn't follow a namespace tombstone (a tombstone ends the probe).
+
+A sequence of manifests that fails this check is corrupt.
 
 | Discovery result | Interpretation |
 | --- | --- |
-| Missing hint | Namespace not installed. |
-| Hint names manifest 1, which is absent | Installation has not completed. |
-| A higher hinted manifest is absent | Read the hint again. If it now names a higher number, start again from it; if it is unchanged, the store is corrupt. Collection deletes manifests below the hint it observed, so a manifest named by an older hint value can be gone after a raise. |
-| A required object is unreadable or invalid | Error; do not treat it as absence. |
-| Current manifest is deleted | `namespace_deleted` for ordinary namespace operations. |
+| The hint is missing | The namespace isn't installed. |
+| The hint points to manifest 1, which is missing | Installation hasn't finished. |
+| A higher hinted manifest is missing | Read the hint again. If it now points to a higher number, start again from it. If it's unchanged, the store is corrupt. (Garbage collection deletes manifests below the hint value it observed, so a manifest that an older hint value pointed to can be gone after the hint is raised.) |
+| A required object is unreadable or invalid | An error, not absence. |
+| The current manifest is deleted | Ordinary namespace operations return `namespace_deleted`. |
 
-Every namespace has its own manifest from installation. A newly created namespace's empty manifest represents root inode 1 at sequence zero. A fork's initial manifest lists the source runs it inherits. Its `fork_basis` records provenance and the retaining pin; readers do not follow that field to select a different basis.
+Every namespace has its own manifest from the moment it's installed. A new namespace's empty manifest describes root inode 1 at sequence 0. A fork's first manifest lists the source runs it inherits. Its `fork_basis` records where the fork came from and which pin keeps its basis, and readers don't follow that field to choose a different basis.
 
-The current manifest plus the unfolded WAL forms one read view:
+The current manifest and the unfolded WAL together make up one read view:
 
 ```text
-hint ── starting number ──> manifest 5 ── probe ──> manifest 6 ──> absent 7
-                                                  │
-                                   ┌──────────────┴──────────────┐
-                                   │                             │
-                              listed runs                folded WAL = 10
-                                   │                             │
-                             metadata rows              replay WAL 11, 12
-                                   └──────────────┬──────────────┘
-                                            read view
+hint --(start)--> manifest 5 --probe--> manifest 6 --probe--> 7 is missing
+                                            |
+                          +-----------------+-----------------+
+                          |                                   |
+                     listed runs                      folded WAL = 10
+                          |                                   |
+                    metadata rows                    replay WAL 11, 12
+                          |                                   |
+                          +-----------------+-----------------+
+                                            |
+                                        read view
 ```
 
-This example assumes 12 is the discovered WAL tip. Manifest and WAL discovery must also account for a concurrent manifest publication, as described below.
+In this example, WAL object 12 is the discovered tip. Discovery MUST also account for a manifest that's published while it runs, as [Replaying the visible WAL](#42-replaying-the-visible-wal) describes.
 
 ### 4.2 Replaying the visible WAL
 
-After selecting a manifest, read the WAL from `folded_wal_no + 1` upward until the first absent number. The objects read are the ones replay needs, so a reader keeps them; discovery and replay are one pass. Numbers may be read in concurrent windows. Those reads do not observe one moment, so a number absent in one read may have been published before a later number was read: the reader reads it again before treating it as missing. The first number still absent ends the tail; a still-absent number below a present one is a missing object. Replay requires every WAL number between the folded boundary and the discovered tip.
+After it selects a manifest, a reader reads the WAL from `folded_wal_no + 1` upward until the first missing number. Discovery and replay are one pass, because the WAL objects that discovery reads are the ones replay needs, so the reader keeps them. Numbers can be read in concurrent windows. Those reads don't all happen at the same moment, so a number that was missing in one read might have been published before a later number was read. The reader reads a missing number again before it treats it as missing. The first number that's still missing ends the tail, and a number that's still missing below a present one is a missing object. Replay requires every WAL number between the folded boundary and the discovered tip.
 
-Each WAL object other than a fence must contain contiguous commits following the preceding head. Its `prior_head_seq` is derived by subtracting one from the first record sequence; a first sequence of zero is invalid. A fence derives its preceding head from `head_seq`. Namespace identity, WAL number, sequence range, allocation state, and writer epoch must validate. Empty fence objects contain no metadata changes. Epochs cannot decrease along the log or exceed the current manifest's epoch. When discovery finds a missing or invalid WAL object, reload the current manifest. If its number changed, start discovery again from it; if it did not, the store is corrupt. A WAL object whose epoch exceeds the loaded manifest's is one case of this rule: another writer may have claimed that epoch after the manifest was loaded.
+Each WAL object MUST pass these checks:
 
-A deleted manifest ends discovery without a WAL or manifest successor probe. For an active manifest, check for a successor after WAL discovery and reload if one appeared. This prevents a concurrent fold or retention advance from making a reclaimed WAL number look unused. Required missing or malformed objects fail the read. The successor check is trusted only while the manifest probe it confirms is younger than `READ_REVALIDATION_BOUND_MS`; a reader that has taken longer reloads the manifest instead, because a successor published after its probe may already have been collected.
+- A WAL object other than a fence contains contiguous commits that follow the preceding head. Its `prior_head_seq` is its first record's sequence minus one, so a first sequence of 0 is invalid. A fence's preceding head is its own `head_seq`.
+- Its namespace identity, WAL number, sequence range, allocation state, and writer epoch are valid.
+- A fence contains no metadata changes.
+- Epochs don't decrease along the log, and they don't exceed the current manifest's epoch.
 
-A read is evaluated at one sequence. Replaying the WAL produces a projection of its metadata changes and any file bytes stored inline. This is the *projected WAL tail*. An implementation may query verified metadata segments and this projection directly, without loading every metadata row into memory, provided it applies the same visibility rules.
+When discovery finds a missing or invalid WAL object, the reader reloads the current manifest. If the manifest number changed, discovery starts again from it, and if it didn't, the store is corrupt. A WAL object whose epoch is higher than the loaded manifest's is one case of this rule, because another writer might have claimed that epoch after the manifest was loaded.
 
-For a warm read, the reference runtime probes the next WAL number with GET. An absent object confirms the cached tip; a present object requires advancing the state and probing onward. On a monotonic revalidation interval, defaulting to one second, it also probes the next manifest number with HEAD. A successor triggers discovery again. So does an answer to either probe that arrives `READ_REVALIDATION_BOUND_MS` or more after the previous successor probe was sent, whatever it finds. The time is measured when the answer arrives, and against the previous successor probe, not the one being answered. A successor probe that finds nothing becomes the previous one for later reads only after both answers have arrived in time. This is how cached readers observe deletion and retention changes. The hint is not used to validate a cached view. The acknowledging runtime seeds its read caches from the publication. The seeded view's previous successor probe is the writer's last confirmation that the manifest it planned against had no successor, not the publication. That confirmation can be up to about two WAL publish budgets older than the publication. If the cached view being replaced stands on the same manifest and its tip is not past the published WAL object, the seeded view keeps the later of the two checks. Its next read probes the next WAL number like any warm read. If the manifest and WAL tip are unchanged and the seeded projection is retained, it replays nothing and does not reload the manifest.
+A deleted manifest ends discovery, without a WAL probe or a manifest successor probe. For an active manifest, the reader checks for a successor after WAL discovery, and it reloads if one appeared. This check stops a concurrent fold or retention advance from making a WAL number look unused when garbage collection has actually deleted its object. A required object that's missing or malformed fails the read. The successor check is trusted only while the manifest probe it confirms is younger than `READ_REVALIDATION_BOUND_MS`. A reader that has taken longer reloads the manifest instead, because a successor published after its probe might already have been deleted.
+
+A read is evaluated at one sequence. Replaying the WAL produces a projection of its metadata changes and any inline file bytes, called the "projected WAL tail". An implementation can query verified metadata segments and this projection directly, without loading every metadata row into memory, as long as it applies the same visibility rules.
+
+A warm read is a read from a cached view. The reference runtime checks a cached view with two probes:
+
+- The WAL probe, a GET of the next WAL number, runs on every warm read. A missing object confirms the cached tip. A present object means the reader advances its state and probes the following number.
+- The successor probe, a HEAD of the next manifest number, runs on a monotonic revalidation interval (one second by default). If it finds a successor, the reader runs discovery again.
+
+The reader also runs discovery again if an answer to either probe arrives `READ_REVALIDATION_BOUND_MS` or more after the previous successor probe was sent, whatever the answer is. The time is measured when the answer arrives, and against the previous successor probe, not the one being answered. A successor probe that finds nothing becomes the previous successor probe for later reads only after both answers have arrived in time. This is how cached readers notice deletions and retention changes. The hint isn't used to validate a cached view.
+
+After a commit, the runtime that acknowledged it seeds its read caches from the publication. The seeded view's previous successor probe is the writer's last confirmation that its planning manifest had no successor (not the publication itself), and that confirmation can be up to about two WAL publish budgets older than the publication. If the cached view being replaced is on the same manifest, and its tip isn't past the published WAL object, the seeded view keeps the later of the two checks. Its next read probes the next WAL number like any warm read. If the manifest and the WAL tip haven't changed and the seeded projection is still cached, the read replays nothing and doesn't reload the manifest.
 
 ### 4.3 Visible metadata
 
-At sequence `N`, ignore events after `N`. An inode must have been created by `N` and must not be covered by an active tombstone on itself or an ancestor.
+At sequence `N`, a reader ignores events after `N`. A visible inode MUST have been created at or before `N`, and it MUST NOT be covered by an active tombstone on itself or on an ancestor.
 
-A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version names the child. An unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index. Path resolution needs one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created by `N` and no active subtree tombstone covers it. Each binding row copies the child inode's kind and creation attribution. They never change for the life of an inode, so listing and path resolution read them from the binding instead of from the child's inode row. Snapshots and user pins apply these rules through their pinned manifests at their captured sequences.
+A directory slot's value is its newest version at or below `N`, ordered by `(committed_seq, delta_index)`. A bound version identifies the child, and an unbound version, or no version, means the slot is empty. Parent lookup applies the same rule to the child index.
 
-A file's current content is its latest revision committed by `N`. Attributes are the latest applicable complete attribute revision, or the initial empty map when no applicable attribute row exists. Recoverable-deletion listing uses the derived active-deletion state; historical tombstone evaluation remains based on tombstone events.
+Resolving a path takes one slot-index lookup per component. A listing scans one parent's prefix in name order and takes the newest visible version of each name. It includes a bound entry only if the child inode was created at or before `N` and no active subtree tombstone covers it. Each binding row includes a copy of the child inode's kind and creation attribution. Those never change for the life of an inode, so listings and path resolution read them from the binding instead of from the child's inode row. Snapshots and user pins apply these rules through their pinned manifests, at their captured sequences.
+
+A file's current content is its latest revision committed at or before `N`. Its attributes are the latest applicable complete attribute revision, or the initial empty map when there's no applicable attribute row. Listing recoverable deletions uses the derived active-deletion state, while evaluating a tombstone at a past sequence uses the tombstone events.
 
 ### 4.4 Paths, listings, and revision reads
 
-Resolve a path from root inode `1`, mapping each component to its name key under the namespace's naming mode and following the active binding. If a component is not visible, the path does not exist. The current format has no mount traversal.
+A reader resolves a path from root inode `1`. It maps each component to its name key, using the namespace's naming mode, and follows the active binding. If a component isn't visible, the path doesn't exist. (The current format has no mount points to traverse.)
 
-A directory listing resolves visible child bindings and uses committed revision metadata for file size and content-reference summaries. It must not fetch and verify every file's content object simply to list a directory.
+A directory listing resolves the visible child bindings, and it uses committed revision metadata for file sizes and content-reference summaries. It MUST NOT fetch and verify every file's content object just to list a directory.
 
-A path-based revision read first resolves the current inode at that path, then looks up the requested revision of that inode. It is not a request for every file that ever occupied the path. An inode-based revision read addresses the retained history of that inode directly.
+A path-based revision read first resolves the current inode at that path, and then it looks up the requested revision of that inode. It isn't a request for every file that has ever been at the path. An inode-based revision read reads the retained history of that inode directly.
 
 ### 4.5 Content verification
 
-A reference names a chain prefix and its checksum. A read takes the view's layout for that chain, then its visible WAL pieces. The projected tail indexes pieces by content ID and offset. The read uses the longest visible layout for the reference's own chain, taking the newest among equal lengths. It consults tail rows and manifest segments.
+A content reference identifies a prefix of a chain and its checksum. To read it, a reader uses the view's layout for that chain, and then the chain's visible WAL pieces. The projected tail indexes pieces by content ID and offset. The reader uses the longest visible layout for the reference's own chain (the newest one, if several have the same length), and it looks in both the tail rows and the manifest's segments.
 
-| Condition | Where to read |
+| Condition | Where the reader reads the bytes |
 | --- | --- |
-| The tail holds pieces at or below the reference's size | Take the reference's own chain layout up to the lowest tail offset. Then take the pieces up to the reference's size. |
-| No pieces supply the reference | Take the view's layout up to the reference's size. |
-| Zero bytes and no pieces | Verify the empty value without a content request. |
-| Nonzero folded prefix without a layout | Report corruption naming the content ID. |
+| The tail has pieces at or below the reference's size | The reference's own chain layout, up to the lowest tail offset, and then the pieces, up to the reference's size. |
+| No pieces cover the reference | The view's layout, up to the reference's size. |
+| Zero bytes, and no pieces | Nowhere. The reader verifies the empty value without a content request. |
+| A nonzero folded prefix with no layout | Nowhere. The reader reports corruption, identifying the content ID. |
 
-Truncation shortens the last extent used by the read. Each extent reads one overlapping range at its object offset. No read makes a HEAD request. A missing-object error names the missing extent's key. A short range reports its expected and actual lengths. The assembled length and checksum are checked against the reference. These errors name the reference's own key.
+When the reference is shorter than the layout, the read shortens the last extent it uses. Each extent is read with one ranged read at its object offset, and no read makes a HEAD request. If an object is missing, the error identifies the missing extent's key, and a short range reports its expected and actual lengths. The reader checks the assembled length and checksum against the reference, and those errors identify the reference's own key.
 
-Inherited layouts retain their object owners. WAL replay loads pieces with metadata. Resident pieces need no content request. Replay checks the envelope and does not recompute file checksums.
+Inherited layouts keep their object owners. WAL replay loads pieces along with the metadata, so pieces that are already in memory need no content request. Replay checks each WAL object's envelope, but it doesn't recompute file checksums.
 
-Reclaiming a WAL object does not remove bytes already held in a read view’s projection. If that projection must be rebuilt and the required WAL objects are gone, the read must fail. Finding a content object is insufficient because the missing WAL is also required to reconstruct the view’s metadata.
+Deleting a WAL object doesn't remove bytes that are already in a read view's projection. But if that projection has to be rebuilt and the WAL objects it needs are gone, the read MUST fail. Finding a content object isn't enough, because the missing WAL objects are also needed to rebuild the view's metadata.
 
-For a streamed read, the full-file checksum is verified only after the complete stream has been processed. The transport must report a verification failure even if some bytes have already reached the client. A direct download grants one range per extent. For provider-direct downloads, the client receives bytes directly from object storage; the [API specification][api-spec] defines its verification responsibilities.
+For a streamed read, the full-file checksum can only be verified after the complete stream has been processed. The transport MUST report a verification failure, even if some bytes have already reached the client. A direct download grants one range per extent, and the client receives the bytes directly from object storage. The [API specification][api-spec] defines the client's verification responsibilities for direct downloads.
 
 ### 4.6 Speculative reads
 
-The embedded runtime can reduce latency by reading a small file while checking whether its cached view is still current. This optimization applies to nonempty files of at most 64 KiB and must respect any smaller configured limit on buffered reads.
+The embedded runtime can reduce latency by reading a small file while it checks whether its cached view is still current. This optimization applies to nonempty files of at most 64 KiB, and it MUST respect any smaller configured limit on buffered reads.
 
-First, resolve the path in the cached view. Start the normal freshness check described in section 4.2 and the content read together. If the namespace read state and manifest are unchanged, the cached resolution is still valid. Otherwise, resolve the path again in the current view.
+A speculative read works like this:
 
-Use the speculative bytes only if the current path has the same complete content reference. Return the entry from the current view. If the reference changed, discard the earlier result, including any content error, before reading the current content once. An error resolving the current path takes precedence over the speculative result.
+1. Resolve the path in the cached view.
+2. Start the normal freshness check (see [Replaying the visible WAL](#42-replaying-the-visible-wal)) and the content read at the same time.
+3. If the namespace's read state and manifest haven't changed, the cached resolution is still valid. Otherwise, resolve the path again in the current view.
+4. Use the speculative bytes only if the current path has the same complete content reference, and return the entry from the current view. If the reference changed, discard the earlier result (including any content error) and read the current content once. An error resolving the current path takes precedence over the speculative result.
 
-For example, if `/report.txt` now refers to different content, discard the old file bytes and read the replacement. If the path was deleted, return the current metadata error even if the old bytes were read successfully.
+For example, if `/report.txt` now refers to different content, the reader discards the old bytes and reads the new ones. If the path was deleted, it returns the current metadata error, even if the old bytes were read successfully.
 
-The speculative read reads like any other read (section 4.5): the range of the object prefix, then the tail's pieces, verified over the reference. Content that the projected tail holds from offset 0 requires no content request.
+A speculative read reads bytes the same way as any other read (see [Content verification](#45-content-verification)): a range of the object prefix, and then the tail's pieces, verified against the reference. If the projected tail contains the content from offset 0, no content request is needed.
 
-Reading speculative bytes does not by itself establish freshness or change retention. The ordinary metadata checks remain required.
+Reading speculative bytes doesn't by itself establish freshness or change retention, so the ordinary metadata checks are still required.
 
 ## 5. Uploading content
 
+This section describes upload sessions, the ways bytes can be transferred, and the proof a commit needs before it can reference uploaded content.
+
 ### 5.1 Upload sessions
 
-Every uploaded content object is associated with an upload session before it becomes eligible for metadata publication. The content ID is allocated when the session is created, before the file bytes are read. New content belongs to the session's namespace under section 1.5.
+Every uploaded content object is tied to an upload session before a commit can reference it. The content ID is allocated when the session is created, before any file bytes are read, and new content belongs to the session's namespace (see [File contents and ownership](#15-file-contents-and-ownership)).
 
-An upload session contains `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, a tagged `mode`, and a tagged `status`.
+An upload session contains `namespace_id`, `upload_id`, `content_id`, an optional `subject_id`, a tagged `mode`, and a tagged `status`:
 
 | Status | Stored fields | Meaning |
 | --- | --- | --- |
-| `open` | `expires_at_ms` | Upload work is permitted while the clock reads before `expires_at_ms`. |
-| `completed` | `completed_at_ms`, `content_ref` | The object was verified and its reference is available for admission. |
-| `aborted` | `aborted_at_ms` | The upload cannot complete or reopen. |
+| `open` | `expires_at_ms` | Upload work is allowed while the clock reads before `expires_at_ms`. |
+| `completed` | `completed_at_ms`, `content_ref` | The object was verified, and a commit can admit its reference. |
+| `aborted` | `aborted_at_ms` | The upload can't complete or reopen. |
 
-At or after `expires_at_ms`, staging, part signing, and completion refuse an open session as they refuse an aborted one. The session never selects content, and collection aborts it (section 11.6). Status reads and aborts do not check the expiry.
+```text
++------+   complete (content verified)   +-----------+
+| open | ------------------------------> | completed |
++------+                                 +-----------+
+   |
+   | abort, or cleanup after expiry
+   v
++---------+
+| aborted |
++---------+
+```
 
-A session starts open and makes at most one terminal transition. Completion and abort race on the same CAS-protected record. Completion verifies content before recording `completed`; abort records `aborted` before cleaning up the object or provider transfer.
+A session starts open and makes at most one terminal transition. Completion and abort race on the same CAS-protected record. Completion verifies the content before it records `completed`, and abort records `aborted` before it cleans up the object or the provider transfer.
 
-Upload records do not advance namespace sequence and are not filesystem change-feed events. Completion is not a file commit. A completed upload may never be referenced by a file.
+At or after `expires_at_ms`, staging, part signing, and completion refuse an open session, the same way they refuse an aborted one. An expired session can never provide content for a commit, and garbage collection aborts it (see [Upload-session cleanup](#116-upload-session-cleanup)). Status reads and aborts don't check the expiry.
+
+Upload records don't advance the namespace's sequence, and they aren't change-feed events. Completing an upload doesn't automatically update a file in a LoonFS namespace, and a completed upload might never be referenced by any file.
 
 ### 5.2 Transfer modes
 
-The mode is fixed for the session's lifetime.
+Each session uses one transfer mode, which is set when the session is created and can't be changed:
 
-| Mode | Durable mode data |
-| --- | --- |
-| `service_proxied` | Tagged staging state: `idle`, `claimed`, or `staged` with a `content_ref` |
-| `direct_put` | The selected whole-object `checksum_algorithm` |
-| `direct_multipart` | `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm` |
+| Mode | How the bytes are transferred | Stored mode data |
+| --- | --- | --- |
+| `service_proxied` | The client sends the bytes to the LoonFS server, which writes the content object. | Tagged staging state: `idle`, `claimed`, or `staged` with a `content_ref` |
+| `direct_put` | The client writes the whole object directly to the provider, with one presigned PUT. | The selected whole-object `checksum_algorithm` |
+| `direct_multipart` | The client uploads parts directly to the provider. | `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm` |
 
-Multipart part progress remains client-side. The part geometry and algorithm remain on the session so resumed work uses the same settings. Provider upload identifiers are retained where required for completion recovery and cleanup.
+For a direct multipart upload, the client tracks part progress. The session stores the part size and checksum algorithm so that resumed work uses the same settings, and it stores provider upload identifiers where they're needed to recover completion or to clean up.
 
-Every staged or completed reference must match the session's content identity and namespace ownership. Completed direct-upload references must use the algorithm recorded in the mode. Missing required fields, inconsistent references, or invalid mode/status combinations are corrupt.
+Every staged or completed reference MUST match the session's content ID and owning namespace, and a completed direct-upload reference MUST use the algorithm recorded in the mode. Missing required fields, inconsistent references, and invalid combinations of mode and status are corrupt.
 
 ### 5.3 Service-proxied staging
 
-A staging request conditionally changes the session's staging state from `idle` to `claimed` before writing content. A concurrent staging request that finds the claim cannot write the same object. When staging succeeds, the request stores the verified reference and releases its claim in the same record update.
+With a service-proxied upload, the LoonFS server writes the content object, and a claim in the session record makes sure only one staging request writes it at a time.
 
-A retry against already staged content compares the incoming content with the staged reference rather than overwriting the object. The same bytes can be accepted as a retry; different bytes conflict. The claim has no independent expiry. A failed write releases the claim only if it failed before its final request was sent. Once that request may have been sent, the write can still land, so the claim stays until the session is aborted or its lease ends. After a request is cancelled, the claim can remain active for the remainder of the session lease.
+A staging request changes the session's staging state from `idle` to `claimed`, with a conditional update, before it writes any content. A concurrent staging request that finds the claim can't write the same object. When staging succeeds, the request stores the verified reference and releases its claim in the same record update.
 
-Completion clears service-proxied staging to `idle` in the same CAS that records the terminal completed reference. Abort also clears staging to `idle`. A terminal record must not retain a second staged content description, even if the two references would agree.
+A retry against content that's already staged compares the incoming content with the staged reference, instead of overwriting the object. The same bytes are accepted as a retry, and different bytes conflict.
 
-Service-proxied staging computes the store's checksum while streaming and records it in the content reference (A.4). When the body ends, the request reads the session record again and lets the object store finish the write only if the session is still open and this request still owns staging. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
+The claim has no expiry of its own. A failed write releases the claim only if it failed before its final request was sent. Once that request might have been sent, the write could still succeed, so the claim stays until the session is aborted or its lease ends. After a request is cancelled, the claim can stay active for the rest of the session lease.
+
+Completion resets staging to `idle` in the same CAS that records the completed reference, and abort also resets staging to `idle`. A terminal record MUST NOT keep a second staged content reference, even if the two references would agree.
+
+Service-proxied staging computes the store's checksum while it streams the bytes, and it records the checksum in the session's content reference (see [Control and manifest payloads](#a4-control-and-manifest-payloads)). When the body ends, the request reads the session record again, and it lets the object store finish the write only if the session is still open and this request still owns staging. The exclusive staging claim prevents a second request from writing the same content object, including during multipart completion.
 
 ### 5.4 Direct uploads
 
-A direct upload transfers bytes from the client to the provider under a short-lived capability. The server allocates the content identity and constrains the target key. Clients cannot choose an arbitrary object key through this interface.
+A direct upload sends bytes from the client to the provider, using a short-lived capability (a presigned request). The server allocates the content ID and constrains the target key, so clients can't choose an arbitrary object key.
 
-Direct PUT uses the algorithm selected when the session begins. Direct multipart uses the algorithm retained in the session, currently CRC-64/NVME. The provider must enforce the signed transfer constraints and expose the stored whole-object checksum in the supported algorithm.
+Direct PUT uses the checksum algorithm selected when the session starts. Direct multipart uses the algorithm stored in the session (currently CRC-64/NVME). The provider MUST enforce the signed transfer constraints, and it MUST expose the stored whole-object checksum in the supported algorithm.
 
-At completion, the server compares the provider's stored size and checksum with the completion claim. A client-supplied digest alone is not sufficient. After the completion call, the object at the key is the only evidence, whatever the provider answered. A claim that the stored object does not match is rejected and changes nothing: the session stays open and nothing is deleted. A session that cannot complete ends by an explicit abort or by its lease (section 11.6). The rule is the same for direct PUT and direct multipart.
+At completion, the server compares the provider's stored size and checksum with the client's completion claim (a digest supplied by the client isn't enough on its own). After the completion call, the object at the key is the only evidence, whatever the provider's response said. If the stored object doesn't match the claim, the server rejects the claim and changes nothing. The session stays open, and nothing is deleted. A session that can't complete ends with an explicit abort, or when its lease ends (see [Upload-session cleanup](#116-upload-session-cleanup)). The same rules apply to direct PUT and direct multipart.
 
-Provider-specific checksum headers, completion APIs, and response encodings belong in the provider adapter. A LoonFS checksum has the same canonical representation regardless of whether the provider returned hexadecimal or base64 data.
+Provider-specific checksum headers, completion APIs, and response encodings belong in the provider adapter. A LoonFS checksum has the same canonical representation whether the provider returned it as hexadecimal or base64.
 
 ### 5.5 Admission proofs
 
-Content is admitted only with evidence that the named bytes were verified in a completed upload. The evidence is bound to the namespace and the complete content reference. A match on the content ID alone is not enough.
+A commit can reference uploaded content only with "admission evidence", which is proof that the referenced bytes were verified in a completed upload. The evidence is tied to the namespace and the complete content reference, so a match on the content ID alone isn't enough. An inline reference MUST be owned by the committing namespace, and admission evidence MUST match the complete reference.
 
-An inline reference must be owned by the committing namespace. Admission evidence must match the complete reference.
+Admission evidence expires. It's valid while the clock reads before its expiry, and it's expired at the expiry instant. Three windows apply ([Upload admission](#c2-upload-admission) lists the values):
 
-The evidence expires. It is valid while the clock reads before its expiry, and it has expired at its expiry instant. A completed session can produce evidence only during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` after its original completion time. A status read or cached response does not restart that window, and nothing is issued at or after its end. A signed token lasts `CONTENT_RECEIPT_TTL_MS` from issuance. Evidence prepared in process without a token expires at the end of the admission window, `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` after the completion (Appendix C.2). No token outlasts that window.
+- A completed session can produce evidence only during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` after its original completion time. A status read or a cached response doesn't restart that window, and nothing is issued at or after its end.
+- A signed token lasts `CONTENT_RECEIPT_TTL_MS` from when it's issued.
+- Evidence prepared in process, without a token, expires at the end of the admission window, `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` after the completion. No token lasts past that window.
 
-The reference HTTP server mints signed content tokens as its representation of this evidence. An embedded implementation need not mint tokens. Token encoding, signing, and HTTP responses are defined in the [API specification][api-spec].
+The reference HTTP server represents admission evidence as signed content tokens. An embedded implementation doesn't need to issue tokens. The [API specification][api-spec] defines token encoding, signing, and HTTP responses.
 
-Immediately before publishing newly accepted requests, the writer checks that externally supplied content references have matching, unexpired admission evidence. The check includes time spent acquiring or checking the writer, loading the view, planning, and preparing the WAL. It uses the request clock plus elapsed monotonic time since the batch call began, including earlier attempts. Retrying does not restart evidence validity.
+Immediately before it publishes newly accepted requests, the writer checks that every externally supplied content reference has matching, unexpired admission evidence. This check includes the time spent acquiring or checking the writer, loading the view, planning, and preparing the WAL object. It uses the request clock plus the monotonic time elapsed since the batch call began, including earlier attempts, so retrying doesn't restart the evidence's validity.
 
-A retained matching commit receipt replays without new content-admission evidence. Internal copy and restore operations retain references already established by the validated namespace state; they do not authorize arbitrary cross-namespace imports. An import outside the pinned fork relationship writes verified bytes under a fresh destination-owned identity.
+A retained matching commit receipt replays without new admission evidence. Internal copy and restore operations reuse references that the validated namespace state already established, and they don't authorize arbitrary imports from other namespaces. An import from outside the pinned fork relationship writes verified bytes under a new content ID owned by the destination.
 
-The receipt window, token lifetime, and publication bound determine the earliest safe collection time for a completed but unreferenced upload. The exact calculation appears in section 11.6 and Appendix C.
+Why does admission evidence expire? Garbage collection has to know when it can delete a completed upload that nothing references. If evidence never expired, a commit could reference the upload at any time, and its content could never be deleted safely. The receipt window, the token lifetime, and the publication budget determine the earliest safe deletion time, and [Upload-session cleanup](#116-upload-session-cleanup) and [Appendix C](#appendix-c-timing-and-size-reference) show the exact calculation.
 
 ## 6. Publishing a commit
 
-A metadata commit becomes visible when put-if-absent creates its numbered WAL object. Upload completion and validation precede this boundary; neither alone commits a file change.
+This section describes how a writer session becomes the namespace's writer, validates requests, and publishes them as commits.
+
+A metadata commit becomes visible when put-if-absent creates its numbered WAL object. Upload completion and validation happen before that point, and neither one alone commits a file change.
 
 ### 6.1 Writer ownership
 
-A writer session acquires authority lazily, before its first semantic publication. Acquisition moves through these states in order:
+A writer session acquires authority lazily, before its first publication that changes metadata. It moves through these states in order:
 
-1. Claim. The session loads the current manifest and publishes its successor with `writer_epoch + 1` and a diagnostic writer block. The claim runs under `METADATA_PUBLICATION_BUDGET_MS`, measured from the start of the acquisition, before the session loads the manifest it copies. A budget that has expired before the put starts, or by the time the put is confirmed, fails the acquisition. A claim that loses its number reloads the current manifest and claims again with the next epoch. A claim whose put has an unknown outcome reads back the manifest at its number. If it finds its own bytes, it treats that manifest as covering the claim and claims again; the epoch it left behind carries no fence. If it finds another manifest, the claim lost and it claims again. If it finds none, the acquisition fails.
-2. Fence. The session discovers the tip. If the current manifest now has a higher epoch than the claim, another session has claimed since, and the acquisition returns `writer_fenced`. Otherwise the session creates a zero-record fence with its epoch at the next WAL number. A fence put is planned against a discovered tip under `WAL_PUBLISH_BUDGET_MS` like any numbered put. A collision, or a budget that expired before the put, discovers the tip again and retries at the new number. These retries end with the acquisition's `METADATA_PUBLICATION_BUDGET_MS`: once it has expired, the next retry fails the acquisition instead. A transport failure, or a put that returns after the budget, fails the acquisition, whose next attempt claims a new epoch. Between the claim landing and the fence landing, the previous writer can still commit at `tip + 1`. Those commits are valid because their epoch is below the manifest's, and the new writer's discovery includes them: a fence planned before such a commit collides and retries above it.
-3. Acquired. After the fence lands, the session is acquired and uses that epoch for every later batch. A later discovery that finds a higher epoch, whether after a collision or after a refresh, fences the session for good. A fenced session returns `writer_fenced` and does not automatically reacquire authority.
+```text
++-------+  claim published   +-------+  fence written   +----------+
+| Claim | -----------------> | Fence | ---------------> | Acquired |
++-------+                    +-------+                  +----------+
+                                 |                           |
+                                 +-------------+-------------+
+                                               | a higher epoch is found
+                                               v
+                                    returns writer_fenced
+```
 
-Another session can acquire a higher epoch. Its numbered fence prevents an older writer from extending the log using a previously observed tip: the stale writer's put collides, discovery observes the higher epoch, and the session returns `writer_fenced`.
+1. **Claim.** The session loads the current manifest and publishes its successor with `writer_epoch + 1` and a diagnostic writer block.
+   - The claim runs under `METADATA_PUBLICATION_BUDGET_MS`, measured from the start of the acquisition (before the session loads the manifest it copies). If the budget has expired before the put starts, or by the time the put is confirmed, the acquisition fails.
+   - If another publisher took the claim's number, the session reloads the current manifest and claims again with the next epoch.
+   - If the put's outcome is unknown, the session reads back the manifest at its number. If it finds its own bytes, that manifest covers the claim, and the session claims again (the epoch it leaves behind never gets a fence). If it finds another manifest, the claim lost, and the session claims again. If it finds no manifest, the acquisition fails.
+2. **Fence.** The session discovers the tip. If the current manifest now has a higher epoch than the claim, another session has claimed since, and the acquisition returns `writer_fenced`. Otherwise, the session creates a fence (a WAL object with no records) with its epoch at the next WAL number.
+   - The fence put is planned against a discovered tip, under `WAL_PUBLISH_BUDGET_MS`, like any numbered put.
+   - After a collision, or a budget that expired before the put, the session discovers the tip again and retries at the new number. These retries stop when the acquisition's `METADATA_PUBLICATION_BUDGET_MS` expires, and the next retry fails the acquisition instead.
+   - A transport failure, or a put that returns after its budget, fails the acquisition. The next attempt claims a new epoch.
+   - Between the claim and the fence, the previous writer can still commit at `tip + 1`. Those commits are valid, because their epoch is below the manifest's, and the new writer's discovery includes them (a fence planned before such a commit collides with it and retries above it).
+3. **Acquired.** After the fence is written, the session is acquired, and it uses that epoch for every later batch. If a later discovery finds a higher epoch (after a collision or after a refresh), the session is fenced. A fenced session returns `writer_fenced`, and it doesn't reacquire authority on its own.
 
-A fence preserves `head_seq` and `next_inode_id` and contains no commit records. Its derived `prior_head_seq` equals `head_seq`. It advances WAL position without advancing logical history. Concurrent attempts are serialized by conditional creation of the next number.
+When another session acquires a higher epoch, its fence prevents an older writer from extending the log from a tip it saw earlier. The stale writer's put collides, discovery finds the higher epoch, and the session returns `writer_fenced`.
 
-There is no writer lease or writer-expiry timestamp. The `writer_id` and `acquired_at_ms` fields describe the acquisition; the epoch determines authority. An acquisition retried after an uncertain outcome can advance the epoch again. Commit retry identity is separate and uses durable receipts.
+A fence keeps `head_seq` and `next_inode_id` unchanged and contains no commit records, so its derived `prior_head_seq` equals its `head_seq`. It moves the WAL position forward without moving the logical history forward. Concurrent attempts are ordered by the conditional creation of the next number.
+
+There's no writer lease or writer-expiry timestamp. The `writer_id` and `acquired_at_ms` fields describe the acquisition, and the epoch alone determines authority. An acquisition retried after an uncertain outcome can raise the epoch again. Commit retries are identified separately, with durable receipts (see [Commit identity and retries](#65-commit-identity-and-retries)).
+
+Why use epochs instead of a lease? With a lease, a new writer would have to wait for the old lease to expire before it could take over. With epochs, a new writer can take over at any time, and correctness depends only on conditional writes. Taking over costs a manifest publication and a fence write (about 200 ms), so most deployments keep one long-lived writer session in a server that many clients share.
 
 ### 6.2 Validation
 
-Before planning new mutations, the writer reconstructs the metadata state from a verified basis and the visible WAL. It resolves paths and inode references, checks content admission, evaluates preconditions, and allocates new inode IDs from `next_inode_id`.
+Before it plans new mutations, the writer rebuilds the metadata state from a verified basis and the visible WAL. It resolves paths and inode references, checks content admission, evaluates preconditions, and allocates new inode IDs from `next_inode_id`.
 
-Operations in one request are evaluated in order. Later operations can observe the tentative effects of earlier operations in that request. When several requests share a publication batch, the writer chooses their order and evaluates them against the preceding accepted requests as well.
+The operations in one request are evaluated in order, and later operations see the tentative effects of earlier ones. When several requests share a publication batch, the writer chooses their order, and it evaluates each one against the requests accepted before it.
 
-The writer must check that a content reference has a supported kind, a correctly encoded checksum, and applicable evidence that the object is durable with the stated size and checksum. Content validation precedes metadata preconditions. Previously established content can be reused only through the namespace's validated state or the admission paths described in section 5.5.
+The writer MUST check that a content reference has a supported kind, a correctly encoded checksum, and applicable evidence that the object is durable with the stated size and checksum. Content validation happens before metadata preconditions. Content that was established earlier can be reused only through the namespace's validated state or the admission paths in [Admission proofs](#55-admission-proofs).
 
-Metadata preconditions include namespace head sequence, name-slot availability, exact binding versions, file and attribute revisions, ancestor visibility, and directory emptiness. The internal exact-binding check is:
+Metadata preconditions can check:
+
+- the namespace's head sequence,
+- whether a name slot is available,
+- exact binding versions,
+- file and attribute revisions,
+- ancestor visibility, and
+- whether a directory is empty.
+
+The internal exact-binding check is:
 
 ```text
 binding_is(parent_inode_id, name_key, child_inode_id, committed_seq, delta_index)
 ```
 
-Checking the inode ID alone is not equivalent. An item may have been moved away and rebound under the same name since the caller observed it.
+Checking the inode ID alone isn't equivalent, because the item might have been moved away and bound under the same name again since the caller looked at it.
 
-Caller-supplied `expected_*` preconditions add specific checks. Omitting an optional precondition disables that check; it does not disable the operation's normal structural validation. Where a revision precondition accompanies an optional inode precondition, the revision precondition requires the matching inode precondition. Inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves and deletes require `expected_binding_version`.
+Callers add specific checks with `expected_*` preconditions. Leaving out an optional precondition turns off that check, but it doesn't turn off the operation's normal structural validation. When a revision precondition comes with an optional inode precondition, the revision precondition requires the matching inode precondition. Inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves and deletes require `expected_binding_version`.
 
-A rejected request receives no sequence number and creates no WAL record. Passing validation is tentative acceptance, not success.
+A rejected request isn't assigned a sequence number and creates no WAL record. Passing validation is only tentative acceptance, not success.
 
 ### 6.3 Publication and group commit
 
-The publication procedure is:
+To publish a batch, a writer:
 
-1. Resolve retained commit IDs, then validate new requests against the discovered view and earlier accepted requests in the batch.
-2. Refuse new commits with `maintenance_required` when the unfolded WAL reaches its write-stop threshold. Fence objects count toward that threshold.
-3. Assign contiguous sequences to accepted requests and construct one object at `tip + 1`, including the resulting `next_inode_id`.
-4. Check the publication budget and content-admission evidence immediately before the put-if-absent.
-   If a candidate's evidence has expired, return its own error for that candidate and `stale_head` for the other accepted candidates so they can be planned again. Write no WAL for that batch.
-5. On success, update the local read state and acknowledge the requests.
+1. Resolves retained commit IDs, and then validates new requests against the discovered view and the requests accepted earlier in the batch.
+2. Refuses new commits with `maintenance_required` when the unfolded WAL reaches its write-stop threshold. Fence objects count toward that threshold.
+3. Assigns contiguous sequences to the accepted requests, and builds one WAL object at `tip + 1`, including the resulting `next_inode_id`.
+4. Checks the publication budget and the content-admission evidence immediately before the put-if-absent. If a request's evidence has expired, the writer returns that request's own error, and `stale_head` for the other accepted requests so they can be planned again. It writes no WAL object for that batch.
+5. On success, updates its local read state and acknowledges the requests.
 
-The publication budget is measured from observing the tip used to plan the batch until initiating its numbered put. A publication is within its budget while the elapsed time is at most the budget. A cached tip has the same time limit. A successful put is itself an observation of the tip it created, so the budget for the next put runs from the start of the batch that made it. It confirms nothing about the manifest the batch was planned against, which a fold or compaction may have replaced. Discovery confirms the loaded manifest current, and a fold the writer publishes and re-anchors onto confirms the new basis from the start of that fold. A writer that keeps publishing checks the next manifest number when its last basis confirmation is more than `WAL_PUBLISH_BUDGET_MS` old. It trusts an absent answer only if it arrives less than `READ_REVALIDATION_BOUND_MS` after that previous confirmation; otherwise, or if a successor exists, it reloads. Appendix C records the bounds.
-
-A writer whose cached tip is more than `WAL_PUBLISH_BUDGET_MS` old confirms the tip or reloads before planning. It sends a HEAD of the WAL number after its tip, then a HEAD of the next manifest number. If both find nothing, and the second answer arrives less than `READ_REVALIDATION_BOUND_MS` after the previous basis confirmation, the writer keeps its position and uses its tail if the shared head-state cache still holds it. The attempt's start, before both probes, becomes the tip observation and basis confirmation, including when the batch ultimately puts nothing. The put's budget runs from that start. A probe that finds an object or fails, a late answer, or an evicted tail causes discovery. A basis already at the revalidation bound when the attempt starts is dropped without probing.
-
-The successor check prevents a collected successor from looking absent: any successor created after the previous confirmation must remain for at least the revalidation bound under the grace and clock allowance of section 11.4. Another writer must publish a claim manifest before writing the next WAL number. A compaction also publishes a successor, even if it is this session's own compaction and leaves the WAL tip and writer epoch unchanged; that successor requires discovery too. The WAL probe directly checks for an unobserved put by the same session, which need not create a claim manifest. Current unknown-outcome and cancelled publication paths discard the retained position; the probe preserves this defensive check if those paths change. For other writers, the claim-manifest rule supplies the safety argument regardless of probe order. The implementation sends the WAL probe first, and any WAL object created after that probe remains young enough for the subsequent put-if-absent to collide with it.
-
-For example, three requests accepted after sequence 40 can be written together as sequences 41, 42, and 43 in WAL object 10. Creating that object commits all three. They remain separate logical commits, while a request containing several operations remains one commit.
+Writing several requests in one WAL object is called "group commit". For example, three requests accepted after sequence 40 can be written together as sequences 41, 42, and 43 in WAL object 10. Successfully writing that object commits all three. They're still three separate commits, and a request with several operations is still one commit.
 
 ```text
 upload and verify content (uploaded path only)
-           │
-           v
+            |
+            v
 validate requests A, B, C against the current view
-           │
-           v
-put-if-absent WAL 10: [seq 41, seq 42, seq 43]  ← commit boundary
-           │
-           v
+            |
+            v
+put-if-absent WAL 10: [seq 41, seq 42, seq 43]   <- commit boundary
+            |
+            v
 acknowledge
 ```
 
-A confirmed precondition failure creates no object. The writer discovers the winning publication, checks for fencing, and re-plans before trying another number. It does not create a parallel branch of history.
+A confirmed precondition failure creates no object. The writer discovers the winning publication, checks whether it has been fenced, and plans again before it tries another number. It never creates a parallel branch of history.
 
-Commits do not raise the hint. Manifest publications raise it (section 7.2), and readers remain correct while it lags because discovery probes forward.
+Commits don't raise the hint. Manifest publications raise it (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)), and readers stay correct while it lags, because discovery probes forward.
+
+Every put is planned against an observed state, and that observation has to be recent. A writer tracks two kinds of observation:
+
+| Observation | What it confirms | Recorded by |
+| --- | --- | --- |
+| Tip observation | The WAL tip that the batch was planned against | Discovery, a successful put (as of the start of the batch that made it), or a confirmation attempt |
+| Basis confirmation | That the manifest the writer planned against still has no successor | Discovery, a fold that the writer published and moved its view onto (as of the start of that fold), or a confirmation attempt |
+
+The publication budget (`WAL_PUBLISH_BUDGET_MS`) runs from the tip observation used to plan a batch until the batch's numbered put starts. A publication is within its budget while the elapsed time is at most the budget, and a cached tip has the same time limit. A successful put confirms nothing about the manifest the batch was planned against, because a fold or compaction might have replaced it since.
+
+A writer that keeps publishing checks the next manifest number when its last basis confirmation is more than `WAL_PUBLISH_BUDGET_MS` old. It trusts a "not found" answer only if the answer arrives less than `READ_REVALIDATION_BOUND_MS` after that previous confirmation. Otherwise, or if a successor exists, it reloads.
+
+A writer whose cached tip is more than `WAL_PUBLISH_BUDGET_MS` old confirms the tip, or reloads, before it plans. A confirmation attempt:
+
+1. Sends a HEAD request for the WAL number after the tip.
+2. Sends a HEAD request for the next manifest number.
+
+If both find nothing, and the second answer arrives less than `READ_REVALIDATION_BOUND_MS` after the previous basis confirmation, the writer keeps its position, and it uses its tail if the shared head-state cache still has it. The attempt's start (before both probes) becomes the new tip observation and basis confirmation, even if the batch ends up writing nothing, and the put's budget runs from that start. If a probe finds an object or fails, an answer arrives late, or the tail was evicted, the writer runs discovery instead. A basis that's already at the revalidation bound when the attempt starts is dropped without probing. [Publication and collection timing](#c1-publication-and-collection-timing) records the bounds.
+
+Why check for a manifest successor at all? The check stops a successor that garbage collection already deleted from looking absent. Any successor created after the previous confirmation is kept for at least the revalidation bound, under the grace and clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions). Another writer has to publish a claim manifest before it can write the next WAL number, and a compaction also publishes a successor (even this session's own compaction, which leaves the WAL tip and writer epoch unchanged), so the manifest probe finds both, and the writer runs discovery.
+
+Why probe the WAL too? The WAL probe directly checks for a put by this same session that the session didn't observe, which wouldn't create a claim manifest. (The current unknown-outcome and cancelled-publication paths already discard the retained position, so the probe is a defensive check in case those paths change.) For other writers, the claim-manifest rule is enough, whatever order the probes are sent in. The implementation sends the WAL probe first, and any WAL object created after that probe is still too young to be deleted when the following put-if-absent runs, so the put collides with it.
 
 ### 6.4 Failed and unknown outcomes
 
-A transport error after the put of the WAL object was sent is not necessarily a failed commit. The put may have succeeded even though its response was lost. An implementation that cannot establish the outcome must report it as unknown, not as a definite failure. An implementation may resolve an unknown outcome itself by retrying with the same commit ID and request: the retry discovers the tip again and looks up the commit receipt, so it returns the original result if the earlier put landed. Only a success or a receipt replay establishes the outcome. A retry that ends in any other error does not show that the earlier put failed, so the implementation still reports `commit_outcome_unknown`. The reference publisher retries a bounded number of times before it reports.
+A transport error after the WAL object's put was sent isn't necessarily a failed commit, because the put might have succeeded and only its response was lost. An implementation that can't establish the outcome MUST report it as unknown, not as a definite failure.
 
-The caller should retry with the same commit ID and the same logical request. Re-uploading the bytes first creates a new content identity and is not the same request.
+An implementation can resolve an unknown outcome itself, by retrying with the same commit ID and request. The retry discovers the tip again and looks up the commit receipt, so it returns the original result if the earlier put succeeded. Only a success or a receipt replay establishes the outcome. A retry that ends in any other error doesn't show that the earlier put failed, so the implementation still reports `commit_outcome_unknown`. The reference publisher retries a bounded number of times before it reports.
 
-A publication batch is not an all-or-nothing transaction across every candidate request. Some requests can fail validation while other requests are accepted. A validation error that depends on another tentative request can be reported as such only if that request is published.
+A caller that receives an unknown outcome retries with the same commit ID and the same logical request.
 
-Suppose request A creates `/reports` and request B also tries to create `/reports`. B may fail because of A's tentative creation. If the publication of A then fails, the writer must report the publication failure for B as well, not claim that B conflicted with a committed directory. A rejection based entirely on the previously durable view does not have that dependency and can stand independently.
+Warning: a caller that retries a commit shouldn't retry the upload too. If the upload is retried, it's assigned a different content ID, so the retried commit is no longer the same request. If the original commit succeeded, the retry would fail with `commit_id_reuse_conflict` instead of returning the original result.
+
+A publication batch isn't an all-or-nothing transaction across every request in it. Some requests can fail validation while others are accepted. A validation error that depends on another tentative request can be reported that way only if that other request is published.
+
+For example, suppose request A creates `/reports`, and request B also tries to create `/reports`. B might fail because of A's tentative creation. If A's publication then fails, the writer MUST report the publication failure for B too, and not claim that B conflicted with a committed directory. A rejection based entirely on the view that was already durable doesn't have this dependency, and it can stand on its own.
 
 ### 6.5 Commit identity and retries
 
-Every WAL commit and `commit` row stores a `semantic_commit_fingerprint`. It represents the logical request: `namespace_id`, `actor_id`, ordered operations with their inline preconditions, request-level preconditions, and optional message. It excludes publication details such as the writer epoch and timestamp. Appendix B specifies the exact canonical bytes.
+Every WAL commit and every `commit` row stores a semantic fingerprint (`semantic_commit_fingerprint`) of the logical request: the `namespace_id`, the `actor_id`, the ordered operations with their inline preconditions, the request-level preconditions, and the optional message. It doesn't include publication details, such as the writer epoch and the timestamp. [Semantic commit fingerprints](#appendix-b-semantic-commit-fingerprints) specifies the exact canonical bytes.
 
-The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families form one family group and follow the same retention rule, so a commit row is retained for as long as its receipt.
+The materialized file set also stores each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families are one family group and follow the same retention rule, so a commit row is kept for as long as its receipt.
 
-While the receipt is retained, an equal fingerprint under the same `commit_id` identifies a replay of the original commit. A different fingerprint returns `commit_id_reuse_conflict`. A replay does not execute the mutation again or reevaluate its original preconditions against current state.
+While the receipt is kept:
 
-Inline content is identified by its bytes. While the commit receipt is retained, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes or a different subject return `commit_id_reuse_conflict`. The bytes an append adds are identified the same way.
+- An equal fingerprint under the same `commit_id` is a replay of the original commit. A replay doesn't run the mutation again, and it doesn't evaluate the original preconditions again against the current state.
+- A different fingerprint returns `commit_id_reuse_conflict`.
 
-Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when a WAL publication budget passes without a put landing and the tip cannot be confirmed, or when its basis manifest gains a successor (section 6.3). A fold it published itself moves the projection's basis to the new manifest and keeps the commits published since, without a refresh. Check for the commit receipt before uploading inline bytes as content objects. If the receipt is still available, return the original result for an identical request or a reuse conflict for a changed request. Neither requires another upload, even after a restart or on another server.
+Inline content is identified by its bytes. While the receipt is kept, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes, or a different subject, return `commit_id_reuse_conflict`. The bytes an append adds are identified the same way.
 
-The guarantee is bounded by retention. Receipts below the retention floor can be removed during compaction. Once a receipt is gone, the old ID cannot be distinguished from an unused ID and a later request can execute as a new mutation. A receipt that has not yet been compacted may still be available, but callers must not depend on that extra lifetime.
+Receipt lookup uses the publisher's current projection. The publisher refreshes that projection when a WAL publication budget passes without a successful put and the tip can't be confirmed, or when its basis manifest has a successor (see [Publication and group commit](#63-publication-and-group-commit)). A fold that the publisher published itself moves the projection's basis to the new manifest and keeps the commits published since, without a refresh.
 
-Receipt lookup remains available at the WAL write-stop threshold. A retained matching receipt returns the original result, and a retained conflicting receipt returns `commit_id_reuse_conflict`. Only new commits are rejected with `maintenance_required`. Writer-session, availability, and corruption checks still apply.
+The writer checks for the commit receipt before it uploads inline bytes as content objects. If the receipt is still available, it returns the original result for an identical request, or a reuse conflict for a changed one. Neither case requires another upload, even after a restart or on another server.
 
-File revision history and commit idempotency have different retention rules. Keeping an old file revision does not require retaining its commit receipt forever.
+The guarantee only lasts as long as the receipt. Compaction can remove receipts below the retention floor, and once a receipt is gone, the old ID can't be distinguished from an unused one, so a later request can run as a new mutation. A receipt that hasn't been compacted yet might still be available, but callers MUST NOT depend on that extra lifetime.
+
+Receipt lookup still works at the WAL write-stop threshold. A retained matching receipt returns the original result, and a retained conflicting receipt returns `commit_id_reuse_conflict`. Only new commits are rejected with `maintenance_required`, and the writer-session, availability, and corruption checks still apply.
+
+File revision history and commit idempotency have different retention rules. Keeping an old file revision doesn't require keeping its commit receipt.
 
 ### 6.6 Operations and WAL deltas
 
-Standard requests operate on paths or inode IDs. They create directories, write files, append to files, move or copy items, delete and undelete items, restore file revisions, and update attributes. Their exact parameters are listed in Appendix B because those parameters also determine retry identity.
+Standard requests operate on paths or inode IDs. They create directories, write files, append to files, move or copy items, delete and undelete items, restore file revisions, and update attributes. [Appendix B](#appendix-b-semantic-commit-fingerprints) lists their exact parameters, because those parameters also determine retry identity.
 
-An append adds bytes as the file's next revision. Its commit carries pieces. The writer combines the base reference's checksum with the appended bytes' checksum in the store's algorithm. It does not read earlier bytes to compute the checksum. A base in another algorithm is `namespace_corrupt` before any write.
+| Setting | Default |
+| --- | --- |
+| Destination behavior for puts, moves, and copies | `no_replace` |
+| Deletes | `non_recursive` |
+| Directory creation | `parents: false` |
+| Attribute `set` and `remove` collections | Empty |
 
-The piece keeps the same content ID only when the namespace owns it, the base size is positive, and the base names the chain's head. The visible tail and longest layout determine that size. A copy or restore of an older prefix cannot shorten the chain head. A same-chain append carries no layout and writes no content object. Otherwise the piece uses a fresh ID. That delta carries the base chain's layout cut to the first piece's offset in the commit. The cut shortens the last extent and drops later extents. Before admitting a fresh chain from unfolded bytes, validation writes the base chain's pending pieces as its next extent through the same materialization as a fold. A fresh chain shares those extents and carries only the appended bytes as pieces. Missing base bytes are corruption naming the base. An append to an empty file starts a fresh chain with a piece at offset 0 and no layout. Earlier operations in the commit count when planning later appends.
+Optional preconditions have no implied value.
 
-The default destination behavior for puts, moves, and copies is `no_replace`. Deletes default to `non_recursive`, directory creation defaults to `parents: false`, and attribute `set` and `remove` collections default to empty. Optional preconditions have no implied value.
+A replacing move deletes the destination file and binds the source in its place, within the same commit. Only a file destination can be replaced, and moving a path onto itself isn't a replacement. An undelete can use the deleted binding's original parent and name, the caller's replacement path, or the caller's parent inode and name, subject to normal validation.
 
-A replacing move deletes the destination file and rebinds the source within the same logical commit. Only a file destination can be replaced; moving a path onto itself is not a replacement. An undelete can use the deleted binding's original parent and name, the caller's replacement path, or the caller's parent inode and name, subject to normal validation.
+An append adds bytes as the file's next revision, and its commit includes the new bytes as pieces. The writer computes the new checksum by combining the base reference's checksum with the appended bytes' checksum, in the store's algorithm, without reading the earlier bytes. A base in another algorithm is `namespace_corrupt`, before anything is written.
 
-The WAL stores the resulting metadata changes, not the original request bodies or validation inputs. The delta kinds are `create_inode`, `bind_direntry`, `unbind_direntry`, `append_file_revision`, `tombstone_subtree`, `revoke_subtree_tombstone`, `append_attributes_revision`, and `append_access_revision`.
+An append either extends the same chain or starts a new one:
 
-Each delta has a `delta_index`, and its wrapper has a `semantic_operation_index` identifying the internal operation that produced it. A convenience request can expand into several internal operations, such as creating missing parent directories. Each operation's deltas are contiguous within its commit. Actor and timestamp are recorded once per commit and copied into the appropriate rows during materialization. The complete stored fields appear in Appendix A.
+- **Same chain.** The appended piece keeps the same content ID only when the namespace owns the chain, the base size is positive, and the base is the chain's head (its full current length). The visible tail and the longest layout determine that length, so a copy or restore of an older prefix can't shorten the chain's head. A same-chain append includes no layout and writes no content object.
+- **New chain.** Otherwise, the piece uses a new content ID. Its delta includes the base chain's layout, cut at the first piece's offset in the commit (the cut shortens the last extent and drops later ones). Before it admits a new chain from bytes that haven't been folded yet, validation writes the base chain's pending pieces as its next extent, the same way a fold does. The new chain shares those extents and includes only the appended bytes as pieces. Missing base bytes are corruption, and the error identifies the base. An append to an empty file starts a new chain with a piece at offset 0 and no layout.
+
+For example, a fork inherits `/log.txt`, whose chain is owned by the source namespace. The fork doesn't own that chain, so appending 10 bytes starts a new chain, whose layout lists the source's objects followed by a piece with the 10 new bytes. Earlier operations in the same commit count when later appends are planned.
+
+The WAL stores the resulting metadata changes ("deltas"), not the original request bodies or validation inputs. There are eight kinds of delta:
+
+| Delta | Records |
+| --- | --- |
+| `create_inode` | A new inode. |
+| `bind_direntry` | A new directory binding. |
+| `unbind_direntry` | A removed directory binding. |
+| `append_file_revision` | A new file revision. |
+| `tombstone_subtree` | A deletion (a tombstone `set` event). |
+| `revoke_subtree_tombstone` | An undelete (a tombstone `revoke` event). |
+| `append_attributes_revision` | A new attribute revision. |
+| `append_access_revision` | A new access revision. |
+
+Each delta has a `delta_index`, and its wrapper has a `semantic_operation_index` that identifies the internal operation that produced it. A convenience request can expand into several internal operations (for example, creating missing parent directories), and each operation's deltas are contiguous within its commit. The actor and timestamp are recorded once per commit and copied into the rows during materialization. [Appendix A](#appendix-a-durable-records-and-byte-encodings) lists the complete stored fields.
 
 ### 6.7 Change feed
 
-The change feed is ordered by logical commit, not by physical WAL object. A WAL object containing three commits contains three commit boundaries in the feed. Within a commit, semantic filesystem events follow request-operation order; one operation can produce several events.
+The change feed is ordered by commit, not by WAL object. A WAL object that contains three commits contributes three commit boundaries to the feed. Within a commit, filesystem events follow the order of the request's operations, and one operation can produce several events.
 
-A consumer resuming after sequence N reads the `commits` family of the current file set and then the commits in the unfolded WAL after it. Fence objects produce no change events. If its cursor is older than the retention floor, it must bootstrap from a fresh pin instead. The API’s event shapes and cursor contract are specified in [the API specification][api-spec].
+A consumer resuming after sequence `N` reads the `commits` family of the current file set, and then the commits in the unfolded WAL after it. Fence objects produce no change events. If the consumer's cursor is older than the retention floor, it MUST start again from a fresh pin. The [API specification][api-spec] specifies the event shapes and the cursor contract.
 
-A consumer that requires permanent event history must retain its own copy before the floor advances. Use `(namespace_id, committed_seq)` for a commit's position and `(namespace_id, inode_id)` for item identity. A commit ID is useful for correlation, but is not a permanent unique event key because it can be reused after receipt reclamation.
+A consumer that needs permanent event history MUST keep its own copy before the floor advances. The stable keys are `(namespace_id, committed_seq)` for a commit's position and `(namespace_id, inode_id)` for item identity. A commit ID is useful for correlating events, but it isn't a permanent unique event key, because it can be reused after its receipt is removed.
 
 ## 7. Materializing metadata
 
-Replaying a longer WAL requires more object reads and more work. A fold materializes committed metadata into immutable sorted segments and publishes a manifest describing those segments. Subsequent reads start from that manifest and replay only the later visible WAL.
+This section describes how committed metadata moves from the WAL into sorted segments, and how a new manifest is published.
 
-This changes the physical representation, not the namespace's visible history. A fold does not allocate a logical commit sequence or create a pin record.
+Replaying a longer WAL takes more object reads and more work. To keep reads fast, a "fold" materializes committed metadata into immutable sorted segments and publishes a manifest that lists them. Later reads start from that manifest and replay only the WAL objects written after it.
+
+A fold changes the physical representation, not the namespace's visible history. It doesn't allocate a sequence number, and it doesn't create a pin.
 
 ### 7.1 Manifests, runs, and segments
 
-A namespace manifest describes one complete metadata file set through `head_seq`. It includes the inode allocator, folded WAL number, retention floor, and all metadata runs required to reconstruct that state. Its `manifest_no` determines its immutable key; only one publication can succeed at that number.
+A namespace manifest describes one complete set of metadata files through `head_seq`. It includes the inode allocator, the folded WAL number, the retention floor, and every metadata run needed to rebuild that state. Its `manifest_no` determines its immutable key, so only one publication can succeed at each number.
 
-A run is the collection of segments produced together. `run_no` is allocated from the manifest's `next_run_no`, which advances when that run is published. A WAL fold allocates one run number across the families it writes. A compaction allocates a run number for its selected family group.
+A "run" is the set of segments produced together. Its `run_no` is allocated from the manifest's `next_run_no`, which advances when the run is published. A WAL fold allocates one run number across all the families it writes, and a compaction allocates one run number for its selected family group.
 
-Each run records `run_seq`, `tier`, and its segment descriptors. `base_seq` is derived as the smallest `run_seq` among runs with segments, or `head_seq` when none have segments. A non-empty manifest must have a non-empty run at `head_seq`; no run sequence may exceed it. An empty manifest describes genesis. Within one run, each family's segments follow list order and have strictly separated ascending key ranges. Every segment contains at least one row. Different runs can overlap because a later run can contain additional rows for the same inode, name slot, or revision history.
+Each run records `run_seq`, `tier`, and its segment descriptors. The manifest's `base_seq` is derived as the smallest `run_seq` among runs with segments, or `head_seq` when no run has segments. A non-empty manifest MUST have a non-empty run at `head_seq`, and no run's sequence can be higher than `head_seq`. An empty manifest describes a new, empty namespace. Within one run, each family's segments follow list order and have strictly separated, ascending key ranges, and every segment contains at least one row. Different runs can overlap, because a later run can contain more rows for the same inode, name slot, or revision history.
 
-The manifest must not contain duplicate run numbers or a run number at or above `next_run_no`. A family's segment ranges must not overlap or descend. Metadata producers must not write the same logical row key twice within one run.
+A manifest MUST NOT contain duplicate run numbers, or a run number at or above `next_run_no`. A family's segment ranges MUST NOT overlap or descend, and a metadata producer MUST NOT write the same logical row key twice within one run.
 
-Metadata rows describe immutable facts at specific positions. Reads merge those facts and apply the visibility rules, rather than choosing arbitrary values for a conflicting row key. The parent-and-name binding family and child-binding index contain the same binding versions in different orders. Manifest validation checks their per-run row counts; compaction checks full row-level equality across its selected complete input runs.
-
-The `commits` and `commit_receipts` families hold one row each per retained commit; manifest validation checks their per-run row counts the same way.
+Metadata rows describe immutable facts at specific positions. Reads merge those facts and apply the visibility rules, instead of choosing between conflicting values for one row key. The two directory binding indexes (by parent and name, and by child) contain the same binding versions in different orders. Manifest validation checks their per-run row counts, and compaction checks full row-by-row equality across its selected input runs. The `commits` and `commit_receipts` families contain one row each per retained commit, and manifest validation checks their per-run row counts the same way.
 
 ### 7.2 Publishing a materialized file set
 
-The first manifest has number 1, the requested namespace identity, creation time, `created_by`, access mode, and naming mode, active status, and no writer block. Both epochs, the local folded WAL number, and activity counters start at zero. A plain create has no fork basis or runs, next inode ID 2, and head sequence, base sequence, retention floor, and next run number zero. A fork has the immutable source basis and inherited state described in section 9.2; its head and retention floor equal the pinned source sequence.
+The first manifest of a namespace has these values:
 
-A fold starts from a verified manifest and a discovered WAL tip. A fold call discovers both; a writer's own fold takes them from its retained view. It materializes the required numbers after `folded_wal_no`, writes new segments, and publishes the next manifest with `folded_wal_no` set to the captured tip. A fence is folded even when the logical sequence does not change. Ordinary folds write a run at the head when materializing new state.
+| Field | Plain create | Fork |
+| --- | --- | --- |
+| Manifest number | 1 | 1 |
+| Namespace ID, creation time, `created_by` | From the request | From the request |
+| Access mode and naming mode | From the request | From the source (see [Forking a namespace](#92-forking-a-namespace)) |
+| Status | Active | Active |
+| Writer block | None | None |
+| Writer epoch, compactor epoch, folded WAL number, activity counters | 0 | 0 |
+| Fork basis | None | The pinned source manifest and the source pin's ID |
+| Runs | None | The source's runs |
+| Next inode ID | 2 | The source's |
+| Head sequence and retention floor | 0 | The pinned source sequence |
+| Base sequence | 0 | Derived from the inherited runs |
+| Next run number | 0 | The source's |
 
-A fold needs no writer epoch and may run in any process. It carries the predecessor's writer and compactor epochs forward. It loads the current manifest before its put, and again when its put loses, and decides coverage. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's. A covered fold is finished. Otherwise it rebuilds against the new predecessor and carries that predecessor's epochs. The rebuild may keep the WAL tail the fold already read when the new predecessor differs from the fold's own only in its number, compactor epoch, retention floor, runs, and next run number, and has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, and a retention advance publish such a manifest. After any other manifest, the rebuild reads the tail again above the new `folded_wal_no`. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
+A fold works in these steps:
 
-Before writing segments or publishing the manifest, a fold checks each chain's ordered tail pieces through its newest reference. Missing pieces are corruption. It checks every whole value that starts at offset 0 before writing any object.
+1. Start from a verified manifest and a discovered WAL tip. (A fold call discovers both, and a writer's own fold takes them from its retained view.)
+2. Check every chain's pieces in the tail (see below).
+3. Write each chain's new extent to a content object (see below).
+4. Write new metadata segments for the WAL objects after `folded_wal_no`, including the new layout rows. A fence is folded even when the sequence doesn't change, and an ordinary fold writes a run at the head when it materializes new state.
+5. Publish the next manifest, with `folded_wal_no` set to the tip it captured, using put-if-absent at the predecessor's `manifest_no + 1`.
+6. Raise the hint.
 
-For each chain, the fold resolves the layout before the pieces. The candidate starts as the ordered pieces, without joining their bytes. Its chain offset is the total length of the preceding extents.
+A fold doesn't need a writer epoch, and any process can run one. It copies the predecessor's writer and compactor epochs forward. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
-Validation can already have materialized bytes that remain in the WAL tail. The fold keeps such an own extent whole and omits the pieces it covers. If it covers all remaining pieces, the last own extent starts the candidate.
+A fold loads the current manifest before its put, and again if its put loses, and then it decides whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, runs, and next run number, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, and a retention advance publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
 
-The fold merges its own chain's last extent into the candidate while that extent is at most twice the candidate's length. Shared base extents are never merged.
+Before it writes segments or publishes the manifest, a fold checks each chain's ordered tail pieces, up to the chain's newest reference. Missing pieces are corruption. The fold checks every whole value that starts at offset 0 before it writes any object.
 
-The fold writes each chain's candidate with one `assemble` call. Each source is a whole own extent; a chain's own extents are never cut. One HEAD per source supplies its stored checksum. A missing stored checksum or one in another algorithm is `namespace_corrupt`. The fold combines the source checksums and the tail checksum in the store's algorithm. The tail stays in ordered pieces. A candidate with no merged extents has no sources, at every size.
+For each chain, the fold builds a "candidate" (the new extent it will write) and resolves the layout before the pieces:
 
-Folds, validation materialization, direct-download writes, and proxied staging share the execution budget's content write permits. `max_content_writes` defaults to 32 and is configurable. Each write holds one permit until it finishes. Runtimes sharing a budget share this limit. `STORE_WRITE_WAVE` still bounds one fold's fan-out. The adapter chooses the write mechanism by the result's size (section 3.2). An assembly holds one part window, or one read chunk on the local store.
+1. The candidate starts as the ordered pieces, without joining their bytes. Its chain offset is the total length of the extents before it.
+2. Validation might already have written some bytes to content objects while they're still in the WAL tail. The fold keeps such an own extent whole and leaves out the pieces it covers. If it covers all the remaining pieces, the last own extent starts the candidate.
+3. While the chain's last own extent is at most twice the candidate's length, the fold merges that extent into the candidate (the "doubling rule"). Shared base extents are never merged.
+4. If the result would leave more than `MAX_LAYOUT_EXTENTS` (32) own extents, the fold merges every own extent after the chain's largest own extent into the candidate as well. Shared base extents stay separate, and they don't count toward this limit.
 
-A fresh chain shares the extents its delta carried and writes only its own pieces.
+For example, suppose a chain's layout has one own extent of 100 bytes, and the tail adds 30 bytes. The last extent (100 bytes) is more than twice the candidate (30 bytes), so the fold writes the 30 bytes as a new extent, and the layout has two extents. If the next fold has 70 new bytes, the last extent (30 bytes) is at most twice 70, so it's merged, and the candidate grows to 100 bytes. The next extent (100 bytes) is now at most twice the candidate, so it's merged too, and the fold writes one 200-byte extent.
 
-After applying the doubling rule, if the candidate would leave more than `MAX_LAYOUT_EXTENTS`, 32 own extents, the fold assembles every own extent after the chain's largest own extent, together with the candidate, into one extent. Shared base extents stay separate and do not count toward this bound.
+The fold writes each chain's candidate with one assembly call. Each source of the assembly is a whole own extent (a chain's own extents are never cut), and one HEAD request per source supplies its stored checksum. A missing stored checksum, or one in another algorithm, is `namespace_corrupt`. The fold combines the source checksums and the tail checksum in the store's algorithm, and the tail bytes stay in ordered pieces. A candidate with no merged extents has no sources, at every size. A new chain shares the extents its delta included, and it writes only its own pieces.
 
-A chain whose pieces start at offset 0 writes the whole object at its own key when the tail holds no shorter reference to it. Every other write is a span named by the candidate's start and the newest reference's size, including a span that starts at zero. A failed fold can leave the first whole object behind, so later bytes must use a different key. Every chain extent write uses an assembly. An occupied key with the same stored checksum succeeds. A different or missing checksum is corruption naming the key. The fold never changes an existing object's bytes.
+A chain whose pieces start at offset 0 writes the whole object at its own key, when the tail has no shorter reference to it. Every other write is a span object, whose key uses the candidate's start and the newest reference's size (including a span that starts at 0). A failed fold can leave the first whole object behind, so later bytes MUST use a different key. Every chain extent is written with an assembly. If the key is already occupied with the same stored checksum, the write succeeds, and if the checksum is different or missing, the fold reports corruption, identifying the key. A fold never changes an existing object's bytes.
 
-The returned layout contains the remaining extents followed by the new extent. Its `committed_seq` is the newest commit whose bytes it covers. Its row replaces any tail layout row for the same content ID when segments are built. The row is included in the fold's delta run. Revision digests are copied from deltas and are never recomputed by a fold.
+The resulting layout is the remaining extents, followed by the new extent. Its `committed_seq` is the newest commit whose bytes it covers. When segments are built, the layout's row replaces any tail layout row for the same content ID, and it's included in the fold's delta run. Revision digests are copied from the deltas, and a fold never recomputes them. A manifest at `folded_wal_no` `n` includes layouts for all pieces through WAL object `n`, and garbage collection relies on that before it deletes a WAL object.
 
-A manifest at `folded_wal_no` `n` names layouts for all pieces through WAL object `n`. WAL collection still requires that coverage.
+Folds, validation (when it writes pending pieces to content objects), direct-download writes, and proxied staging all share the execution budget's content-write permits. `max_content_writes` defaults to 32 and is configurable. Each write uses one permit until it finishes, and runtimes that share a budget share the limit. `STORE_WRITE_WAVE` also limits how many writes one fold starts at a time. The adapter chooses how to write by the result's size (see [Immutable writes and retries](#32-immutable-writes-and-retries)), and an assembly buffers at most one part window (or one read chunk on the local store).
 
-Publication uses put-if-absent at `predecessor.manifest_no + 1`. A lost put loads the winning manifest. A fold already covered by the winner needs no further publication; coverage includes WAL position as well as sequence. Otherwise it rebuilds against the new predecessor. Compaction additionally requires its selected inputs to remain valid.
+Every successor manifest MUST:
 
-Successors preserve namespace identity, including the access and naming modes, and cannot lower head sequence, writer or compactor epoch, folded WAL number, the retention floor, allocators, or cumulative activity counters. A successor at the same head must preserve activity counters exactly. A tombstone has no successor.
+- keep the namespace's identity, including its access and naming modes,
+- not lower the head sequence, the writer or compactor epoch, the folded WAL number, the retention floor, the allocators, or the cumulative activity counters, and
+- keep the activity counters exactly the same, if it's at the same head.
 
-The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until initiation of the manifest put. An expired attempt publishes nothing further. Its unreferenced output remains subject to segment-age collection rules. Streaming compaction has the longer bound in section 10.4.
+A namespace tombstone has no successor.
 
-After publication, raise the hint within the publication budget. Failure to raise it does not undo the manifest. GC preserves manifest numbers at or above the hint observed for its pass so discovery can cross a lagging hint. Intermediate manifests retained for discovery do not independently retain their runs. A manifest whose successor is younger than the grace retains its runs as a root (section 11.2).
+The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until the manifest put starts. An attempt whose budget expired publishes nothing more, and its unreferenced output is deleted under the segment-age rules in [Candidate and age rules](#113-candidate-and-age-rules). Streaming compaction has a longer bound (see [Streaming compaction](#104-streaming-compaction)).
 
-Forks follow the same path from manifest 1. Publishing a target-owned manifest does not imply copying inherited segments into the target's prefix; each segment retains its owner.
+After the publication, the fold raises the hint within the publication budget. If raising the hint fails, the manifest is still published. Garbage collection keeps every manifest number at or above the hint value it observed for its pass, so discovery can probe forward from a hint that lags. The intermediate manifests kept for discovery don't keep their own runs. A manifest whose successor is younger than the grace does keep its runs, as a root (see [Reference roots](#112-reference-roots)).
+
+Forks follow the same path from manifest 1. A manifest owned by the fork doesn't mean the inherited segments were copied into the fork's prefix, and each segment keeps its owner.
+
+Why does the doubling rule exist? Without it, every fold of a growing chain would either add one more extent (so a log file with many appends would end up with thousands of objects to read) or copy the whole chain again (so each append would cost a copy of everything before it). The doubling rule keeps each extent at least twice as large as the one after it, so a chain has a small number of extents, and each byte is copied only about once for each doubling of the chain's size. The 32-extent limit covers the case where many small appends would otherwise build up more extents than that.
 
 ### 7.3 Recovery material and maintenance policy
 
-After the corresponding WAL is reclaimed, metadata segments are required recovery material. They are not disposable caches. A missing or corrupt required manifest or segment is an error; readers do not select a different file set and silently return another state.
+Once the WAL objects they came from are deleted, metadata segments are required recovery material, not caches. A missing or corrupt required manifest or segment is an error. Readers don't choose a different file set and return another state without saying so.
 
-Implementations can fold automatically as the WAL grows. The reference defaults request a fold at 32 unfolded WAL objects and reject new commits with `maintenance_required` at 128. The commit that triggers a fold can finish before the fold completes. Reads and retained-receipt lookup remain available at the threshold.
+Implementations can fold automatically as the WAL grows. The reference implementation uses these defaults (these are implementation defaults, not format requirements):
 
-The reference maintenance also requests a fold of a shorter tail once it has gone idle: the tail holds a commit, and the newest commit's `committed_at_ms` is at least 15 minutes older than the maintenance clock. A tail of fences alone is never idle. The timestamp only decides when to fold; a fold is valid at any time.
+| Trigger | Reference default |
+| --- | --- |
+| Request a fold | 32 unfolded WAL objects |
+| Reject new commits with `maintenance_required` | 128 unfolded WAL objects |
+| Fold an idle tail | The tail contains a commit, and the newest commit's `committed_at_ms` is at least 15 minutes older than the maintenance clock |
 
-Folding does not advance retention. An operator separately decides when older replay history may be discarded. Appendix C lists the reference implementation's sizing defaults.
+The commit that triggers a fold can finish before the fold does. Reads and lookups of retained receipts still work at the write-stop threshold. Idleness is measured from the newest commit's timestamp, so a tail that contains only fences is never idle. The timestamp only decides when to fold, and a fold is valid at any time.
+
+Folding doesn't advance retention. An operator decides separately when older replay history can be discarded. [Appendix C](#appendix-c-timing-and-size-reference) lists the reference implementation's sizing defaults.
 
 ### 7.4 Statistics
 
@@ -712,349 +998,404 @@ Each manifest stores three cumulative activity counters in a required `activity`
 
 | Counter | What counts |
 | --- | --- |
-| `content_bytes` | Full content length of every committed file revision, including overwrites and revisions that reuse stored content. A revision whose bytes its commit's pieces add counts only those bytes, once, so an append counts the bytes it appends. |
-| `file_revisions` | Every committed file-revision append, including an empty revision. |
+| `content_bytes` | The full content length of every committed file revision, including overwrites and revisions that reuse stored content. A revision whose new bytes are pieces in its commit counts only those bytes, once, so an append counts the bytes it appends. |
+| `file_revisions` | Every committed file revision, including an empty one. |
 | `mutations` | Each semantic operation group in a committed WAL record, identified by `semantic_operation_index`. |
 
-For example, writing a 10-byte file and then replacing it with a 6-byte revision adds 16 bytes, two revisions, and two mutations. Creating a directory adds one mutation. Recursively deleting that directory adds one mutation, regardless of how many descendants it hides. Convenience requests can contain several internal operations, so mutation totals can exceed request counts.
+For example, writing a 10-byte file and then replacing it with a 6-byte revision adds 16 bytes, two revisions, and two mutations. Creating a directory adds one mutation. Recursively deleting that directory adds one mutation, however many descendants it hides. Convenience requests can contain several internal operations, so the mutation total can be higher than the number of requests.
 
-A fold adds only the activity after its predecessor's covered position. It publishes the counters, runs, head sequence, and folded WAL number together. A competing publication requires the fold to reload the predecessor and count only the remaining tail. A recognized commit retry adds nothing again. If an expired receipt allows a new durable commit, that commit counts as new activity.
+A fold adds only the activity after its predecessor's covered position, and it publishes the counters, runs, head sequence, and folded WAL number together. If another publication wins, the fold reloads the predecessor and counts only the remaining tail. A recognized commit retry adds nothing. If an expired receipt allows a new durable commit, that commit counts as new activity.
 
-Uploads alone, fence records, pins, inline-content extraction, and compaction add no activity. Retention and deletion do not subtract past activity. Every publisher carries forward the counters from the predecessor it actually updates, including when compaction races a newer fold.
+Uploads on their own, fences, pins, writing inline content to content objects, and compaction add no activity. Retention and deletion don't subtract past activity. Every publisher copies the counters forward from the predecessor it actually updates, including when a compaction races a newer fold.
 
 Two footprint values are calculated from the manifest's segment descriptors:
 
 | Value | Calculation |
 | --- | --- |
-| `inode_record_count` | Sum of `row_count` for `inodes` segments. |
-| `metadata_stored_bytes` | Sum of `index_block.offset + index_block.stored_bytes` for all referenced segments. |
+| `inode_record_count` | The sum of `row_count` for `inodes` segments. |
+| `metadata_stored_bytes` | The sum of `index_block.offset + index_block.stored_bytes` for every referenced segment. |
 
-The inode count includes retained deleted records. An implicit root counts as zero until stored as an inode record. Metadata bytes exclude content, WAL, manifest and pin JSON, unreferenced outputs, and segments referenced only by other manifests. Shared segments count in each referencing manifest; these totals do not measure unique physical storage.
+The inode count includes retained deleted records, and an implicit root counts as zero until it's stored as an inode record. Metadata bytes don't include content, WAL objects, manifest or pin JSON, unreferenced outputs, or segments that only other manifests reference. A shared segment counts in every manifest that references it, so these totals don't measure unique physical storage.
 
-Statistics reads use one validated manifest without reading segments or replaying newer WAL. Observations include namespace identity, lifecycle status, manifest number, head sequence, and folded WAL number. Pin statistics read the pinned manifest. Compaction can change footprint without changing the logical head, so the manifest number matters too.
+A statistics read uses one validated manifest, without reading segments or replaying newer WAL objects. An observation includes the namespace's identity, lifecycle status, manifest number, head sequence, and folded WAL number. Pin statistics read the pinned manifest. Compaction can change the footprint without changing the head, which is why the manifest number is included too.
 
-Observations also include `manifest_bytes`, the stored length of the manifest document as read, and `segments_by_family`, which counts each family's segment descriptors across every run and lists every family, with zero for a family that has none. Both values come from the same validated manifest, so they add no requests.
+An observation also includes `manifest_bytes`, the stored length of the manifest document as read, and `segments_by_family`, which counts each family's segment descriptors across every run (every family is listed, with zero for a family that has none). Both values come from the same validated manifest, so they don't add any requests.
 
-A fork inherits the source manifest's segment descriptors, so its footprint values begin as the source's. Its counters begin at zero. Activity committed in the source stays in the source's manifests.
+A fork inherits the source manifest's segment descriptors, so its footprint values start out the same as the source's, but its counters start at zero. Activity committed in the source stays in the source's manifests.
 
-Counters start at zero. Meters compare observations for the same namespace. Billing cursors and policy belong to the application.
+To meter usage, an application compares two observations of the same namespace, and it keeps its own billing cursors and policy. The counters are public integers, within the bound in the API specification. Exceeding that bound is an error, and a counter that decreases is corruption.
 
-The counters are public integers within the bound in the API specification; exceeding it is an error, and a counter that regresses is corruption.
-
-Grep reports its own referenced segment bytes under Appendix D. Its manifest and indexing position are independent of the core observation. A new fork starts without an index; a failed index read must not be reported as zero bytes.
+Grep reports its own referenced segment bytes (see [Appendix D](#appendix-d-grep-extension-format)), and its manifest and indexing position are separate from the core observation. A new fork starts without an index, and a failed index read MUST NOT be reported as zero bytes.
 
 ## 8. Pins
 
-A pin is a durable record that holds one manifest. It preserves that manifest and its segments after newer manifests are published. Ordinary folding creates no pin; applications, operators, and forks create pins when they need a stable retained basis.
+A "pin" is a durable record that keeps one manifest, and the segments it lists, after newer manifests are published. Without a pin, garbage collection deletes a superseded manifest once its successor is old enough. Ordinary folds don't create pins. Applications, operators, and forks create pins when they need a stable view of the namespace.
 
 ### 8.1 Records and owners
 
-Each pin is stored under `pins/{pin_id}.json`. Its positioned ID identifies the manifest number and includes a fresh random suffix. Repeated creates over the same manifest or label create distinct records.
+Each pin is stored at `pins/{pin_id}.json`. Its ID includes the pinned manifest's number and a new random suffix, so creating a pin twice on the same manifest, or with the same label, creates two separate records.
 
 | Owner | Stored owner fields | Reads | Removal |
 | --- | --- | --- | --- |
-| `user` | `name`, optional `expires_at_ms` | Readable while the record exists, including after expiry. | Explicit deletion, or GC after expiry plus grace. Without an expiry, only explicit deletion removes it from an active namespace. |
-| `snapshot` | `name`, required `expires_at_ms` | Readable only before expiry. | Explicit deletion, or GC after expiry plus grace. |
-| `fork` | `target_namespace_id` | Not read through the pin; it retains the runs that the target's manifest lists. | GC after the target stops depending on it (section 11.7). |
+| `user` | `name`, optional `expires_at_ms` | Readable while the record exists, even after its expiry time. | Explicit deletion, or garbage collection after expiry plus the grace. Without an expiry, only explicit deletion removes it from an active namespace. |
+| `snapshot` | `name`, required `expires_at_ms` | Readable only before it expires. | Explicit deletion, or garbage collection after expiry plus the grace. |
+| `fork` | `target_namespace_id` | Not read through the pin. It keeps the runs that the target's manifest lists. | Garbage collection, after the target stops depending on it (see [Pin cleanup](#117-pin-cleanup)). |
 
-The record also stores namespace, head sequence, payload checksum, and creation time. The manifest number comes from the pin ID. It has no lifecycle status. Creating the record establishes the candidate pin; deleting it ends the pin. Fork pins have no expiry or renewal protocol.
+The record also stores the namespace, head sequence, payload checksum, and creation time. The manifest number comes from the pin ID. A pin has no lifecycle status. Creating the record creates the pin, and deleting the record ends it. Fork pins have no expiry and no renewal protocol.
 
-Expiry, read eligibility, collection eligibility, and removal are separate. An expired record still exists: it appears in the complete pin listing and keeps its manifest and segments retained until collection deletes it. Section 11.7 defines when each owner becomes collectable.
+Expiry, read eligibility, eligibility for garbage collection, and removal are separate. An expired record still exists. It appears in the complete pin listing, and it keeps its manifest and segments until garbage collection deletes it. [Pin cleanup](#117-pin-cleanup) defines when each kind of pin can be collected.
 
 ### 8.2 Creating and verifying a pin
 
-For a pin created from the current head:
+To create a pin from the current head, LoonFS:
 
-1. Fold the observed WAL tail and select a verified current manifest.
-2. Write a fresh pin with put-if-absent.
-3. Load the current manifest again.
-4. Require the same manifest number and payload checksum, an active namespace, and a retention floor no later than the pinned head sequence.
+1. Folds the observed WAL tail, and selects a verified current manifest.
+2. Writes a new pin with put-if-absent.
+3. Loads the current manifest again.
+4. Checks that the manifest number and payload checksum are the same, that the namespace is active, and that its retention floor is no later than the pinned head sequence.
 
-If another manifest became current, delete the candidate pin and retry from a fresh basis. A deletion, a store failure, or exhausted contention retries prevents acknowledgement. The creator deletes a pin whose write or verification fails. That deletion is best effort: if it fails, the creator still returns the error that failed creation, and collection decides the pin under section 11.7. Verification has no time limit of its own. The number and checksum checks apply even when the new manifest has the same logical sequence.
+If another manifest became current in the meantime, LoonFS deletes the candidate pin and retries from a fresh basis. A deletion, a store failure, or running out of contention retries prevents acknowledgement. The creator deletes a pin whose write or verification fails. That deletion is best effort. If it fails, the creator still returns the error that failed the creation, and garbage collection decides what to do with the pin (see [Pin cleanup](#117-pin-cleanup)). Verification has no time limit of its own. The number and checksum checks apply even when the new manifest has the same sequence.
 
-Section 3.1 allows a put whose outcome is unknown to land after its creator stopped waiting, including after the creator's delete. Such a pin was never returned to a caller. It appears in the pin listing and is collected under section 11.7 like any other pin, so a user pin without an expiry stays until it is deleted.
+A put whose outcome is unknown can succeed after its creator stopped waiting (see [Required operations](#31-required-operations)), even after the creator's delete. A pin created that way was never returned to a caller. It appears in the pin listing and is collected like any other pin, so a user pin without an expiry stays until someone deletes it.
 
-This order matters when collection races with pin creation. A collector either captured the pinned manifest as current, or captured a successor after the pin was durable and includes the pin in its complete listing. Once acknowledged, the pin retains its files even if the retention floor later passes its sequence.
+Once a pin is acknowledged, it keeps its manifest's files, even if the retention floor later moves past its sequence.
 
-A fork of a snapshot uses a different protecting root. It makes one check before and again after it writes a fork pin for the snapshot's historical manifest: the source namespace is active, and the snapshot pin exists and is unexpired. It does not require that historical manifest to remain current. Both expiry checks use the request clock plus elapsed monotonic time since the fork call began. A snapshot that no longer exists answers `snapshot_not_found`, an expired one `snapshot_gone`, and a deleted source `namespace_deleted`. If the fork pin write or the second check fails, the fork deletes the new fork pin under the same best-effort rule. Verification has no time limit of its own. Pins are never recreated, so a snapshot pin that still exists after the fork pin write existed throughout, and every collection pass that listed pins before that write also listed the snapshot pin and rooted the same manifest.
+Why write the pin before checking the manifest again? A garbage collection pass that runs at the same time either captured the pinned manifest as current, or captured a successor after the pin was written, and in that case the pass's complete pin listing includes the pin. Either way, the pinned manifest is protected.
+
+A fork of a snapshot is protected by the snapshot instead. It doesn't require the snapshot's historical manifest to still be current. The fork:
+
+1. Checks that the source namespace is active, and that the snapshot pin exists and hasn't expired.
+2. Writes a fork pin on the snapshot's manifest.
+3. Checks the same two conditions again.
+
+Both expiry checks use the request clock plus the monotonic time elapsed since the fork call began. A snapshot that no longer exists returns `snapshot_not_found`, an expired one returns `snapshot_gone`, and a deleted source returns `namespace_deleted`. If the fork pin write or the second check fails, the fork deletes the new fork pin, under the same best-effort rule. Verification has no time limit of its own. Pins are never recreated, so if the snapshot pin still exists after the fork pin is written, it existed the whole time. So every garbage collection pass that listed pins before that write also listed the snapshot pin, and it protected the same manifest.
 
 ### 8.3 Reads, deletion, and expiry
 
-An operation that names a pin ID looks the pin up for the owner it serves. An ID with no pin, or with a pin of another owner, answers `checkpoint_not_found` from a checkpoint operation and `snapshot_not_found` from a snapshot operation, so an ID does not reveal a pin of another owner.
+An operation that takes a pin ID looks up the pin for the owner the operation serves. An ID with no pin, or with a pin that has another owner, returns `checkpoint_not_found` from a checkpoint operation and `snapshot_not_found` from a snapshot operation, so an ID doesn't reveal a pin of another owner.
 
-A read through a pin derives the manifest number from the ID, confirms that the pin exists and has the owner the read serves, and verifies its manifest reference. Reads use that manifest directly, without replaying later namespace history.
+A read through a pin takes the manifest number from the ID, confirms that the pin exists and has the right owner, and verifies its manifest reference. The read uses that manifest directly, without replaying later namespace history. Reads follow the owner rules in [Records and owners](#81-records-and-owners), and extending a snapshot also requires that the snapshot hasn't expired.
 
-Reads follow the owner rules in section 8.1. Snapshot extensions also require an unexpired snapshot owner.
-
-Explicit deletion looks the pin up the same way and deletes it. Deleting it again returns not-found. Fork-owned pins have no explicit deletion. Collection roots follow section 11.2; retirement eligibility follows section 9.5.
+Explicit deletion looks up the pin the same way and deletes it. Deleting it again returns not found. Fork pins can't be deleted explicitly. [Reference roots](#112-reference-roots) defines which pins protect manifests from garbage collection, and [Retirement](#95-retirement) defines when a deleted namespace can be retired.
 
 ### 8.4 Extending a snapshot
 
-An unexpired snapshot's expiry can be extended by compare-and-swap. The manifest reference, identity, and owner do not change. An extension cannot recreate a deleted pin or make an expired snapshot usable again. See the API specification for duration and request constraints.
+An unexpired snapshot's expiry time can be extended by compare-and-swap. The manifest reference, the identity, and the owner don't change. An extension can't recreate a deleted pin, or make an expired snapshot usable again. The API specification defines the duration and request limits.
 
-Each renewal attempt checks expiry after loading the pin, using the request clock plus elapsed monotonic time across the whole extension call. Expiry during an already-started compare-and-swap does not undo a successful extension.
+Each renewal attempt checks the expiry after it loads the pin, using the request clock plus the monotonic time elapsed across the whole extension call. If the snapshot expires while a compare-and-swap that already started is in progress, a successful extension still stands.
 
 ## 9. Namespace lifecycle and forks
 
-Namespace creation and deletion publish numbered manifests. Section 9.5 defines retirement.
+This section describes how namespaces are created, forked, deleted, and retired. Creating and deleting a namespace both publish numbered manifests.
 
 ### 9.1 Creating a namespace
 
-Read existing namespace state before writing new objects. An existing active namespace returns `namespace_exists`, or its current summary with `allow_existing`. Corruption and read errors are not absence. These completed-namespace checks write nothing.
+To create a namespace, LoonFS:
 
-For an absent namespace, build the first manifest under section 7.2.
+1. Reads the existing namespace state before it writes any objects. An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`). Corruption and read errors aren't absence. These checks write nothing.
+2. Builds the first manifest for an absent namespace (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)).
+3. Writes the hint, pointing to manifest 1, and then manifest 1, both with put-if-absent. A hint collision is allowed.
 
-Write the hint naming manifest 1, then manifest 1, both with put-if-absent. A hint collision is permitted. The manifest put decides which installation wins. A hint left before that put does not establish namespace existence.
-
-Conflicting and unknown publication outcomes follow section 9.3.
+If two processes create the same namespace at the same time, the one whose manifest 1 put succeeds creates the namespace. A hint written before that put doesn't mean the namespace exists, because its writer might have failed before it wrote manifest 1.
 
 ### 9.2 Forking a namespace
 
-A fork starts independent history from the source's retained metadata:
+A fork starts its own history from the source's retained metadata. To create one, LoonFS:
 
-1. Load the target’s current manifest before writing a source pin. Continue only if the target is absent. Create a verified source pin whose owner names the target namespace, either from the source head or a live snapshot under section 8.2.
-2. Load and verify the pinned manifest.
-3. Copy the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, and naming mode. The inherited runs determine the same base sequence. Preserve every segment's owner. Set the fork basis to the pinned manifest reference and source pin ID.
-4. Build the remaining first-manifest fields under section 7.2 and install it under section 9.1.
+1. Loads the target's current manifest before it writes a source pin, and continues only if the target doesn't exist. It then creates a verified source pin whose owner is the target namespace, either from the source's head or from a live snapshot (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
+2. Loads and verifies the pinned manifest.
+3. Copies the pinned manifest's run references, head sequence, inode allocator, next run number, access configuration, and naming mode. The inherited runs determine the same base sequence. Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID.
+4. Builds the rest of the first manifest's fields (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
 
-The target copies no file bytes or metadata segments. Its first data commit is one sequence above its initial head. It can itself be forked immediately because its manifest already lists its inherited runs.
+The fork copies no file bytes or metadata segments. Its first commit is one sequence above its initial head. The fork can itself be forked right away, because its manifest already lists its inherited runs.
 
-The source pin's creation grace protects installation: collection keeps a fork pin for at least the ordinary grace `T` of the pass (section 11.3) after its `created_at_ms`, which the fork call takes from its request clock (section 11.7). The metadata publication budget in section 7.2 starts at the beginning of the fork call, before target discovery and source pin creation. The remaining grace covers provider operations and the clock allowance.
+The source pin's creation grace protects the installation. Garbage collection keeps a fork pin for at least the ordinary grace `T` of the pass (see [Candidate and age rules](#113-candidate-and-age-rules)) after its `created_at_ms`, which the fork call takes from its request clock (see [Pin cleanup](#117-pin-cleanup)). The metadata publication budget (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) starts at the beginning of the fork call, before target discovery and source pin creation, and the rest of the grace covers provider operations and the clock allowance.
 
 ### 9.3 Conflicting and unknown installations
 
-A losing manifest-1 put returns to the existing-state checks in section 9.1. Deleted status follows the lifetime rule in section 1. Invalid bytes or key/payload disagreement are corruption. No loser overwrites the winner.
+A losing manifest 1 put goes back to the existing-state checks in [Creating a namespace](#91-creating-a-namespace). Deleted status follows the lifetime rule in [Namespaces and identity](#11-namespaces-and-identity). Invalid bytes, or a key that doesn't match its payload, are corruption. A loser never overwrites the winner.
 
-A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number. Another manifest there is a conflict. Identical bytes there confirm the attempt's own success only when the manifest names an object unique to that attempt: a fork's first manifest names its source pin, and a manifest that lists a segment its predecessor does not names a segment that attempt wrote. Every other manifest, including a plain create under section 9.1, a compactor claim, a writer acquisition, or a tombstone, can be rebuilt byte for byte by another publisher, so identical bytes count as the current manifest and the attempt retries from it. Identical bytes count only if the read-back returns within the publication budget (section 11.4). Identical bytes read back after the budget, or a number that is still absent, end the call with an unknown outcome, and a later call starts from current state.
+A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number:
 
-On `namespace_exists` or `namespace_deleted`, a fork installer reloads the target and deletes its source pin unless the target’s fork basis names it. It returns the original error in every case. If the reload or the deletion fails, the pin stays for collection to decide under section 11.7. A matching pin ID with a different manifest reference is corruption under section 11.7.
+- Another manifest there is a conflict.
+- Identical bytes confirm the attempt's own success only when the manifest refers to an object that's unique to that attempt. A fork's first manifest refers to its source pin, and a manifest that lists a segment its predecessor doesn't list refers to a segment that this attempt wrote.
+- Every other manifest (a plain create, a compactor claim, a writer acquisition, or a namespace tombstone) can be rebuilt byte for byte by another publisher. Identical bytes count as the current manifest, and the attempt retries from it.
+- Identical bytes count only if the read-back returns within the publication budget (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). Identical bytes read back after the budget, or a number that's still missing, end the call with an unknown outcome, and a later call starts from the current state.
 
-An unused fork pin is collected after its creation grace under section 11.7.
+Why don't identical bytes always prove success? Two publishers can build exactly the same manifest from the same predecessor (for example, two plain creates with the same request), so finding identical bytes doesn't show which one wrote them. Only a manifest that refers to something this attempt created, such as a new pin or a new segment, proves that the attempt succeeded.
+
+When a fork installer gets `namespace_exists` or `namespace_deleted`, it reloads the target and deletes its source pin, unless the target's fork basis refers to that pin. It returns the original error in every case. If the reload or the deletion fails, the pin stays, and garbage collection decides what to do with it (see [Pin cleanup](#117-pin-cleanup)). A matching pin ID with a different manifest reference is corruption. An unused fork pin is collected after its creation grace.
 
 ### 9.4 Deleting a namespace
 
-Deletion uses the acquired writer epoch. After admitted commits finish, it folds the remaining WAL, then publishes the next manifest with deleted status. The manifest records `deleted_at_ms` from the deletion call's clock. Deletion initiates tombstone publication within `METADATA_PUBLICATION_BUDGET_MS` of capturing that clock. Its runs, counters, and folded WAL boundary cover the final head, so every WAL object of the deleted namespace is at or below `folded_wal_no`. A failed fold leaves the namespace active; deletion can be retried. Previously committed data remains committed.
+Deletion uses the acquired writer epoch. After the admitted commits finish, LoonFS folds the remaining WAL, and then it publishes the next manifest with a deleted status. That manifest records `deleted_at_ms` from the deletion call's clock, and deletion starts the tombstone publication within `METADATA_PUBLICATION_BUDGET_MS` of capturing that clock. The tombstone's runs, counters, and folded WAL boundary cover the final head, so every WAL object of the deleted namespace is at or below `folded_wal_no`. If the fold fails, the namespace stays active, and the deletion can be retried. Data that was already committed stays committed.
 
-An ordinary operation that observes deletion returns `namespace_deleted`. A cached reader can still use its active view until the next manifest revalidation is due. Deletion does not immediately remove content.
-
-Collection roots follow section 11.2. A separate purge operation is outside this specification.
+An ordinary operation that finds the namespace deleted returns `namespace_deleted`. A cached reader can keep using its active view until its next manifest revalidation is due. Deleting a namespace doesn't immediately remove its content. [Reference roots](#112-reference-roots) defines what garbage collection keeps, and a separate purge operation is outside this specification.
 
 ### 9.5 Retirement
 
-No retirement deadline is stored and collection publishes no manifest. For a tombstone `T`, the derived deadline is:
+"Retirement" is the point at which a deleted namespace's own content can be deleted. No retirement deadline is stored, and garbage collection publishes no manifest. For a namespace tombstone `T`, the deadline is derived as:
 
 ```text
 deadline(T) = T.deleted_at_ms
               + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)
 ```
 
-A tombstone is eligible when the pass clock reaches its deadline and the complete pin listing contains no pin on the namespace. Pins deleted later in the same pass still count. Any unrecognized key under the pin prefix also blocks reclamation.
+A tombstone is eligible for retirement when the pass clock reaches its deadline and the complete pin listing contains no pin on the namespace. Pins deleted later in the same pass still count, and any unrecognized key under the pin prefix also blocks reclamation.
 
-Eligible tombstones release their own content and source pins under section 11.8. Other owners remain outside that sweep.
+An eligible tombstone's own content and source pins are released (see [Sweeping a retired owner's content](#118-sweeping-a-retired-owners-content)). Content owned by other namespaces isn't part of that sweep.
 
 ### 9.6 Fork dependencies after deletion
 
-A source pin remains required until its target is retired. While the target's current manifest, active or deleted, names the pin, the source's collection keeps it (section 11.7). The target's retirement deletes it (section 11.8), although the target's tombstone stays current and still names it. Rewriting a target's metadata does not transfer ownership of inherited file bytes.
+A source pin is required until its target is retired. While the target's current manifest (active or deleted) refers to the pin, garbage collection in the source keeps it (see [Pin cleanup](#117-pin-cleanup)). Retiring the target deletes the pin (see [Sweeping a retired owner's content](#118-sweeping-a-retired-owners-content)), even though the target's tombstone is still its current manifest and still refers to the pin. Rewriting a target's metadata doesn't transfer ownership of inherited file bytes.
 
-For `A → B → C`, C's fork pin on B prevents B from being reclaimed. B's pin on A remains until B is reclaimed. Reclaiming C deletes C's pin on B. B can then be reclaimed once its deadline and pin checks pass, releasing its pin on A.
+For example, suppose B is a fork of A, and C is a fork of B. C's fork pin on B prevents B from being retired, and B's pin on A stays until B is retired. Retiring C deletes C's pin on B. B can then be retired once its deadline and pin checks pass, which releases its pin on A.
 
-Pin deletion proceeds from descendants to ancestors. A failed source-pin deletion leaves the target tombstone available for another pass.
+Pins are deleted from descendants to ancestors. If deleting a source pin fails, the target's tombstone is still available for another pass.
 
 ### 9.7 Cross-namespace copies and moves
 
-An inode-preserving rename is namespace-local. Across namespaces, a move is a destination copy followed by source deletion, without an atomic transaction across both histories.
+A rename that keeps the inode stays within one namespace. Across namespaces, a move is a copy to the destination followed by a deletion in the source, without an atomic transaction across both histories.
 
-A fork can retain references through its source pin; other imports write verified bytes under a fresh destination-owned identity. Reusing another owner's identity would require an additional durable source-side retention protocol.
+A fork can keep using references through its source pin. Every other import writes verified bytes under a new content ID owned by the destination. (Reusing another owner's content ID would require an extra durable retention protocol on the source side.)
 
-An import checks the owner’s current view for authorization, including imports within that namespace. The import reads the requested reference where the owner's current view finds its bytes (section 4.5): pieces in that view's projected tail are used only when the reference's owner is the namespace the view reads, and every other byte comes from a content object. Reclaimed content returns the same error as any missing content object. The import verifies the bytes and stages them under a fresh identity owned by the destination. Forks pin manifests, so inherited content is always materialized. Inherited references retain their owner.
+An import checks the owner's current view for authorization, including an import within the same namespace. The import reads the requested reference where the owner's current view finds its bytes (see [Content verification](#45-content-verification)). Pieces in that view's projected tail are used only when the reference's owner is the namespace the view reads, and every other byte comes from a content object. Reclaimed content returns the same error as any missing content object. The import verifies the bytes and stages them under a new content ID owned by the destination. Forks pin manifests, so inherited content has always been written to content objects. Inherited references keep their owner.
 
-A subject importing a bare reference must be an administrator of its owner namespace. An unrestricted owner and a request with no subject need no administrator grant. Authorization always uses the owner's current head. A deleted owner uses the access state in its surviving head.
+A subject that imports a bare reference MUST be an administrator of the reference's owner namespace. An unrestricted owner, and a request with no subject, don't need an administrator grant. Authorization always uses the owner's current head, and a deleted owner uses the access state in its final manifest.
 
 ## 10. Retention and compaction
 
-Retention determines which historical views remain available under the format guarantee. Compaction rewrites the physical representation while preserving those views. Neither operation publishes new filesystem changes.
+This section describes how much history a namespace keeps, and how compaction rewrites metadata without changing what's visible.
+
+Every commit adds metadata rows, and without a limit, old revisions, bindings, and receipts would build up indefinitely. The "retention floor" sets how far back history is guaranteed, and "compaction" merges metadata runs and removes the rows that the floor no longer requires. Neither operation publishes new filesystem changes, and compaction preserves every retained view.
 
 ### 10.1 Advancing the retention floor
 
-The floor bounds incremental replay, superseded binding history, file revision history, old attribute states, and commit receipts. File history above the retention floor is complete; at or below the floor each file keeps its newest revision. The floor does not expire layout rows. WAL objects are not retained by the floor; collection removes them once folded.
+The retention floor limits how far back these kinds of history are kept: incremental replay, superseded bindings, file revisions, old attribute states, and commit receipts. Above the floor, every file's history is complete, and at or below it, each file keeps its newest revision. The floor doesn't expire layout rows, and it doesn't keep WAL objects (garbage collection removes them once they're folded).
 
-Floor advancement is explicit. The initial sequence floor is 0 for a new root namespace and the fork point for a fork. Automatic folds do not advance it. The change feed returns only commits above the floor, so the commit row at the floor is kept and never replayed; a fork's floor is its fork point so that the source's commit at that sequence stays out of the fork's feed.
+The floor only moves when it's explicitly advanced, and automatic folds don't advance it. Its initial value is 0 for a new namespace, and the fork point for a fork. The change feed returns only commits above the floor, so the commit row at the floor is kept, but it's never replayed. That's also why a fork's floor is its fork point, so that the source's commit at that sequence stays out of the fork's change feed.
 
-A floor advance names a target: the current manifest's `head_seq`, a sequence, or a cutoff time. A sequence above `head_seq` targets `head_seq`. For a cutoff time, the advance reads the `commits` family upward from the current floor and stops at the first commit whose `committed_at_ms` is later than the cutoff. The target is the last commit the scan passed, or the current floor when the scan passed none. Commit timestamps are observational and need not increase with sequence, so the scan stops at the first later commit instead of skipping it.
+A floor advance has one of three targets:
 
-The advance loads the current manifest. A target at or below its floor publishes nothing and reports that floor. Otherwise the advance verifies that the manifest's referenced segments exist and publishes a successor with the same runs, head summary, allocators, and authority, setting `retention_floor_seq` to the target. The floor cannot decrease.
+- the current manifest's `head_seq`,
+- a sequence (a sequence above `head_seq` targets `head_seq`), or
+- a cutoff time.
 
-The existence check detects missing recovery material before abandoning the corresponding replay guarantee. It is not a multi-object transaction or a substitute for collection's reference rules. Read paths still verify checksums. A pin below the new sequence floor continues to protect its own manifest and runs.
+For a cutoff time, the advance reads the `commits` family upward from the current floor, and it stops at the first commit whose `committed_at_ms` is later than the cutoff. The target is the last commit the scan passed, or the current floor if it passed none. Commit timestamps are informational and don't have to increase with sequence, so the scan stops at the first later commit instead of skipping it. For example, suppose the floor is 10, commits 11, 12, and 13 were committed at 9:00, 9:05, and 9:02, and the cutoff is 9:03. The scan passes 11, stops at 12, and the target is 11, even though 13 is earlier than the cutoff.
+
+The advance loads the current manifest. A target at or below the manifest's floor publishes nothing and reports that floor. Otherwise, the advance checks that the manifest's referenced segments exist, and it publishes a successor with the same runs, head summary, allocators, and authority, with `retention_floor_seq` set to the target. The floor never decreases.
+
+A pin below the new floor still protects its own manifest and runs.
+
+Why check that the segments exist first? Advancing the floor ends the guarantee that older history can be replayed, so LoonFS first makes sure the history it's keeping is readable. The check isn't a transaction across objects, and it doesn't replace garbage collection's reference rules. Reads still verify checksums.
 
 ### 10.2 Compaction windows
 
-Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group because they must remain consistent. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. Appendix A.6 lists the groups.
+Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group, because they MUST stay consistent with each other. The `commits` and `commit_receipts` families form another group, and each of the other seven groups contains one family. [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists the groups.
 
-A bounded compaction merges an oldest-first contiguous window. It can skip the group's oldest run when that run is too large for one bounded step and merge the delta runs above it instead. It cannot skip an intervening delta run.
+A bounded compaction merges a contiguous window of runs, starting from the oldest. It can skip the group's oldest run, when that run is too large for one bounded step, and merge the delta runs above it instead. It can't skip a delta run in the middle.
 
-An output run is `base` if and only if the window includes the group's oldest run. Only that kind of compaction can drop rows under the retention rules. A compaction above the oldest run produces a `delta` run and drops nothing, because an excluded older run may hold rows that a row in the window supersedes: an older binding version below an unbound one, or a listed deletion whose removal row is in the window.
+```text
+oldest                                       newest
+[ base run ] [ delta 1 ] [ delta 2 ] [ delta 3 ]
+|<-------- bottom-anchored window --------->|   output: a new base run, can drop rows
+             |<----- window above base ---->|   output: a new delta run, drops nothing
+```
 
-A group has at most one base run. A bottom-anchored compaction replaces the existing base when one exists and is stamped with the manifest's `head_seq`. Base runs are ordered before delta runs regardless of their sequence stamp. A compaction that skips the oldest run is stamped with its newest input's sequence and remains at that position in the group.
+| Window | Output run | Can it drop rows? | Sequence stamp |
+| --- | --- | --- | --- |
+| Includes the group's oldest run ("bottom-anchored") | `base`, which replaces the existing base run | Yes, under the retention rules | The manifest's `head_seq` |
+| Skips the oldest run | `delta` | No | The newest input's sequence |
 
-A delta-only compaction must merge at least two runs. Once a group has only one delta run above an oversized base, another bounded delta-only compaction cannot reduce the run count. A larger streaming compaction can handle the complete group.
+A group has at most one base run. Base runs are ordered before delta runs, whatever their sequence stamps, and a compaction that skips the oldest run stays at its position in the group.
+
+A delta-only compaction MUST merge at least two runs. Once a group has only one delta run above an oversized base, a bounded delta-only compaction can't reduce the run count any further, but a larger streaming compaction can process the complete group.
+
+Why can't a compaction above the oldest run drop rows? An excluded older run might contain rows that a row in the window supersedes, such as an older binding version below an unbound one, or a listed deletion whose removal row is in the window. Dropping rows in the window could make those older rows visible again.
 
 ### 10.3 Row retention during a base compaction
 
-The following rules apply only when the selected inputs include the group's oldest run. A delta-only compaction retains all history rows and the first layout row per content ID.
+These rules apply only when the selected inputs include the group's oldest run. A delta-only compaction keeps every history row and the first layout row for each content ID.
 
-| Family | Rows retained or removed |
+| Family | Rows kept or removed |
 | --- | --- |
-| `inodes` | Retain all inode rows. |
-| `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child), retain all versions above the floor and the newest version at or below it. Drop that floor version too if it is unbound. |
-| `revisions` | For each file, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
-| `tombstones` | Retain all set and revoke events. |
-| `active_deletions` | Retain listed deletions until revoked. Remove a cancelled `listed`/`removed` pair together. The floor does not expire a recoverable deletion. |
-| `commits`, `commit_receipts` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it; in a fork it is the source's commit at the fork point. |
-| `content_layouts` | Keep the first row per content ID, ordered by longest layout then newest commit. Drop chains absent from the basis's revision filter. |
-| `attributes` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
-| `access` | For each inode, retain all revisions above the floor and the newest revision at or below it; remove earlier revisions. |
+| `inodes` | Keep every inode row. |
+| `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child), keep every version above the floor and the newest version at or below it. Drop that floor version too if it's unbound. |
+| `revisions` | For each file, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. |
+| `tombstones` | Keep every `set` and `revoke` event. |
+| `active_deletions` | Keep listed deletions until they're revoked, and remove a cancelled `listed` and `removed` pair together. The floor doesn't expire a recoverable deletion. |
+| `commits`, `commit_receipts` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it (in a fork, it's the source's commit at the fork point). |
+| `content_layouts` | Keep the first row for each content ID, ordered by longest layout and then newest commit. Drop chains that aren't in the basis's revision filter (see below). |
+| `attributes` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. |
+| `access` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. |
 
-An unbound binding version is a tombstone. It must remain while it hides older versions of its edge. Only a bottom-anchored compaction, which includes the group's oldest run, can drop it. That compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every history row, including unbound versions at or below the floor. It can drop superseded layout rows because the longest layout covers every shorter prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
+An unbound binding version acts as a tombstone, and it MUST stay while it hides older versions of its edge. Only a bottom-anchored compaction can drop it, and that compaction drops it together with every older version it hides. A compaction that excludes the oldest run keeps every history row, including unbound versions at or below the floor, but it can drop superseded layout rows, because the longest layout covers every shorter prefix. Runs cover separate sequence ranges, so a bottom-anchored compaction includes every older version that can affect its floor state.
 
-A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row of its basis names, judged by a filter that errs only toward keeping; a later compaction drops what the filter kept. Both streaming jobs and bounded steps scan the basis's revisions once before merging layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID. Its expected count is the sum of the revision segments' `row_count`. If it would exceed `MAX_BLOOM_FILTER_BYTES` (64 MiB), the merge keeps every layout and logs that choice.
+A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row in its basis refers to. It decides with a Bloom filter, which can only err toward keeping a row, and a later compaction drops what the filter kept. Both streaming jobs and bounded steps scan the basis's revisions once before they merge layouts. The filter uses two xxh64 hashes, a seed from the output run number, and 10 bits per expected ID, and its expected count is the sum of the revision segments' `row_count`. If the filter would be larger than `MAX_BLOOM_FILTER_BYTES` (64 MiB), the merge keeps every layout and logs that choice.
 
-Each binding event appears in both indexes, and both indexes group their rows by edge. Compaction therefore keeps or removes each event in both indexes alike, and both keep the same events. Row counts and row digests verify that the two indexes agree. Every event above the floor remains.
+Each binding event appears in both indexes, and both indexes group their rows by edge, so compaction keeps or removes each event in both indexes the same way. Row counts and row digests verify that the two indexes agree, and every event above the floor stays.
 
-A binding row takes its position from the delta that published it, so a later bind does not depend on an earlier unbound value. Attribute and access revisions keep a cleared floor state, because the next update is validated against its revision number.
+A binding row's position comes from the delta that published it, so a later bind doesn't depend on an earlier unbound value. Attribute and access revisions keep a cleared floor state, because the next update is validated against its revision number.
 
-An empty attribute map, or an access row with no boundary and no grants, is retained when it is the state at the floor. Removing it could expose an older row and restore state that had been cleared. File revision, attribute, and access rows are not removed merely because the inode is deleted, so undelete can restore the same state.
+An empty attribute map, or an access row with no boundary and no grants, is kept when it's the state at the floor. Removing it could expose an older row and bring back state that had been cleared. File revision, attribute, and access rows aren't removed just because their inode is deleted, so an undelete can restore the same state.
 
-A rewrite must refuse an ambiguous file revision, attribute, or access history in which two rows for one inode have the same revision number at or below the floor. It cannot choose an arbitrary row and discard the other.
+A rewrite MUST refuse an ambiguous file revision, attribute, or access history, in which two rows for one inode have the same revision number at or below the floor. It can't choose one row and discard the other.
 
-The active-deletion family is a current-state index, not an independent historical trash log. Its removal marker sorts before the corresponding listed entry. Bottom-anchored compaction can remove the pair without leaving an older entry that would reappear in a subsequent read.
+The active-deletion family is an index of current state, not a separate historical trash log. Its removal marker sorts before the matching listed entry, so a bottom-anchored compaction can remove the pair without leaving an older entry that would reappear in a later read.
 
-Compaction must preserve visible metadata at every retained sequence. It publishes a complete replacement through the numbered manifest protocol. Input objects remain available until no protected manifest or pin references them; successful publication is not permission to delete them immediately.
+Compaction MUST preserve the visible metadata at every retained sequence. It publishes a complete replacement through the numbered manifest protocol. Its input objects stay available until no protected manifest or pin references them (a successful publication isn't permission to delete them right away).
 
 ### 10.4 Streaming compaction
 
-A streaming compaction processes selected runs without holding every row in memory. It writes completed segments under the namespace's normal `segments/` prefix using fresh IDs, then publishes references to that output in the next manifest. Readers continue using the preceding manifest until publication succeeds.
+A streaming compaction merges the selected runs without keeping every row in memory. It writes completed segments under the namespace's normal `segments/` prefix, with new IDs, and then it publishes references to that output in the next manifest. Readers keep using the previous manifest until the publication succeeds.
 
-A runtime claims the namespace's compactor epoch before its first compaction after open. Claiming publishes a manifest with `compactor_epoch + 1` and otherwise unchanged state. Concurrent family groups in that runtime share the claim. Bounded and streaming compaction publications must match the current epoch; a newer claim fences older compactors. Both also check the epoch of the manifest they load before they read a segment. Core keeps this epoch because streaming compaction merges a window too large for one bounded step and publishes once at the end, so a newer runtime can stop a stale compactor at its next check; grep publishes each bounded step, so a lost race costs one step.
+A runtime claims the namespace's compactor epoch before its first compaction after it opens the namespace. Claiming publishes a manifest with `compactor_epoch + 1` and no other changes, and concurrent family groups in that runtime share the claim. Bounded and streaming compaction publications MUST match the current epoch, so a newer claim fences older compactors. Both also check the epoch of the manifest they load before they read a segment.
 
-Before each publication attempt, a job checks its elapsed monotonic time and reloads the current manifest. Its selected input segments must still be present and unchanged. A lost numbered put can be retried against a new manifest while those conditions hold. A changed epoch produces `fenced`; changed inputs produce `abandoned`.
+Before each publication attempt, a job checks its elapsed monotonic time and reloads the current manifest. Its selected input segments MUST still be present and unchanged. While both conditions are true, a lost numbered put can be retried against a new manifest. A changed epoch produces `fenced`, and changed inputs produce `abandoned`.
 
-A job runs under two deadlines. The job's deadline starts before it reads its input, and the job starts its last publication attempt within `METADATA_COMPACTION_BUDGET_MS` of it. A job past that bound returns `abandoned`. The publication deadline starts when finalization starts, and every finalization attempt runs under that one `METADATA_PUBLICATION_BUDGET_MS`. An attempt past that bound fails with the metadata publication budget error.
+A job runs under two deadlines:
 
-Segments not referenced by a collection root are protected for a minimum provider age of 24 hours. The streaming publication budget reserves the minimum GC grace inside that interval:
+| Deadline | Starts | Limit | Past the limit |
+| --- | --- | --- | --- |
+| Job deadline | Before the job reads its input | The job starts its last publication attempt within `METADATA_COMPACTION_BUDGET_MS`. | The job returns `abandoned`. |
+| Publication deadline | When finalization starts | Every finalization attempt runs under one `METADATA_PUBLICATION_BUDGET_MS`. | The attempt fails with the metadata publication budget error. |
+
+Segments that no root references are protected until their provider age is at least 24 hours. The streaming publication budget reserves the minimum garbage collection grace inside that interval:
 
 ```text
 streaming publication budget + minimum GC grace <= 24 hours
 ```
 
-With the current constants, the job can initiate publication for at most 23 hours, 18 minutes, and 30 seconds after its timer begins before output. Beyond that point it abandons publication because its earliest unreferenced output may become collectable. A cancelled or crashed job leaves output subject to the same age rule.
+With the current constants, a job can start its publication for at most 23 hours, 18 minutes, and 30 seconds after its timer starts (before it writes any output). After that, it abandons the publication, because its earliest unreferenced output might already be eligible for deletion. A cancelled or crashed job leaves output that's subject to the same age rule.
 
-Streaming compaction applies the row-retention rules for its selected window, just as bounded compaction does. It must preserve every retained view. Restart begins a new plan from the current manifest; there is no durable compaction cursor or output-protection record.
+Streaming compaction applies the row-retention rules for its selected window, the same way bounded compaction does, and it MUST preserve every retained view. A restart begins a new plan from the current manifest, and there's no durable compaction cursor or output-protection record.
+
+Why does core keep a compactor epoch? A streaming compaction merges a window that's too large for one bounded step, and it publishes once at the end, which can be hours later. The epoch lets a newer runtime stop a stale compactor at its next check. (Grep publishes each bounded step separately, so a lost race only costs one step, and grep doesn't need an epoch.)
 
 ## 11. Garbage collection
 
-Collection removes objects that no retained view needs, after the applicable age and publication checks. A logical delete alone is not permission to remove file bytes. A live namespace's content stays while a retained view names it (section 11.9), and a deleted ancestor's content remains while fork descendants depend on it.
+This section describes how garbage collection decides which objects are still referenced, and when an unreferenced object is old enough to delete safely.
+
+Garbage collection deletes objects that no retained view needs, after the required age and publication checks. A logical deletion on its own doesn't allow file bytes to be removed. A live namespace's content stays while a retained view refers to it (see [Content roots](#119-content-roots)), and a deleted ancestor's content stays while fork descendants depend on it.
+
+An object can't be deleted as soon as nothing references it, because a publisher might be about to reference it. Garbage collection waits until an unreferenced object is older than the reclamation grace, which is long enough for every publication planned against an older state to have finished or failed (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
 
 ### 11.1 One complete pass
 
-A call discovers the namespace's current manifest, lists its upload sessions, reads its WAL tail, lists all pin keys and manifest numbers, takes each manifest's successor age from that listing, and records the protected manifests and segments. Invalid or unreadable root manifests stop the call before sweeping. An absent namespace has nothing for core GC to collect.
+A garbage collection pass first establishes the roots. It:
 
-The call then lists each swept candidate family from the beginning to completion. Unless its shared base filter would exceed the cap (section 11.9), it sweeps content one id shard at a time. A shard contains the content ids with a common hex prefix. Exact content-root sets use read working memory for one shard and the tail and session ids. Shared base keys use a Bloom filter with a separate 64 MiB byte cap. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin and session listings used to establish roots are separate from the later sweeps that decide which records can be deleted.
+1. Discovers the namespace's current manifest.
+2. Lists the namespace's upload sessions.
+3. Reads the WAL tail.
+4. Lists all pin keys and manifest numbers, and takes each manifest's successor age from that listing.
+5. Records the protected manifests and segments.
 
-Every age decision uses the call's fixed `now_ms`. A later call reads fresh roots and uses its own clock. Concurrent collectors can independently delete eligible objects; an already absent object needs no further cleanup. A failed pass can have deleted earlier candidates, but the next pass safely starts again.
+An invalid or unreadable root manifest stops the pass before anything is deleted. An absent namespace has nothing for core garbage collection to delete.
+
+The pass then lists each candidate family completely, from the beginning. Unless its shared base filter would be larger than its limit (see [Content roots](#119-content-roots)), it sweeps content one ID shard at a time, where a shard is the content IDs with a common hex prefix. The exact sets of content roots use read working memory for one shard, plus the tail and session IDs. Shared base keys use a Bloom filter, with its own 64 MiB limit. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin and session listings that establish the roots are separate from the later sweeps that decide which records can be deleted.
+
+Every age decision in a pass uses the same `now_ms`, captured when the pass starts. A later pass reads fresh roots and uses its own clock. Concurrent collectors can delete eligible objects independently, and an object that's already gone needs no more cleanup. A failed pass might have deleted some candidates already, but the next pass can safely start over.
 
 ### 11.2 Reference roots
 
 | Evidence captured for the pass | Objects protected |
 | --- | --- |
-| Current active namespace manifest | The manifest and every segment in its runs. |
-| Current deleted manifest | The tombstone and every segment in its runs. |
-| Every recognized pin key in the complete listing | The numbered manifest in its ID and every segment in that manifest. |
-| Every manifest below the current one whose immediate successor is younger than the ordinary grace `T` | The manifest and every segment in its runs. |
-| Hint's observed manifest number | All manifest numbers at or above it, so discovery can probe forward. This root does not protect their runs. |
-| Current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
+| The current active manifest | The manifest, and every segment in its runs. |
+| The current deleted manifest (the namespace tombstone) | The tombstone, and every segment in its runs. |
+| Every recognized pin key in the complete listing | The manifest numbered in its ID, and every segment in that manifest. |
+| Every manifest below the current one whose immediate successor is younger than the ordinary grace `T` | The manifest, and every segment in its runs. |
+| The hint's observed manifest number | Every manifest number at or above it, so discovery can probe forward. (This root doesn't protect their runs.) |
+| The current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
-Pin bodies are not needed to identify these roots: the manifest number is part of the pin key. Bodies are normally read later for owner and expiry decisions. If a pin's manifest is absent, the collector reads the pin and applies the same owner and grace rules as pin cleanup. An absent or collectable pin does not require that missing basis; this permits recovery from failed installation cleanup and concurrent pin removal. A retained pin naming a missing manifest is corruption. Invalid or unreadable manifests still fail the pass. Each listed pin whose manifest is present protects its files for the whole pass, even if that pass deletes the pin.
+Pin bodies aren't needed to identify these roots, because the manifest number is part of the pin key. Bodies are normally read later, for owner and expiry decisions. If a pin's manifest is missing, the collector reads the pin and applies the same owner and grace rules as pin cleanup. An absent or collectable pin doesn't require that missing basis, which allows recovery from a failed installation cleanup or a concurrent pin removal. A retained pin that refers to a missing manifest is corruption, and invalid or unreadable manifests still fail the pass. Each listed pin whose manifest is present protects its files for the whole pass, even if that pass deletes the pin.
 
-A manifest below the current one stays a root while its immediate successor is younger than `T`, whether it is above or below the observed hint. The successor's age comes from its modification time in the manifest listing. A successor listed without a time counts as young. A successor absent from the listing does not make the older manifest a root. A reader or writer confirms its view with a successor check that finds the next manifest number absent, so that successor is created no earlier than the check. The view's manifest and every segment in its runs therefore stay for at least one grace after the check. A reader revalidates within `READ_REVALIDATION_BOUND_MS` of its previous check, and the writer confirms its basis at least once per `WAL_PUBLISH_BUDGET_MS` (sections 4.2 and 6.3). Both bounds are below the grace, and the clock allowance in section 11.4 is the margin.
+A manifest below the current one stays a root while its immediate successor is younger than `T`, whether it's above or below the observed hint. The successor's age comes from its modification time in the manifest listing. A successor listed without a time counts as young, and a successor missing from the listing doesn't make the older manifest a root.
 
-The tombstone retains its runs so an import from a deleted owner can still be authorized against its final access state. Retirement does not read those segments. Retirement eligibility follows section 9.5.
+The tombstone keeps its runs, so an import from a deleted owner can still be authorized against its final access state. Retirement doesn't read those segments (see [Retirement](#95-retirement)). Content objects have their own roots (see [Content roots](#119-content-roots)).
 
-Content objects have their own roots, defined in section 11.9.
+A retention floor can move past a pinned manifest's head sequence, and that doesn't remove the pin's protection. Reads through the pin use the pinned file set directly.
 
-A retention floor may pass a pinned manifest's head sequence. That does not remove its protection. Reads through the pin use the pinned file set directly.
+Why keep a superseded manifest for one grace? A reader or writer confirms its view with a successor check that finds the next manifest number missing, so that successor is created no earlier than the check. The view's manifest, and every segment in its runs, therefore stay for at least one grace after the check. A reader revalidates within `READ_REVALIDATION_BOUND_MS` of its previous check, and the writer confirms its basis at least once per `WAL_PUBLISH_BUDGET_MS` (see [Replaying the visible WAL](#42-replaying-the-visible-wal) and [Publication and group commit](#63-publication-and-group-commit)). Both bounds are below the grace, and the clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions) is the margin.
 
 ### 11.3 Candidate and age rules
 
-Being unreferenced makes an object a candidate; it does not make it immediately deletable. Provider age uses the modification time the listing reports. A candidate listed without a time is retained. Let `T` be the configured ordinary grace, which must be at least `GC_MIN_GRACE_WINDOW_MS`.
+Being unreferenced makes an object a candidate for deletion, but it doesn't make it deletable right away. Provider age uses the modification time that the listing reports, and a candidate listed without a time is kept. Let `T` be the configured ordinary grace, which MUST be at least `GC_MIN_GRACE_WINDOW_MS`.
 
 | Family | Conditions for deletion |
 | --- | --- |
-| Namespace manifest | Below the observed hint and not a root (section 11.2), with provider age at least `T`. |
-| WAL object in an active namespace | At or below `folded_wal_no`, with provider age at least `T`. |
-| WAL object in a deleted namespace | Provider age at least `T`; no current WAL is protected. |
+| Namespace manifest | Below the observed hint, not a root (see [Reference roots](#112-reference-roots)), and a provider age of at least `T`. |
+| WAL object in an active namespace | At or below `folded_wal_no`, and a provider age of at least `T`. |
+| WAL object in a deleted namespace | A provider age of at least `T` (no current WAL object is protected). |
 | Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
-| Pin record | Owner-specific rules in section 11.7. |
-| Upload session | Status-specific rules in section 11.6. |
-| Content object in an active namespace | No content root names it (section 11.9), with provider age at least `T`. |
-| Temporary object | Provider age at least `T`. |
-| An eligible tombstone’s owned content | Sections 9.5 and 11.8. |
+| Pin record | The owner-specific rules in [Pin cleanup](#117-pin-cleanup). |
+| Upload session | The status-specific rules in [Upload-session cleanup](#116-upload-session-cleanup). |
+| Content object in an active namespace | No content root refers to it (see [Content roots](#119-content-roots)), and a provider age of at least `T`. |
+| Temporary object | A provider age of at least `T`. |
+| An eligible tombstone's own content | See [Retirement](#95-retirement) and [Sweeping a retired owner's content](#118-sweeping-a-retired-owners-content). |
 
-The hint and current manifest are never swept. Unrecognized keys outside an eligible tombstone’s content prefix are retained by core GC. On an age-gated candidate, a missing provider timestamp or one in the future cannot establish sufficient age.
+The hint and the current manifest are never deleted. Core garbage collection keeps unrecognized keys outside an eligible tombstone's content prefix. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
 
-For example, a collector observing hint 8 and current manifest 10 keeps manifests 8–10 for discovery. It keeps the segments in manifest 10, in any pinned manifest, and in any manifest whose successor is younger than `T`, such as 9 when 10 is recent. If 9 is older than `T`, a segment mentioned only by 8 is a candidate. Such a segment still needs to exceed the segment minimum age before deletion.
+For example, suppose a collector observes hint 8 and current manifest 10. It keeps manifests 8, 9, and 10 for discovery. It keeps the segments in manifest 10, in any pinned manifest, and in any manifest whose successor is younger than `T` (such as manifest 9, if manifest 10 is recent). If manifest 9 is older than `T`, a segment that only manifest 8 lists is a candidate, but it still has to be older than the segment minimum age before it's deleted.
 
 ### 11.4 Clock and operation assumptions
 
-Ordinary age is calculated as `now_ms.saturating_sub(last_modified_ms)`. Safety therefore depends on a bound on age overstatement: the collector clock may be ahead of the provider, timestamps may have limited precision, and a process may pause around a publication check.
+Garbage collection decides by age, and an object's age is calculated as `now_ms.saturating_sub(last_modified_ms)`. So safety depends on a bound on how much an age can be overstated. The collector's clock might be ahead of the provider's, timestamps might have limited precision, and a process might pause around a publication check.
 
-The combined allowance is 180,000 milliseconds. This is one relative-clock, precision, and scheduling allowance, not three minutes for each participant. A provider ahead of the collector delays collection. Record-based ages use the corresponding bound between the collector and the host that recorded creation, expiry, or completion.
+The combined allowance (`GC_SAFETY_MARGIN_MS`) is 180,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not three minutes for each participant. A provider whose clock is ahead of the collector's only delays garbage collection. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
 
-Publication budgets use monotonic elapsed time, measured on a clock that continues through host sleep. The minimum ordinary grace covers the longer of the longest bounded publication and the revalidation bound plus the lifetime of a direct transfer capability, because a view up to that bound old can still issue a capability. It then adds the provider publication request bound and the combined allowance. Fork installation and streaming compaction reserve that grace within their respective lifetime bounds. Appendix C records the exact calculations.
+Publication budgets use monotonic elapsed time, on a clock that keeps running while the host sleeps. The minimum ordinary grace covers the longer of two times: the longest bounded publication, or the revalidation bound plus the lifetime of a direct transfer capability (a view up to that bound old can still issue a capability). It then adds the provider publication request bound and the combined allowance. Fork installation and streaming compaction reserve that grace within their own lifetime bounds. [Publication and collection timing](#c1-publication-and-collection-timing) records the exact calculations.
 
-If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout does not establish that a remote write had no effect; unknown outcomes still require reconciliation.
+If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout doesn't show that a remote write had no effect, so unknown outcomes still have to be reconciled. The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms the publication only while the budget hasn't expired. After that, the attempt can't rule out that its put was applied outside the provider bound, so the outcome stays unknown. The operation returns `outcome_unknown`, and the caller reloads and plans from the current state.
 
-The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms publication only while the budget has not expired. After that, the attempt cannot rule out that its put was applied outside the provider bound, so the outcome stays unknown: the operation answers `outcome_unknown`, and the caller reloads and plans from current state.
+The publication protocol depends on one assumption that the implementation can't check. A provider applies a request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of when the client started the operation that sent it. This is the provider time that the reclamation grace reserves, and it's an operational requirement on the provider. The protocol is safe under that assumption, for these reasons:
 
-The publication protocol depends on one assumption that the implementation cannot check: a provider applies a request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of the moment the client began the operation that sent it. This is the provider time that the reclamation grace reserves, and it is an operational requirement on the provider. The argument that depends on it runs as follows. A WAL object or manifest at number `n` is created no earlier than the observation that `n - 1` was the tip, because that observation found `n` absent. The object becomes collectable only a grace after its creation, and the grace is at least the longest budget plus the provider request bound plus the clock allowance. A put planned against that observation starts within its budget, and under the assumption the provider applies or rejects it within the request bound after that. So before `n` can be collected, the provider has applied or rejected every such put, and each has succeeded, failed, or been reported unknown. No put recreates a collected number. The budget check before a put keeps a stale observation from being used. The budget check after a put makes a late success unknown, so every acknowledged put was applied within its budget. The same two checks cover the epoch claim and other manifest puts under `METADATA_PUBLICATION_BUDGET_MS`, and the fence and data puts under `WAL_PUBLISH_BUDGET_MS`. The format keeps no durable record of the WAL and manifest numbers that have been used. Checking such a record would add a read to every commit acknowledgement and every current-state read, and it would remove only this assumption.
+1. A WAL object or manifest at number `n` is created no earlier than the observation that `n - 1` was the tip, because that observation found `n` missing.
+2. The object can be deleted only one grace after it's created, and the grace is at least the longest budget, plus the provider request bound, plus the clock allowance.
+3. A put planned against that observation starts within its budget, and (by the assumption) the provider applies or rejects it within the request bound after that.
+4. So before `n` can be deleted, the provider has applied or rejected every such put, and each one has succeeded, failed, or been reported as unknown. No put recreates a deleted number.
 
-Direct expiry checks do not add GC grace to the requested lifetime. A host ahead by `E` milliseconds can reject an expired upload or snapshot up to `E` milliseconds earlier than the creating host would. Reclamation grace protects concurrent publication; it does not synchronize expiry decisions across hosts.
+Two budget checks make this true. The check before a put stops a stale observation from being used, and the check after a put turns a late success into an unknown outcome, so every acknowledged put was applied within its budget. The same two checks cover the epoch claim and other manifest puts (under `METADATA_PUBLICATION_BUDGET_MS`), and the fence and data puts (under `WAL_PUBLISH_BUDGET_MS`). ([Alternatives considered](#13-alternatives-considered) explains why the format doesn't keep a record of used numbers instead.)
+
+Direct expiry checks don't add the grace to the requested lifetime. A host whose clock is `E` milliseconds ahead can reject an expired upload or snapshot up to `E` milliseconds earlier than the creating host would. The reclamation grace protects concurrent publication, and it doesn't synchronize expiry decisions across hosts.
 
 ### 11.5 Publication during collection
 
-A new pin from the current head is acknowledged only after its manifest identity is checked again following the pin write. This closes the race between collection's current-manifest read and its complete pin listing. A snapshot fork is protected by the snapshot pin or by the new fork pin written before the snapshot recheck.
+A new pin from the current head is acknowledged only after LoonFS checks its manifest's identity again, after the pin write. This closes the race between garbage collection's read of the current manifest and its complete pin listing (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)). A snapshot fork is protected by the snapshot pin, or by the new fork pin written before the snapshot is checked again.
 
-A collector protects every WAL number above its captured folded boundary. Writers must observe a cached tip within the publication budget before attempting its successor, by discovery or the confirmation in section 6.3. They cannot treat a much later reclaimed WAL number as a free publication slot. Readers have the matching obligation: a cold discovery trusts an absent successor only if the answer arrives within `READ_REVALIDATION_BOUND_MS` of its manifest probe, and a cached view trusts its probe answers only if they arrive within that bound of its previous successor probe (section 4.2). Metadata segments have the matching guarantee. A view that revalidates within its bound never lists a collected segment, because its manifest was current at its last successor check and stays a root for at least one grace after its successor appeared (section 11.2).
+A collector protects every WAL number above its captured folded boundary. Writers MUST observe a cached tip within the publication budget before they try to write its successor, by discovery or by the confirmation in [Publication and group commit](#63-publication-and-group-commit). So a writer can't treat a much later WAL number, whose object was deleted, as a free slot.
 
-New metadata segments remain protected by their minimum age while a publisher writes and verifies them. Streaming compaction must initiate publication before its budget expires, and every compaction checks its epoch and selected inputs. These rules apply to output that is not yet listed by a root captured earlier in the pass.
+Readers have the matching obligation. A cold discovery trusts a missing successor only if the answer arrives within `READ_REVALIDATION_BOUND_MS` of its manifest probe, and a cached view trusts its probe answers only if they arrive within that bound of its previous successor probe (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). Metadata segments have the matching guarantee. A view that revalidates within its bound never lists a deleted segment, because its manifest was current at its last successor check, and it stays a root for at least one grace after its successor appeared (see [Reference roots](#112-reference-roots)).
 
-A failed required-root read stops collection. An uncertain fork-target read retains that pin. Each cleanup operation must retain the durable evidence needed to retry after a failure.
+New metadata segments are protected by their minimum age while a publisher writes and verifies them. Streaming compaction MUST start its publication before its budget expires, and every compaction checks its epoch and its selected inputs. These rules apply to output that isn't yet listed by a root the pass captured earlier.
+
+A failed read of a required root stops garbage collection, and an uncertain read of a fork's target keeps that pin. Each cleanup operation MUST keep the durable evidence it needs to retry after a failure.
 
 ### 11.6 Upload-session cleanup
 
-Uploads are collected through their session records. Retirement under section 9.5 takes precedence over the session status rules. Section 11.9 defines when an active namespace's content is collected, and section 11.8 defines the content sweep of a retired one.
+Uploads are collected through their session records. Retirement (see [Retirement](#95-retirement)) takes precedence over the session status rules. [Content roots](#119-content-roots) defines when an active namespace's content is deleted, and [Sweeping a retired owner's content](#118-sweeping-a-retired-owners-content) defines the content sweep of a retired one.
 
 | Session and namespace | Action |
 | --- | --- |
-| Open session | Retain until expiry plus `T`; then CAS to `aborted` and clean content and provider transfer state. A lost CAS retains it. |
-| Aborted session | Retry content and provider cleanup; remove the record after abort time plus `T`. |
-| Completed session in an active namespace | Retain until content grace passes; then remove the record. Its content follows section 11.9. |
-| Session in a deleted namespace ineligible under section 9.5 | Retain; report a future retirement deadline, if any. |
-| Completed session in an eligible deleted namespace | Remove the record; no additional completion grace is required. The content sweep in section 11.8 removes its content. |
+| Open session | Keep it until its expiry plus `T`, then CAS it to `aborted` and clean up its content and provider transfer state. If the CAS loses, keep it. |
+| Aborted session | Retry content and provider cleanup, and remove the record after its abort time plus `T`. |
+| Completed session in an active namespace | Keep it until the content grace passes, then remove the record. Its content follows [Content roots](#119-content-roots). |
+| Session in a deleted namespace that isn't eligible for retirement | Keep it, and report a future retirement deadline, if there is one. |
+| Completed session in an eligible deleted namespace | Remove the record (no extra completion grace is required). The retirement sweep removes its content. |
 
-Before completion, a session owns its random content identity exclusively and cannot issue admission evidence. In active namespaces or eligible tombstones, cleanup first wins the terminal transition, then removes content and any provider transfer. Cleanup keeps the aborted record until abort time plus `T`, so a streamed write that passed its final ownership check before the abort still has a record when it finishes, and a later cleanup attempt can remove its object. A failed cleanup leaves the record for another attempt. Open and aborted sessions still require provider cleanup after namespace retirement because provider upload state can exist outside object listings.
+Before completion, a session exclusively owns its random content ID, and it can't issue admission evidence. In active namespaces and eligible tombstones, cleanup first wins the terminal transition, and then it removes the content and any provider transfer. Cleanup keeps the aborted record until its abort time plus `T`, so a streamed write that passed its final ownership check before the abort still has a record when it finishes, and a later cleanup attempt can remove its object. A failed cleanup leaves the record for another attempt. Open and aborted sessions still need provider cleanup after the namespace is retired, because provider upload state can exist outside object listings.
 
 Cleanup derives every content key and provider cleanup target from the namespace and content ID recorded when the session opened.
 
-A completed session's record is a content root (section 11.9). Once the record is removed, its content stays only while another root names it.
+A completed session's record is a content root (see [Content roots](#119-content-roots)). Once the record is removed, its content stays only while another root refers to it.
 
-The completed-content grace covers all possible admission evidence:
+The completed-content grace covers every possible piece of admission evidence:
 
 ```text
 completion
-    ├── receipt issuance window ──┤
-                                  ├── final token lifetime ──┤
-                                                             ├── minimum GC grace ──┤
-                                                                                   earliest cleanup
+|<-- receipt issuance window -->|
+                                |<-- final token lifetime -->|
+                                                             |<-- minimum GC grace -->|
+                                                                       earliest cleanup
 ```
 
 In milliseconds:
@@ -1066,140 +1407,181 @@ CONTENT_RECLAMATION_GRACE_MS
       + GC_MIN_GRACE_WINDOW_MS
 ```
 
-Every token mint checks the original completion time. A retained receipt cannot extend its issuance window. In-process proofs expire at the end of the admission window, and publication checks proof expiry immediately before the numbered WAL put. After the full grace, an unpublished upload cannot acquire a new valid first publication. Published content stays while a content root names it.
+Every token issue checks the original completion time, so a retained receipt can't extend its issuance window. In-process proofs expire at the end of the admission window, and publication checks proof expiry immediately before the numbered WAL put. After the full grace, an unpublished upload can't be committed for the first time. Published content stays while a content root refers to it.
 
 ### 11.7 Pin cleanup
 
-User and snapshot pins become collectable after expiry plus `T`, or creation plus `T` on a deleted namespace. A user pin with no expiry remains until explicit deletion in an active namespace. A retained user or snapshot pin reports the earlier of those times in `next_reclamation_at_ms`. Pin deletion is direct; IDs are never reused.
+User and snapshot pins become collectable after their expiry plus `T`, or after their creation plus `T` in a deleted namespace. A user pin with no expiry stays in an active namespace until it's explicitly deleted. A retained user or snapshot pin reports the earlier of those times in `next_reclamation_at_ms`. Pins are deleted directly, and pin IDs are never reused.
 
-For a fork pin naming target `T`:
+A fork pin is cleaned up based on its target namespace:
 
 | Condition | Decision |
 | --- | --- |
-| Inside its creation grace, less than `T` after its `created_at_ms`; or the target's current fork basis names this pin with the same manifest reference; or a target store read fails | Retain, including when the target is deleted. |
-| Target absent or its fork basis does not name this pin | Delete the abandoned installation’s pin. |
-| Target’s current fork basis names this pin with a different manifest reference | Fail with `namespace_corrupt`. |
+| The pin is inside its creation grace (less than `T` after its `created_at_ms`), the target's current fork basis refers to this pin with the same manifest reference, or a read of the target's store fails | Keep the pin, including when the target is deleted. |
+| The target is absent, or its fork basis doesn't refer to this pin | Delete the pin of the abandoned installation. |
+| The target's current fork basis refers to this pin with a different manifest reference | Fail with `namespace_corrupt`. |
 
-The source discovers the target’s current manifest through its hint. It reads no target WAL and performs no listing. Section 11.8 defines source-pin release.
+The source finds the target's current manifest through the target's hint. It reads no target WAL objects and makes no listings. [Sweeping a retired owner's content](#118-sweeping-a-retired-owners-content) defines when a source pin is released.
 
-A candidate pin that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, collection decides the pin under its owner's rules, including a fork pin's creation grace.
+A candidate pin that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, garbage collection decides the pin under its owner's rules, including a fork pin's creation grace.
 
 ### 11.8 Sweeping a retired owner's content
 
-After session cleanup, reclaim a tombstone eligible under section 9.5:
+After upload-session cleanup, garbage collection reclaims a tombstone that's eligible for retirement (see [Retirement](#95-retirement)) in two steps:
 
-1. List the namespace’s content prefix from Appendix A.8 and delete every listed key with bounded concurrency. Count listed keys whose deletion succeeds in `deleted.retired_content_objects`. Apply no additional age check. A listing or deletion failure ends the call before releasing the source pin.
-2. Delete the source pin named by the tombstone’s fork basis, if any. Count it only if it was present.
+1. List the namespace's content prefix (see [Object keys](#a8-object-keys)), and delete every listed key, with bounded concurrency. Count the listed keys whose deletion succeeds in `deleted.retired_content_objects`. No additional age check applies. A listing or deletion failure ends the call before the source pin is released.
+2. Delete the source pin that the tombstone's fork basis refers to, if there is one, and count it only if it was present.
 
-Content ownership follows section 1.5. A deleted namespace refuses upload capabilities and completion, and the retirement grace exceeds the lifetime of issued presigned URLs.
+Content ownership follows [File contents and ownership](#15-file-contents-and-ownership). A deleted namespace refuses upload capabilities and completion, and the retirement grace is longer than the lifetime of any issued presigned URL.
 
-Content and source-pin cleanup are idempotent. With no new objects, a later content sweep makes one empty LIST and no DELETE, and reports zero reclaimed objects. Retained roots follow section 11.2. Deleting listed content counts as maintenance progress. No progress record or journal is stored.
+Content and source-pin cleanup are idempotent. With no new objects, a later content sweep makes one empty LIST request and no DELETE requests, and it reports zero reclaimed objects. Retained roots follow [Reference roots](#112-reference-roots). Deleting listed content counts as maintenance progress, and no progress record or journal is stored.
 
 ### 11.9 Content roots
 
-In an active namespace `N`, a content object that `N` owns stays while a layout extent names that object or a tail or session root names its chain:
+In an active namespace `N`, a content object that `N` owns is kept while a layout extent refers to that object, or a tail or session root refers to its chain:
 
-| Root | Content it names |
+| Root | Content it protects |
 | --- | --- |
-| A layout view: the current manifest, every pinned manifest, and every manifest whose immediate successor is younger than `T` under section 11.2 | The objects of every extent, owned by `N`, of every `content_layouts` row. |
-| `N`'s unfolded WAL tail | Every chain named by an `append_file_revision` delta, and every extent owned by `N` in the tail row state's layouts. |
+| A layout view: the current manifest, every pinned manifest, and every manifest whose immediate successor is younger than `T` (see [Reference roots](#112-reference-roots)) | The objects of every extent, owned by `N`, in every `content_layouts` row. |
+| `N`'s unfolded WAL tail | Every chain that an `append_file_revision` delta refers to, and every extent owned by `N` in the layouts of the tail's row state. |
 | An upload session record in `N`, whatever its status | The session's `content_id`. |
 
-Collection considers every other content object under `namespaces/N/content/` for deletion once its provider age is at least `T`, subject to the conservative filter below. It keeps an object younger than `T` and a key that does not parse as a content object key. Layout views are considered in root order. A view whose layout segments are already covered by the views kept earlier adds no scan. Views with the same layout segment set are scanned only once per scan. A first scan finds extents whose content id differs from their row's. It inserts their object keys into a Bloom filter. A second scan reads disjoint id ranges, one shard at a time, and protects the exact extent object keys in that shard. Tail and session ids protect every object of their chains. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (section 11.4).
+Garbage collection considers every other content object under `namespaces/N/content/` for deletion once its provider age is at least `T`, subject to the shared base filter described below. It keeps an object younger than `T`, and a key that doesn't parse as a content object key.
 
-The shared base filter has no false negatives. A false positive retains an unreferenced object for this pass. The pass's supplied `now_ms` seeds the filter, so a pass with a different clock uses a different seed. The filter uses xxh64 double hashing and seven probes. Its initial expected entry count is the current manifest's layout row count, with a minimum of one. Each insertion counts toward the current level's expectation, including repeated keys. When an insertion would exceed that expectation, the filter adds a level with twice the expectation and a seed derived from the pass seed and the level index. A key matches the filter when any level matches. Each level is sized at ten bits per expected entry. A filter with `n` levels has roughly `n` times the single-level false-positive rate. The sum of the levels' allocations is capped at 64 MiB, separate from read working memory. If the initial level or a new level would exceed the cap, collection logs the limit and skips the active namespace's content sweep. An initial allocation over the cap skips the shared base scan; growth over the cap stops it. Neither case lists content. Other families still sweep.
+To find the protected objects, the pass:
 
-A tail revision delta may omit its layout only when its commit carries a piece at offset 0, or carries a piece that continues a chain with an existing revision. In the second case, the base remains the inode's head until the append folds, so retention keeps that revision and layout compaction keeps the chain's row.
+1. Considers the layout views in root order. A view whose layout segments are already covered by the views kept earlier adds no scan, and views with the same set of layout segments are scanned only once.
+2. Scans for extents whose content ID is different from their row's (shared base extents, which can point into any shard), and inserts their object keys into a Bloom filter.
+3. Scans disjoint content ID ranges, one shard at a time, and protects the exact extent object keys in that shard.
 
-A fork's source pin roots the inherited revisions and layouts in the owner's namespace.
+Tail and session IDs protect every object of their chains. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
 
-The pass lists upload sessions before it reads the WAL tail. A session record is removed only after any admission evidence it could issue has expired (section 11.6). A session the pass does not list was either created after the listing or removed before it. Content of a session created later is younger than `T`. Every commit that names content of a removed session landed before the tail was read, so the tail or a rooted manifest names that content.
+The shared base filter follows these rules:
 
-A deleted namespace keeps its content until it retires. Section 11.8 then removes its whole content prefix.
+- It has no false negatives. A false positive keeps an unreferenced object for this pass.
+- The pass's `now_ms` seeds the filter, so a pass with a different clock uses a different seed.
+- It uses xxh64 double hashing and seven probes.
+- Its initial expected entry count is the current manifest's layout row count, with a minimum of one. Each insertion counts toward the current level's expectation, including repeated keys. When an insertion would exceed that expectation, the filter adds a level with twice the expectation and a seed derived from the pass seed and the level index. A key matches the filter when any level matches.
+- Each level is sized at ten bits per expected entry, so a filter with `n` levels has roughly `n` times the false-positive rate of one level.
+- The levels' total size is limited to 64 MiB, separate from read working memory. If the initial level or a new level would exceed the limit, garbage collection logs it and skips the active namespace's content sweep. (An initial allocation over the limit skips the shared base scan, and growth over the limit stops it.) Neither case lists content, and other families are still swept.
+
+Why does the pass scan twice? The exact keys for one shard fit in bounded memory, but a shared base extent refers to an object of another chain, which can be in any shard. The first scan collects those keys into the filter, so the second scan can protect them whichever shard they fall in.
+
+A tail revision delta can leave out its layout only when its commit includes a piece at offset 0, or a piece that continues a chain with an existing revision. In the second case, the base stays the inode's head until the append is folded, so retention keeps that revision, and layout compaction keeps the chain's row.
+
+A fork's source pin protects the inherited revisions and layouts in the owner's namespace.
+
+The pass lists upload sessions before it reads the WAL tail. A session record is removed only after any admission evidence it could issue has expired (see [Upload-session cleanup](#116-upload-session-cleanup)). A session that the pass doesn't list was either created after the listing or removed before it. The content of a session created later is younger than `T`, and every commit that refers to the content of a removed session succeeded before the tail was read, so the tail or a protected manifest refers to that content.
+
+A deleted namespace keeps its content until it's retired. [Sweeping a retired owner's content](#118-sweeping-a-retired-owners-content) then removes its whole content prefix.
 
 ## 12. Encodings, versions, and extensions
 
-Storage versions describe how durable objects are interpreted and operated on. API versions describe request and response contracts. They are related, but a change to one is not automatically a change to the other.
+This section describes how durable objects are encoded and versioned, and how extensions store their own state.
+
+Storage versions describe how durable objects are interpreted and operated on, and API versions describe request and response contracts. They're related, but a change to one isn't automatically a change to the other.
 
 ### 12.1 Field conventions
 
-Durable field names and enum values use `snake_case`. Tagged unions use `kind`. A `status` field describes a resource lifecycle, while `phase` describes computation progress; the values of either use `kind` when they are tagged objects.
+Durable field names and enum values use `snake_case`, and tagged unions use `kind`. A `status` field describes a resource's lifecycle, and a `phase` field describes the progress of a computation. When the values of either are tagged objects, they use `kind`.
 
-Identifier fields use `_id`. A `_seq` is a position in namespace commit history, a `_no` is a counter scoped to its resource, an `_index` is a zero-based collection position, and a `_number` is a one-based position defined by a provider or tool.
+Field name suffixes have these meanings:
 
-An absent optional object field is omitted when writing. A required value is written even when it is zero, false, or an empty collection. Fingerprint preimages have their own explicit absence rules in Appendix B; they are not ordinary durable records.
+| Suffix | Meaning |
+| --- | --- |
+| `_id` | An identifier. |
+| `_seq` | A position in the namespace's commit history. |
+| `_no` | A counter scoped to its resource. |
+| `_index` | A zero-based position in a collection. |
+| `_number` | A one-based position defined by a provider or tool. |
 
-Durable inode IDs are integers. Public API inode strings such as `ino_42` do not change the stored ID representation. The canonical fingerprint rules explicitly identify the few contexts where public strings are part of the preimage.
+An absent optional object field is left out when it's written. A required value is written even when it's zero, false, or an empty collection. Fingerprint preimages have their own explicit absence rules (see [Appendix B](#appendix-b-semantic-commit-fingerprints)), because they aren't ordinary durable records.
+
+Durable inode IDs are integers. Public API inode strings, such as `ino_42`, don't change the stored representation. The canonical fingerprint rules identify the few places where public strings are part of the preimage.
 
 ### 12.2 Envelopes and checksums
 
-Structured control records, manifests, and WAL objects use an envelope with `kind`, `format_version`, `payload_checksum`, and `payload`. Content objects are raw file bytes. Block segments use the sectioned encoding in Appendix A instead of an envelope.
+Structured control records, manifests, and WAL objects use an envelope with `kind`, `format_version`, `payload_checksum`, and `payload`. Content objects are raw file bytes. Block segments use the sectioned encoding in [Block-segment encoding](#a7-block-segment-encoding) instead of an envelope.
 
-JSON envelopes retain the payload as an inline raw JSON fragment. A WAL envelope contains the encoded CBOR payload as a CBOR byte string. The enclosing document is compressed with zstd. The checksum covers the payload bytes that were stored, not a decoded object serialized again by the reader.
+A JSON envelope keeps its payload as an inline raw JSON fragment. A WAL envelope contains its encoded CBOR payload as a CBOR byte string, and the whole document is compressed with zstd. The checksum covers the payload bytes as they were stored, not a decoded object that the reader serialized again.
 
-Decoders identify the kind and supported version before interpreting the payload. They verify the exact payload checksum before decoding its fields. Unknown kinds, unsupported versions, malformed payloads, and checksum failures are errors; none is a reason to substitute another object.
+Decoders identify the kind and the supported version before they interpret the payload, and they verify the exact payload checksum before they decode its fields. Unknown kinds, unsupported versions, malformed payloads, and checksum failures are errors, and none of them is a reason to use another object instead.
 
-Envelope and manifest-reference digests are encoded as `sha256:<64 lowercase hex>`. A content, object, or part checksum uses `{ "algorithm": ..., "value": ... }` because its algorithm is selected by the store. A block handle has a numeric `crc32c` field because that algorithm is fixed by its block format. Commit fingerprints additionally name their canonicalization scheme.
+Envelope and manifest-reference digests are encoded as `sha256:<64 lowercase hex>`. A content, object, or part checksum uses `{ "algorithm": ..., "value": ... }`, because the store selects its algorithm. A block handle has a numeric `crc32c` field, because the block format always uses CRC32C. Commit fingerprints also identify their canonicalization scheme.
 
-Per-block CRC32C verifies ranged block reads against their handles. Envelope digests verify complete payloads. Neither an unauthenticated checksum nor an object name is an authorization mechanism.
+Per-block CRC32C checksums verify ranged block reads against their handles, and envelope digests verify complete payloads. Neither an unauthenticated checksum nor an object name is an authorization mechanism.
 
 ### 12.3 Strict decoding and evolution
 
-Authoritative durable envelopes and their nested payloads reject unknown fields. This includes immutable objects: WAL folding and compaction re-encode their contents, so accepting an unknown field and dropping it in a successor would lose durable meaning.
+Authoritative durable envelopes, and their nested payloads, reject unknown fields. That includes immutable objects, because folds and compaction encode their contents again, so accepting an unknown field and dropping it from a successor would lose durable meaning.
 
-`ContentRef` and `Checksum` are closed shapes wherever they appear. Each content kind and each checksum algorithm is its own closed shape. A new kind or algorithm is a new shape. Unknown content kinds and checksum algorithms are rejected. A new content kind requires a supported version change for every durable family containing that reference.
+`ContentRef` and `Checksum` are closed shapes wherever they appear. Each content kind and each checksum algorithm is its own closed shape, and a new kind or algorithm is a new shape. Unknown content kinds and checksum algorithms are rejected, and a new content kind requires a supported version change for every durable family that contains the reference.
 
-API request bodies also reject unknown fields, including nested fields, so a misspelled precondition cannot silently become a request without that precondition. Response bodies generally tolerate additions, except for shared closed shapes. The companion API specification defines those transport rules.
+API request bodies also reject unknown fields, including nested fields, so a misspelled precondition can't quietly become a request without that precondition. Response bodies generally tolerate additions, except for shared closed shapes. The API specification defines those transport rules.
 
-The owning envelope's `format_version` governs its entire payload, including nested objects and collection semantics. A payload does not add an independent format-version field. A metadata segment is a separate object. Its descriptor's `encoding` is the segment's own version, and it covers both the block layout of Appendix A.7 and the row-kind schema of Appendix A.6. Because each segment carries its own encoding, one manifest may list segments of different encodings. Compaction migrates the rows it rewrites to the encoding of the segments it writes. The encoding is not a version of the manifest payload; the manifest version governs the descriptor itself. A `commit` row carries the deltas of its WAL commit record, so the `commits` family's encoding changes whenever the WAL delta vocabulary changes. A reader rejects a manifest that names an encoding it does not support, before it opens any segment. Grep segments are interpreted under the version of the grep manifest that references them. A name such as `blob_v1` identifies a closed content strategy; it is not permission to ignore the owning family's version.
+Versions work like this:
 
-After the stable format is released, a change to a field's name, presence, type, tag, encoding, or governed semantics requires a new owning-family version. Collection-protocol changes can require a version gate even when most stored fields remain unchanged. An implementation must not operate on a newer protocol merely because it can deserialize a subset of its fields. The rule applies to every role that mutates durable state: publishing a successor manifest or WAL object, compacting, creating or changing pins, advancing retention, collecting, and maintaining an extension. Each of those roles loads the current manifest before it publishes, or is fenced by the epoch that a newer binary claims when it first publishes, and an unsupported version is rejected at load. A process that was running when a newer version was published therefore stops mutating durable state at its next publication attempt, and a collection pass stops at its next start.
+- The owning envelope's `format_version` governs its whole payload, including nested objects and collection semantics. A payload doesn't add its own format-version field.
+- A metadata segment is a separate object. Its descriptor's `encoding` is the segment's own version, and it covers both the block layout ([Block-segment encoding](#a7-block-segment-encoding)) and the row-kind schema ([Metadata rows and row keys](#a6-metadata-rows-and-row-keys)). Each segment has its own encoding, so one manifest can list segments of different encodings, and compaction migrates the rows it rewrites to the encoding of the segments it writes. The encoding isn't a version of the manifest payload (the manifest's version governs the descriptor itself).
+- A `commit` row contains the deltas of its WAL commit record, so the `commits` family's encoding changes whenever the WAL delta vocabulary changes.
+- A reader rejects a manifest that refers to an encoding it doesn't support, before it opens any segment.
+- Grep segments are interpreted under the version of the grep manifest that references them.
+- A name such as `blob_v1` identifies a closed content strategy, and it isn't permission to ignore the owning family's version.
 
-A reader accepts every released version of a family up to its own and rejects a newer one. Segment encodings follow the same rule. Pins and fork bases freeze manifests by checksum and keep their segments for as long as any pin or fork lives, so objects written by any earlier release can stay in use. A writer emits the lowest version that can express the object it writes. An upgraded binary therefore writes objects that an older binary can read until an object needs a newer version.
+After the stable format is released, a change to a field's name, presence, type, tag, encoding, or governed meaning requires a new version of the owning family. A change to the garbage collection protocol can require a version gate, even when most stored fields stay the same. An implementation MUST NOT operate on a newer protocol just because it can deserialize some of its fields. This rule applies to every role that changes durable state: publishing a successor manifest or WAL object, compacting, creating or changing pins, advancing retention, garbage collection, and maintaining an extension. Each of those roles loads the current manifest before it publishes, or is fenced by the epoch that a newer binary claims when it first publishes, and an unsupported version is rejected when it's loaded. So a process that was running when a newer version was published stops changing durable state at its next publication attempt, and a garbage collection pass stops at its next start.
 
-Golden fixtures pin the reference encodings in `crates/loonfs-types/tests/golden_formats.rs` and the grep fixtures. Fingerprint vectors additionally pin canonical JSON bytes and digests. Validating a new release requires preserving the meaning of retained data, not just recompiling its type definitions.
+A reader accepts every released version of a family up to its own, and it rejects a newer one. Segment encodings follow the same rule. Pins and fork bases capture manifests by checksum, and they keep their segments for as long as any pin or fork lives, so objects written by any earlier release can stay in use. A writer writes the lowest version that can express the object it writes, so an upgraded binary writes objects that an older binary can read until an object needs a newer version.
 
-Appendix A lists the family versions. A binary rollback is valid only if the older binary supports every stored family version and its associated protocol. Downgrading the binary does not convert stored data.
+Golden fixtures pin the reference encodings in `crates/loonfs-types/tests/golden_formats.rs` and the grep fixtures, and fingerprint vectors also pin canonical JSON bytes and digests. Validating a new release means preserving the meaning of retained data, not just recompiling its type definitions.
+
+[Family versions](#a1-family-versions) lists the family versions. A binary rollback is valid only if the older binary supports every stored family version and its protocol. Downgrading the binary doesn't convert stored data.
 
 ### 12.4 Extensions
 
-An optional derived subsystem stores its objects below:
+An optional derived subsystem, such as grep, stores its objects under:
 
 ```text
 namespaces/{namespace_id}/extensions/{name}/
 ```
 
-It defines its own object grammar, versions, discovery and publication rules, and collection rules. Core manifests contain no generic extension registry or extension-state fields. Core reads do not require support for the extension's encoding. Core collectors do not delete extension objects.
+An extension defines its own object grammar, versions, discovery and publication rules, and garbage collection rules. Core manifests contain no generic extension registry and no extension-state fields. Core reads don't require support for an extension's encoding, and core garbage collection doesn't delete extension objects.
 
-An extension must remain rebuildable from authoritative core state. Its absence cannot make the core namespace unreadable. The grep extension is specified separately in Appendix D, including its manifest, tokenizer, postings, and GC behavior.
+An extension MUST stay rebuildable from authoritative core state, and its absence can't make the core namespace unreadable. [Appendix D](#appendix-d-grep-extension-format) specifies the grep extension, including its manifest, tokenizer, postings, and garbage collection.
 
 ### 12.5 Reserved functionality
 
-Version 1 defines the inode kinds `file` and `dir`. The kind `link` is reserved, not defined. A link is an inode with exactly one parent binding and an immutable target inode id. Path resolution substitutes the target for the link. Version 1 has no row, delta, or operation for links.
+Version 1 defines the inode kinds `file` and `dir`. The kind `link` is reserved, not defined. A link would be an inode with exactly one parent binding and an immutable target inode ID, and path resolution would use the target in place of the link. Version 1 has no row, delta, or operation for links.
 
-In version 1, an inode never has more than one parent binding. For a directory the rule is permanent: bindings that give a directory several parents are outside the format in every version.
+In version 1, an inode never has more than one parent binding. A directory can never have more than one parent, in any version of the format.
 
-Mount creation and traversal are not defined by this version; no standard operation creates a mount.
+This version doesn't define mount creation or traversal, and no standard operation creates a mount.
 
-The naming mode `labels` is reserved. In such a namespace, names would be labels: siblings could share a name, and path routes would answer `not_supported`. This version does not define it, and a manifest with that mode is invalid.
+The naming mode `labels` is reserved. In a namespace with that mode, names would be labels, so siblings could share a name, and path routes would return `not_supported`. This version doesn't define it, and a manifest with that mode is invalid.
+
+## 13. Alternatives considered
+
+This section describes designs that were considered for the format and the reasons they weren't used. The design notes cover narrower choices: [commit history](../design/commit-history.md#alternatives-considered), [inline small content](../design/inline-small-content.md#alternatives-considered), and [directory bindings](../design/directory-bindings.md#costs-and-alternatives).
+
+- **A writer lease.** A writer could take a lease with an expiry time instead of an epoch. A new writer would then have to wait for the old lease to expire before it could take over. With epochs and fences, a new writer can take over at any time, and correctness depends only on conditional writes (see [Writer ownership](#61-writer-ownership)).
+- **A durable record of used WAL and manifest numbers.** Recording every number that was used would remove the provider timing assumption in [Clock and operation assumptions](#114-clock-and-operation-assumptions), because a deleted number could never be mistaken for a free one. But checking the record would add a read to every commit acknowledgement and every read of the current state, and it would remove only that one assumption.
 
 ## Appendix A. Durable records and byte encodings
 
-This appendix is the field and encoding reference for the protocols above. Field names are literal. A `?` after a field in a table means the object member is optional and omitted when absent; the question mark is not part of its stored name.
+This appendix is the field and encoding reference for the protocols above. Field names are literal. A `?` after a field in a table means the object member is optional and is left out when absent (the question mark isn't part of its stored name).
 
 ### A.1 Family versions
 
-The three control-object kinds are `hint`, `pin`, and `upload_session`.
+There are three kinds of control object: `hint`, `pin`, and `upload_session`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
 | WAL object | `wal_object` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
 | Namespace manifest | `manifest` | Uncompressed JSON | 1 |
 | Namespace hint | `hint` | Uncompressed JSON | 1 |
-| Metadata segment | No envelope | Block sections described in A.7, holding the rows described in A.6 | 1, named by the segment descriptor's `encoding` |
+| Metadata segment | No envelope | Block sections (see [A.7](#a7-block-segment-encoding)), containing the rows in [A.6](#a6-metadata-rows-and-row-keys) | 1, given by the segment descriptor's `encoding` |
 | Pin record | `pin` | Uncompressed JSON | 1 |
 | Upload session | `upload_session` | Uncompressed JSON | 1 |
-| Content object | No envelope | Immutable extent bytes | A layout names whole and span objects for a `blob_v1` chain prefix |
+| Content object | No envelope | Immutable extent bytes | Not versioned. A layout lists the whole and span objects for a `blob_v1` chain prefix. |
 | Grep hint | `grep_hint` | Uncompressed JSON | 1 |
 | Grep manifest | `grep_manifest` | Uncompressed JSON | 1 |
 | Grep segment | No envelope | Block sections with grep rows | Governed by grep manifest version 1 |
@@ -1210,30 +1592,30 @@ An envelope contains these fields:
 
 | Field | Representation |
 | --- | --- |
-| `kind` | Family discriminator string. |
-| `format_version` | Unsigned family-version integer. |
+| `kind` | The family's discriminator string. |
+| `format_version` | The family's version, as an unsigned integer. |
 | `payload_checksum` | `sha256:` followed by 64 lowercase hexadecimal characters. |
-| `payload` | Raw JSON sub-document for JSON families; CBOR byte string containing the encoded payload for WAL. |
+| `payload` | A raw JSON sub-document for JSON families, or a CBOR byte string containing the encoded payload for the WAL. |
 
-For JSON, hash the UTF-8 bytes of the stored payload fragment, including its internal whitespace and spelling. Do not parse and re-serialize the payload to calculate its stored checksum. The enclosing envelope's whitespace is not part of that payload checksum.
+For JSON, the checksum is the SHA-256 of the UTF-8 bytes of the stored payload fragment, including its internal whitespace and spelling. Don't parse and re-serialize the payload to calculate its checksum. The enclosing envelope's whitespace isn't part of the payload checksum.
 
-For WAL, serialize the payload to CBOR, hash those bytes, store them as the envelope's CBOR byte string, and zstd-compress the envelope. The digest does not cover the compressed representation or a second encoding of the decoded payload.
+For the WAL, serialize the payload to CBOR, hash those bytes, store them as the envelope's CBOR byte string, and zstd-compress the envelope. The digest doesn't cover the compressed representation, or a second encoding of the decoded payload.
 
-A reader first identifies the declared kind and version, then validates the envelope and checksum, then interprets the payload under the supported schema. Field and protocol validation still applies after a checksum succeeds. A matching checksum does not make an inconsistent record valid.
+A reader first identifies the declared kind and version, then validates the envelope and checksum, and then interprets the payload under the supported schema. Field and protocol validation still apply after the checksum matches, because a matching checksum doesn't make an inconsistent record valid.
 
 ### A.3 Content references and checksums
 
-A `blob_v1` reference contains all of the following fields:
+A `blob_v1` reference contains all of these fields:
 
 | Field | Meaning |
 | --- | --- |
 | `kind` | `blob_v1`. |
-| `owner_namespace_id` | Namespace that originally wrote the object. |
+| `owner_namespace_id` | The namespace that originally wrote the content. |
 | `content_id` | `con_` followed by 32 random lowercase hexadecimal characters. |
-| `size_bytes` | Length of the file: the prefix of the content object the reference names. |
-| `checksum` | Algorithm and digest of those bytes. |
+| `size_bytes` | The length of the file, which is the prefix of the chain that the reference identifies. |
+| `checksum` | The algorithm and digest of those bytes. |
 
-For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single LF at the end, have this reference shape. The ID is illustrative, while the size and CRC-64/NVME are calculated from those bytes:
+For example, the 15 UTF-8 bytes `Hello, LoonFS!\n` (ending in a single LF) have this reference. The ID is illustrative, while the size and CRC-64/NVME checksum are calculated from those bytes:
 
 ```json
 {
@@ -1248,7 +1630,7 @@ For example, the 15 UTF-8 bytes represented by `Hello, LoonFS!\n`, with a single
 }
 ```
 
-Section 1.5 defines content identity and key derivation.
+[File contents and ownership](#15-file-contents-and-ownership) defines content identity and key derivation.
 
 A checksum is `{ "algorithm": <name>, "value": <lowercase hex> }`:
 
@@ -1257,11 +1639,11 @@ A checksum is `{ "algorithm": <name>, "value": <lowercase hex> }`:
 | `crc64nvme` | 16 hexadecimal characters |
 | `crc32c` | 8 hexadecimal characters |
 
-Coverage is defined by the containing field. A content reference covers the prefix it names. An upload-content claim covers the complete object. A multipart part checksum covers one part. An algorithm selector without a value is not itself a checksum. Provider encodings are converted to this representation before constructing the stored value.
+What a checksum covers depends on the field that contains it. A content reference's checksum covers the prefix it identifies, an upload-content claim covers the complete object, and a multipart part checksum covers one part. An algorithm selector without a value isn't a checksum. Provider encodings are converted to this representation before the stored value is built.
 
 ### A.4 Control and manifest payloads
 
-The following tables list the durable payload fields. Their transition rules are in the protocol chapters.
+These tables list the durable payload fields. The protocol sections define how they change.
 
 | Payload | Fields |
 | --- | --- |
@@ -1272,59 +1654,61 @@ The following tables list the durable payload fields. Their transition rules are
 | Pin record | `namespace_id`, `pin_id`, `head_seq`, `payload_checksum`, `created_at_ms`, `owner` |
 | Upload session | `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, `mode`, `status` |
 
-Namespace status is `{"kind":"active"}` or `{"kind":"deleted"}` with required `deleted_at_ms` only on the deleted variant. Missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
+Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
-Pin owners have the fields in section 8.1. There is no status field on a pin. Upload status is `open` with `expires_at_ms`, `completed` with `completed_at_ms`, `content_ref`, or `aborted` with `aborted_at_ms`. The mode remains present in every status. A service-proxied mode contains `staging`; direct PUT contains `checksum_algorithm`; direct multipart contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`. Staging is `idle`, `claimed`, or `staged` with `content_ref`. All these variants use `kind` tags.
+Pin owners have the fields in [Records and owners](#81-records-and-owners), and a pin has no status field. Upload sessions use these tagged variants, and all of them use `kind` tags:
+
+- Status: `open` with `expires_at_ms`, `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`.
+- Mode, which is present in every status: `service_proxied` contains `staging`, `direct_put` contains `checksum_algorithm`, and `direct_multipart` contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`.
+- Staging: `idle`, `claimed`, or `staged` with `content_ref`.
 
 A namespace manifest contains:
 
 | Field | Meaning |
 | --- | --- |
-| `namespace_id` | Namespace described by the manifest. |
-| `created_at_ms` | Namespace creation time. |
-| `created_by` | Application-supplied actor that created or forked the namespace. |
-| `access` | Access mode, immutable for the namespace: `{"kind":"unrestricted"}`, or `{"kind":"acl"}` with `principal_scope` and `root_grants`. |
-| `naming` | Naming mode, immutable for the namespace: `"case_insensitive"` or `"case_sensitive"` (section 1.4). |
-| `fork_basis?` | Source reference and pin identity, immutable for the namespace. |
-| `status` | Active or deleted state for this namespace. |
-| `writer?` | Diagnostic writer block. |
-| `folded_wal_no` | Highest local WAL number incorporated into the file set. |
-| `manifest_no` | Positive number matching the object key. |
-| `compactor_epoch` | Current compaction authority. |
-| `head_seq` | Materialized head sequence; on deletion, the final namespace sequence. |
-| `activity` | Required cumulative activity counters defined in section 7.4. |
-| `writer_epoch` | Current writer authority. |
-| `next_inode_id` | First inode ID available at the recorded boundary. |
-| `next_run_no` | Next run number to allocate. |
-| `retention_floor_seq` | Earliest sequence covered by incremental replay and row retention. |
-| `runs` | Complete list of materialized metadata runs. |
+| `namespace_id` | The namespace that the manifest describes. |
+| `created_at_ms` | The namespace's creation time. |
+| `created_by` | The application-supplied actor that created or forked the namespace. |
+| `access` | The access mode, which can't change after creation: `{"kind":"unrestricted"}`, or `{"kind":"acl"}` with `principal_scope` and `root_grants`. |
+| `naming` | The naming mode, which can't change after creation: `"case_insensitive"` or `"case_sensitive"` (see [Names and paths](#14-names-and-paths)). |
+| `fork_basis?` | The source reference and pin identity, which can't change after creation. |
+| `status` | Whether the namespace is active or deleted. |
+| `writer?` | The diagnostic writer block. |
+| `folded_wal_no` | The highest local WAL number included in the file set. |
+| `manifest_no` | A positive number that matches the object key. |
+| `compactor_epoch` | The current compaction authority. |
+| `head_seq` | The materialized head sequence (on deletion, the final namespace sequence). |
+| `activity` | The required cumulative activity counters (see [Statistics](#74-statistics)). |
+| `writer_epoch` | The current writer authority. |
+| `next_inode_id` | The first inode ID available at the recorded boundary. |
+| `next_run_no` | The next run number to allocate. |
+| `retention_floor_seq` | The earliest sequence covered by incremental replay and row retention. |
+| `runs` | The complete list of materialized metadata runs. |
 
-A run contains `run_no`, `run_seq`, `tier`, and `segments`. Tier is `delta` or `base`. A segment descriptor contains:
+A run contains `run_no`, `run_seq`, `tier`, and `segments`, and its tier is `delta` or `base`. A segment descriptor contains:
 
 | Field | Meaning |
 | --- | --- |
-| `owner_namespace_id` | Namespace storing the segment. |
-| `segment_id` | Immutable generated segment identity. |
-| `family` | Metadata row family. |
-| `encoding` | Required unsigned integer that names the segment's version, which covers its block layout and its rows. The value is 1. |
-| `row_count` | Positive number of stored rows. |
-| `min_row_key`, `max_row_key` | Inclusive key range. |
-| `index_block`, `filter_block` | Index and filter handles. |
-| `filter_inline?` | Exact stored filter bytes as lowercase hexadecimal. |
+| `owner_namespace_id` | The namespace that stores the segment. |
+| `segment_id` | The segment's immutable generated identity. |
+| `family` | The metadata row family. |
+| `encoding` | A required unsigned integer that is the segment's version, which covers its block layout and its rows. The value is 1. |
+| `row_count` | A positive number of stored rows. |
+| `min_row_key`, `max_row_key` | The inclusive key range. |
+| `index_block`, `filter_block` | The index and filter handles. |
+| `filter_inline?` | The exact stored filter bytes, as lowercase hexadecimal. |
 
-The oldest non-empty run sequence defines `base_seq`; with no such run, it equals `head_seq`. It is not stored. Segments follow their list order within each family.
-
-The owner and segment ID determine the object key. The descriptor stores no separate path or compaction-job identity.
+`base_seq` is the oldest non-empty run's sequence, or `head_seq` when there's no such run, and it isn't stored. Segments follow their list order within each family. The owner and segment ID determine the object key, and the descriptor stores no separate path or compaction-job identity.
 
 ### A.5 WAL records
 
-`MAX_WAL_OBJECT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every WAL object within this limit through request and batch admission; readers refuse larger documents. A writer composes each batch so the sum of its requests' bounds plus the document overhead stays within the limit. This is a format constraint because every successful publication must remain readable with bounded decompression.
+`MAX_WAL_OBJECT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every WAL object within this limit through request and batch admission, and readers refuse larger documents. A writer builds each batch so that the sum of its requests' bounds, plus the document overhead, stays within the limit. This is a format constraint, because every successful publication MUST stay readable with bounded decompression.
 
 A WAL object's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_seq`, `next_inode_id`, and `records`.
 
-For a data WAL object, `prior_head_seq` is derived with checked subtraction from the first record sequence. `records` covers the sequences after it through `head_seq` contiguously. A first sequence of zero is invalid. The WAL number must match the key, and the allocation high-water mark must agree with replay. A fence has an empty record list and an unchanged head and allocator. Its derived `prior_head_seq` equals `head_seq`. Fences participate in WAL numbering and epoch validation but produce no logical changes.
+For a data WAL object, `prior_head_seq` is derived (with checked subtraction) from the first record's sequence, and `records` covers the sequences after it through `head_seq`, without gaps. A first sequence of 0 is invalid. The WAL number MUST match the key, and the allocation high-water mark MUST agree with replay. A fence has an empty record list and an unchanged head and allocator, so its derived `prior_head_seq` equals `head_seq`. Fences take part in WAL numbering and epoch validation, but they produce no logical changes.
 
-Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, optional `message`, `deltas`, and optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`. The latter is a kind-tagged object with these fields:
+Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, an optional `message`, `deltas`, and an optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`, which is a kind-tagged object with these fields:
 
 | Delta kind | Fields after `kind` |
 | --- | --- |
@@ -1337,27 +1721,32 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
 | `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
-A delta's own commit sequence is implicit in its containing commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event the delta retires or revokes. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
+A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes or revokes. A deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear.
 
-A revision delta may omit `layout` only when the commit carries a piece at offset 0 for its content ID, or carries a piece for a chain that already has a revision in the planning view. The same-chain case is safe because the base remains the inode's head until the append folds, so retention keeps a revision that names the chain and layout compaction cannot prune its row. A piece at offset 0 forbids a layout. A present layout validates against its own `size_bytes()`. Its extents may name other owners and content IDs. Its size equals the lowest offset of the commit's pieces for that content ID, or the reference's `size_bytes` if the commit carries no piece for it. A failed check is `InvalidWalRevisionLayout`. Upload evidence supplies one whole extent. Copies, restores, and fresh chains carry the required prefix from the planning view. Validation writes any pending pieces needed by that prefix through the fold's content materialization before admitting the reference. The returned layout names those objects even if compaction later removes the source chain's row.
+A revision delta's `layout` follows these rules:
 
-`inline_content` is a list of pieces `{content_id, offset, bytes}`, where `bytes` is a CBOR byte string that the chain holds from `offset`. The field is omitted when empty and defaults to an empty list when absent. The reference a piece accompanies is an ordinary `blob_v1` reference. A whole value is a piece at offset 0. A piece past offset 0 continues an existing chain, or starts a fresh chain whose delta carries the layout of the first `offset` bytes. An append to zero bytes starts a fresh content ID with a whole value. A chain of zero bytes is never appended to, so its download grant can sign no range (see the [API specification][api-spec]).
+- It can be left out only when the commit includes a piece at offset 0 for its content ID, or a piece for a chain that already has a revision in the planning view. The same-chain case is safe, because the base stays the inode's head until the append is folded, so retention keeps a revision that refers to the chain, and layout compaction can't prune its row.
+- A piece at offset 0 rules out a layout.
+- A present layout validates against its own `size_bytes()`, and its extents can refer to other owners and content IDs. Its size equals the lowest offset of the commit's pieces for that content ID, or the reference's `size_bytes` if the commit includes no piece for it. A failed check is `InvalidWalRevisionLayout`.
+- Upload evidence provides one whole extent. Copies, restores, and new chains include the required prefix from the planning view. Before it admits the reference, validation writes any pending pieces that prefix needs to content objects, the same way a fold does. The resulting layout refers to those objects even if compaction later removes the source chain's row.
 
-Encoding and decoding enforce these rules using only the WAL object:
+`inline_content` is a list of pieces, `{content_id, offset, bytes}`, where `bytes` is a CBOR byte string that the chain contains starting at `offset`. The field is left out when it's empty, and it defaults to an empty list when absent. The reference that a piece goes with is an ordinary `blob_v1` reference. A whole value is a piece at offset 0. A piece past offset 0 continues an existing chain, or starts a new chain whose delta includes the layout of the first `offset` bytes. An append to zero bytes starts a new content ID with a whole value. A chain of zero bytes is never appended to, so its download grant can sign no range (see the [API specification][api-spec]).
 
-1. Every entry's `content_id` is named by an `append_file_revision` delta in the same commit whose `content_ref.owner_namespace_id` equals the WAL object's `namespace_id`.
+Encoding and decoding enforce these rules, using only the WAL object:
+
+1. Every entry's `content_id` is referenced by an `append_file_revision` delta in the same commit, whose `content_ref.owner_namespace_id` equals the WAL object's `namespace_id`.
 2. The entries for one content ID in one commit, ordered by offset, are contiguous, and the last one ends at the largest `size_bytes` of those references. A zero-length entry is valid.
-3. A delta without pieces for its content ID requires a layout. A first piece past offset 0 permits an absent layout; a present layout covers exactly `[0, offset)`. A first piece at offset 0 forbids a layout. The planner checks that a fresh chain carries a layout, because the decoder cannot see earlier revisions.
-4. A commit holds at most one entry per content ID and offset.
-5. Each entry contains at most `MAX_WAL_INLINE_CONTENT_BYTES`: 256 KiB (262,144 bytes), and the sum of all entry lengths in one WAL object is at most `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES`: 4 MiB (4,194,304 bytes).
+3. A delta without pieces for its content ID requires a layout. A first piece past offset 0 allows an absent layout, and a present layout covers exactly `[0, offset)`. A first piece at offset 0 rules out a layout. The planner checks that a new chain includes a layout, because the decoder can't see earlier revisions.
+4. A commit contains at most one entry per content ID and offset.
+5. Each entry contains at most `MAX_WAL_INLINE_CONTENT_BYTES` (256 KiB, or 262,144 bytes), and the sum of all entry lengths in one WAL object is at most `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES` (4 MiB, or 4,194,304 bytes).
 
-These are reader limits; writer thresholds are policy at or below them. `MAX_WAL_OBJECT_BYTES` still limits the complete decompressed document. A delta may name content with no inline entry. Replay does not hash pieces against the reference's checksum; the envelope's `payload_checksum` covers the stored payload bytes. The decoder cannot check whether the objects a layout names exist. A read or fold that finds their bytes missing reports corruption.
+These are reader limits, and writer thresholds are policy at or below them. `MAX_WAL_OBJECT_BYTES` still limits the complete decompressed document. A delta can refer to content that has no inline entry. Replay doesn't hash pieces against the reference's checksum, because the envelope's `payload_checksum` covers the stored payload bytes. The decoder can't check whether the objects a layout refers to exist, so a read or fold that finds their bytes missing reports corruption.
 
-WAL replay applies these normalized records in sequence and delta order. It does not re-run the original request's preconditions or reinterpret the request under a newer planner.
+WAL replay applies these normalized records in sequence and delta order. It doesn't run the original request's preconditions again, or interpret the request again under a newer planner.
 
 ### A.6 Metadata rows and row keys
 
-Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and the row-family ordering are separate: the same `direntry_binding` row appears in both binding families.
+Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and the row-family ordering are separate, so the same `direntry_binding` row appears in both binding families.
 
 | Row kind | Fields after `kind` |
 | --- | --- |
@@ -1372,17 +1761,17 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
 
-A `commit` row is the WAL commit record of A.5 without its inline content. The `inline_content` field is omitted, and a row that carries one is invalid.
+A `commit` row is the WAL commit record from [WAL records](#a5-wal-records), without its inline content. The `inline_content` field is left out, and a row that includes one is invalid.
 
 For a directory binding, `state` is `{"kind":"bound","display_name":...}` or `{"kind":"unbound"}`. Both binding families store the complete row.
 
-For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke target is a `DeltaPosition` value `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`. A revoke action is `{"kind":"revoke","target":...}`.
+For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke target is a `DeltaPosition` value, `{seq, delta_index}`. A set action is `{"kind":"set","deleted_binding":...}`, and a revoke action is `{"kind":"revoke","target":...}`.
 
-An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`. A `removed` action contains `revocation_seq`. These are nested action fields, not additional top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode. A `listed` action without it fails decoding.
+An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `revocation_seq`. These are nested action fields, not extra top-level fields on every active-deletion row. The `inode_kind` is copied from the deleted root inode, and a `listed` action without it fails decoding.
 
-The fixed row-key prefixes are followed by hyphen-separated components. Unsigned 64-bit components use 20 decimal digits and unsigned 32-bit components use 10, with leading zeroes. Variable names and commit IDs are the lowercase hexadecimal encoding of their UTF-8 bytes. Content-layout keys use the content ID directly. This avoids interpreting a name's own punctuation as a component delimiter.
+Each row key starts with its family's prefix, followed by hyphen-separated components. Unsigned 64-bit components use 20 decimal digits, and unsigned 32-bit components use 10, with leading zeros. Variable names and commit IDs are the lowercase hexadecimal encoding of their UTF-8 bytes, so a name's own punctuation is never read as a component separator. Content-layout keys use the content ID directly.
 
-In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction before fixed-width decimal encoding. They are not literal text in a key.
+In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction before the fixed-width decimal encoding. They aren't literal text in a key.
 
 | Family | Row key |
 | --- | --- |
@@ -1398,31 +1787,45 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `attributes` | `attribute-{inode_id:020}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id:020}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
-The two binding families hold the same edge events in two orders. An edge is a parent, a name key, and a child. The slot index sorts a slot's rows by child and then by position, oldest first. The child index sorts a child's rows by parent, then by name key, and then by position, oldest first. Key order is therefore not position order within a slot or a child. A read selects the greatest visible position among a slot's rows or a child's rows. Compaction groups both families by edge. While it scans one edge, it holds at most one candidate floor row. It also carries the last edge bound at the floor across the edges of one slot in the slot index, and across the edges of one child in the child index. One child per slot and one parent per child are rules that commit validation enforces (section 1.3). A second child bound in one slot at the floor, or a second parent bound for one child at the floor, is corruption, and compaction refuses it.
+The two binding families contain the same edge events in two orders (an edge is a parent, a name key, and a child):
 
-Ascending byte order scans an inode's file revisions, attributes, and access rows newest-first. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry. The stored widths are still ten digits.
+- The slot index sorts a slot's rows by child, and then by position, oldest first.
+- The child index sorts a child's rows by parent, then by name key, and then by position, oldest first.
 
-Bloom filters use the following keys, which are not always full row keys:
+So key order isn't position order within a slot or a child, and a read selects the greatest visible position among a slot's rows or a child's rows.
+
+Compaction groups both families by edge. While it scans one edge, it keeps at most one candidate floor row. It also tracks the last edge bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index. Commit validation enforces one child per slot and one parent per child (see [Directory bindings](#13-directory-bindings)), so a second child bound in one slot at the floor, or a second parent bound for one child at the floor, is corruption, and compaction refuses it.
+
+Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
+
+Bloom filters use these keys, which aren't always full row keys:
 
 | Family | Filter key |
 | --- | --- |
-| `inodes` | Complete row key |
+| `inodes` | The complete row key |
 | `direntry_binds` | `direntry-bind-{parent_inode_id:020}-{name_key_hex}` |
 | `direntry_child_binds` | `direntry-child-bind-{child_inode_id:020}` |
 | `revisions` | `revision-{inode_id:020}` |
 | `tombstones` | `tombstone-{root_inode_id:020}` |
-| `active_deletions` | Complete row key |
+| `active_deletions` | The complete row key |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}` |
-| `commits` | Complete row key |
+| `commits` | The complete row key |
 | `content_layouts` | `content-layout-{content_id}` |
 | `attributes` | `attribute-{inode_id:020}` |
 | `access` | `access-{inode_id:020}` |
 
-A layout row records the chain's objects as of the commit or fold that wrote its bytes. The first row under a content id's prefix is the longest layout, and among equal lengths the newest. Shorter rows are superseded. Compaction keeps the first row per ID in its inputs, subject to the pruning rule in section 10.3. A layout row's `size_bytes` is the layout's size, which can differ from the reference's size.
+A layout row records a chain's objects as of the commit or fold that wrote its bytes. The first row under a content ID's prefix is the longest layout (the newest, among layouts of equal length), and shorter rows are superseded. Compaction keeps the first row for each ID in its inputs, subject to the pruning rule in [Row retention during a base compaction](#103-row-retention-during-a-base-compaction). A layout row's `size_bytes` is the layout's size, which can be different from the reference's size.
 
-A `layout` contains `extents` in chain order. Each extent contains `owner_namespace_id`, `content_id`, `object`, `offset`, and `length`. The object is `{"kind":"whole"}` or `{"kind":"span","start":...,"end":...}`. Lengths sum to `size_bytes`. Each length is positive. Zero bytes require exactly one whole extent of length zero. Each owner namespace and content ID must be valid. Span bounds satisfy `start < end`. The extent's object range fits within `end - start`. A shared prefix can shorten the extent without changing the span key. Readers honor nonzero object offsets.
+A `layout` contains `extents`, in chain order. Each extent contains `owner_namespace_id`, `content_id`, `object`, `offset`, and `length`, and its object is `{"kind":"whole"}` or `{"kind":"span","start":...,"end":...}`. A layout MUST follow these rules:
 
-The family groups are fixed:
+- The lengths add up to `size_bytes`, and each length is positive.
+- Zero bytes require exactly one whole extent of length zero.
+- Each owner namespace and content ID is valid.
+- Span bounds satisfy `start < end`, and the extent's object range fits within `end - start`.
+
+A shared prefix can shorten an extent without changing its span key, and readers honor nonzero object offsets.
+
+The family groups are:
 
 | Group | Members |
 | --- | --- |
@@ -1448,26 +1851,26 @@ A segment is a concatenation of independently readable sections:
 [zstd index block]
 ```
 
-There is no segment header or footer. The manifest descriptor supplies the filter and index handles; the index supplies the data-block handles. A segment cannot be opened from its own bytes without the necessary descriptor information.
+There's no segment header or footer. The manifest descriptor provides the filter and index handles, and the index provides the data-block handles, so a segment can't be opened from its own bytes without the descriptor.
 
-A metadata segment descriptor's `encoding` names the version of this layout and of the rows its data blocks hold. Grep segments take their version from the grep manifest that references them.
+A metadata segment descriptor's `encoding` is the version of this layout and of the rows its data blocks contain. Grep segments take their version from the grep manifest that references them.
 
-Each handle is an encoded object with the following fields:
+Each handle is an encoded object with these fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `offset` | `u64` | Zero-based byte offset in the complete segment. |
-| `stored_bytes` | `u32` | Number of stored bytes in the section. |
-| `decoded_bytes` | `u32` | Expected length after decompression, or the uncompressed length for a filter. |
-| `crc32c` | `u32` | CRC32C of the exact stored section bytes. |
+| `offset` | `u64` | The zero-based byte offset in the complete segment. |
+| `stored_bytes` | `u32` | The number of stored bytes in the section. |
+| `decoded_bytes` | `u32` | The expected length after decompression (for a filter, the uncompressed length). |
+| `crc32c` | `u32` | The CRC32C of the exact stored section bytes. |
 
-The verified put checks the whole object at write time.
+The verified put checks the whole object when it's written.
 
-For each section, the returned byte count must match `stored_bytes`, the stored-byte CRC must match `crc32c`, and the decoded length must match `decoded_bytes`. Both lengths fit in `u32`. Readers stop decompression after at most `decoded_bytes + 1` bytes. The extra byte reports a decoded-length mismatch without expanding the rest of an invalid section. This caps decompressed output, not vector capacity or the total memory of decoded rows and parser state. Appendix C.4 describes initial allocation sizing.
+Each section MUST pass three checks: the returned byte count matches `stored_bytes`, the CRC of the stored bytes matches `crc32c`, and the decoded length matches `decoded_bytes`. Both lengths fit in `u32`. Readers stop decompressing after at most `decoded_bytes + 1` bytes, so the extra byte reports a decoded-length mismatch without expanding the rest of an invalid section. This limits the decompressed output, but not vector capacity or the total memory of decoded rows and parser state. [Reference-implementation sizing and admission defaults](#c4-reference-implementation-sizing-and-admission-defaults) describes initial allocation sizing.
 
 #### Data blocks
 
-Before compression, a data block consists of entries, a restart-offset array, and a four-byte restart count. An entry contains:
+Before compression, a data block is made up of entries, a restart-offset array, and a four-byte restart count. An entry contains:
 
 ```text
 shared_prefix_len     unsigned LEB128
@@ -1477,17 +1880,17 @@ row_len               unsigned LEB128
 row                    row_len CBOR bytes
 ```
 
-The key is the first `shared_prefix_len` bytes of the preceding key followed by `key_suffix`. The prefix must end on a valid UTF-8 boundary. Keys are in ascending order. The generic block grammar can represent adjacent equal keys; the metadata-run uniqueness rule still applies to metadata producers.
+The key is the first `shared_prefix_len` bytes of the previous key, followed by `key_suffix`. The prefix MUST end on a valid UTF-8 boundary, and keys are in ascending order. The block grammar can represent adjacent equal keys, but the uniqueness rule for metadata runs still applies to metadata producers.
 
-The first entry and every sixteenth entry thereafter begin a restart and encode the full key with a zero shared-prefix length. The restart array contains their offsets relative to the start of the entry region, each as a little-endian `u32`. Readers verify each offset and reject missing or unused offsets. These restarts limit shared-prefix reconstruction to groups of sixteen rows. The array is followed by its count, also a little-endian `u32`. Entries and restart data are compressed together as one zstd section.
+The first entry, and every sixteenth entry after it, starts a restart and encodes the full key with a shared-prefix length of zero. The restart array contains their offsets relative to the start of the entry region, each as a little-endian `u32`. Readers verify each offset and reject missing or unused offsets. Restarts limit shared-prefix reconstruction to groups of sixteen rows. The array is followed by its count, also a little-endian `u32`, and the entries and restart data are compressed together as one zstd section.
 
-The same entry and restart layout applies to metadata and grep data blocks.
+Metadata and grep data blocks use the same entry and restart layout.
 
-Writers encode unsigned LEB128 values with seven payload bits per byte and the high bit indicating continuation. The last byte has no continuation bit. Encoded values fit in `u64`; in a ten-byte encoding only one payload bit is available in the final byte. The writer uses the shortest representation of each value.
+Writers encode unsigned LEB128 values with seven payload bits per byte, and with the high bit set when another byte follows. The last byte has no continuation bit. Encoded values fit in `u64`, so in a ten-byte encoding, only one payload bit is available in the final byte. The writer uses the shortest representation of each value.
 
 #### Filter block
 
-The filter is uncompressed and has this byte layout:
+The filter is uncompressed, and it has this byte layout:
 
 ```text
 n_hashes              u32, little-endian
@@ -1495,50 +1898,50 @@ bit_len               u64, little-endian
 bits                  ceil(bit_len / 8) bytes
 ```
 
-Version 1 requires `n_hashes` to be seven and `bit_len` to be at least 64. Readers reject other header values before probing. The reference producer reserves ten bits per inserted filter key, with a minimum of 64 bits. Repeated filter keys count as separate insertions for sizing. The number of stored bit-array bytes must equal `ceil(bit_len / 8)`.
+Version 1 requires `n_hashes` to be seven and `bit_len` to be at least 64, and readers reject other header values before probing. The reference producer reserves ten bits per inserted filter key, with a minimum of 64 bits, and repeated filter keys count as separate insertions for sizing. The number of stored bit-array bytes MUST equal `ceil(bit_len / 8)`.
 
-Hashing is XXH64 over the filter key's UTF-8 bytes, with two fixed seeds:
+Hashing is XXH64 over the filter key's UTF-8 bytes, with two constant seeds:
 
 ```text
 h1 = XXH64(key, seed = 0)
 h2 = XXH64(key, seed = 0x9e3779b97f4a7c15)
 ```
 
-For each probe `i` from zero through `n_hashes - 1`, calculate `(h1 + i * h2)` with unsigned 64-bit wrapping arithmetic, then take the remainder modulo `bit_len`. Bit `b` is stored in byte `b / 8` at the mask `1 << (b % 8)`.
+For each probe `i` from zero through `n_hashes - 1`, calculate `(h1 + i * h2)` with unsigned 64-bit wrapping arithmetic, and then take the remainder modulo `bit_len`. Bit `b` is stored in byte `b / 8`, at the mask `1 << (b % 8)`.
 
-A valid negative filter result can skip the segment for that lookup. It does not replace row-level visibility rules for a positive result.
+A valid negative filter result means the lookup can skip the segment. A positive result doesn't replace the row-level visibility rules.
 
-When `filter_inline` is present in the descriptor, it is the lowercase hexadecimal encoding of these exact stored filter bytes. The inline value must have the filter handle's stored length and checksum. Its presence does not remove the filter block from the segment. A reader without an inline copy fetches the section by its handle.
+When `filter_inline` is present in the descriptor, it's the lowercase hexadecimal encoding of these exact stored filter bytes, and it MUST have the filter handle's stored length and checksum. Its presence doesn't remove the filter block from the segment, and a reader without an inline copy fetches the section by its handle.
 
 #### Index block
 
 The decoded index is a CBOR list. Each entry contains `last_row_key` and `block`, where `block` is the corresponding data-block handle. The list is zstd-compressed as one section.
 
-Index entries are ordered by their last keys. Data-block byte ranges are contiguous and must not overflow. The filter immediately follows the data region, and the index immediately follows the filter at the end of the object. The descriptor's handles must agree with that layout.
+Index entries are ordered by their last keys. Data-block byte ranges are contiguous and MUST NOT overflow. The filter comes right after the data region, and the index comes right after the filter, at the end of the object. The descriptor's handles MUST agree with that layout.
 
-A range lookup uses the last keys to identify candidate blocks. Readers verify each fetched section before decoding its rows and apply the descriptor's family and key-range constraints.
+A range lookup uses the last keys to find candidate blocks. Readers verify each fetched section before they decode its rows, and they apply the descriptor's family and key-range constraints.
 
 ### A.8 Object keys
 
-These patterns define the core object families. Segment owners can differ from the namespace reading them.
+These patterns define the core object families. A segment's owner can be different from the namespace that reads it.
 
-| Family | Standard object key pattern |
+| Family | Object key pattern |
 | --- | --- |
-| **WAL objects** | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
-| **Namespace manifests** | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json` |
-| **Pin records** | `namespaces/{namespace_id}/pins/{pin_id}.json` |
-| **Metadata segments** | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
-| **Upload sessions** | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
-| **Hint** | `namespaces/{namespace_id}/hint.json` |
-| **Content objects** | `namespaces/{owner_namespace_id}/content/{content_id}` |
-| **Content span objects** | `namespaces/{owner_namespace_id}/content/{content_id}-{start:020}-{end:020}` |
-| **Temporary objects** | `namespaces/{namespace_id}/temporary/{temporary_id}` |
+| WAL objects | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
+| Namespace manifests | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json` |
+| Pin records | `namespaces/{namespace_id}/pins/{pin_id}.json` |
+| Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
+| Upload sessions | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
+| Hint | `namespaces/{namespace_id}/hint.json` |
+| Content objects | `namespaces/{owner_namespace_id}/content/{content_id}` |
+| Content span objects | `namespaces/{owner_namespace_id}/content/{content_id}-{start:020}-{end:020}` |
+| Temporary objects | `namespaces/{namespace_id}/temporary/{temporary_id}` |
 
 ## Appendix B. Semantic commit fingerprints
 
 A commit fingerprint is stored as `v1:sha256:<64 lowercase hex>`. The scheme identifies the canonicalization rules below, not the API's general-purpose JSON serialization.
 
-The fingerprint is the SHA-256 of compact UTF-8 JSON with the following top-level fields in this exact order:
+The fingerprint is the SHA-256 of compact UTF-8 JSON with these top-level fields, in this exact order:
 
 ```text
 {
@@ -1552,13 +1955,13 @@ The fingerprint is the SHA-256 of compact UTF-8 JSON with the following top-leve
 }
 ```
 
-The layout above is a schema illustration. Actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present and is `[]` for an empty list; `message` and `subject_id` are always present and are `null` when absent.
+The layout above illustrates the schema, and the actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present (and `[]` for an empty list), and `message` and `subject_id` are always present (and `null` when absent).
 
-The `namespace_id`, `actor_id`, `subject_id`, message, operation order, and caller preconditions are significant. A changed `actor_id` is a changed logical request even if a different process is otherwise retrying on behalf of the same application. The principal scope is excluded because the namespace has one scope and refuses every other. The commit ID itself, writer epoch, and committed timestamp are excluded.
+The `namespace_id`, `actor_id`, `subject_id`, message, operation order, and caller preconditions are all significant. A changed `actor_id` is a changed logical request, even if a different process is retrying on behalf of the same application. The principal scope isn't included, because a namespace has one scope and refuses every other. The commit ID itself, the writer epoch, and the commit timestamp aren't included either.
 
 ### B.1 Operation fields
 
-Every operation begins with `kind`, followed by the fields in the order below. Every listed field is written, including unset optional fields as `null` and default booleans or behavior values explicitly.
+Every operation starts with `kind`, followed by the fields in the order below. Every listed field is written, including unset optional fields (as `null`) and default booleans or behavior values.
 
 | Kind | Fields after `kind`, in order |
 | --- | --- |
@@ -1583,9 +1986,9 @@ Every operation begins with `kind`, followed by the fields in the order below. E
 | `update_access` | `path`, `boundary`, `grants`, `expected_inode_id`, `expected_access_revision_no` |
 | `update_access_by_inode` | `inode_id`, `boundary`, `grants`, `expected_access_revision_no` |
 
-Paths use their validated canonical absolute form. Display-name fields contain one validated component. Inode IDs in these operation shapes use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers. Binding versions retain their opaque string representation.
+Paths use their validated canonical absolute form, and display-name fields contain one validated component. Inode IDs in these operations use their numeric storage representation, not public `ino_` strings. Sequence and revision numbers are JSON integers, and binding versions keep their opaque string representation.
 
-Attribute `set` keys are sorted by lexicographic UTF-8 byte order. The `remove` list is sorted and deduplicated. Operation order is not sorted or otherwise changed.
+Attribute `set` keys are sorted in lexicographic UTF-8 byte order, and the `remove` list is sorted and deduplicated. The order of operations isn't sorted or otherwise changed.
 
 ### B.2 Content in a fingerprint
 
@@ -1595,19 +1998,19 @@ A content reference is represented by exactly these fields, in this order:
 {"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":15}
 ```
 
-The owner namespace and checksum are excluded from the preimage. The delta's `layout` is also excluded. It records physical placement, not request identity. Every reference a commit can admit is owned by the committing namespace. The owner repeats the `namespace_id` the preimage already names. The checksum is verification evidence rather than a second identity. Both fields are still present and validated on the actual reference; their exclusion from the fingerprint does not make them optional on a commit.
+The owner namespace and the checksum aren't included in the preimage, and neither is the delta's `layout`, which records physical placement, not request identity. Every reference a commit can admit is owned by the committing namespace, so the owner would repeat the `namespace_id` that the preimage already includes. The checksum is verification evidence, not a second identity. Both fields are still present and validated on the actual reference (leaving them out of the fingerprint doesn't make them optional on a commit).
 
-Two uploads of identical bytes have different IDs and different fingerprints. A retry reuses the original reference rather than repeating the upload and substituting a new one.
+Two uploads of identical bytes have different IDs, so they have different fingerprints. A retry reuses the original reference, instead of repeating the upload and using a new one.
 
-Content that a commit carries inline has no object to name, so it is identified by its bytes. Each operation whose reference names inline content uses this form in its `content_ref` member instead:
+Content that a commit includes inline has no object to refer to, so it's identified by its bytes. Each operation whose reference is for inline content uses this form in its `content_ref` member instead:
 
 ```json
 {"kind":"inline_v1","sha256":"<64 lowercase hex>","size_bytes":15}
 ```
 
-`sha256` is the lowercase hexadecimal SHA-256 of the complete content, and the fields appear in the order shown. The fingerprint hashes the request bytes independently of the content reference's checksum. The content ID and owner are excluded. The form follows how the request supplied the content, not where the bytes are stored: content supplied inline keeps this form if the writer stages it instead, and staged or uploaded content always keeps the reference form. The same bytes sent once inline and once as an uploaded object produce different fingerprints.
+`sha256` is the lowercase hexadecimal SHA-256 of the complete content, and the fields appear in the order shown. The fingerprint hashes the request bytes separately from the content reference's checksum, and the content ID and owner aren't included. The form follows how the request provided the content, not where the bytes are stored. Content provided inline keeps this form even if the writer stages it, and staged or uploaded content always keeps the reference form. So the same bytes, sent once inline and once as an uploaded object, produce different fingerprints.
 
-The bytes an append adds have no reference until the writer plans the commit, so the `inline_content` member of `append_file` and `append_file_by_inode` uses a third form:
+The bytes an append adds don't have a reference until the writer plans the commit, so the `inline_content` member of `append_file` and `append_file_by_inode` uses a third form:
 
 ```json
 {"kind":"append_v1","sha256":"<64 lowercase hex>","size_bytes":6}
@@ -1617,7 +2020,7 @@ The bytes an append adds have no reference until the writer plans the commit, so
 
 ### B.3 Preconditions
 
-The precondition list appears after `message` and retains caller order without sorting or deduplication. Each precondition starts with `kind`, followed by:
+The precondition list comes after `message`, and it keeps the caller's order, without sorting or deduplication. Each precondition starts with `kind`, followed by:
 
 | Kind | Fields after `kind`, in order |
 | --- | --- |
@@ -1630,15 +2033,15 @@ The precondition list appears after `message` and retains caller order without s
 | `path_absence` | `path` |
 | `name_absence` | `parent_inode_id`, `display_name` |
 
-Precondition inode IDs use their numeric storage representation, not public `ino_` strings. Every listed field is written. Optional fields are `null` when absent.
+Precondition inode IDs use their numeric storage representation, not public `ino_` strings. Every listed field is written, and optional fields are `null` when absent.
 
-Precondition sequence and revision values are JSON integers. Paths use validated absolute spelling, display names use one validated component, and binding versions remain opaque strings. Preconditions affect request identity and validation; they add no separate WAL field or replay delta.
+Precondition sequence and revision values are JSON integers. Paths use their validated absolute spelling, display names use one validated component, and binding versions stay opaque strings. Preconditions affect request identity and validation, but they add no separate WAL field or replay delta.
 
 ### B.4 Strings, integers, and example bytes
 
-Non-ASCII characters are encoded directly as UTF-8. JSON quotes, backslashes, and control characters are escaped; `/` is not escaped. Integers use decimal digits without leading zeroes. The fixed field order above is retained; it is not a general instruction to sort every JSON object's fields alphabetically.
+Non-ASCII characters are encoded directly as UTF-8. JSON quotes, backslashes, and control characters are escaped, and `/` isn't escaped. Integers use decimal digits without leading zeros. The field order above is kept as specified (it isn't a general instruction to sort every JSON object's fields alphabetically).
 
-For example, the following is the complete canonical preimage for one directory-creation request. There is no trailing newline in the bytes being hashed:
+For example, this is the complete canonical preimage for one directory-creation request. The hashed bytes have no trailing newline:
 
 ```json
 {"domain":"loonfs.commit.semantic.v1","namespace_id":"demo","actor_id":"usr_8f3c","operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"preconditions":[]}
@@ -1650,33 +2053,33 @@ Its fingerprint is:
 v1:sha256:a64ec097a98f4c881c3770868ad31e77efd8ec9fedb6101672de2091311666ba
 ```
 
-A one-operation convenience call and a one-element commit request use the same canonical input. The wire request can omit defaults that the canonical operation writes explicitly; its raw request JSON is not the fingerprint preimage.
+A one-operation convenience call and a one-element commit request use the same canonical input. The wire request can leave out defaults that the canonical operation writes explicitly, so its raw request JSON isn't the fingerprint preimage.
 
-The complete shared vectors are in [commit_fingerprints_v1.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without binding versions, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders must preserve those exact bytes and digests.
+The complete shared vectors are in [commit_fingerprints_v1.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without binding versions, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders MUST preserve those exact bytes and digests.
 
 ## Appendix C. Timing and size reference
 
-Publication and collection use the timing relationships below. Configurable sizing targets are listed separately in C.4. The reference values are defined in the [limits module][limits-source].
+Publication and garbage collection use the timing relationships below, and [C.4](#c4-reference-implementation-sizing-and-admission-defaults) lists the configurable sizing targets separately. The [limits module][limits-source] defines the reference values.
 
 ### C.1 Publication and collection timing
 
-| Constant | Milliseconds | Interpretation |
+| Constant | Milliseconds | Meaning |
 | --- | ---: | --- |
-| `WAL_PUBLISH_BUDGET_MS` | 60,000 | Observing the planning tip through initiation of its next numbered put. |
-| `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | Start of a bounded manifest publication, including an epoch claim, through initiation of its put. |
-| `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | Shared client-operation retry budget. |
-| `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One control-operation attempt. |
-| `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | Retry budget, final backoff, and payload-sized final request. |
-| `GC_SAFETY_MARGIN_MS` | 180,000 | Combined relative-clock, timestamp-precision, and scheduling allowance. |
-| `GC_MIN_GRACE_WINDOW_MS` | 2,490,000 | Derived minimum ordinary collection grace. |
-| `READ_REVALIDATION_BOUND_MS` | 1,155,000 | Longest gap between a view's previous basis confirmation and the answer to its next successor check. |
-| `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | Default configured ordinary grace. |
-| `UNREFERENCED_SEGMENT_MIN_AGE_MS` | 86,400,000 | Segments must be strictly older than this before unreferenced collection. |
-| `METADATA_COMPACTION_BUDGET_MS` | 83,910,000 | Maximum elapsed time before initiating streaming publication. |
-| `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | Lifetime of a direct transfer capability. |
-| `NAMESPACE_RETIREMENT_GRACE_MS` | 3,645,000 | Minimum grace from the deletion call clock. |
+| `WAL_PUBLISH_BUDGET_MS` | 60,000 | From observing the planning tip to starting the next numbered put. |
+| `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | From the start of a bounded manifest publication (including an epoch claim) to starting its put. |
+| `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | The shared retry budget for a client operation. |
+| `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One attempt of a control operation. |
+| `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | The retry budget, the final backoff, and a payload-sized final request. |
+| `GC_SAFETY_MARGIN_MS` | 180,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
+| `GC_MIN_GRACE_WINDOW_MS` | 2,490,000 | The derived minimum ordinary garbage collection grace. |
+| `READ_REVALIDATION_BOUND_MS` | 1,155,000 | The longest gap between a view's previous basis confirmation and the answer to its next successor check. |
+| `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | The default configured ordinary grace. |
+| `UNREFERENCED_SEGMENT_MIN_AGE_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
+| `METADATA_COMPACTION_BUDGET_MS` | 83,910,000 | The longest time before a streaming compaction starts its publication. |
+| `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a direct transfer capability. |
+| `NAMESPACE_RETIREMENT_GRACE_MS` | 3,645,000 | The minimum grace after the deletion call's clock. |
 
-A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (section 3.1). Conditional WAL and manifest writes can still exceed the payload threshold in their one request. The publication allowance therefore reserves 120 + 15 + 120 seconds, not the 30-second small-request timeout. This is a request-phase allowance, not a bound on response-body consumption. It retains the relative-clock and scheduling assumptions and does not prove that a timed-out remote mutation had no effect.
+A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, and then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (see [Required operations](#31-required-operations)), but a conditional WAL or manifest write can still be larger than the payload threshold in its one request. So the publication allowance reserves 120 + 15 + 120 seconds, not the 30-second timeout for small requests. The allowance covers the request phase, not reading the response body. It keeps the relative-clock and scheduling assumptions, and it doesn't prove that a timed-out remote change had no effect.
 
 ```text
 GC_MIN_GRACE_WINDOW_MS
@@ -1698,21 +2101,21 @@ NAMESPACE_RETIREMENT_GRACE_MS
       + GC_MIN_GRACE_WINDOW_MS
 ```
 
-Configured grace `T` cannot be below the minimum. Retirement uses the greater of `T` and the retirement minimum. Segment age and completed-content grace use their fixed constants. Changing a publication bound or its safety relationship changes the protocol, not just a scheduling preference.
+The configured grace `T` can't be lower than the minimum, and retirement uses the greater of `T` and the retirement minimum. Segment age and the completed-content grace use their own constants. Changing a publication bound, or its safety relationship, changes the protocol, not just a scheduling preference.
 
 ### C.2 Upload admission
 
-| Constant | Milliseconds | Interpretation |
+| Constant | Milliseconds | Meaning |
 | --- | ---: | --- |
-| `UPLOAD_SESSION_LEASE_MS` | 86,400,000 | Open-session lifetime on the creating host. |
-| `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` | 604,800,000 | Seven-day window in which completed content can issue new receipts. |
-| `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | One-hour token lifetime. |
-| `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | Receipt issuance window plus the final token's lifetime. |
-| `CONTENT_RECLAMATION_GRACE_MS` | 610,890,000 | Admission window plus minimum GC grace. |
+| `UPLOAD_SESSION_LEASE_MS` | 86,400,000 | An open session's lifetime on the creating host. |
+| `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` | 604,800,000 | The seven-day window in which completed content can issue new receipts. |
+| `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | The one-hour token lifetime. |
+| `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | The receipt issuance window plus the final token's lifetime. |
+| `CONTENT_RECLAMATION_GRACE_MS` | 610,890,000 | The admission window plus the minimum garbage collection grace. |
 
-The completed-content interval is seven days, one hour, forty-one minutes, and thirty seconds. Eligibility is still conditional on the namespace state and reference evidence; reaching that age does not delete referenced content.
+The completed-content interval is seven days, one hour, forty-one minutes, and thirty seconds. Deletion still depends on the namespace's state and on reference evidence, and reaching that age doesn't delete referenced content.
 
-A direct multipart upload is also subject to provider transfer geometry. The current reference limits are 10,000 parts, 5 MiB minimum configured part size, 5 GiB maximum configured part size, and 1,000 part capabilities per signing request. These limits do not override a provider's lower maximum object size or other supported-provider constraints.
+A direct multipart upload is also subject to the provider's transfer limits. The current reference limits are 10,000 parts, a 5 MiB minimum configured part size, a 5 GiB maximum configured part size, and 1,000 part capabilities per signing request. These limits don't override a provider's lower maximum object size, or other constraints of supported providers.
 
 ### C.3 Fixed logical bounds
 
@@ -1731,7 +2134,7 @@ Attribute limits count the original UTF-8 strings, before JSON escaping or CBOR 
 
 ### C.4 Reference-implementation sizing and admission defaults
 
-These are reference producer and runtime defaults. A target size can be exceeded by one large row; rows are never split to meet a size target. The stored encoding remains the same when a producer changes these tuning values.
+These are defaults for the reference producer and runtime. A target size can be exceeded by one large row, because rows are never split to meet a size target, and the stored encoding stays the same when a producer changes these values.
 
 | Setting | Value |
 | --- | ---: |
@@ -1750,13 +2153,13 @@ These are reference producer and runtime defaults. A target size can be exceeded
 
 `manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the cached manifest.
 
-A decoder cannot use target block or segment sizes as hard allocation bounds. The reference block reader initially reserves at most the smaller of `decoded_bytes` and 64 KiB. Further allocation follows bytes actually decompressed. Output stops at the declared length plus one byte as specified in Appendix A.7; vector capacity can exceed that output length. This does not impose a smaller maximum block size. Request admission limits are specified in the [API specification][api-spec].
+A decoder can't use the target block or segment sizes as hard allocation limits. The reference block reader initially reserves at most the smaller of `decoded_bytes` and 64 KiB, and further allocation follows the bytes actually decompressed. Output stops at the declared length plus one byte (see [Block-segment encoding](#a7-block-segment-encoding)), and vector capacity can be larger than that output length. This doesn't impose a smaller maximum block size. The [API specification][api-spec] specifies request admission limits.
 
-The hard WAL document limit is specified in [Appendix A.5](#a5-wal-records).
+[WAL records](#a5-wal-records) specifies the hard limit on the size of a WAL document.
 
 ## Appendix D. Grep extension format
 
-Grep is derived from authoritative file content and namespace history. It is optional and separately stored. Core manifests contain no grep pointer, index watermark, or segment references. A new fork has no grep index until the extension builds one for that target.
+Grep is derived from authoritative file content and namespace history. It's optional, and it's stored separately. Core manifests contain no grep pointer, index watermark, or segment references, and a new fork has no grep index until the extension builds one for it.
 
 ### D.1 Objects and publication
 
@@ -1767,55 +2170,80 @@ namespaces/{namespace_id}/extensions/grep/
 └── segments/{segment_id}.sst.zst
 ```
 
-The `grep_hint` version-1 JSON payload contains `namespace_id` and `manifest_no`. Enabling writes a hint naming manifest 1, then creates manifest 1 with put-if-absent. A hint collision is permitted; the manifest put decides installation. Later publications use the next contiguous number.
+The `grep_hint` version 1 JSON payload contains `namespace_id` and `manifest_no`. Enabling grep writes a hint that points to manifest 1, and then creates manifest 1 with put-if-absent. A hint collision is allowed, and the manifest put determines which installation succeeds. Later publications use the next number.
 
-A `grep_manifest` version-1 payload contains `namespace_id`, `manifest_no`, `status`, `index`, and `segments`. Its namespace and number must agree with the key. Both envelopes verify their stored payload checksum and reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
+A `grep_manifest` version 1 payload contains `namespace_id`, `manifest_no`, `status`, `index`, and `segments`, and its namespace and number MUST match the key. Both envelopes verify their stored payload checksum, and they reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
 
-`index_stored_bytes` is the sum of `index_block.offset + index_block.stored_bytes` for its referenced segments, using checked arithmetic. This calculation needs no segment reads. Report it with the grep manifest number and full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes; a read failure remains an error.
+`index_stored_bytes` is the sum of `index_block.offset + index_block.stored_bytes` for the manifest's referenced segments, computed with checked arithmetic, so it doesn't need any segment reads. It's reported with the grep manifest number and the full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes, and a read failure stays an error.
 
-Discovery loads the hinted manifest and probes successive numbers until not-found. A missing hint or missing manifest 1 means grep is not enabled. A missing higher hinted manifest is corruption. After any not-found result, discovery reads the hint again, because collection may have deleted manifests below a newer hint. It starts again from that hint when the hint names a later manifest, or when the hint arrives `READ_REVALIDATION_BOUND_MS` or more after a time read before discovery loaded the hint it started from. A successor manifest must have the same `namespace_id` and the next manifest number. It must not lower `next_run_no` or the indexing position in `status`. A backfill may reset its inode cursor only when it restarts from a newly pinned checkpoint. Disabling keeps `next_run_no` and drops the rest of the index state. Enabling starts a new backfill. A query validates a cached manifest with a HEAD of its successor. It runs discovery again when the successor is present, or when the answer arrives `READ_REVALIDATION_BOUND_MS` or more after the cached manifest's previous check. A query whose previous check is already that old runs discovery without the HEAD. The query reads the time before it sends the HEAD, and that time becomes the previous check only after an absent answer arrives within the bound. A manifest loaded by discovery is dated by a time read before discovery began. Decoded manifests can be cached by namespace and number.
+Grep discovery works like core discovery:
 
-An index watermark ahead of the head of a query's read view does not disable the index. The query takes a new read view once before using that index.
+1. Load the hinted manifest, and probe the following numbers until one returns not found. A missing hint, or a missing manifest 1, means grep isn't enabled. A missing higher hinted manifest is corruption.
+2. After any not-found result, read the hint again, because garbage collection might have deleted manifests below a newer hint. Start again from that hint when it points to a later manifest, or when its answer arrives `READ_REVALIDATION_BOUND_MS` or more after a time read before discovery loaded the hint it started from.
 
-A step writes segments first, then publishes the next manifest with put-if-absent. A losing publisher reloads durable state and re-plans against current inputs. If a manifest put ends with an unknown outcome, the publisher reads the manifest at the number it attempted. If that manifest has an identical payload and the publication budget has not expired, the publication succeeded. If it has another payload, the publisher lost, and it reloads and plans its next step from current state. If the number is absent, the outcome stays unknown. The publisher answers `outcome_unknown` and keeps the backfill checkpoint that the step pinned, because the put may still land and name it. A put that succeeds after the budget has expired also has an unknown outcome, as in section 11.4. A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error. A failed hint raise does not undo publication.
+A successor manifest MUST have the same `namespace_id` and the next manifest number, and it MUST NOT lower `next_run_no` or the indexing position in `status`. A backfill can reset its inode cursor only when it restarts from a newly pinned checkpoint. Disabling grep keeps `next_run_no` and drops the rest of the index state, and enabling it starts a new backfill.
 
-Every step that publishes a manifest must initiate that publication within `METADATA_PUBLICATION_BUDGET_MS`, measured from before it loads the grep manifest it builds on. It writes no manifest after that bound. Grep uses bounded steps rather than core streaming compaction's epoch claim; conditional numbered publication and input revalidation control competing steps.
+A query validates a cached manifest with a HEAD request for its successor:
+
+- It runs discovery again when the successor is present, or when the answer arrives `READ_REVALIDATION_BOUND_MS` or more after the cached manifest's previous check.
+- A query whose previous check is already that old runs discovery without the HEAD.
+- The query reads the time before it sends the HEAD, and that time becomes the previous check only after a not-found answer arrives within the bound.
+
+A manifest loaded by discovery is dated by a time read before discovery began, and decoded manifests can be cached by namespace and number.
+
+If an index watermark is ahead of the head of a query's read view, the index is still used. The query takes a new read view once before it uses that index.
+
+A step writes segments first, and then it publishes the next manifest with put-if-absent. A publisher that loses reloads the durable state and plans again against the current inputs. If a manifest put ends with an unknown outcome, the publisher reads the manifest at the number it tried:
+
+- If that manifest has an identical payload and the publication budget hasn't expired, the publication succeeded.
+- If it has another payload, the publisher lost, and it reloads and plans its next step from the current state.
+- If the number is missing, the outcome stays unknown. The publisher returns `outcome_unknown`, and it keeps the backfill checkpoint that the step pinned, because the put might still succeed and refer to it.
+
+A put that succeeds after the budget has expired also has an unknown outcome (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). A successful publisher raises the hint with CAS, taking the greater number. A hint read or write that returns no compare token is a store error, and a failed hint raise doesn't undo the publication.
+
+Every step that publishes a manifest MUST start that publication within `METADATA_PUBLICATION_BUDGET_MS`, measured from before it loads the grep manifest it builds on, and it writes no manifest after that bound. Grep uses bounded steps instead of core streaming compaction's epoch claim. Conditional numbered publication and input revalidation control competing steps.
 
 ### D.2 Index lifecycle
 
-The manifest's `status` contains the position fields defined for that lifecycle state:
+The manifest's `status` contains the position fields for its lifecycle state:
 
 | Kind | Status fields |
 | --- | --- |
 | `backfilling` | `captured_seq`, `checkpoint_id`, optional `cursor_inode_id` |
 | `active` | `built_through_seq`, `next_event_index` |
-| `disabled` | No additional status fields |
+| `disabled` | No other status fields |
 
-Backfill's `captured_seq` is the pinned checkpoint's sequence. Its cursor resumes strictly after the last inode ID. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
+Backfill's `captured_seq` is the pinned checkpoint's sequence, and its cursor resumes strictly after the last inode ID. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
 
-The nested `index` contains `next_run_no` and optional `reorganize`. Reorganization contains `snapshot_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`. Its cursor is inclusive. Input and output segment IDs must be unique, disjoint, and present in the manifest's segment list. Each output must have the recorded level and run number. The extension can rebuild its state from a fresh core checkpoint.
+The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `snapshot_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh core checkpoint.
 
-Grep segments follow list order. Each descriptor carries a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, and optional `filter_inline`. The block handles and checksums have the same representation as metadata segment descriptors.
+Grep segments follow list order, and each descriptor has a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, and an optional `filter_inline`. The block handles and checksums use the same representation as metadata segment descriptors.
 
-Grep uses a numeric `level` rather than the core's base/delta tier. Level 0 is delta output, level 1 is an intermediate merge, and level 2 is the base. In-progress reorganization records the output level and run number so resumed steps continue the same run. Every descriptor and in-progress output run number must be below `next_run_no`.
+Grep uses a numeric `level` instead of the core's base and delta tiers:
+
+- Level 0 is delta output.
+- Level 1 is an intermediate merge.
+- Level 2 is the base.
+
+In-progress reorganization records the output level and run number, so resumed steps continue the same run. Every descriptor and in-progress output run number MUST be below `next_run_no`.
 
 ### D.3 Tokenization and postings
 
-A revision is eligible for the version-1 gram index when its content is at most 8 MiB and the first 8 KiB contains no NUL byte and passes the text check. The sample must be valid UTF-8, except that an incomplete final character is accepted when it follows a nonempty valid prefix. This is a sample check; bytes after it are not required to be UTF-8.
+A revision is eligible for the version 1 gram index when its content is at most 8 MiB, and its first 8 KiB contain no NUL byte and pass the text check. The sample MUST be valid UTF-8, except that an incomplete final character is accepted when it follows a nonempty valid prefix. This only checks the sample, so the bytes after it don't have to be UTF-8.
 
-For each eligible revision, the tokenizer folds ASCII letters to lowercase and takes every overlapping three-byte window. Grams are bytes, not Unicode characters. This folding is distinct from the Unicode rule used for filename comparison.
+For each eligible revision, the tokenizer folds ASCII letters to lowercase and takes every overlapping three-byte window. Grams are bytes, not Unicode characters, and this folding is different from the Unicode rule that's used to compare file names.
 
 For example, `Abcd` produces the byte grams `abc` and `bcd`, represented as `616263` and `626364`. A gram is encoded as six lowercase hexadecimal characters.
 
-A row is a kind-tagged CBOR object with kind `gram_postings`. Its fields after `kind` are `gram`, `first_inode_id`, and `postings`. The gram is a hexadecimal string, the inode ID is an integer, and `postings` is a CBOR byte string containing the packed batch. `first_inode_id` must equal the first posting's inode ID. The row key is:
+A row is a kind-tagged CBOR object with the kind `gram_postings`. Its fields after `kind` are `gram`, `first_inode_id`, and `postings`. The gram is a hexadecimal string, the inode ID is an integer, and `postings` is a CBOR byte string that contains the packed batch. `first_inode_id` MUST equal the first posting's inode ID. The row key is:
 
 ```text
 gram-{gram_hex}-{first_inode_id:020}
 ```
 
-Its filter key is `gram-{gram_hex}`. Several rows can contain batches for the same gram, within a segment or across segments. A reader unions those batches.
+Its filter key is `gram-{gram_hex}`. Several rows can contain batches for the same gram, within a segment or across segments, and a reader combines those batches.
 
-A posting identifies `(inode_id, revision_no)`, not a path. Batches are strictly ordered by that pair and encoded as unsigned LEB128 values:
+A posting identifies `(inode_id, revision_no)`, not a path. Batches are strictly ordered by that pair, and they're encoded as unsigned LEB128 values:
 
 ```text
 posting_count
@@ -1826,27 +2254,27 @@ next_revision_no
 ... repeated for the remaining postings
 ```
 
-Revision numbers are unsigned 32-bit absolute values; inode IDs are unsigned 64-bit values, delta-encoded after the first. Empty batches, unordered postings, and trailing bytes after the declared batch are invalid.
+Revision numbers are unsigned 32-bit absolute values, and inode IDs are unsigned 64-bit values, delta-encoded after the first. Empty batches, unordered postings, and trailing bytes after the declared batch are invalid.
 
-The segment framing is exactly the data/filter/index format in Appendix A, with grep CBOR rows instead of metadata rows. Per-block CRCs verify ranged reads.
+The segment framing is exactly the data, filter, and index format in Appendix A, with grep CBOR rows instead of metadata rows, and per-block CRCs verify ranged reads.
 
-The tokenizer, posting representation, and row-key meaning are governed by grep manifest version 1. They are not implementation-only choices that can change while an existing index is interpreted under the same version.
+Grep manifest version 1 governs the tokenizer, the posting representation, and the meaning of row keys. They aren't implementation choices that can change while an existing index is read under the same version.
 
 ### D.4 Grep collection
 
-Each explicit call discovers the current grep manifest, builds its live segment set, and lists `manifests/` and `segments/` from beginning to end using one supplied `now_ms`. The collector stores no durable progress cursor.
+Each explicit call discovers the current grep manifest, builds its live segment set, and lists `manifests/` and `segments/` completely, using one supplied `now_ms`. The collector stores no durable progress cursor.
 
-The current manifest protects all listed segments, including pending reorganization inputs and outputs. Manifest numbers at or above the observed hint remain available for discovery. A manifest below the current one, and every segment it lists, stays while its immediate successor is younger than ordinary grep grace, whether it is above or below the observed hint. A successor without a provider timestamp counts as young. The collector applies this rule from the current manifest downward and stops at the first successor that is absent or whose provider age meets the grace. A query confirms its cached manifest within `READ_REVALIDATION_BOUND_MS` of its previous check (section D.1), and that bound is below the grace, so a query never lists a collected segment. An invalid or unreadable current or kept manifest stops the call before deletion.
+The current manifest protects all the segments it lists, including pending reorganization inputs and outputs. Manifest numbers at or above the observed hint stay available for discovery. A manifest below the current one, and every segment it lists, stays while its immediate successor is younger than the ordinary grep grace, whether it's above or below the observed hint. A successor without a provider timestamp counts as young. The collector applies this rule from the current manifest downward, and it stops at the first successor that's missing or whose provider age meets the grace. A query confirms its cached manifest within `READ_REVALIDATION_BOUND_MS` of its previous check (see [Objects and publication](#d1-objects-and-publication)), and that bound is below the grace, so a query never lists a deleted segment. An invalid or unreadable current or kept manifest stops the call before anything is deleted.
 
-| Candidate on a live namespace | Collection rule |
+| Candidate in a live namespace | Rule |
 | --- | --- |
-| Manifest below the observed hint | Kept while its immediate successor is younger than ordinary grep grace. Otherwise its own provider age must meet ordinary grep grace. |
-| Segment outside the live set | Provider age must be strictly greater than 24 hours. |
-| Unknown age or unrecognized key | Retain. |
+| A manifest below the observed hint | Keep it while its immediate successor is younger than the ordinary grep grace. Otherwise, its own provider age MUST meet the ordinary grep grace. |
+| A segment outside the live set | Its provider age MUST be strictly greater than 24 hours. |
+| Unknown age, or an unrecognized key | Keep it. |
 
-Ordinary grep grace is one hour in the reference implementation. The output publication budget plus the minimum GC grace fits inside the segment minimum age, using the same provider and clock assumptions as core collection.
+The ordinary grep grace is one hour in the reference implementation. The output publication budget plus the minimum garbage collection grace fits inside the segment minimum age, using the same provider and clock assumptions as core garbage collection.
 
-For an absent or deleted core namespace, an explicit grep collection call can reap the entire extension prefix after ordinary grace, including its hint. Core GC never collects extension objects. Grep never enumerates namespaces; callers and hosts select which namespace to maintain.
+For an absent or deleted core namespace, an explicit grep garbage collection call can remove the entire extension prefix after the ordinary grace, including its hint. Core garbage collection never deletes extension objects. Grep never lists namespaces, so callers and hosts choose which namespace to maintain.
 
 [api-spec]: api.md
 [provider-spec]: object-storage-providers.md
