@@ -1,6 +1,6 @@
 # SDK conformance tests
 
-This private crate contains shared JSON test cases and a Rust test harness.
+`loonfs-conformance` contains the shared JSON test cases that every LoonFS SDK test harness loads, and a Rust harness that runs them. If you maintain an SDK, your SDK's harness runs these same cases against its own client. This is a private crate (it isn't published to crates.io), so if you're looking for a Rust client for a LoonFS server, use `loonfs-client` instead.
 
 ## Cases
 
@@ -23,10 +23,10 @@ The sixteen cases cover:
 - an end-to-end filesystem workflow
 - namespace-alias-scoped requests through a proxy
 
-Each SDK test harness runs the proxy case against its own proxy implementation.
-The Rust harness only checks that the fixture is valid.
-The `upload_modes` case runs in the Rust reference harness. SDK harnesses
-validate its place in the inventory; Go logs a skip for this case.
+Two cases don't run in every harness:
+
+- The proxy case: each SDK's test harness runs it against its own proxy implementation. The Rust harness only checks that the fixture is valid.
+- `upload_modes`: this case runs in the Rust reference harness. SDK harnesses check that it's listed in the case inventory, and the Go harness logs that it skips the case.
 
 ## JSON format
 
@@ -37,40 +37,23 @@ Each file in `cases/` contains:
 - `request`: input values for the case
 - `expected`: expected response fields and behavior
 
-Each case has a Rust function that performs the calls. The JSON files contain
-only inputs and expected results.
+Each case has a Rust function that makes the calls. The JSON files contain only inputs and expected results.
 
-A `checksum_algorithm` literal in a case means the store's algorithm. The
-checked-in `crc64nvme` value is for the default S3 shape used by SDK suites.
-The Rust harness checks that value against the S3 default, then compares
-responses with the algorithm of the shape being tested: `crc64nvme` for S3
-and `crc32c` for GCS.
+A `checksum_algorithm` literal in a case stands for the store's checksum algorithm. The checked-in value, `crc64nvme`, is the algorithm of the default S3 shape that SDK suites use (see [Rust harness](#rust-harness)). The Rust harness checks that value against the S3 default, and then compares responses with the algorithm of the shape it's testing (`crc64nvme` for S3, and `crc32c` for GCS).
 
-Large multipart cases use a repeatable byte pattern. For length `N` and
-modulus `M`, the byte at each zero-based offset is `offset % M`. Other payloads
-are UTF-8 strings.
+Large multipart cases use a repeatable byte pattern. For length `N` and modulus `M`, the byte at each zero-based offset is `offset % M`. Other payloads are UTF-8 strings.
 
 ## Rust harness
 
-`tests/reference.rs` starts the production HTTP router with a temporary local
-store and runs the corpus once per shape through `loonfs-client`:
+`tests/reference.rs` starts the production HTTP router with a temporary local store, and runs the corpus once for each store shape through `loonfs-client`:
 
 - S3 uses CRC-64/NVME and offers service-proxied, direct PUT, and multipart uploads.
 - GCS uses CRC-32C and offers service-proxied and direct PUT uploads.
 
-A loopback service handles direct uploads and downloads. Only the S3 shape
-has a multipart store, issuer, and part-upload route. The Rust harness skips
-`upload_multipart` on GCS and logs why. The `upload_modes` case compares the
-exact advertised mode set and attempts every mode. Each supported begin
-must name the store's checksum algorithm; unsupported modes must fail.
+A loopback service handles direct uploads and downloads. Only the S3 shape has a multipart store, issuer, and part-upload route, so the Rust harness skips `upload_multipart` on GCS and logs why. The `upload_modes` case compares the exact set of advertised modes, and tries every mode. Each supported begin must report the store's checksum algorithm, and each unsupported mode must fail.
 
-`start_server` takes a `StoreShape`. The server binary reads
-`LOONFS_CONFORMANCE_SHAPE=s3|gcs`, defaulting to `s3` when it is unset.
-Invalid values fail startup. SDK suites keep using the default shape.
+`start_server` takes a `StoreShape`. The server binary reads `LOONFS_CONFORMANCE_SHAPE=s3|gcs`, and uses `s3` when the variable is unset. An invalid value makes startup fail. SDK suites use the default shape.
 
-The typed client cannot create malformed JSON or invalid query values, so the
-error case sends those two requests with a raw HTTP client. All other requests
-use `loonfs-client`.
+The typed client can't create malformed JSON or invalid query values, so the error case sends those two requests with a raw HTTP client. All other requests use `loonfs-client`.
 
-Unit tests cover fixture loading, byte patterns, and pagination. The
-integration test requires local TCP listeners.
+Unit tests cover fixture loading, byte patterns, and pagination. The integration test needs local TCP listeners.

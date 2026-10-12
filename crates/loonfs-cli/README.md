@@ -1,55 +1,43 @@
 # loonfs-cli
 
-`loonfs-cli` provides the `loonfs` command for managing profiles, namespaces, path-based
-filesystem operations, and namespace maintenance against LoonFS.
+`loonfs-cli` provides the `loonfs` command, which you can use to manage profiles, namespaces, and namespace maintenance, and to work with files and directories by path. To use LoonFS from a Rust program instead, use the `loonfs` crate to embed the runtime, or `loonfs-client` to call a LoonFS server. To run a server, use `loonfs-server`.
 
-An embedded profile runs the HTTP binding in memory over its runtime handles.
-The CLI sends requests to it through the same client that a remote profile
-uses, so both kinds of profile answer the same API contract. An embedded
-profile opens no listener and needs no bearer token. The bounded index steps
-of `loonfs maintenance index enable` run directly on the local runtime handles
-instead of through the binding. A command returns only after the folds and
-metadata compactions its writes started have finished.
+A "profile" is an entry in the config file that tells the CLI which object store or server to use. A remote profile sends requests to a LoonFS server. An embedded profile (`local`, `s3`, `r2`, or `gcs`) reads and writes the object store directly. It runs the HTTP binding (`loonfs-http`) in memory, on top of its own runtime handles, and the CLI sends requests to the binding through the same client that a remote profile uses. Because of that, both kinds of profile follow the same API contract. An embedded profile doesn't open a network listener and doesn't need a bearer token.
 
-Embedded requests go through the binding's validation, error envelope, and
-JSON body limits, and a failed request reports the binding's request ID and
-error details. The binding cancels a request that runs past 60 seconds, the
-server's default deadline. Routes that stream file content, maintenance runs,
-and the store probe are exempt from that deadline. The binding admits at most
-8 concurrent uploads and 16 concurrent downloads, the same defaults as the
-server. The upload and download size limits are `u64::MAX`, which leaves
-embedded transfers unbounded. An interrupted embedded download starts again
-from the beginning. Progress for a single-file `loonfs get` counts the bytes
-received and shows no total. A file upload records its prepared commit
-request. A rerun after a process restart submits that request again and renews
-its content token through the upload session, so the file is not uploaded
-again.
+On an embedded profile, `loonfs maintenance index enable` runs its bounded index steps directly on the local runtime handles, instead of through the binding. A command on an embedded profile returns only after the [folds](../../docs/specs/glossary.md#fold) and metadata compactions that its writes started have finished.
 
-If another writer fences an embedded session, that session is dead. The
-request fails with `writer_fenced` and is not resubmitted. The embedded host
-drops its handle. A later request starts a new session, whose first publish
-takes the namespace back. An open while the old session's work ends can
-return `writer_session_closed`; a later request can open after it ends.
-Sustained fencing of one namespace means two writers are being sent its
-traffic. Send that namespace's traffic to one writer.
+Requests through an embedded profile work as follows:
+
+- **Validation and errors.** Requests go through the binding's validation, error envelope, and JSON body limits. A failed request reports the binding's request ID and error details.
+- **Deadline.** The binding cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content, maintenance runs, and the store probe aren't subject to that deadline.
+- **Concurrency.** The binding admits at most 8 concurrent uploads and 16 concurrent downloads, the same defaults as the server.
+- **Transfer size.** The upload and download size limits are `u64::MAX`, so embedded transfers aren't limited in size.
+- **Downloads.** An interrupted embedded download starts again from the beginning. Progress for a single-file `loonfs get` counts the bytes received, but doesn't show a total.
+- **Uploads.** A file upload records its prepared commit request. If you rerun the command after the process restarts, the rerun submits that request again and renews its content token through the upload session, so the file isn't uploaded again.
+
+If another writer [fences](../../docs/specs/glossary.md#fence) an embedded profile's [writer session](../../docs/specs/glossary.md#writer-session), that session can't be used again. The request fails with `writer_fenced`, the CLI doesn't resubmit it, and the embedded host drops its handle. A later request starts a new writer session, and that session's first publication takes the namespace back. If a request tries to open the namespace while the old session's work is still ending, it can fail with `writer_session_closed`. A request made after that work ends can open the namespace.
+
+If one namespace is fenced again and again, its traffic is being sent to two writers. Send all of that namespace's traffic to one writer.
 
 ## Shell completion
 
-Generate completion scripts for Bash, Zsh, Fish, PowerShell, or Elvish with:
+`loonfs completion` prints a completion script for Bash, Zsh, Fish, PowerShell, or Elvish:
 
 ```sh
 loonfs completion --shell zsh
 ```
 
-When omitted, `--shell` defaults from `$SHELL`.
+If you omit `--shell`, the CLI chooses the shell from `$SHELL`.
 
-For example, enable Zsh completion in the current shell with:
+For example, to enable Zsh completion in the current shell, run:
 
 ```sh
 source <(loonfs completion --shell zsh)
 ```
 
 ## Command Reference
+
+This reference lists the CLI's commands and flags, how the CLI chooses its config file, and how transfers, progress, and other behaviors work.
 
 ```text
 LoonFS CLI Command Reference
