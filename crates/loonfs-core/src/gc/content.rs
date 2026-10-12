@@ -39,7 +39,7 @@ impl<'a> ContentSweep<'a> {
         seed: u64,
         max_bytes: usize,
     ) -> Result<Option<Self>> {
-        if live.namespace_deleted {
+        if live.current_tombstone.is_some() {
             tracing::info!(namespace_id = %namespace_id, shard_width = 0,
                 layout_views = 0, "collecting namespace");
             return Ok(None);

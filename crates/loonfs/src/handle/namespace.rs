@@ -1,6 +1,6 @@
 //! The handle for one namespace, in a read-only or a writable mode.
 
-use super::{LoonFs, ReadOnly, Writable};
+use super::{LoonFs, Mode, ReadOnly, Writable};
 use crate::fs::RuntimeCore;
 use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionStatus};
 use crate::{ChangeSeq, NamespaceId, Result};
@@ -38,16 +38,16 @@ use std::sync::Arc;
 /// `writer_session_closed` while its work ends, then starts a new session
 /// even if clones of the dead session are still held.
 #[derive(Clone)]
-pub struct Namespace<M> {
+pub struct Namespace<M: Mode> {
     pub(crate) core: RuntimeCore,
     pub(crate) namespace_id: NamespaceId,
     pub(crate) mode: M,
-    /// Held exactly when the mode is [`Writable`]. The mode type is shared
-    /// with [`LoonFs`], which has no session, so the session lives here.
-    session: Option<Arc<NamespaceSession>>,
+    /// The writer session in the writable mode. The mode type is shared with
+    /// [`LoonFs`], which has no session, so the session lives here.
+    session: M::Session,
 }
 
-impl<M: fmt::Debug> fmt::Debug for Namespace<M> {
+impl<M: Mode + fmt::Debug> fmt::Debug for Namespace<M> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Namespace")
@@ -57,7 +57,7 @@ impl<M: fmt::Debug> fmt::Debug for Namespace<M> {
     }
 }
 
-impl<M> Namespace<M> {
+impl<M: Mode> Namespace<M> {
     /// Returns the id of the namespace this handle acts on.
     pub fn id(&self) -> &NamespaceId {
         &self.namespace_id
@@ -97,7 +97,7 @@ impl Namespace<ReadOnly> {
             core,
             namespace_id,
             mode: ReadOnly,
-            session: None,
+            session: (),
         }
     }
 }
@@ -108,14 +108,12 @@ impl Namespace<Writable> {
             core: runtime.core.clone(),
             namespace_id: session.namespace_id().clone(),
             mode: runtime.mode.clone(),
-            session: Some(session),
+            session,
         }
     }
 
     pub(crate) fn session(&self) -> &NamespaceSession {
-        self.session
-            .as_deref()
-            .expect("a writable namespace handle should hold its writer session")
+        &self.session
     }
 
     /// Returns the state of this handle's writer session.
@@ -152,11 +150,7 @@ impl Namespace<Writable> {
     /// Returns whether this is the only handle holding its writer session.
     /// Hosts must prevent concurrent opens while using this check to close it.
     pub fn is_exclusively_held(&self) -> bool {
-        Arc::strong_count(
-            self.session
-                .as_ref()
-                .expect("a writable namespace handle should hold its writer session"),
-        ) == 1
+        Arc::strong_count(&self.session) == 1
     }
 
     /// Refuses new work, cancels the session's metadata compaction, drains

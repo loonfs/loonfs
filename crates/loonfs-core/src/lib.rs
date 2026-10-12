@@ -166,7 +166,7 @@ pub mod publish {
     pub use crate::commit_engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionStatus,
-        WalFoldInput, WriterSessionStatus,
+        TailSource, WalFoldInput, WalTailReport, WriterSessionStatus,
     };
     pub use crate::path::write::{CommitIntent, FilesystemOperation};
     pub use crate::storage::content_admission::PreparedContent;
@@ -196,7 +196,7 @@ pub use manifest::{
 };
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
-    CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange,
+    CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange,
     MAX_CURRENT_FILES_PER_STAT,
 };
 pub use pin::{

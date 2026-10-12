@@ -1106,8 +1106,8 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         &original
     );
     assert_eq!(
-        replay.wal_tail_objects,
-        crate::limits::MAX_UNFOLDED_WAL_OBJECTS
+        replay.wal_tail.map(|tail| tail.objects),
+        Some(crate::limits::MAX_UNFOLDED_WAL_OBJECTS)
     );
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().compare_and_swaps, 0);
@@ -1167,8 +1167,8 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         );
     }
     assert_eq!(
-        mixed.wal_tail_objects,
-        crate::limits::MAX_UNFOLDED_WAL_OBJECTS
+        mixed.wal_tail.map(|tail| tail.objects),
+        Some(crate::limits::MAX_UNFOLDED_WAL_OBJECTS)
     );
     assert_eq!(
         store.counts().puts,

@@ -15,7 +15,7 @@ use loonfs_objectstore::{
 };
 use loonfs_types::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentRefValidationError,
-    ErrorCode, NamespaceId, PathEntry, StreamingChecksum,
+    ContentVerifier, ErrorCode, NamespaceId, PathEntry, StreamingChecksum,
 };
 use std::future::Future;
 use std::num::NonZeroU64;
@@ -280,16 +280,7 @@ pub struct FileContentStream<S> {
     chunk_bytes: NonZeroU64,
     /// Start offset of the next ranged read.
     next_offset: u64,
-    /// Offset where this stream started.
-    resumed_from: u64,
-    /// Number of bytes before `resumed_from` included in the checksum.
-    prefix_folded: u64,
-    /// Checksum state for bytes processed so far.
-    digest: StreamingChecksum,
-    /// Expected checksum.
-    expected: Checksum,
-    /// Cached result because the checksum can only be finalized once.
-    completion: Option<std::result::Result<(), DurableContentValidationError>>,
+    verifier: ContentVerifier,
 }
 
 impl<S: ObjectStore> FileContentStream<S> {
@@ -307,8 +298,7 @@ impl<S: ObjectStore> FileContentStream<S> {
                 .await?;
             validate_loaded_content_bytes(location.object_key().to_owned(), &content_ref, &bytes)?;
         }
-        let expected = content_ref.checksum.clone();
-        let digest = StreamingChecksum::for_algorithm(expected.algorithm);
+        let verifier = ContentVerifier::new(&content_ref, start_offset);
         Ok(Self {
             store,
             entry,
@@ -316,11 +306,7 @@ impl<S: ObjectStore> FileContentStream<S> {
             content_ref,
             chunk_bytes,
             next_offset: start_offset,
-            resumed_from: start_offset,
-            prefix_folded: 0,
-            digest,
-            expected,
-            completion: None,
+            verifier,
         })
     }
 
@@ -331,27 +317,12 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// Incorrect bytes cause checksum verification to fail at the end of the
     /// stream.
     pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<()> {
-        assert!(
-            self.completion.is_none(),
-            "a resumed prefix for `{}` should arrive before the read reaches its end",
-            self.location.object_key()
-        );
-        assert_eq!(
-            self.next_offset,
-            self.resumed_from,
-            "a resumed prefix for `{}` should arrive before the stream fetches content",
-            self.location.object_key()
-        );
-        let folded = self.prefix_folded.saturating_add(bytes.len() as u64);
-        if folded > self.content_ref.size_bytes {
-            return Err(CoreError::ResumeOffsetOutOfRange {
-                start_offset: folded,
-                size_bytes: self.content_ref.size_bytes,
-            });
-        }
-        self.digest.update(bytes);
-        self.prefix_folded = folded;
-        Ok(())
+        self.verifier.fold_resumed_prefix(bytes).map_err(|overrun| {
+            CoreError::ResumeOffsetOutOfRange {
+                start_offset: overrun.prefix_bytes,
+                size_bytes: overrun.size_bytes,
+            }
+        })
     }
 
     /// The authoritative metadata entry for a path read. Inode-only reads
@@ -380,12 +351,12 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// A resumed stream must receive its complete prefix before this method is
     /// called.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
-        if self.prefix_folded != self.resumed_from {
-            return Err(CoreError::ResumePrefixIncomplete {
-                start_offset: self.resumed_from,
-                folded: self.prefix_folded,
-            });
-        }
+        self.verifier
+            .ensure_resumed_prefix_complete()
+            .map_err(|incomplete| CoreError::ResumePrefixIncomplete {
+                start_offset: incomplete.start_offset,
+                folded: incomplete.prefix_bytes,
+            })?;
         Ok(self.next_verified_chunk().await?)
     }
 
@@ -412,45 +383,31 @@ impl<S: ObjectStore> FileContentStream<S> {
                 actual: self.next_offset + bytes.len() as u64,
             });
         }
-        self.digest.update(&bytes);
+        self.verifier.update(&bytes);
         self.next_offset += bytes.len() as u64;
         Ok(Some(bytes))
     }
 
     /// The verdict on the complete object: computed the first time the end is
     /// reached, and repeated on every later ask.
-    ///
-    /// The byte count needs no check of its own here. Every chunk is required
-    /// to arrive exactly as long as it was asked for, and no chunk is asked
-    /// for past the declared size, so reaching this point *is* having folded
-    /// exactly `size_bytes` — the resumed head start, which the first
-    /// [`Self::next_chunk`] refuses to start without, plus everything
-    /// fetched from it to the end.
     fn completion(&mut self) -> std::result::Result<(), DurableContentValidationError> {
-        let verdict = match self.completion.take() {
-            Some(verdict) => verdict,
-            None => self.verify_complete(),
+        let mismatch = match self.verifier.finish() {
+            Ok(()) => return Ok(()),
+            Err(mismatch) => mismatch,
         };
-        self.completion = Some(verdict.clone());
-        verdict
-    }
-
-    /// Closes the digest over everything read and holds it to the reference.
-    fn verify_complete(&mut self) -> std::result::Result<(), DurableContentValidationError> {
-        // Closing consumes the digest, which is why this runs exactly once.
-        let digest = std::mem::replace(
-            &mut self.digest,
-            StreamingChecksum::for_algorithm(self.expected.algorithm),
-        );
-        let actual = digest.finish();
-        if actual != self.expected {
-            return Err(DurableContentValidationError::ContentChecksumMismatch {
-                object_key: self.location.object_key().to_owned(),
-                expected: describe_checksum(&self.expected),
-                actual: describe_checksum(&actual),
+        let object_key = self.location.object_key().to_owned();
+        if mismatch.actual_bytes != mismatch.expected_bytes {
+            return Err(DurableContentValidationError::ContentLengthMismatch {
+                object_key,
+                expected: mismatch.expected_bytes,
+                actual: mismatch.actual_bytes,
             });
         }
-        Ok(())
+        Err(DurableContentValidationError::ContentChecksumMismatch {
+            object_key,
+            expected: describe_checksum(&mismatch.expected),
+            actual: describe_checksum(&mismatch.actual),
+        })
     }
 }
 

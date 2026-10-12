@@ -1800,8 +1800,7 @@ mod tests {
 
     fn non_interactive_runtime() -> RuntimeBehavior {
         RuntimeBehavior {
-            json: false,
-            no_input: true,
+            output: crate::render::OutputFormat::Human,
             interactive: false,
             progress: crate::progress::ProgressMode::Off,
         }

@@ -723,7 +723,7 @@ fn remote_client_config_from(
                 .map(SecretString::from)
         }),
         request_timeout_ms: None,
-        disable_transient_retry: no_retry,
+        retry: !no_retry,
         ca_cert_path: ca_cert_path.map(ToOwned::to_owned),
     }
 }
@@ -789,7 +789,7 @@ mod tests {
             from_config.auth_token.as_ref().map(SecretString::expose),
             Some("stored-token")
         );
-        assert!(!from_config.disable_transient_retry);
+        assert!(from_config.retry);
 
         let from_environment =
             remote_client_config_from("https://loonfs.example.com", None, None, true, |name| {
@@ -803,10 +803,7 @@ mod tests {
                 .map(SecretString::expose),
             Some("env-token")
         );
-        assert!(
-            from_environment.disable_transient_retry,
-            "--no-retry reaches the client"
-        );
+        assert!(!from_environment.retry, "--no-retry reaches the client");
 
         let blank =
             remote_client_config_from("https://loonfs.example.com", None, None, false, |_| {

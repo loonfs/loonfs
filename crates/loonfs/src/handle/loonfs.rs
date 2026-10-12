@@ -1,8 +1,9 @@
 //! The runtime, in a read-only or a writable mode.
 
+use super::builder::WriterConfig;
 use super::{LoonFsBuilder, Maintenance, Namespace};
 use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
-use crate::publisher::PublisherRegistry;
+use crate::publisher::{NamespaceSession, PublisherRegistry};
 use crate::{
     CapabilityDocument, ExecutionBudget, MetadataCache, NamespaceId, Result, SharedObjectStore,
     StoreConfig,
@@ -30,7 +31,7 @@ use std::sync::Arc;
 /// the runtime's scope in its metadata cache, and, in the writable mode, the
 /// publication service and the shutdown state.
 #[derive(Clone)]
-pub struct LoonFs<M> {
+pub struct LoonFs<M: Mode> {
     pub(crate) core: RuntimeCore,
     pub(crate) mode: M,
 }
@@ -55,7 +56,44 @@ impl fmt::Debug for Writable {
     }
 }
 
-impl<M> LoonFs<M> {
+/// A handle mode: [`ReadOnly`] or [`Writable`].
+///
+/// The trait is sealed, so these two are the only modes.
+#[allow(
+    private_bounds,
+    reason = "the crate-private supertrait seals the trait and holds the data each mode adds"
+)]
+pub trait Mode: sealed::Sealed {}
+
+impl Mode for ReadOnly {}
+impl Mode for Writable {}
+
+pub(crate) mod sealed {
+    use super::{NamespaceSession, ReadOnly, Writable, WriterConfig};
+    use std::sync::Arc;
+
+    /// The data each mode adds to a namespace handle and to a builder.
+    pub(crate) trait Sealed {
+        /// What a namespace handle holds for its writer session: nothing in
+        /// the read-only mode.
+        type Session: Clone;
+        /// What a builder holds for the writer-only settings: nothing in the
+        /// read-only mode.
+        type WriterConfig: Default;
+    }
+
+    impl Sealed for ReadOnly {
+        type Session = ();
+        type WriterConfig = ();
+    }
+
+    impl Sealed for Writable {
+        type Session = Arc<NamespaceSession>;
+        type WriterConfig = WriterConfig;
+    }
+}
+
+impl<M: Mode> LoonFs<M> {
     /// Returns the execution budget this runtime's reads, publications, folds, and
     /// merges draw from, which other runtimes may share.
     pub fn execution_budget(&self) -> &ExecutionBudget {

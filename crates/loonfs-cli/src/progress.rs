@@ -487,8 +487,7 @@ mod tests {
     fn silent_reporter(op: ProgressOp, path: &str) -> ProgressReporter {
         ProgressReporter::new(
             RuntimeBehavior {
-                json: false,
-                no_input: false,
+                output: crate::render::OutputFormat::Human,
                 interactive: false,
                 progress: ProgressMode::Off,
             },

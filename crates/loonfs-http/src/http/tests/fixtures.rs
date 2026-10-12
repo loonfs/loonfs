@@ -1,6 +1,6 @@
 //! Runtime handles and options for binding tests.
 
-use crate::{AuthPolicy, BindingConfig, BindingState, HttpMetrics, Namespaces};
+use crate::{AuthPolicy, BindingConfig, BindingState, HttpMetrics, JobMode, Namespaces};
 use loonfs::{LoonFs, SharedObjectStore, SnapshotPolicy, TraceMode};
 use loonfs_grep::{
     new_grep_block_cache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
@@ -29,9 +29,8 @@ pub(super) struct TestAppOptions {
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
     TestOptions {
         binding: BindingConfig {
-            serves_grep: true,
-            maintains_grep_index: true,
-            serves_maintenance: true,
+            grep: JobMode::ServeAndMaintain,
+            maintenance: JobMode::ServeOnly,
             snapshot_policy: SnapshotPolicy {
                 max_ttl_ms: 86_400_000,
                 max_lifetime_ms: 604_800_000,
@@ -75,7 +74,7 @@ pub(super) async fn test_app(
         WriterId::parse(format!("{}-maintenance", config.writer_id))
             .expect("a suffixed writer id should stay valid"),
     );
-    let grep_worker = (options.serves_grep || options.maintains_grep_index).then(|| {
+    let grep_worker = (options.grep.serves() || options.grep.maintains()).then(|| {
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
@@ -83,7 +82,7 @@ pub(super) async fn test_app(
             loonfs_grep::GrepStepBudget::default(),
         )
     });
-    let grep_service = options.serves_grep.then(|| {
+    let grep_service = options.grep.serves().then(|| {
         let cache = Arc::new(new_grep_block_cache(
             DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
             metrics.recorder().as_ref(),

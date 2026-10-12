@@ -8,7 +8,7 @@ mod materialized_view;
 pub(crate) use current_files::{
     ensure_stat_batch_within_cap, resolve_visible_inode, stat_current_files_by_inode,
 };
-pub use current_files::{CurrentFileState, MAX_CURRENT_FILES_PER_STAT};
+pub use current_files::{CurrentFile, CurrentFileState, MAX_CURRENT_FILES_PER_STAT};
 #[cfg(test)]
 pub(crate) use materialized_view::load_current_metadata_view;
 pub(crate) use materialized_view::{

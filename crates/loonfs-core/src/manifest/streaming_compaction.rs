@@ -674,8 +674,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
     output_run_no: Option<RunNo>,
-    chain_filter: Option<BloomFilter>,
-    keep_every_layout: bool,
+    chain_filter: ChainFilter,
     result: MetadataMergeReport,
     canonical_digest: RowDigest,
     index_digest: RowDigest,
@@ -685,6 +684,16 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     /// Progress state for an unbounded background merge. `None` for a merge
     /// short enough to have nothing to report.
     progress: Option<ProgressReporter>,
+}
+
+/// Whether a layout merge drops the layout rows of chains no revision names.
+enum ChainFilter {
+    /// The merge isn't a layout merge that may drop rows below the floor.
+    NotNeeded,
+    /// The content IDs the revisions name, which a kept layout row matches.
+    Loaded(BloomFilter),
+    /// The filter would exceed its byte limit, so the merge keeps every layout.
+    OverLimit,
 }
 
 struct MergeControl<'a> {
@@ -741,8 +750,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 .manifest
                 .as_ref()
                 .map(|manifest| manifest.payload().next_run_no),
-            chain_filter: None,
-            keep_every_layout: false,
+            chain_filter: ChainFilter::NotNeeded,
             index_memo,
             namespace_id,
             group,
@@ -807,7 +815,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 .expect("a layout compaction should have a manifest basis")
                 .0,
         ) else {
-            self.keep_every_layout = true;
+            self.chain_filter = ChainFilter::OverLimit;
             tracing::info!(namespace_id = %self.namespace_id, expected_ids,
                 "chain filter exceeded its byte limit; kept every layout");
             return Ok(None);
@@ -842,7 +850,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
                 }
             }
         }
-        self.chain_filter = Some(filter);
+        self.chain_filter = ChainFilter::Loaded(filter);
         Ok(None)
     }
 
@@ -874,7 +882,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
     }
 
     fn rule_for(&self, cluster: &RetentionCluster) -> RetentionRule {
-        if self.keep_every_layout {
+        if matches!(self.chain_filter, ChainFilter::OverLimit) {
             RetentionRule::KeepEveryRow
         } else if self.placement.may_drop_rows_below_the_retention_floor()
             || cluster.rule == RetentionRule::FirstPerGroup
@@ -958,7 +966,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             let row = iterators[next].take_head();
             self.result.rows_read += 1;
             self.report_progress();
-            if let (Some(filter), MetadataRow::ContentLayout(layout)) = (&self.chain_filter, &row) {
+            if let (ChainFilter::Loaded(filter), MetadataRow::ContentLayout(layout)) =
+                (&self.chain_filter, &row)
+            {
                 if !filter.may_contain(layout.content_id.as_str().as_bytes()) {
                     continue;
                 }

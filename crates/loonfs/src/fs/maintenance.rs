@@ -975,7 +975,9 @@ impl crate::Namespace<crate::Writable> {
                 boundary,
                 grants,
                 expected_inode_id: Some(loonfs_types::ROOT_INODE_ID),
-                expected_access_revision_no: Some(current),
+                expected_access_revision_no: Some(
+                    current.unwrap_or(loonfs_types::AccessRevisionNo(0)),
+                ),
             },
         );
         let commit = self

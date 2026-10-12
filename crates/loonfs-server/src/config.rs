@@ -16,6 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 
+pub use loonfs_http::JobMode;
 pub use loonfs_objectstore::StoreConfig;
 
 /// Overrides the embedded writer's inline content policy.
@@ -185,8 +186,8 @@ pub struct ServerConfig {
     pub grep: GrepConfig,
     /// Whether this server serves maintenance requests, runs the maintenance
     /// sweep, both, or neither.
-    #[serde(default)]
-    pub maintenance: MaintenanceMode,
+    #[serde(default = "default_maintenance")]
+    pub maintenance: JobMode,
     /// Minimum interval between publication starts per namespace, in
     /// milliseconds. A request to an idle namespace publishes immediately;
     /// the interval paces requests that queued behind a publish, so hot
@@ -317,6 +318,10 @@ pub struct TlsServerConfig {
     pub cert_path: String,
     /// PEM private key: PKCS#8, PKCS#1 (RSA), or SEC1.
     pub key_path: String,
+}
+
+fn default_maintenance() -> JobMode {
+    JobMode::ServeAndMaintain
 }
 
 fn default_min_publish_interval_ms() -> u64 {
@@ -456,73 +461,14 @@ pub struct MetadataCacheConfig {
     pub max_head_state_bytes: Option<usize>,
 }
 
-/// What this server does about maintenance: serve the API group, run the
-/// maintenance sweep, both, or neither.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenanceMode {
-    /// Neither serve the maintenance API group nor run the sweep.
-    Disabled,
-    /// Serve explicit maintenance requests without running the sweep.
-    ServeOnly,
-    /// Run the sweep without serving the maintenance API group.
-    MaintainOnly,
-    /// Serve explicit maintenance requests and run the sweep.
-    #[default]
-    ServeAndMaintain,
-}
-
-impl MaintenanceMode {
-    /// Whether this server serves the maintenance API group.
-    pub fn serves(self) -> bool {
-        matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
-    }
-
-    /// Whether this server runs the maintenance sweep.
-    pub fn maintains(self) -> bool {
-        matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
-    }
-}
-
-/// What this server does about grep: answer queries, keep the index built,
-/// both, or neither.
-///
-/// The two jobs are independent. A read replica can serve searches over an
-/// index another process maintains; a write node can maintain the index for
-/// namespaces it never answers searches about; the reference deployment
-/// does both. Every combination is named here, so none has to be validated
-/// away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GrepMode {
-    /// Neither answer grep queries nor maintain the index.
-    Disabled,
-    /// Answer queries over an index some other process maintains.
-    ServeOnly,
-    /// Maintain the index without answering queries about it.
-    MaintainOnly,
-    /// Answer queries and maintain the index in this process.
-    ServeAndMaintain,
-}
-
-impl GrepMode {
-    /// Whether the grep query endpoint is supported.
-    pub fn serves_grep(self) -> bool {
-        matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
-    }
-
-    /// Whether this server serves the index-maintenance endpoints, and
-    /// whether its maintenance sweep builds and collects the index.
-    pub fn maintains_index(self) -> bool {
-        matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
-    }
-}
-
 /// The server's `[grep]` table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepConfig {
-    pub mode: GrepMode,
+    /// Whether this server answers grep queries, and whether it serves the
+    /// index-maintenance endpoints and its sweep builds and collects the
+    /// index.
+    pub mode: JobMode,
     pub max_cache_bytes: Option<usize>,
     /// Flattening preserves the existing `[grep]` keys while leaving the
     /// worker policy itself as their one in-memory owner.
@@ -533,7 +479,7 @@ pub struct GrepConfig {
 impl Default for GrepConfig {
     fn default() -> Self {
         Self {
-            mode: GrepMode::Disabled,
+            mode: JobMode::Disabled,
             max_cache_bytes: None,
             worker: GrepWorkerConfig::default(),
         }
@@ -599,10 +545,10 @@ impl ServerConfig {
     /// It names the address, provider, and maintenance settings.
     pub fn check_summary(&self) -> String {
         let maintenance = match self.maintenance {
-            MaintenanceMode::Disabled => "disabled",
-            MaintenanceMode::ServeOnly => "serve_only",
-            MaintenanceMode::MaintainOnly => "maintain_only",
-            MaintenanceMode::ServeAndMaintain => "serve_and_maintain",
+            JobMode::Disabled => "disabled",
+            JobMode::ServeOnly => "serve_only",
+            JobMode::MaintainOnly => "maintain_only",
+            JobMode::ServeAndMaintain => "serve_and_maintain",
         };
         format!(
             "config ok: bind {}, store {}, maintenance {}",
@@ -942,7 +888,7 @@ impl ServerConfig {
             (limit.unwrap_or(0) as u128).saturating_sub(fixed_bytes + headroom as u128) as usize;
         let share =
             |percent: usize| limit.map(|_| (managed as u128 * percent as u128 / 100) as usize);
-        let serves_grep = self.grep.mode.serves_grep();
+        let serves_grep = self.grep.mode.serves();
         validate_positive(
             "max_concurrent_compactions",
             self.max_concurrent_compactions as u64,
@@ -1143,9 +1089,9 @@ root = "unused"
     fn four_gib_derives_each_pool_and_folds_unused_grep_into_segments() {
         let mut config = memory_config("memory_limit_bytes = 4294967296");
         for mode in [
-            super::GrepMode::ServeOnly,
-            super::GrepMode::Disabled,
-            super::GrepMode::MaintainOnly,
+            super::JobMode::ServeOnly,
+            super::JobMode::Disabled,
+            super::JobMode::MaintainOnly,
         ] {
             config.grep.mode = mode;
             let memory = config.memory_sizing(Some(1)).expect("explicit limit wins");
@@ -1157,7 +1103,7 @@ root = "unused"
             assert_eq!(memory.managed, 3_034_998_375);
             assert_eq!(
                 memory.segment.bytes,
-                if mode.serves_grep() {
+                if mode.serves() {
                     1_213_999_350
                 } else {
                     1_517_499_187
@@ -1166,7 +1112,7 @@ root = "unused"
             assert_eq!(memory.head_state.bytes, 303_499_837);
             assert_eq!(
                 memory.grep.bytes,
-                if mode.serves_grep() { 303_499_837 } else { 0 }
+                if mode.serves() { 303_499_837 } else { 0 }
             );
             assert_eq!(memory.read_working.bytes, 606_999_675);
             assert_eq!(memory.publication.bytes, 303_499_837);
@@ -1367,22 +1313,17 @@ root = "/tmp/loonfs-server"
 "#,
         );
         let config = load_server_config(&path).expect("valid config");
-        assert_eq!(config.maintenance, super::MaintenanceMode::ServeAndMaintain);
+        assert_eq!(config.maintenance, super::JobMode::ServeAndMaintain);
         assert!(config.maintenance.serves());
         assert!(config.maintenance.maintains());
 
         for (spelling, mode, serves, maintains) in [
-            ("disabled", super::MaintenanceMode::Disabled, false, false),
-            ("serve_only", super::MaintenanceMode::ServeOnly, true, false),
-            (
-                "maintain_only",
-                super::MaintenanceMode::MaintainOnly,
-                false,
-                true,
-            ),
+            ("disabled", super::JobMode::Disabled, false, false),
+            ("serve_only", super::JobMode::ServeOnly, true, false),
+            ("maintain_only", super::JobMode::MaintainOnly, false, true),
             (
                 "serve_and_maintain",
-                super::MaintenanceMode::ServeAndMaintain,
+                super::JobMode::ServeAndMaintain,
                 true,
                 true,
             ),
@@ -2583,7 +2524,7 @@ root = "/tmp/loonfs-server"
         );
 
         let config = load_server_config(&path).expect("load config");
-        assert_eq!(config.grep.mode, super::GrepMode::Disabled);
+        assert_eq!(config.grep.mode, super::JobMode::Disabled);
     }
 
     #[test]
@@ -2609,12 +2550,12 @@ root = "/tmp/loonfs-server"
     #[test]
     fn every_grep_mode_names_the_two_jobs_it_does() {
         for (spelling, mode, serves, maintains) in [
-            ("disabled", super::GrepMode::Disabled, false, false),
-            ("serve_only", super::GrepMode::ServeOnly, true, false),
-            ("maintain_only", super::GrepMode::MaintainOnly, false, true),
+            ("disabled", super::JobMode::Disabled, false, false),
+            ("serve_only", super::JobMode::ServeOnly, true, false),
+            ("maintain_only", super::JobMode::MaintainOnly, false, true),
             (
                 "serve_and_maintain",
-                super::GrepMode::ServeAndMaintain,
+                super::JobMode::ServeAndMaintain,
                 true,
                 true,
             ),
@@ -2636,8 +2577,8 @@ root = "/tmp/loonfs-server"
 
             let config = load_server_config(&path).expect("load config");
             assert_eq!(config.grep.mode, mode);
-            assert_eq!(config.grep.mode.serves_grep(), serves);
-            assert_eq!(config.grep.mode.maintains_index(), maintains);
+            assert_eq!(config.grep.mode.serves(), serves);
+            assert_eq!(config.grep.mode.maintains(), maintains);
         }
     }
 
@@ -2694,7 +2635,7 @@ root = "/tmp/loonfs-server"
         );
 
         let grep = load_server_config(&path).expect("load config").grep;
-        assert_eq!(grep.mode, super::GrepMode::ServeOnly);
+        assert_eq!(grep.mode, super::JobMode::ServeOnly);
         let policy = grep
             .worker_config()
             .build_policy()

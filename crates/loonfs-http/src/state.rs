@@ -11,6 +11,7 @@ use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{ErrorCode, MonotonicTimer, NamespaceId, SecretString, StdMonotonicTimer};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -26,11 +27,45 @@ pub const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 8;
 pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 16;
 pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 60_000;
 
+/// Which of two jobs a host does for one subsystem: serve its requests, do
+/// its background work, both, or neither.
+///
+/// The two jobs are independent. For grep, a read replica can serve searches
+/// over an index another process maintains, and a write node can maintain
+/// the index for namespaces it never answers searches about. Every
+/// combination is named here, so none has to be validated away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobMode {
+    /// Neither serve requests nor do the background work.
+    Disabled,
+    /// Serve requests without doing the background work.
+    ServeOnly,
+    /// Do the background work without serving requests.
+    MaintainOnly,
+    /// Serve requests and do the background work.
+    ServeAndMaintain,
+}
+
+impl JobMode {
+    /// Whether the host serves the subsystem's requests.
+    pub fn serves(self) -> bool {
+        matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
+    }
+
+    /// Whether the host does the subsystem's background work.
+    pub fn maintains(self) -> bool {
+        matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BindingConfig {
-    pub serves_grep: bool,
-    pub maintains_grep_index: bool,
-    pub serves_maintenance: bool,
+    /// Whether this binding answers grep queries and maintains the grep index.
+    pub grep: JobMode,
+    /// Whether this binding serves the maintenance API group. The host runs
+    /// any background maintenance itself.
+    pub maintenance: JobMode,
     pub snapshot_policy: SnapshotPolicy,
     pub max_download_bytes: u64,
     pub max_upload_bytes: u64,
@@ -62,16 +97,11 @@ pub struct BindingState {
 }
 
 impl BindingState {
-    pub(crate) fn grep_worker(&self) -> &GrepWorker<SharedObjectStore> {
+    /// The grep worker, where this binding maintains the grep index.
+    pub(crate) fn grep_index_worker(&self) -> Option<&GrepWorker<SharedObjectStore>> {
         self.grep_worker
             .as_ref()
-            .expect("grep routes should carry a grep worker")
-    }
-
-    pub(crate) fn grep_service(&self) -> &GrepService {
-        self.grep_service
-            .as_deref()
-            .expect("grep routes should carry a grep service")
+            .filter(|_| self.options.grep.maintains())
     }
 }
 

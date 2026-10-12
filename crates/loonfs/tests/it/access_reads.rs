@@ -1,7 +1,7 @@
 //! Subject reads observe access changes through the runtime cache.
 
 use loonfs::publish::{CommitIntent, FilesystemOperation};
-use loonfs::{CreateNamespaceOptions, DestinationBehavior, LoonFs};
+use loonfs::{CreateNamespaceOptions, CurrentFile, DestinationBehavior, LoonFs};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
@@ -184,10 +184,7 @@ async fn check_buffered_read_access(content_size: usize) {
     assert_eq!(states.len(), 1);
     let state = &states[0];
     assert_eq!(state.inode_id, inode_id);
-    assert!(!state.visible);
-    assert!(!state.readable);
-    assert_eq!(state.current_revision_no, None);
-    assert_eq!(state.current_path, None);
+    assert_eq!(state.file, CurrentFile::Hidden { readable: false });
 }
 
 #[tokio::test]

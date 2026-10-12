@@ -3,7 +3,7 @@
 #![allow(clippy::panic)]
 
 use super::Sweep;
-use crate::config::{GrepConfig, GrepMode, ServerConfig};
+use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
 use loonfs::{LoonFs, Maintenance, NamespaceId, SharedObjectStore, Writable};
@@ -72,7 +72,7 @@ impl SweepServer {
             .await
             .expect("build the server runtime");
         let maintenance = runtime.maintenance(writer_id("sweep-server-maintenance"));
-        let grep_worker = config.grep.mode.maintains_index().then(|| {
+        let grep_worker = config.grep.mode.maintains().then(|| {
             GrepWorker::new(
                 runtime.object_store(),
                 runtime.read_only(),
@@ -191,7 +191,7 @@ root = "unused"
     .expect("parse the sweep test config");
     if let Some(worker) = grep {
         config.grep = GrepConfig {
-            mode: GrepMode::ServeAndMaintain,
+            mode: JobMode::ServeAndMaintain,
             worker,
             ..GrepConfig::default()
         };

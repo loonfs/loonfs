@@ -7,7 +7,7 @@ use loonfs::{InlineContentPolicy, LoonFs, Maintenance, SharedObjectStore, Writab
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_http::{
-    AuthPolicy, BindingConfig, BindingState, HttpMetrics, Namespaces,
+    AuthPolicy, BindingConfig, BindingState, HttpMetrics, JobMode, Namespaces,
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
 use loonfs_objectstore::ConfiguredObjectStoreKind;
@@ -34,9 +34,8 @@ pub(crate) fn client(
     no_retry: bool,
 ) -> Result<Client, CliError> {
     let options = Arc::new(BindingConfig {
-        serves_grep: true,
-        maintains_grep_index: true,
-        serves_maintenance: true,
+        grep: JobMode::ServeAndMaintain,
+        maintenance: JobMode::ServeAndMaintain,
         snapshot_policy: loonfs::SnapshotPolicy::default(),
         max_download_bytes: u64::MAX,
         max_upload_bytes: u64::MAX,
@@ -90,7 +89,7 @@ pub(crate) fn client(
             server_url: "http://embedded.invalid".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
-            disable_transient_retry: no_retry,
+            retry: !no_retry,
             ca_cert_path: None,
         },
         service,

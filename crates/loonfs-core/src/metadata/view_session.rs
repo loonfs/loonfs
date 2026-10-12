@@ -303,7 +303,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     ) -> Result<Vec<DirentryBindingNameGroup>> {
         let mut groups: Vec<DirentryBindingNameGroup> = Vec::new();
         loop {
-            if stream.manifest_candidates.is_empty() && !stream.manifest_exhausted {
+            if stream.manifest_candidates.is_empty()
+                && !matches!(stream.manifest_scan, ScanPosition::Exhausted)
+            {
                 self.counters.scan_range_page_calls =
                     self.counters.scan_range_page_calls.saturating_add(1);
                 let page = if let Some(segments) = self.base.manifest_segments() {
@@ -311,18 +313,18 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         segments,
                         parent_inode_id,
                         start_after_name_key,
-                        stream.manifest_after_row_key.as_deref(),
+                        stream.manifest_scan.after_row_key(),
                         group_limit.max(DIRECTORY_PAGE_RAW_SCAN_LIMIT),
                     )
                     .await?
                 } else {
                     Vec::new()
                 };
-                if page.is_empty() {
-                    stream.manifest_exhausted = true;
-                } else {
-                    stream.manifest_after_row_key =
-                        page.last().map(|candidate| candidate.row_key.clone());
+                stream.manifest_scan = match page.last() {
+                    None => ScanPosition::Exhausted,
+                    Some(candidate) => ScanPosition::After(candidate.row_key.clone()),
+                };
+                if !page.is_empty() {
                     stream
                         .manifest_candidates
                         .extend(
@@ -346,7 +348,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                     (None, Some(_)) => true,
                     (Some(_), None) => false,
                     (None, None) => {
-                        if stream.manifest_exhausted {
+                        if matches!(stream.manifest_scan, ScanPosition::Exhausted) {
                             break;
                         }
                         continue;
@@ -905,8 +907,7 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
 /// Cursor state for the merged manifest+tail direntry-bind stream, grouped
 /// by name key across calls.
 struct DirentryBindingNameGroupStream {
-    manifest_after_row_key: Option<String>,
-    manifest_exhausted: bool,
+    manifest_scan: ScanPosition,
     manifest_candidates: VecDeque<DirentryBindingPageCandidate>,
     tail_candidates: Vec<DirentryBindingPageCandidate>,
     tail_index: usize,
@@ -916,12 +917,35 @@ struct DirentryBindingNameGroupStream {
 impl DirentryBindingNameGroupStream {
     fn new(tail_candidates: Vec<DirentryBindingPageCandidate>, manifest_exhausted: bool) -> Self {
         Self {
-            manifest_after_row_key: None,
-            manifest_exhausted,
+            manifest_scan: if manifest_exhausted {
+                ScanPosition::Exhausted
+            } else {
+                ScanPosition::Start
+            },
             manifest_candidates: VecDeque::new(),
             tail_candidates,
             tail_index: 0,
             pushed_back: None,
+        }
+    }
+}
+
+/// Where a paged scan of manifest rows resumes.
+enum ScanPosition {
+    /// No page read yet.
+    Start,
+    /// Resumes after this row key.
+    After(String),
+    /// No rows remain.
+    Exhausted,
+}
+
+impl ScanPosition {
+    /// The row key the next page starts after, or `None` for the first page.
+    fn after_row_key(&self) -> Option<&str> {
+        match self {
+            Self::After(row_key) => Some(row_key),
+            Self::Start | Self::Exhausted => None,
         }
     }
 }

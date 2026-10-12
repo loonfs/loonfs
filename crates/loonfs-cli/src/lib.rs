@@ -44,11 +44,7 @@ pub async fn main() -> ExitCode {
         return render_parse_failure(&error);
     }
     let runtime = args::RuntimeBehavior::detect(&cli);
-    let output_format = if runtime.json {
-        render::OutputFormat::Json
-    } else {
-        render::OutputFormat::Human
-    };
+    let output_format = runtime.output;
 
     // Boxing keeps the public entrypoint's future shallow for downstream binaries.
     let result = Box::pin(commands::run(cli, runtime)).await;

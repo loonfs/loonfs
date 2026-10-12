@@ -1085,14 +1085,6 @@ impl Namespace<Writable> {
     }
 }
 
-pub(crate) struct EnginePublishResult {
-    pub(crate) results: Vec<std::result::Result<Commit, crate::CoreError>>,
-    pub(crate) wal_tail_objects: u64,
-    pub(crate) wal_tail_inline_bytes: usize,
-    pub(crate) wal_tail_observed: bool,
-    pub(crate) wal_tail_discovered: bool,
-}
-
 /// Publishes already-classified candidates as one batch — one WAL
 /// object, one numbered WAL put — through the namespace
 /// publisher's own commit engine, and seeds the read cache with the
@@ -1108,7 +1100,7 @@ pub(crate) async fn publish_batch_with_engine(
     candidates: &[CommitCandidate],
     context: &loonfs_core::MutationContext,
     batch: &loonfs_core::time::Deadline,
-) -> EnginePublishResult {
+) -> loonfs_core::publish::NamespaceCommitEnginePublishResult {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();
     // Boxing erases the engine's deeply nested publish future; without
@@ -1121,11 +1113,5 @@ pub(crate) async fn publish_batch_with_engine(
             core.seed_namespace_read_cache(namespace_id, state);
         }
     }
-    EnginePublishResult {
-        results: publish.results,
-        wal_tail_objects: publish.wal_tail_objects,
-        wal_tail_inline_bytes: publish.wal_tail_inline_bytes,
-        wal_tail_observed: publish.wal_tail_observed,
-        wal_tail_discovered: publish.wal_tail_discovered,
-    }
+    publish
 }

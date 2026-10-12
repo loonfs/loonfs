@@ -44,9 +44,8 @@ async fn delete_routes_require_the_owner_and_delete_each_pin_once() {
         KeyPredicate::any(),
     ));
     let mut config = test_options(directory.path(), "pin-deletion-writer");
-    config.binding.serves_maintenance = true;
-    config.binding.serves_grep = false;
-    config.binding.maintains_grep_index = false;
+    config.binding.maintenance = JobMode::ServeOnly;
+    config.binding.grep = JobMode::Disabled;
     let (router, state) = test_app(config, options_with_store(store.clone()))
         .await
         .expect("app");

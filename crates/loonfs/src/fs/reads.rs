@@ -375,7 +375,8 @@ impl ReadView {
 
     /// Resolves current visibility, revision, and path against this view.
     ///
-    /// Unreadable inodes return `visible: false` with no path or revision.
+    /// Unreadable inodes return [`CurrentFile::Hidden`](crate::CurrentFile::Hidden), with no
+    /// path or revision.
     pub async fn stat_current_files_by_inode(
         &self,
         inode_ids: &[InodeId],
@@ -603,7 +604,7 @@ pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, Error>;
 /// A pager over the files a checkpoint pins.
 pub type CheckpointFilesPager = loonfs_types::Pager<CheckpointFilesPage, Error>;
 
-impl<M> Namespace<M> {
+impl<M: crate::Mode> Namespace<M> {
     fn read_view_from(
         &self,
         engine: NamespaceReaderEngine<SharedObjectStore>,
@@ -1325,8 +1326,8 @@ impl<M> Namespace<M> {
     /// Resolves the current state of each inode ID.
     ///
     /// Results use one read view and preserve input order. Missing or unreadable
-    /// inodes return `visible: false` with no path or revision. Readable directories
-    /// have a path but no revision.
+    /// inodes return [`CurrentFile::Hidden`](crate::CurrentFile::Hidden), with no path or
+    /// revision. Readable directories have a path but no revision.
     ///
     /// A batch larger than [`MAX_CURRENT_FILES_PER_STAT`](crate::MAX_CURRENT_FILES_PER_STAT)
     /// returns `invalid_request` before reading metadata.

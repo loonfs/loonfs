@@ -5,7 +5,7 @@
 use crate::common::http_split_support::test_config;
 use crate::common::start_server;
 use loonfs_client::{NamespacePath, PutFileOptions, ReadFileOptions, StatOptions};
-use loonfs_server::MaintenanceMode;
+use loonfs_server::JobMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id};
 use loonfs_types::{
@@ -315,7 +315,7 @@ async fn http_snapshots_keep_owner_operations_and_listings_separate() {
         "snapshot-separation",
         "snapshot-separation",
     );
-    config.maintenance = MaintenanceMode::ServeOnly;
+    config.maintenance = JobMode::ServeOnly;
     let harness = start_server(config).await;
     let namespace = namespace_id("separation");
     harness

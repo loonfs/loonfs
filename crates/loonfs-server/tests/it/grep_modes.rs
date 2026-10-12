@@ -11,8 +11,7 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, AppConfig, GrepConfig, GrepMode, MaintenanceMode, MetadataCacheConfig, ServerConfig,
-    StoreConfig,
+    app, AppConfig, GrepConfig, JobMode, MetadataCacheConfig, ServerConfig, StoreConfig,
 };
 use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_types::{
@@ -33,7 +32,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "disabled").await;
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::Disabled),
+        test_config(temp_dir.path(), JobMode::Disabled),
         AppConfig::default(),
     )
     .await
@@ -94,7 +93,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
 
 #[tokio::test]
 async fn grep_gc_requires_grep_maintenance() {
-    for mode in [GrepMode::Disabled, GrepMode::ServeOnly] {
+    for mode in [JobMode::Disabled, JobMode::ServeOnly] {
         let temp_dir = tempdir().expect("store tempdir");
         let (router, server) = app(test_config(temp_dir.path(), mode), AppConfig::default())
             .await
@@ -120,7 +119,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "query-grammar").await;
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::ServeOnly),
+        test_config(temp_dir.path(), JobMode::ServeOnly),
         AppConfig::default(),
     )
     .await
@@ -198,7 +197,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
+        test_config(temp_dir.path(), JobMode::ServeAndMaintain),
         AppConfig::default(),
     )
     .await
@@ -464,7 +463,7 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     // Nothing in this process has touched either namespace: one sweep pass
     // carries both indexes to their heads.
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::ServeAndMaintain),
+        test_config(temp_dir.path(), JobMode::ServeAndMaintain),
         AppConfig::default(),
     )
     .await
@@ -501,7 +500,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::ServeOnly),
+        test_config(temp_dir.path(), JobMode::ServeOnly),
         AppConfig::default(),
     )
     .await
@@ -593,7 +592,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let (router, server) = app(
-        test_config(temp_dir.path(), GrepMode::MaintainOnly),
+        test_config(temp_dir.path(), JobMode::MaintainOnly),
         AppConfig::default(),
     )
     .await
@@ -676,8 +675,8 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         .expect("open namespace");
     let (router, server) = app(
         ServerConfig {
-            maintenance: MaintenanceMode::ServeOnly,
-            ..test_config(temp_dir.path(), GrepMode::ServeAndMaintain)
+            maintenance: JobMode::ServeOnly,
+            ..test_config(temp_dir.path(), JobMode::ServeAndMaintain)
         },
         AppConfig::default(),
     )
@@ -751,7 +750,7 @@ async fn seed_namespace(
     (store, writer, namespace_id)
 }
 
-fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
+fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
         memory_limit_bytes: None,
@@ -769,7 +768,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
             mode,
             ..GrepConfig::default()
         },
-        maintenance: MaintenanceMode::ServeAndMaintain,
+        maintenance: JobMode::ServeAndMaintain,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,
@@ -816,7 +815,7 @@ async fn sweep(server: &loonfs_server::AppState) {
 
 /// Whether this deployment serves the index-maintenance routes.
 fn maintains_grep_index(server: &loonfs_server::AppState) -> bool {
-    server.binding.options.maintains_grep_index
+    server.binding.options.grep.maintains()
 }
 
 /// The sequence this namespace's index is built through.

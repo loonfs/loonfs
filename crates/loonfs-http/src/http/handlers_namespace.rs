@@ -164,7 +164,7 @@ pub(super) async fn get_capabilities(
     // the routes this router mounts. Serving searches and maintaining their
     // index remain separately deployable.
     capabilities.api_groups = vec![API_GROUP_FILESYSTEM_V0.to_owned()];
-    if state.options.serves_maintenance {
+    if state.options.maintenance.serves() {
         capabilities
             .api_groups
             .push(API_GROUP_MAINTENANCE_V0.to_owned());
@@ -172,9 +172,9 @@ pub(super) async fn get_capabilities(
     set_feature(
         &mut capabilities,
         FEATURE_MAINTENANCE_GREP_INDEX,
-        state.options.serves_maintenance && state.options.maintains_grep_index,
+        state.options.maintenance.serves() && state.options.grep.maintains(),
     );
-    if state.options.serves_grep {
+    if state.options.grep.serves() {
         let pagination = PaginationPolicy::default();
         capabilities.api_groups.push(API_GROUP_QUERY_V0.to_owned());
         capabilities
@@ -876,11 +876,11 @@ pub(super) async fn run_maintenance(
                 .map(RunMaintenanceResponse::Retention)
         }
         RunMaintenanceRequest::GrepGc {} => {
-            if !state.options.maintains_grep_index {
+            let Some(worker) = state.grep_index_worker() else {
                 return Err(grep_index_not_maintained().await);
-            }
+            };
             let now_ms = maintenance.now_ms();
-            return loonfs_grep::gc_grep(state.grep_worker(), &namespace_id, now_ms)
+            return loonfs_grep::gc_grep(worker, &namespace_id, now_ms)
                 .await
                 .map(Json)
                 .map_err(|error| map_grep_error(&namespace_id, error));

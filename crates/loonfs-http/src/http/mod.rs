@@ -61,7 +61,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, post, put, MethodRouter};
-use axum::Router;
+use axum::{Extension, Router};
 use loonfs::ErrorCode;
 use loonfs_types::ErrorKind;
 
@@ -235,15 +235,16 @@ async fn require_bearer_token(
     Ok(next.run(request).await)
 }
 
-fn gated(
-    enabled: bool,
+/// Serves `served` with `handle` as a request extension where the binding
+/// holds the handle, and `denied` where it doesn't.
+fn gated<T: Clone + Send + Sync + 'static>(
+    handle: Option<T>,
     served: MethodRouter<BindingState>,
     denied: MethodRouter<BindingState>,
 ) -> MethodRouter<BindingState> {
-    if enabled {
-        served
-    } else {
-        denied
+    match handle {
+        Some(handle) => served.layer(Extension(handle)),
+        None => denied,
     }
 }
 
@@ -253,8 +254,8 @@ pub fn router(state: BindingState) -> Router {
     // are separately deployable: the query route exists where this server
     // serves grep, and the three routes that mutate a grep manifest exist where
     // it maintains one.
-    let serves_grep = state.options.serves_grep;
-    let maintains_index = state.options.maintains_grep_index;
+    let grep_service = state.grep_service.clone();
+    let index_worker = state.grep_index_worker().cloned();
     let mut authenticated = Router::new()
         .route(
             "/v0/capabilities",
@@ -301,7 +302,7 @@ pub fn router(state: BindingState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/grep",
-            gated(serves_grep, get(grep), get(grep_queries_not_served)),
+            gated(grep_service, get(grep), get(grep_queries_not_served)),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/revisions",
@@ -369,7 +370,7 @@ pub fn router(state: BindingState) -> Router {
             get(get_upload),
         )
         .route("/v0/namespaces/{namespace_id}/changes", get(list_changes));
-    if state.options.serves_maintenance {
+    if state.options.maintenance.serves() {
         authenticated = authenticated
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
@@ -378,7 +379,7 @@ pub fn router(state: BindingState) -> Router {
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/grep/index",
                 gated(
-                    maintains_index,
+                    index_worker.clone(),
                     get(get_grep_index),
                     get(grep_index_not_maintained),
                 ),
@@ -386,7 +387,7 @@ pub fn router(state: BindingState) -> Router {
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
                 gated(
-                    maintains_index,
+                    index_worker.clone(),
                     post(enable_grep_index),
                     post(grep_index_not_maintained),
                 ),
@@ -394,7 +395,7 @@ pub fn router(state: BindingState) -> Router {
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
                 gated(
-                    maintains_index,
+                    index_worker,
                     post(disable_grep_index),
                     post(grep_index_not_maintained),
                 ),

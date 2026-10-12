@@ -2347,7 +2347,9 @@ async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on()
     );
     let mut visible = visible_namespace(&store, &namespace_id).await;
     assert!(
-        visible.iter().any(|state| state.visible),
+        visible
+            .iter()
+            .any(|state| matches!(state.file, CurrentFile::Visible { .. })),
         "the seed must leave something to read"
     );
 
@@ -2752,7 +2754,10 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
         "the swap must not move anything a read already answered"
     );
     assert!(
-        visible_after.last().expect("the fold's file").visible,
+        matches!(
+            visible_after.last().expect("the fold's file").file,
+            CurrentFile::Visible { .. }
+        ),
         "the file the fold published must be visible after the swap"
     );
 }

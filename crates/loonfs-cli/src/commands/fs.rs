@@ -28,6 +28,7 @@ use crate::config::ConfigLocation;
 use crate::error::CliError;
 use crate::payload::{LocalPayload, STDIN_PATH};
 use crate::progress::{ProgressOp, ProgressReporter};
+use crate::render::OutputFormat;
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_client::{
     AppendFileOptions, AttributeChanges, CommitOptions, CreateDirectoryOptions, DeleteOptions,
@@ -135,8 +136,8 @@ pub(crate) async fn run_filesystem_ls(
         .map(|value| parse_snapshot_id_arg("--snapshot-id", value))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
-    let streams_pages =
-        args.pagination.page_limits.jsonl || (args.pagination.page_limits.all && !runtime.json);
+    let streams_pages = args.pagination.page_limits.jsonl
+        || (args.pagination.page_limits.all && runtime.output == OutputFormat::Human);
     if streams_pages {
         let stdout = io::stdout();
         let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
@@ -175,7 +176,7 @@ pub(crate) async fn run_filesystem_ls(
         },
     )
     .await?;
-    if !runtime.json {
+    if runtime.output == OutputFormat::Human {
         if let Some(drift) = followed.head_drift.as_ref() {
             crate::render::write_listing_drift_warning(drift);
         }
@@ -453,7 +454,7 @@ pub(crate) async fn run_filesystem_get(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    if runtime.json && args.local_destination.as_deref() == Some("-") {
+    if runtime.output == OutputFormat::Json && args.local_destination.as_deref() == Some("-") {
         return Err(fail(
             kind,
             Some(context.profile_name),

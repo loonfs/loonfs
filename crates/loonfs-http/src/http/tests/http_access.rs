@@ -1,6 +1,7 @@
 //! Subject headers and their invalid-request parameter names.
 
 use super::fixtures::{test_app, test_options, TestAppOptions};
+use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs_test_support::ids::namespace_id;
@@ -532,7 +533,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
 async fn a_former_server_observes_revocation_on_its_first_read_after_publication() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_options(&temp_dir.path().join("store"), "old-writer");
-    config.binding.serves_maintenance = true;
+    config.binding.maintenance = JobMode::ServeOnly;
     let (old_router, old_state) = test_app(config.clone(), TestAppOptions::default())
         .await
         .expect("old server");

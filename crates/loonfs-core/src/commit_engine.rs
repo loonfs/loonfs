@@ -551,19 +551,33 @@ impl std::io::Write for RequestByteCounter {
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
     pub results: Vec<Result<Commit>>,
-    /// WAL tail length observed by this publish, for opportunistic
-    /// maintenance scheduling. Zero when no projection was loaded.
-    pub wal_tail_objects: u64,
-    pub wal_tail_inline_bytes: usize,
-    /// Whether this attempt loaded the tail. The inline count then includes
-    /// the inline bytes of a put whose outcome is unknown.
-    pub wal_tail_observed: bool,
-    /// Whether this attempt read the WAL tail from the store instead of
-    /// finding it in the head-state cache.
-    pub wal_tail_discovered: bool,
+    /// The WAL tail this attempt loaded, for opportunistic maintenance
+    /// scheduling, or `None` when it loaded no projection.
+    pub wal_tail: Option<WalTailReport>,
     /// Read state produced by a successful, unambiguous WAL put. Callers can
     /// use it to update read caches without reloading from object storage.
     pub resulting_read_state: Option<ResultingReadState>,
+}
+
+/// The WAL tail one publish attempt loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalTailReport {
+    /// Unfolded WAL objects.
+    pub objects: u64,
+    /// Inline content bytes in the tail, including the inline bytes of a put
+    /// whose outcome is unknown.
+    pub inline_bytes: usize,
+    /// Where the attempt found the tail.
+    pub source: TailSource,
+}
+
+/// Where a publish attempt found the WAL tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailSource {
+    /// The head-state cache.
+    Cached,
+    /// The store.
+    Store,
 }
 
 /// The tail a fold publishes: the head it was replayed against, the basis
@@ -916,10 +930,7 @@ impl NamespaceCommitEngine {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
-                wal_tail_objects: 0,
-                wal_tail_inline_bytes: 0,
-                wal_tail_observed: false,
-                wal_tail_discovered: false,
+                wal_tail: None,
                 resulting_read_state: None,
             };
         }
@@ -930,10 +941,7 @@ impl NamespaceCommitEngine {
             Err(error) => {
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
-                    wal_tail_objects: 0,
-                    wal_tail_inline_bytes: 0,
-                    wal_tail_observed: false,
-                    wal_tail_discovered: false,
+                    wal_tail: None,
                     resulting_read_state: None,
                 };
             }
@@ -999,10 +1007,7 @@ impl NamespaceCommitEngine {
                 }
                 return NamespaceCommitEnginePublishResult {
                     results: repeated_error(candidate_count, error),
-                    wal_tail_objects: 0,
-                    wal_tail_inline_bytes: 0,
-                    wal_tail_observed: false,
-                    wal_tail_discovered: false,
+                    wal_tail: None,
                     resulting_read_state: None,
                 };
             }
@@ -1045,10 +1050,15 @@ impl NamespaceCommitEngine {
         }
         NamespaceCommitEnginePublishResult {
             results: published.results,
-            wal_tail_objects,
-            wal_tail_inline_bytes: wal_tail_inline_bytes + unknown_inline_bytes,
-            wal_tail_observed: true,
-            wal_tail_discovered,
+            wal_tail: Some(WalTailReport {
+                objects: wal_tail_objects,
+                inline_bytes: wal_tail_inline_bytes + unknown_inline_bytes,
+                source: if wal_tail_discovered {
+                    TailSource::Store
+                } else {
+                    TailSource::Cached
+                },
+            }),
             resulting_read_state,
         }
     }
@@ -2145,7 +2155,10 @@ mod tests {
         timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
         store.reset();
         let published = publish_one(&mut engine, &store, &writer, "epsilon").await;
-        assert!(published.wal_tail_discovered);
+        assert_eq!(
+            published.wal_tail.map(|tail| tail.source),
+            Some(TailSource::Store)
+        );
         assert_eq!(
             published
                 .resulting_read_state

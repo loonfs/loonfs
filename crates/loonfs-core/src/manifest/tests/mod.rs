@@ -54,7 +54,7 @@ use crate::namespace::control::{load_current_manifest, load_namespace_read_state
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::claim_writer_epoch;
 use crate::path::read::{
-    load_current_metadata_view, stat_current_files_by_inode, CurrentFileState,
+    load_current_metadata_view, stat_current_files_by_inode, CurrentFile, CurrentFileState,
 };
 use crate::pin::record::load_pin;
 use crate::protocol::list_changes_after;

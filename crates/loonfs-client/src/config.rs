@@ -29,24 +29,28 @@ pub struct ClientConfig {
     /// also have a built-in 90-second total retry limit.
     #[serde(default)]
     pub request_timeout_ms: Option<u64>,
-    /// Disables the bounded automatic retry of quick-clearing transient
+    /// Enables the bounded automatic retry of quick-clearing transient
     /// failures: the retryable-unavailability codes (`server_busy`,
     /// `commit_queue_full`, `store_contention`, `shutting_down` — a draining
     /// process telling the caller to retry against the next one) and
     /// network-level transport errors (connect failures, timeouts, resets).
-    /// Off by default. The retry
+    /// On by default. The retry
     /// applies only to reads, commits (which carry a durable replay
     /// identity), and operations whose repeat semantics are idempotent;
     /// lifecycle mutations
     /// and upload-session creation are always single-attempt.
-    #[serde(default)]
-    pub disable_transient_retry: bool,
+    #[serde(default = "default_retry")]
+    pub retry: bool,
     /// PEM bundle of extra certificate authorities to trust for `https`
     /// server URLs, for a server whose certificate a private CA issued.
     /// Added to the platform trust store rather than replacing it, so a
     /// client configured this way still reaches publicly-trusted servers.
     #[serde(default)]
     pub ca_cert_path: Option<String>,
+}
+
+fn default_retry() -> bool {
+    true
 }
 
 impl ClientConfig {
@@ -168,7 +172,7 @@ mod tests {
             server_url: server_url.to_owned(),
             auth_token: auth_token.map(SecretString::from),
             request_timeout_ms: None,
-            disable_transient_retry: false,
+            retry: true,
             ca_cert_path: None,
         }
     }

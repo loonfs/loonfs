@@ -454,8 +454,7 @@ async fn an_idle_close_rechecks_the_seq_and_counts_subject_scoped_handles() {
         .await
         .expect("close idle session")
         .expect("session closed");
-    assert!(closed.was_open);
-    assert_eq!(closed.drained_commits, 0);
+    assert_eq!(closed.drained_commits, Some(0));
     assert!(namespaces.held_ids().is_empty());
 }
 

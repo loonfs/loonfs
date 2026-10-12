@@ -7,8 +7,8 @@
 use crate::common::{expect_code, open_runtime_async, store};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
-    CommitId, CreateDirectoryOptions, ErrorCode, FilesystemChange, InodeId, Namespace, PageRequest,
-    PaginationPolicy, Writable,
+    CommitId, CreateDirectoryOptions, CurrentFile, ErrorCode, FilesystemChange, InodeId, Namespace,
+    PageRequest, PaginationPolicy, Writable,
 };
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
@@ -114,10 +114,13 @@ async fn assert_inode_addressing_serves(
         .stat_current_files_by_inode(&[loose.inode_id])
         .await
         .expect("resolve the moved file");
-    assert_eq!(
-        current[0].current_path.as_ref().map(|path| path.as_str()),
-        Some(file_path.as_str())
-    );
+    let CurrentFile::Visible { path, .. } = &current[0].file else {
+        panic!(
+            "expected the moved file to be visible, got {:?}",
+            current[0].file
+        );
+    };
+    assert_eq!(path.as_str(), file_path.as_str());
 
     // Path-addressed requests keep the parse-time limits.
     expect_code(

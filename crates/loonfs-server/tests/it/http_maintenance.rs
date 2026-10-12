@@ -537,7 +537,7 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
 
         let harness = start_server(loonfs_server::ServerConfig {
             idle_fold_timeout_ms,
-            maintenance: loonfs_server::MaintenanceMode::ServeOnly,
+            maintenance: loonfs_server::JobMode::ServeOnly,
             ..test_config(store_root, "loonfs-server-idle", key_prefix)
         })
         .await;
@@ -596,7 +596,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         "loonfs-server-maintenance-corrupt",
         "http-maintenance-corrupt",
     );
-    warm_config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
+    warm_config.maintenance = loonfs_server::JobMode::ServeOnly;
     let harness = start_server(warm_config).await;
     // A new server must read the corrupted manifest; the first server has a valid cached snapshot.
     let mut cold_config = test_config(
@@ -604,7 +604,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         "loonfs-server-cold-reader",
         "http-maintenance-corrupt",
     );
-    cold_config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
+    cold_config.maintenance = loonfs_server::JobMode::ServeOnly;
     let cold = start_server(cold_config).await;
     let client = harness.client.clone();
     let cold_client = cold.client.clone();

@@ -1,6 +1,6 @@
 //! The builder for a [`LoonFs`] runtime in either mode.
 
-use super::{LoonFs, ReadOnly, Writable};
+use super::{LoonFs, Mode, ReadOnly, Writable};
 use crate::config::ReadConfig;
 use crate::fs::{RuntimeCore, WriterBits, WriterIdentity};
 use crate::metrics::{
@@ -15,7 +15,6 @@ use loonfs_core::cache::StoredMetadataBlockCache;
 use loonfs_core::MetadataRunPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Builder for a [`LoonFs`] runtime in mode `M`.
@@ -25,10 +24,9 @@ use std::sync::Arc;
 /// writable builder. [`Self::read_only`] turns a writable builder into a
 /// read-only one.
 #[must_use]
-pub struct LoonFsBuilder<M> {
+pub struct LoonFsBuilder<M: Mode> {
     core: CoreConfig,
-    writer: WriterConfig,
-    mode: PhantomData<M>,
+    writer: M::WriterConfig,
 }
 
 /// Where a runtime's object-store client comes from.
@@ -56,15 +54,26 @@ struct CoreConfig {
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
-/// What only a writable runtime reads. A read-only build ignores it.
-struct WriterConfig {
+/// What only a writable runtime reads.
+pub(crate) struct WriterConfig {
     writer_id: Option<String>,
     min_publish_interval_ms: u64,
     publication_policy: PublicationPolicy,
     inline_content: InlineContentPolicy,
 }
 
-impl<M> LoonFsBuilder<M> {
+impl Default for WriterConfig {
+    fn default() -> Self {
+        Self {
+            writer_id: None,
+            min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
+            publication_policy: PublicationPolicy::default(),
+            inline_content: InlineContentPolicy::default(),
+        }
+    }
+}
+
+impl<M: Mode> LoonFsBuilder<M> {
     pub(super) fn from_config(store_config: StoreConfig) -> Self {
         Self::new(StoreSource::Config(store_config))
     }
@@ -90,13 +99,7 @@ impl<M> LoonFsBuilder<M> {
                 object_store_metrics_recorder: None,
                 metrics_recorder: None,
             },
-            writer: WriterConfig {
-                writer_id: None,
-                min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
-                publication_policy: PublicationPolicy::default(),
-                inline_content: InlineContentPolicy::default(),
-            },
-            mode: PhantomData,
+            writer: M::WriterConfig::default(),
         }
     }
 
@@ -286,8 +289,7 @@ impl LoonFsBuilder<Writable> {
     pub fn read_only(self) -> LoonFsBuilder<ReadOnly> {
         LoonFsBuilder {
             core: self.core,
-            writer: self.writer,
-            mode: PhantomData,
+            writer: (),
         }
     }
 

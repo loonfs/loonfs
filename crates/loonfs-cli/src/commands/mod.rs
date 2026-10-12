@@ -29,6 +29,7 @@ use crate::args::{
 };
 use crate::config::resolve_config_location;
 use crate::error::CliError;
+use crate::render::OutputFormat;
 use clap::CommandFactory;
 use clap_complete::Shell;
 use std::path::Path;
@@ -41,7 +42,7 @@ pub(crate) async fn run(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let kind = cli.kind();
-    if runtime.json && !kind.supports_json() {
+    if runtime.output == OutputFormat::Json && !kind.supports_json() {
         return Err(CommandFailure {
             kind,
             profile: None,

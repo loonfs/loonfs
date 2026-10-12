@@ -11,9 +11,9 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
         let directory = tempdir().expect("temporary store");
         let mut config = test_config(directory.path(), "composed-writer");
         config.maintenance = if serves_maintenance {
-            crate::MaintenanceMode::ServeAndMaintain
+            crate::JobMode::ServeAndMaintain
         } else {
-            crate::MaintenanceMode::MaintainOnly
+            crate::JobMode::MaintainOnly
         };
         let (router, state) = app(config, AppConfig::default()).await.expect("server app");
         let router = if serves_maintenance {
@@ -21,7 +21,10 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
         } else {
             loonfs_http::router(state.binding.clone())
         };
-        assert_eq!(state.binding.options.serves_maintenance, serves_maintenance);
+        assert_eq!(
+            state.binding.options.maintenance.serves(),
+            serves_maintenance
+        );
         assert!(state.sweep.is_some(), "the maintenance sweep survives");
 
         for path in ["/health", "/readiness", "/metrics"] {

@@ -4,8 +4,8 @@ use crate::common::{
     assert_core_error_kind, metadata_options, open_runtime_async, store, SettableWallClock,
 };
 use loonfs::{
-    DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PageRequest, PaginationPolicy,
-    PutFileOptions, SnapshotPolicy,
+    CurrentFile, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PageRequest,
+    PaginationPolicy, PutFileOptions, SnapshotPolicy,
 };
 use tempfile::tempdir;
 
@@ -747,7 +747,13 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
         .stat_current_files_by_inode(&[before.inode_id])
         .await
         .expect("resolve inode through the view");
-    assert_eq!(states[0].current_revision_no, before.revision_no());
+    assert_eq!(
+        states[0].file,
+        CurrentFile::Visible {
+            path: before.path.clone(),
+            revision_no: before.revision_no(),
+        }
+    );
 
     let latest = namespace
         .read_file("/before.txt")

@@ -57,7 +57,7 @@ impl SnapshotPolicy {
 /// A pager over live snapshots.
 pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, Error>;
 
-impl<M> Namespace<M> {
+impl<M: crate::Mode> Namespace<M> {
     /// Lists live snapshots.
     pub fn list_snapshots(&self) -> SnapshotsPager {
         let reader = self.read_only();

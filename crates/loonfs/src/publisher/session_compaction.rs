@@ -285,7 +285,7 @@ async fn closing_a_session_cancels_its_compaction_and_returns() {
         .expect("close returns once the job reaches its next block")
         .expect("close the session");
 
-    assert!(report.was_open);
+    assert!(report.drained_commits.is_some());
     assert_eq!(compactions(&parked.recorder, "cancelled"), 1);
     assert_eq!(compactions(&parked.recorder, "completed"), 0);
     assert_eq!(
@@ -481,7 +481,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
         .await
         .expect("close does not wait for the other session's merge")
         .expect("close the session");
-    assert!(report.was_open);
+    assert!(report.drained_commits.is_some());
     assert_eq!(
         current_manifest(store.inner(), merging.id())
             .await

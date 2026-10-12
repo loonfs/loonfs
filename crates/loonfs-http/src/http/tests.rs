@@ -15,7 +15,7 @@ mod surface;
 
 use super::error::{status_for_core_error_code, ServedErrorCode};
 use super::{request_log_severity, RequestLogSeverity};
-use crate::BindingState;
+use crate::{BindingState, JobMode};
 use loonfs::SharedObjectStore;
 mod fixtures;
 use async_trait::async_trait;
@@ -1567,7 +1567,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
             server_url: format!("http://{addr}"),
             auth_token: auth_token.map(Into::into),
             request_timeout_ms: None,
-            disable_transient_retry: false,
+            retry: true,
             ca_cert_path: None,
         })
         .expect("valid client config");
@@ -1956,7 +1956,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".into()),
         request_timeout_ms: None,
-        disable_transient_retry: false,
+        retry: true,
         ca_cert_path: None,
     })
     .expect("valid client config");
@@ -2319,7 +2319,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         request_timeout_ms: None,
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
-        disable_transient_retry: true,
+        retry: false,
         ca_cert_path: None,
     };
     let config_for_busy = client_config.clone();
@@ -2409,7 +2409,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         request_timeout_ms: None,
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
-        disable_transient_retry: true,
+        retry: false,
         ca_cert_path: None,
     };
     let config_for_busy = client_config.clone();
@@ -2602,7 +2602,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".into()),
         request_timeout_ms: None,
-        disable_transient_retry: false,
+        retry: true,
         ca_cert_path: None,
     })
     .expect("valid client config");
@@ -2741,7 +2741,7 @@ async fn start_grep_error_server(
     writer_id: &str,
 ) -> TestHarness {
     let mut config = test_options(root, writer_id);
-    config.binding.maintains_grep_index = false;
+    config.binding.grep = JobMode::ServeOnly;
     start_server_with_config(store, config).await
 }
 
@@ -2752,7 +2752,7 @@ async fn start_grep_maintenance_error_server(
     writer_id: &str,
 ) -> TestHarness {
     let mut config = test_options(root, writer_id);
-    config.binding.maintains_grep_index = true;
+    config.binding.grep = JobMode::ServeAndMaintain;
     start_server_with_config(store, config).await
 }
 
@@ -2822,7 +2822,7 @@ async fn start_server_with_config(store: SharedObjectStore, config: TestOptions)
             server_url: format!("http://{}", addr),
             auth_token: Some("test-token".into()),
             request_timeout_ms: None,
-            disable_transient_retry: false,
+            retry: true,
             ca_cert_path: None,
         })
         .expect("valid client config"),
@@ -3394,7 +3394,7 @@ mod direct_download {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".into()),
             request_timeout_ms: None,
-            disable_transient_retry: false,
+            retry: true,
             ca_cert_path: None,
         })
         .expect("valid client config")
@@ -3648,7 +3648,7 @@ mod direct_download {
                 server_url: "http://127.0.0.1".to_owned(),
                 auth_token: Some("test-token".into()),
                 request_timeout_ms: None,
-                disable_transient_retry: false,
+                retry: true,
                 ca_cert_path: None,
             },
             service,
@@ -3728,7 +3728,9 @@ mod direct_download {
             .open_direct_download(&grant)
             .await
             .expect("open the grant");
-        download.fold_resumed_prefix(&payload[..held as usize]);
+        download
+            .fold_resumed_prefix(&payload[..held as usize])
+            .expect("fold the held prefix");
         let mut received = Vec::new();
         while let Some(chunk) = download.next_chunk().await.expect("read the grant") {
             received.extend_from_slice(&chunk);

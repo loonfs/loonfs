@@ -76,7 +76,7 @@ pub use loonfs_core::limits::{
 pub use loonfs_core::time::{current_time_ms, WallClock};
 pub use loonfs_core::{
     classify_store_failure, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
-    CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFileState,
+    CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
     DeleteNamespaceOptions, ErrorCode, ErrorKind, FileContentStream, GcOptions,
     ListCheckpointFilesOptions, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
     MetadataViewError, RetentionTarget, WriterFence, CONTENT_READ_CHUNK_BYTES,
@@ -215,7 +215,8 @@ pub use fs::{
     PathEntriesPager, ReadView, SnapshotPolicy, SnapshotsPager, TrashPager,
 };
 pub use handle::{
-    LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Namespace, ReadOnly, Writable,
+    LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Mode, Namespace, ReadOnly,
+    Writable,
 };
 pub use metadata_cache::{
     MetadataCache, MetadataCacheBuilder, MetadataCacheStats, DEFAULT_MAX_HEAD_STATE_BYTES,

@@ -33,7 +33,7 @@ use loonfs_core::commit::CommitFingerprint;
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS};
 use loonfs_core::publish::{
     is_retryable_wal_publish, settle_publish_attempt, NamespaceCommitEngine,
-    SharedWriterSessionStatus, WalPublishError, WriterSessionStatus,
+    SharedWriterSessionStatus, TailSource, WalPublishError, WriterSessionStatus,
 };
 use loonfs_core::time::{Deadline, Observation};
 use loonfs_objectstore::timing::MonotonicTimer;
@@ -57,10 +57,9 @@ type DeleteResult = Result<DeleteNamespaceResponse, Error>;
 /// Result of closing one namespace writer session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseNamespaceReport {
-    /// False when the session had already stopped admitting work.
-    pub was_open: bool,
-    /// Commits admitted before the close and published during the drain.
-    pub drained_commits: usize,
+    /// Commits admitted before the close and published during the drain, or
+    /// `None` when the session had already stopped admitting work.
+    pub drained_commits: Option<usize>,
     /// Whether the closed session had been fenced.
     pub fenced: bool,
 }
@@ -165,11 +164,17 @@ impl NamespaceSession {
     }
 
     pub(crate) fn last_published_seq(&self) -> Option<ChangeSeq> {
-        self.publisher.lock_state().last_published_seq
+        self.publisher
+            .lock_state()
+            .last_published
+            .map(|last| last.seq)
     }
 
     pub(crate) fn last_published_at_ms(&self) -> Option<u64> {
-        self.publisher.lock_state().last_published_at_ms
+        self.publisher
+            .lock_state()
+            .last_published
+            .map(|last| last.at_ms)
     }
 
     pub(crate) fn metadata_caught_up(&self) -> bool {
@@ -223,8 +228,7 @@ impl NamespaceSession {
         }
         publisher.forget_if_ended();
         Ok(CloseNamespaceReport {
-            was_open: drained_commits.is_some(),
-            drained_commits: drained_commits.unwrap_or(0),
+            drained_commits,
             fenced: publisher.session_is_fenced(),
         })
     }
@@ -537,9 +541,15 @@ struct NamespacePublisherState {
     /// queued when its last batch settled, so the next request publishes
     /// immediately.
     last_publish: Option<Observation>,
-    last_published_seq: Option<ChangeSeq>,
-    last_published_at_ms: Option<u64>,
+    last_published: Option<LastPublish>,
     metadata_caught_up: bool,
+}
+
+/// The newest commit this session published, and when it published it.
+#[derive(Debug, Clone, Copy)]
+struct LastPublish {
+    seq: ChangeSeq,
+    at_ms: u64,
 }
 
 impl NamespacePublisherState {
@@ -697,8 +707,7 @@ impl NamespacePublisher {
                 compaction: None,
                 next_task_id: 0,
                 last_publish: None,
-                last_published_seq: None,
-                last_published_at_ms: None,
+                last_published: None,
                 metadata_caught_up: true,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
@@ -1254,7 +1263,10 @@ impl NamespacePublisher {
             batch,
         )
         .await;
-        if publish.wal_tail_discovered {
+        if publish
+            .wal_tail
+            .is_some_and(|tail| tail.source == TailSource::Store)
+        {
             self.runtime_core.instruments().publisher_tail_replay();
         }
         if !publish.results.iter().any(is_retryable_wal_publish) {
@@ -1268,16 +1280,17 @@ impl NamespacePublisher {
                 .instruments()
                 .publisher_write_stop_refusal();
         }
-        let fold_start = if publish.wal_tail_objects >= FOLD_AT_WAL_OBJECTS
-            || publish.wal_tail_inline_bytes >= self.inline_content.inline_content_fold_at_bytes
-            || write_stopped
+        let fold_start = if publish.wal_tail.is_some_and(|tail| {
+            tail.objects >= FOLD_AT_WAL_OBJECTS
+                || tail.inline_bytes >= self.inline_content.inline_content_fold_at_bytes
+        }) || write_stopped
         {
             self.start_fold()
         } else {
             None
         };
-        if publish.wal_tail_observed {
-            slot.last_known_wal_tail_inline_bytes = Some(publish.wal_tail_inline_bytes);
+        if let Some(tail) = publish.wal_tail {
+            slot.last_known_wal_tail_inline_bytes = Some(tail.inline_bytes);
         }
         let committed_seq = publish
             .results
@@ -1285,10 +1298,15 @@ impl NamespacePublisher {
             .filter_map(|result| result.as_ref().ok())
             .map(|commit| commit.committed_seq)
             .max();
-        if committed_seq.is_some() {
+        if let Some(committed_seq) = committed_seq {
             let mut state = self.lock_state();
-            state.last_published_seq = state.last_published_seq.max(committed_seq);
-            state.last_published_at_ms = Some(self.timer.monotonic_now_ms());
+            let seq = state
+                .last_published
+                .map_or(committed_seq, |last| last.seq.max(committed_seq));
+            state.last_published = Some(LastPublish {
+                seq,
+                at_ms: self.timer.monotonic_now_ms(),
+            });
             state.metadata_caught_up = false;
         }
         drop(slot);
@@ -1413,7 +1431,7 @@ impl NamespacePublisher {
             idle_fold_timeout_ms: u64::MAX,
             ..crate::MaintainMetadataOptions::default()
         };
-        let seq = self.lock_state().last_published_seq;
+        let seq = self.lock_state().last_published.map(|last| last.seq);
         let result = maintenance
             .maintain_metadata_while_due_with_options(
                 &self.namespace_id,
@@ -1436,7 +1454,7 @@ impl NamespacePublisher {
 
     fn record_metadata_maintenance(&self, expected_seq: Option<ChangeSeq>, caught_up: bool) {
         let mut state = self.lock_state();
-        if state.last_published_seq == expected_seq {
+        if state.last_published.map(|last| last.seq) == expected_seq {
             state.metadata_caught_up = caught_up;
         }
     }

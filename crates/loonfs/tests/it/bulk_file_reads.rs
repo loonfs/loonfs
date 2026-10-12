@@ -7,7 +7,7 @@
 
 use crate::common::*;
 use loonfs::{
-    CheckpointFile, CheckpointFilesPageCursor, ContentRef, CurrentFileState,
+    CheckpointFile, CheckpointFilesPageCursor, ContentRef, CurrentFile, CurrentFileState,
     DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, Error, ErrorCode, InodeId,
     ListCheckpointFilesOptions, LoonFs, NamespaceId, PageRequest, PutFileOptions, ReadOnly,
     RevisionNo, SharedObjectStore, StoreConfig,
@@ -722,12 +722,10 @@ async fn stat_current_files_by_inode_answers_the_whole_matrix_in_input_order() {
             gone(unknown),
             CurrentFileState {
                 inode_id: directory,
-                visible: true,
-                readable: true,
-                current_revision_no: None,
-                current_path: Some(
-                    loonfs_types::AbsolutePath::parse("/m").expect("valid absolute path")
-                ),
+                file: CurrentFile::Visible {
+                    path: loonfs_types::AbsolutePath::parse("/m").expect("valid absolute path"),
+                    revision_no: None,
+                },
             },
         ]
     );
@@ -736,20 +734,17 @@ async fn stat_current_files_by_inode_answers_the_whole_matrix_in_input_order() {
 fn visible_file(inode_id: InodeId, revision_no: RevisionNo, path: &str) -> CurrentFileState {
     CurrentFileState {
         inode_id,
-        visible: true,
-        readable: true,
-        current_revision_no: Some(revision_no),
-        current_path: Some(loonfs_types::AbsolutePath::parse(path).expect("valid absolute path")),
+        file: CurrentFile::Visible {
+            path: loonfs_types::AbsolutePath::parse(path).expect("valid absolute path"),
+            revision_no: Some(revision_no),
+        },
     }
 }
 
 fn gone(inode_id: InodeId) -> CurrentFileState {
     CurrentFileState {
         inode_id,
-        visible: false,
-        readable: true,
-        current_revision_no: None,
-        current_path: None,
+        file: CurrentFile::Hidden { readable: true },
     }
 }
 
@@ -782,7 +777,9 @@ async fn stat_current_files_by_inode_refuses_a_batch_over_the_cap() {
         .await
         .expect("a batch at the cap is answered");
     assert_eq!(states.len(), loonfs::MAX_CURRENT_FILES_PER_STAT);
-    assert!(states.iter().all(|state| state.visible));
+    assert!(states
+        .iter()
+        .all(|state| matches!(state.file, CurrentFile::Visible { .. })));
 
     let mut over_cap = at_cap;
     over_cap.push(alpha);
@@ -953,12 +950,14 @@ async fn a_standalone_reader_serves_every_operation() {
         .stat_current_files_by_inode(&files.iter().map(|file| file.inode_id).collect::<Vec<_>>())
         .await
         .expect("resolve current files through a standalone reader");
-    assert!(states.iter().all(|state| state.visible));
+    assert!(states
+        .iter()
+        .all(|state| matches!(state.file, CurrentFile::Visible { .. })));
     assert!(
-        states.iter().any(|state| state
-            .current_path
-            .as_ref()
-            .is_some_and(|path| path.as_str() == "/docs/alpha-moved.txt")),
+        states.iter().any(|state| matches!(
+            &state.file,
+            CurrentFile::Visible { path, .. } if path.as_str() == "/docs/alpha-moved.txt"
+        )),
         "the standalone reader should see the move that landed after the checkpoint"
     );
 

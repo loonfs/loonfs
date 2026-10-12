@@ -9,7 +9,7 @@ struct CachedFileTarget {
     target: ResolvedFileContent,
 }
 
-impl<M> Namespace<M> {
+impl<M: crate::Mode> Namespace<M> {
     async fn cached_file_target(&self, absolute_path: &str) -> Option<CachedFileTarget> {
         let view = self.core.cached_read_context(&self.namespace_id)?;
         let target = self

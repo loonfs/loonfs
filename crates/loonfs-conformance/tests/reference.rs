@@ -125,7 +125,7 @@ fn configured_client(server_url: &str, auth_token: Option<&str>) -> Client {
         server_url: server_url.to_owned(),
         auth_token: auth_token.map(Into::into),
         request_timeout_ms: None,
-        disable_transient_retry: false,
+        retry: true,
         ca_cert_path: None,
     })
     .expect("valid conformance client")
@@ -977,7 +977,9 @@ async fn run_append(harness: &Harness, case: &Case) {
         .open_direct_download(&resumed)
         .await
         .expect("open the resumed download");
-    stream.fold_resumed_prefix(&[content, appended].concat()[..expected.resume_offset as usize]);
+    stream
+        .fold_resumed_prefix(&[content, appended].concat()[..expected.resume_offset as usize])
+        .expect("fold the held prefix");
     let mut rest = Vec::new();
     while let Some(chunk) = stream
         .next_chunk()

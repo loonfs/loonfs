@@ -1,6 +1,7 @@
 //! Resolves the current state and path of a batch of inode IDs.
 //!
-//! Missing or unreadable inodes return `visible: false` with no path or revision.
+//! Missing or unreadable inodes return [`CurrentFile::Hidden`], with no path or
+//! revision.
 
 use super::materialized_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
@@ -18,14 +19,26 @@ pub const MAX_CURRENT_FILES_PER_STAT: usize = loonfs_types::DEFAULT_MAX_PAGE_LIM
 pub struct CurrentFileState {
     /// Requested inode ID.
     pub inode_id: InodeId,
-    /// Whether the inode has a visible path and the subject can read it.
-    pub visible: bool,
-    /// Whether the subject can read this inode.
-    pub readable: bool,
-    /// Current revision number for a visible file.
-    pub current_revision_no: Option<RevisionNo>,
-    /// Current path when `visible` is true.
-    pub current_path: Option<AbsolutePath>,
+    /// Whether the inode has a visible path that the subject can read.
+    pub file: CurrentFile,
+}
+
+/// Whether an inode has a visible path that the subject can read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurrentFile {
+    /// The inode has a visible path, and the subject can read it.
+    Visible {
+        /// Current path.
+        path: AbsolutePath,
+        /// Current revision number, for a file.
+        revision_no: Option<RevisionNo>,
+    },
+    /// The inode is missing, has no visible path, or the subject can't read
+    /// it.
+    Hidden {
+        /// Whether the subject can read this inode.
+        readable: bool,
+    },
 }
 
 /// Rejects an oversized batch before reading metadata.
@@ -71,7 +84,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     let Some(resolved) = resolve_visible_inode(session, ancestor_paths, inode_id).await? else {
         return Ok(missing(inode_id, access.is_unrestricted()));
     };
-    let current_revision_no = if resolved.inode_kind == InodeKind::File {
+    let revision_no = if resolved.inode_kind == InodeKind::File {
         session
             .latest_revision_head_of_visible(inode_id)
             .await?
@@ -81,10 +94,10 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     };
     Ok(CurrentFileState {
         inode_id,
-        visible: true,
-        readable: true,
-        current_revision_no,
-        current_path: Some(resolved.absolute_path),
+        file: CurrentFile::Visible {
+            path: resolved.absolute_path,
+            revision_no,
+        },
     })
 }
 
@@ -135,10 +148,7 @@ pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
 fn missing(inode_id: InodeId, readable: bool) -> CurrentFileState {
     CurrentFileState {
         inode_id,
-        visible: false,
-        readable,
-        current_revision_no: None,
-        current_path: None,
+        file: CurrentFile::Hidden { readable },
     }
 }
 

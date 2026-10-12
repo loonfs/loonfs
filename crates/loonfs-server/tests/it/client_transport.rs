@@ -15,8 +15,8 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
         "client-router",
         "client-router",
     );
-    config.maintenance = loonfs_server::MaintenanceMode::ServeOnly;
-    config.grep.mode = loonfs_server::GrepMode::Disabled;
+    config.maintenance = loonfs_server::JobMode::ServeOnly;
+    config.grep.mode = loonfs_server::JobMode::Disabled;
     let (router, state) = loonfs_server::app(config, loonfs_server::AppConfig::default())
         .await
         .expect("app");
@@ -35,7 +35,7 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
             server_url: "http://127.0.0.1".to_owned(),
             auth_token: Some("test-token".into()),
             request_timeout_ms: None,
-            disable_transient_retry: false,
+            retry: true,
             ca_cert_path: None,
         },
         service,

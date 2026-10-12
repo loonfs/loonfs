@@ -207,6 +207,170 @@ impl StreamingChecksum {
     }
 }
 
+/// A streamed read's check against its content reference.
+///
+/// A read that starts at a nonzero offset first folds in the bytes below that
+/// offset, which the caller already holds, so the checksum covers the whole
+/// content. Each fetched chunk is folded in after that. At the end,
+/// [`Self::finish`] compares the byte count and the checksum with the
+/// reference, and every later call returns the same result.
+#[derive(Debug)]
+pub struct ContentVerifier {
+    expected_bytes: u64,
+    expected: Checksum,
+    start_offset: u64,
+    prefix_bytes: u64,
+    fetched_bytes: u64,
+    status: ContentVerificationStatus,
+}
+
+#[derive(Debug)]
+enum ContentVerificationStatus {
+    Streaming(StreamingChecksum),
+    Verified,
+    Failed(ContentMismatchError),
+}
+
+impl ContentVerifier {
+    /// Starts checking a read of `content_ref` that fetches from `start_offset`.
+    pub fn new(content_ref: &ContentRef, start_offset: u64) -> Self {
+        Self {
+            expected_bytes: content_ref.size_bytes,
+            expected: content_ref.checksum.clone(),
+            start_offset,
+            prefix_bytes: 0,
+            fetched_bytes: 0,
+            status: ContentVerificationStatus::Streaming(StreamingChecksum::for_algorithm(
+                content_ref.checksum.algorithm,
+            )),
+        }
+    }
+
+    /// Folds in held bytes from below the start offset, in order.
+    ///
+    /// A prefix that runs past the end of the content is refused, and none of
+    /// it is folded. A call after the first fetched chunk or after
+    /// [`Self::finish`] panics.
+    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), ResumedPrefixOverrunError> {
+        assert_eq!(
+            self.fetched_bytes, 0,
+            "a resumed prefix should arrive before the stream fetches content"
+        );
+        let prefix_bytes = self.prefix_bytes.saturating_add(bytes.len() as u64);
+        let size_bytes = self.expected_bytes;
+        let digest = self
+            .digest()
+            .expect("a resumed prefix should arrive before the read reaches its end");
+        if prefix_bytes > size_bytes {
+            return Err(ResumedPrefixOverrunError {
+                prefix_bytes,
+                size_bytes,
+            });
+        }
+        digest.update(bytes);
+        self.prefix_bytes = prefix_bytes;
+        Ok(())
+    }
+
+    /// Returns an error until every byte below the start offset is folded in.
+    pub fn ensure_resumed_prefix_complete(&self) -> Result<(), ResumedPrefixIncompleteError> {
+        if self.prefix_bytes == self.start_offset {
+            return Ok(());
+        }
+        Err(ResumedPrefixIncompleteError {
+            start_offset: self.start_offset,
+            prefix_bytes: self.prefix_bytes,
+        })
+    }
+
+    /// Folds in the next fetched chunk, in order. A call after
+    /// [`Self::finish`] panics.
+    pub fn update(&mut self, chunk: &[u8]) {
+        self.digest()
+            .expect("a fetched chunk should arrive before the read reaches its end")
+            .update(chunk);
+        self.fetched_bytes += chunk.len() as u64;
+    }
+
+    /// Compares everything folded in with the reference the first time it's
+    /// called, and returns the same result on every later call.
+    pub fn finish(&mut self) -> Result<(), ContentMismatchError> {
+        let verdict = match std::mem::replace(&mut self.status, ContentVerificationStatus::Verified)
+        {
+            ContentVerificationStatus::Streaming(digest) => self.compare(digest.finish()),
+            ContentVerificationStatus::Verified => Ok(()),
+            ContentVerificationStatus::Failed(mismatch) => Err(mismatch),
+        };
+        self.status = match &verdict {
+            Ok(()) => ContentVerificationStatus::Verified,
+            Err(mismatch) => ContentVerificationStatus::Failed(mismatch.clone()),
+        };
+        verdict
+    }
+
+    fn digest(&mut self) -> Option<&mut StreamingChecksum> {
+        match &mut self.status {
+            ContentVerificationStatus::Streaming(digest) => Some(digest),
+            ContentVerificationStatus::Verified | ContentVerificationStatus::Failed(_) => None,
+        }
+    }
+
+    fn compare(&self, actual: Checksum) -> Result<(), ContentMismatchError> {
+        let actual_bytes = self.prefix_bytes + self.fetched_bytes;
+        if actual_bytes == self.expected_bytes && actual == self.expected {
+            return Ok(());
+        }
+        Err(ContentMismatchError {
+            expected_bytes: self.expected_bytes,
+            actual_bytes,
+            expected: self.expected.clone(),
+            actual,
+        })
+    }
+}
+
+/// Describes streamed content that doesn't match its reference.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "content of {actual_bytes} bytes with checksum `{}:{}` does not match the {expected_bytes} \
+     bytes with checksum `{}:{}` that its reference names",
+    .actual.algorithm, .actual.value, .expected.algorithm, .expected.value
+)]
+pub struct ContentMismatchError {
+    /// Byte length the reference names.
+    pub expected_bytes: u64,
+    /// Bytes folded in: the resumed prefix and every fetched chunk.
+    pub actual_bytes: u64,
+    /// Checksum the reference names.
+    pub expected: Checksum,
+    /// Checksum of the bytes folded in.
+    pub actual: Checksum,
+}
+
+/// Describes a resumed prefix that runs past the end of the content.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("a resumed prefix of {prefix_bytes} bytes runs past the end of {size_bytes}-byte content")]
+pub struct ResumedPrefixOverrunError {
+    /// Prefix length the refused bytes would have reached.
+    pub prefix_bytes: u64,
+    /// Byte length of the content.
+    pub size_bytes: u64,
+}
+
+/// Describes a resumed read asked for content before its whole prefix was
+/// folded in.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "a read resumed at offset {start_offset} was given {prefix_bytes} bytes of what it skipped; \
+     verification covers the whole content, so all of them are needed first"
+)]
+pub struct ResumedPrefixIncompleteError {
+    /// Offset the read fetches from.
+    pub start_offset: u64,
+    /// Prefix bytes folded in so far.
+    pub prefix_bytes: u64,
+}
+
 /// An incremental CRC-64/NVME checksum.
 #[derive(Default)]
 pub struct Crc64Nvme {

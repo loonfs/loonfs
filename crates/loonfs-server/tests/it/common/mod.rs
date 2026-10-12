@@ -9,8 +9,8 @@
 
 use loonfs_client::{Client, ClientConfig, ListOptions, NamespacePath};
 use loonfs_server::{
-    app, serve_with_shutdown, AppConfig, GrepConfig, GrepMode, MaintenanceMode,
-    MetadataCacheConfig, ServeError, ServerConfig, StoreConfig, TlsServerConfig,
+    app, serve_with_shutdown, AppConfig, GrepConfig, JobMode, MetadataCacheConfig, ServeError,
+    ServerConfig, StoreConfig, TlsServerConfig,
 };
 use loonfs_test_support::http::raw_agent;
 use loonfs_types::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
@@ -130,7 +130,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
             server_url: server_url.clone(),
             auth_token: auth_token.map(Into::into),
             request_timeout_ms: None,
-            disable_transient_retry: false,
+            retry: true,
             ca_cert_path: None,
         })
         .expect("valid client config"),
@@ -194,7 +194,7 @@ pub(crate) async fn start_tls_server(mut config: ServerConfig) -> TlsTestServer 
             server_url: server_url.clone(),
             auth_token: auth_token.clone().map(Into::into),
             request_timeout_ms: None,
-            disable_transient_retry: false,
+            retry: true,
             ca_cert_path: Some(ca_cert_path.clone()),
         })
         .expect("valid client config"),
@@ -241,7 +241,7 @@ pub(crate) async fn start_graceful_server(mut config: ServerConfig) -> GracefulT
             server_url: server_url.clone(),
             auth_token: auth_token.map(Into::into),
             request_timeout_ms: None,
-            disable_transient_retry: false,
+            retry: true,
             ca_cert_path: None,
         })
         .expect("valid client config"),
@@ -319,10 +319,10 @@ pub(crate) fn test_config(
         metadata_cache: MetadataCacheConfig::default(),
         local_cache: None,
         grep: GrepConfig {
-            mode: GrepMode::ServeAndMaintain,
+            mode: JobMode::ServeAndMaintain,
             ..GrepConfig::default()
         },
-        maintenance: MaintenanceMode::ServeAndMaintain,
+        maintenance: JobMode::ServeAndMaintain,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,

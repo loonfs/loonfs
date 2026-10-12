@@ -44,8 +44,7 @@ impl FileDownload {
     pub(crate) fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), CliError> {
         match self {
             Self::Direct { stream, .. } => {
-                stream.fold_resumed_prefix(bytes);
-                Ok(())
+                stream.fold_resumed_prefix(bytes).map_err(CliError::from)
             }
             Self::Proxied(_) => Ok(()),
         }

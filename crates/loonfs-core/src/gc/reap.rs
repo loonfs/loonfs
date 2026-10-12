@@ -65,7 +65,8 @@ pub(super) async fn sweep_pin<S: ObjectStore + ?Sized>(
         .expires_at_ms()
         .map(|expiry| expiry.saturating_add(grace_window_ms));
     let ages_out_at_ms = live
-        .namespace_deleted
+        .current_tombstone
+        .is_some()
         .then(|| record.created_at_ms.saturating_add(grace_window_ms));
     let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
     Ok(match reclaimable_at_ms {

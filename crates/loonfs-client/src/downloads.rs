@@ -3,8 +3,10 @@
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
 use futures::future::BoxFuture;
+use futures::stream::Fuse;
 use futures::FutureExt as _;
 use loonfs_types::api::v0::DownloadRange;
+use loonfs_types::ContentVerifier;
 use std::collections::VecDeque;
 use std::task::{Context, Poll};
 
@@ -38,21 +40,14 @@ pub struct DownloadOptions {
 /// The ranges after the current one are requested while it is read, up to a
 /// fixed window of open responses.
 pub struct DirectDownloadStream {
-    body: payload::PayloadStream,
+    body: Fuse<payload::PayloadStream>,
     next: VecDeque<NextRange>,
     client: Client,
     ranges: VecDeque<DownloadRange>,
     range_remaining: u64,
     expected: ContentRef,
     target: String,
-    /// Running checksum for the complete revision.
-    digest: StreamingChecksum,
-    size_bytes: u64,
-    /// Requested starting offset. Zero means a complete download.
-    resumed_from: u64,
-    /// Number of prefix bytes included in checksum verification so far.
-    prefix_folded: u64,
-    finished: bool,
+    verifier: ContentVerifier,
 }
 
 enum NextRange {
@@ -75,27 +70,25 @@ impl DirectDownloadStream {
 
     /// Adds existing prefix bytes to the checksum for a resumed download.
     ///
-    /// The caller must provide bytes in order from the start of the revision.
-    /// Incorrect prefix bytes cause final checksum verification to fail.
-    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) {
-        self.digest.update(bytes);
-        self.prefix_folded = self.prefix_folded.saturating_add(bytes.len() as u64);
+    /// The caller must provide bytes in order from the start of the revision,
+    /// before the first [`Self::next_chunk`]; a call after that panics. A
+    /// prefix that runs past the end of the revision is refused. Incorrect
+    /// prefix bytes cause final checksum verification to fail.
+    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<()> {
+        self.verifier.fold_resumed_prefix(bytes).map_err(|overrun| {
+            ClientError::Http(format!("download of `{}`: {overrun}", self.target))
+        })
     }
 
     /// Returns the next response-body chunk, or `None` once the complete
-    /// revision has passed its length and checksum checks.
+    /// revision has passed its length and checksum checks. After a failed
+    /// check, every later call returns the same failure.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
-        if self.prefix_folded != self.resumed_from {
-            return Err(ClientError::Http(format!(
-                "a download of `{}` resumed at offset {} was given {} bytes of what it \
-                 skipped; verification covers the whole revision, so all of them are needed \
-                 first",
-                self.target, self.resumed_from, self.prefix_folded
-            )));
-        }
-        if self.finished {
-            return Ok(None);
-        }
+        self.verifier
+            .ensure_resumed_prefix_complete()
+            .map_err(|incomplete| {
+                ClientError::Http(format!("download of `{}`: {incomplete}", self.target))
+            })?;
         loop {
             let polled = tokio::select! {
                 biased;
@@ -106,19 +99,16 @@ impl DirectDownloadStream {
                 Some(Ok(chunk)) => {
                     let length = chunk.len() as u64;
                     if length > self.range_remaining {
-                        self.finished = true;
                         return Err(ClientError::Protocol(format!(
                             "direct read of `{}` exceeded the range length the grant named",
                             self.target
                         )));
                     }
                     self.range_remaining -= length;
-                    self.size_bytes += length;
-                    self.digest.update(&chunk);
+                    self.verifier.update(&chunk);
                     return Ok(Some(chunk));
                 }
                 Some(Err(error)) => {
-                    self.finished = true;
                     return Err(ClientError::Io(format!(
                         "read of `{}` failed: {error}",
                         self.target
@@ -126,51 +116,28 @@ impl DirectDownloadStream {
                 }
                 None => {
                     if self.range_remaining != 0 {
-                        self.finished = true;
                         return Err(ClientError::Protocol(format!(
                             "direct read of `{}` lacks {} bytes from the range the grant named",
                             self.target, self.range_remaining
                         )));
                     }
                     if let Some(next) = self.next.pop_front() {
-                        self.finished = true;
                         let (length, body) = match next {
                             NextRange::Opening { length, open } => (length, open.await?),
                             NextRange::Open { length, body } => (length, body),
                             NextRange::Failed(error) => return Err(error),
                         };
-                        self.body = body;
+                        self.body = body.fuse();
                         self.range_remaining = length;
-                        self.finished = false;
                         self.request_next_range();
                         continue;
                     }
-                    self.finished = true;
-                    if self.size_bytes != self.expected.size_bytes {
-                        return Err(ClientError::Protocol(format!(
-                            "direct download of `{}` ended after {} bytes, not the {} the grant named",
-                            self.target, self.size_bytes, self.expected.size_bytes
-                        )));
-                    }
-                    let expected = &self.expected.checksum;
-                    // Finalizing consumes the checksum state. `finished` prevents
-                    // this branch from running again.
-                    let observed = std::mem::replace(
-                        &mut self.digest,
-                        StreamingChecksum::for_algorithm(expected.algorithm),
-                    )
-                    .finish();
-                    if observed != *expected {
-                        return Err(ClientError::Protocol(format!(
-                            "direct download of `{}` produced {}:{}, not the {}:{} the grant named",
-                            self.target,
-                            observed.algorithm,
-                            observed.value,
-                            expected.algorithm,
-                            expected.value
-                        )));
-                    }
-                    return Ok(None);
+                    return self.verifier.finish().map(|()| None).map_err(|mismatch| {
+                        ClientError::Protocol(format!(
+                            "direct download of `{}` is not what the grant named: {mismatch}",
+                            self.target
+                        ))
+                    });
                 }
             }
         }
@@ -431,18 +398,14 @@ impl Client {
             .expect("validated grant should contain a range");
         let body = self.open_download_range(first).await?;
         let mut stream = DirectDownloadStream {
-            body,
+            body: body.fuse(),
             next: VecDeque::new(),
             client: self.clone(),
             ranges: remaining.iter().cloned().collect(),
             range_remaining: first.length,
             expected: content_ref.clone(),
             target,
-            digest: StreamingChecksum::for_algorithm(content_ref.checksum.algorithm),
-            size_bytes: start_offset,
-            resumed_from: start_offset,
-            prefix_folded: 0,
-            finished: false,
+            verifier: ContentVerifier::new(content_ref, start_offset),
         };
         stream.request_next_range();
         Ok(stream)

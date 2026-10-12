@@ -38,9 +38,8 @@ impl Harness {
         ));
         let mut config = test_options(directory.path(), "inline-host");
         config.binding.inline_content = inline_content;
-        config.binding.serves_maintenance = false;
-        config.binding.serves_grep = false;
-        config.binding.maintains_grep_index = false;
+        config.binding.maintenance = JobMode::Disabled;
+        config.binding.grep = JobMode::Disabled;
         let (router, state) = test_app(config, options_with_store(store.clone()))
             .await
             .expect("app");
@@ -440,7 +439,7 @@ async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised()
             server_url: format!("http://{address}"),
             auth_token: Some("test-token".into()),
             request_timeout_ms: None,
-            disable_transient_retry: true,
+            retry: false,
             ca_cert_path: None,
         })
         .expect("client");

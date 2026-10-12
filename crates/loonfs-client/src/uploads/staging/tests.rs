@@ -126,7 +126,7 @@ fn client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
-            disable_transient_retry: false,
+            retry: true,
             ca_cert_path: None,
         },
         transport.clone(),
@@ -142,7 +142,7 @@ fn client_without_retry(transport: &crate::scripted_transport::ScriptedTransport
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
-            disable_transient_retry: true,
+            retry: false,
             ca_cert_path: None,
         },
         transport.clone(),
@@ -902,7 +902,7 @@ async fn request_head_for(source: PayloadSource) -> String {
         server_url: format!("http://{address}"),
         auth_token: None,
         request_timeout_ms: None,
-        disable_transient_retry: true,
+        retry: false,
         ca_cert_path: None,
     })
     .expect("valid client config");

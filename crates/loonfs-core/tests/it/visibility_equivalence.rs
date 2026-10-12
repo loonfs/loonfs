@@ -8,8 +8,8 @@ use crate::common::read_context;
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::{
-    CompactionStepOutcome, CoreError, CreateNamespaceOptions, ErrorCode, NamespaceWriterEngine,
-    RuntimeReadContext,
+    CompactionStepOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
+    NamespaceWriterEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::api::v0::Commit;
@@ -284,20 +284,24 @@ impl VisibilityHarness {
             // still reach the root, and the expectations below are written
             // by hand, so a disagreement between the two shows up as a
             // visible inode with no expected path or the reverse.
+            let current_path = match state.file {
+                CurrentFile::Visible { path, .. } => Some(path),
+                CurrentFile::Hidden { .. } => None,
+            };
             assert_eq!(
-                state.visible,
+                current_path.is_some(),
                 expectation.path.is_some(),
                 "{checkpoint}: inode {} visibility disagrees with its expected path",
                 expectation.inode_id
             );
             assert_eq!(
-                state.current_path.as_ref().map(AbsolutePath::as_str),
+                current_path.as_ref().map(AbsolutePath::as_str),
                 expectation.path,
                 "{checkpoint}: inode {} derived an unexpected root path",
                 expectation.inode_id
             );
 
-            if let Some(path) = state.current_path {
+            if let Some(path) = current_path {
                 let resolved = self
                     .engine
                     .resolve_path(&path, StatOptions::default(), context)

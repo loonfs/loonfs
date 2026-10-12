@@ -1,6 +1,7 @@
 //! The clap argument grammar for every `loonfs` command.
 
 use crate::progress::ProgressMode;
+use crate::render::OutputFormat;
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use loonfs_types::InodeId;
 use std::io::IsTerminal;
@@ -1494,8 +1495,7 @@ pub(crate) enum ConfigCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeBehavior {
-    pub json: bool,
-    pub no_input: bool,
+    pub output: OutputFormat,
     pub interactive: bool,
     /// How a long-running transfer reports its progress.
     pub progress: ProgressMode,
@@ -1508,8 +1508,11 @@ impl RuntimeBehavior {
             && std::io::stdin().is_terminal()
             && std::io::stderr().is_terminal();
         Self {
-            json: cli.json,
-            no_input: cli.no_input,
+            output: if cli.json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Human
+            },
             interactive,
             // Progress asks standard error alone, not the terminal pair
             // `interactive` needs: a `put` fed by a pipe still has a

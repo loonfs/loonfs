@@ -115,8 +115,9 @@ pub use commit_identity::{
     semantic_commit_fingerprint, CommitFingerprint, InlineContentIdentity, SemanticFingerprintError,
 };
 pub use content::{
-    Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentRef, ContentRefKind,
-    ContentRefValidationError, Crc32c, Crc64Nvme, StreamingChecksum,
+    Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentMismatchError, ContentRef,
+    ContentRefKind, ContentRefValidationError, ContentVerifier, Crc32c, Crc64Nvme,
+    ResumedPrefixIncompleteError, ResumedPrefixOverrunError, StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};

@@ -15,7 +15,7 @@ use crate::args::{CommandKind, RuntimeBehavior};
 use crate::error::CliError;
 use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
-use crate::render::write_stderr_progress;
+use crate::render::{write_stderr_progress, OutputFormat};
 use futures::{stream::FuturesUnordered, Stream, StreamExt};
 use loonfs_client::{CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use loonfs_types::DestinationBehavior;
@@ -262,7 +262,7 @@ fn relative_remote(relative: &Path) -> Result<String, CliError> {
 }
 
 fn warn_drift(tally: &TreeTally, runtime: RuntimeBehavior) {
-    if !runtime.json {
+    if runtime.output == OutputFormat::Human {
         if let Some(drift) = tally.heads.drift() {
             crate::render::write_listing_drift_warning(&drift);
         }
@@ -642,8 +642,7 @@ mod tests {
     /// not reported, which is what a test wants of it.
     fn unwatched() -> RuntimeBehavior {
         RuntimeBehavior {
-            json: true,
-            no_input: true,
+            output: OutputFormat::Json,
             interactive: false,
             progress: ProgressMode::Off,
         }

@@ -35,7 +35,6 @@ pub(super) enum RetirementStatus {
 }
 
 pub(super) struct LiveSet {
-    pub(super) namespace_deleted: bool,
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: BTreeSet<String>,
@@ -76,7 +75,6 @@ impl LiveSet {
             load_read_anchor_from_manifest(store, namespace_id, manifest, hint, observed).await?;
         let head = anchor.manifest.state.envelope.payload();
         let mut live = Self {
-            namespace_deleted: head.status.is_deleted(),
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
             objects: BTreeSet::new(),
@@ -97,7 +95,7 @@ impl LiveSet {
         // A tombstone roots its runs like any current manifest: an import from
         // a deleted owner is still authorized against its final access state.
         live.protect_manifest(&anchor.manifest);
-        if !live.namespace_deleted {
+        if live.current_tombstone.is_none() {
             let tail = project_anchor_tail(store, segment_cache, &anchor).await?;
             for revision in tail.revisions() {
                 live.content_ids
@@ -220,7 +218,7 @@ impl LiveSet {
                 .flat_map(|run| &run.segments)
                 .map(metadata_segment_object_key),
         );
-        if !self.namespace_deleted {
+        if self.current_tombstone.is_none() {
             self.manifests.push(manifest.clone());
         }
     }

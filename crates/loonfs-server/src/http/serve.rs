@@ -167,7 +167,7 @@ pub async fn app(
         }
     };
     let metrics = HttpMetrics::new();
-    let maintains_grep_index = config.grep.mode.maintains_index();
+    let maintains_grep_index = config.grep.mode.maintains();
     // Opened before the runtime, because the runtime is what it is
     // installed on: a directory that cannot be owned fails startup here
     // rather than after a runtime is already running on it.
@@ -188,19 +188,18 @@ pub async fn app(
     // answers queries with one. It runs on the runtime's own instrumented
     // client, so the grep-owned traffic is measured like every other
     // request instead of escaping on a second, raw client.
-    let grep_worker =
-        (config.grep.mode.serves_grep() || config.grep.mode.maintains_index()).then(|| {
-            GrepWorker::new(
-                runtime.object_store(),
-                runtime.read_only(),
-                maintenance.clone(),
-                loonfs_grep::GrepStepBudget::new(
-                    std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
-                        .expect("validated grep step limit should be nonzero"),
-                ),
-            )
-        });
-    let grep_service = config.grep.mode.serves_grep().then(|| {
+    let grep_worker = (config.grep.mode.serves() || config.grep.mode.maintains()).then(|| {
+        GrepWorker::new(
+            runtime.object_store(),
+            runtime.read_only(),
+            maintenance.clone(),
+            loonfs_grep::GrepStepBudget::new(
+                std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
+                    .expect("validated grep step limit should be nonzero"),
+            ),
+        )
+    });
+    let grep_service = config.grep.mode.serves().then(|| {
         let grep_block_cache = Arc::new(new_grep_block_cache(
             memory.grep.bytes,
             metrics.recorder().as_ref(),
@@ -225,9 +224,8 @@ pub async fn app(
         })
         .transpose()?;
     let options = Arc::new(BindingConfig {
-        serves_grep: config.grep.mode.serves_grep(),
-        maintains_grep_index,
-        serves_maintenance: config.maintenance.serves(),
+        grep: config.grep.mode,
+        maintenance: config.maintenance,
         snapshot_policy: loonfs::SnapshotPolicy {
             max_ttl_ms: config.snapshot_max_ttl_ms,
             max_lifetime_ms: config.snapshot_max_lifetime_ms,

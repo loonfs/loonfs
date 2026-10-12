@@ -297,7 +297,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".into()),
         request_timeout_ms: None,
-        disable_transient_retry: false,
+        retry: true,
         ca_cert_path: None,
     })
     .expect("valid client config");
@@ -583,7 +583,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let mut config = test_config(temp_dir.path(), "hidden-maintenance-writer");
-    config.maintenance = crate::config::MaintenanceMode::MaintainOnly;
+    config.maintenance = crate::config::JobMode::MaintainOnly;
     let (router, state) = app(config, options_with_store(store))
         .await
         .expect("build app");
@@ -824,10 +824,10 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         metadata_cache: MetadataCacheConfig::default(),
         local_cache: None,
         grep: crate::config::GrepConfig {
-            mode: crate::config::GrepMode::ServeAndMaintain,
+            mode: crate::config::JobMode::ServeAndMaintain,
             ..crate::config::GrepConfig::default()
         },
-        maintenance: crate::config::MaintenanceMode::ServeAndMaintain,
+        maintenance: crate::config::JobMode::ServeAndMaintain,
         min_publish_interval_ms: 0,
         request_deadline_ms: 60_000,
         shutdown_deadline_ms: 600_000,

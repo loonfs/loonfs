@@ -243,7 +243,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
     }
 
-    /// The root row's current boundary flag and grants. Refused on an
+    /// The root row's current boundary flag, grants, and access revision,
+    /// which is `None` before the root has an access row. Refused on an
     /// unrestricted namespace, which holds no access rows.
     pub async fn root_access(
         &self,
@@ -251,7 +252,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<(
         bool,
         loonfs_types::AccessGrants,
-        loonfs_types::AccessRevisionNo,
+        Option<loonfs_types::AccessRevisionNo>,
     )> {
         if matches!(context.head.access, NamespaceAccess::Unrestricted {}) {
             return Err(CoreError::NamespaceUnrestricted {
@@ -264,12 +265,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .latest_access_revision(ROOT_INODE_ID)
             .await?;
         Ok(row.map_or(
-            (
-                false,
-                loonfs_types::AccessGrants::default(),
-                loonfs_types::AccessRevisionNo(0),
-            ),
-            |row| (row.boundary, row.grants, row.access_revision_no),
+            (false, loonfs_types::AccessGrants::default(), None),
+            |row| (row.boundary, row.grants, Some(row.access_revision_no)),
         ))
     }
 
