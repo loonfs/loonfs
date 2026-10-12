@@ -96,7 +96,7 @@ Why isn't S3 API compatibility enough by itself for direct transfers? Some S3-co
 
 Why does every provider with direct writes also support direct reads? That way, an object too large for a proxied upload can also be downloaded without passing through the server.
 
-## 4. Incremental writes and where they are real
+## 4. Incremental writes by provider
 
 This section describes how much of a large proxied upload the server keeps in memory on each provider.
 
