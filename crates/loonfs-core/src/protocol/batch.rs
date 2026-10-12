@@ -249,7 +249,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
     let wal = match prepare_wal_object(
         namespace_id.clone(),
-        view.acquired_writer.writer_epoch,
+        view.claimed_writer.writer_epoch,
         &view.head,
         &accepted_commits,
     ) {
@@ -501,11 +501,11 @@ mod tests {
         create(&store, &namespace_id, &context)
             .await
             .expect("bootstrap namespace");
-        let acquired_writer = claim_writer_epoch(&store, &namespace_id, &context)
+        let claimed_writer = claim_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
         let mut view =
-            load_publish_metadata_view(&store, None, &namespace_id, acquired_writer, None, None)
+            load_publish_metadata_view(&store, None, &namespace_id, claimed_writer, None, None)
                 .await
                 .expect("load publish view");
 

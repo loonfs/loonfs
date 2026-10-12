@@ -75,7 +75,7 @@ impl fmt::Debug for FailInterceptor {
 pub type FailStore<S> = InterceptStore<S, FailInterceptor>;
 
 impl<S> InterceptStore<S, FailInterceptor> {
-    /// Selects operations by key predicate and operation class.
+    /// Selects operations by key predicate and operation selector.
     pub fn new(
         inner: S,
         keys: KeyPredicate,

@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
-    pub(super) acquired_writer: ClaimedWriter,
+    pub(super) claimed_writer: ClaimedWriter,
     /// The tip observation starts with this load rather than a retained view.
     pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
@@ -166,7 +166,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    acquired_writer: ClaimedWriter,
+    claimed_writer: ClaimedWriter,
     cached_projection: Option<PublishTailProjection>,
     acquired_anchor: Option<NamespaceReadAnchor>,
 ) -> Result<PublishMetadataView<'a, S>> {
@@ -189,7 +189,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             anchor.read_state.clone(),
         ),
     };
-    ensure_writer_not_fenced(&head, &acquired_writer)?;
+    ensure_writer_not_fenced(&head, &claimed_writer)?;
     if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -210,7 +210,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         .then_some(projection.position.wal_tail_objects);
     Ok(PublishMetadataView {
         head,
-        acquired_writer,
+        claimed_writer,
         tail_discovered,
         manifest_segments,
         projection,

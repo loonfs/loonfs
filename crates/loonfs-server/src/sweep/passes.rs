@@ -45,8 +45,8 @@ impl Sweep {
             if held
                 .handle
                 .last_published_at_ms()
-                .is_some_and(|published_ms| {
-                    u128::from(now_ms.saturating_sub(published_ms))
+                .is_some_and(|published_at_ms| {
+                    u128::from(now_ms.saturating_sub(published_at_ms))
                         < inner.tick_interval.as_millis()
                 })
             {
@@ -57,14 +57,14 @@ impl Sweep {
                 && held
                     .handle
                     .last_published_at_ms()
-                    .is_some_and(|published_ms| {
-                        let fold_after_ms =
-                            published_ms.saturating_add(inner.metadata.idle_fold_timeout_ms);
-                        now_ms >= fold_after_ms
+                    .is_some_and(|published_at_ms| {
+                        let fold_due_at_ms =
+                            published_at_ms.saturating_add(inner.metadata.idle_fold_timeout_ms);
+                        now_ms >= fold_due_at_ms
                             && held
                                 .metadata_retry_at_ms
                                 .saturating_sub(inner.metadata_retry_interval_ms)
-                                < fold_after_ms
+                                < fold_due_at_ms
                     });
             let due =
                 if !metadata_caught_up && (now_ms >= held.metadata_retry_at_ms || idle_fold_due) {

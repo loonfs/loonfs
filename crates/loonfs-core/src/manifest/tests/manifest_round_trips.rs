@@ -65,7 +65,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     let head = load_namespace_read_state(&store, &namespace_id)
         .await
         .expect("load head");
-    let acquired_writer = loonfs_types::format::control::ClaimedWriter {
+    let claimed_writer = loonfs_types::format::control::ClaimedWriter {
         writer_id: context.writer_id.clone(),
         writer_epoch: head.writer_epoch,
     };
@@ -73,7 +73,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         &store,
         None,
         &namespace_id,
-        acquired_writer,
+        claimed_writer,
         None,
         None,
     )

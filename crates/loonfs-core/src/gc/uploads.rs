@@ -64,10 +64,8 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     state: &UploadSessionPayload,
 ) -> Result<UploadSessionSweep> {
     match live.retirement_status() {
-        RetirementStatus::Retained { until_ms } => {
-            return Ok(UploadSessionSweep::Retain {
-                reclaimable_at_ms: until_ms,
-            })
+        RetirementStatus::Retained { reclaimable_at_ms } => {
+            return Ok(UploadSessionSweep::Retain { reclaimable_at_ms })
         }
         RetirementStatus::Active | RetirementStatus::Eligible => {}
     }

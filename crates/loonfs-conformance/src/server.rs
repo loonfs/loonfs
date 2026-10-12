@@ -204,7 +204,7 @@ struct LoopbackIssuer {
     base_url: String,
 }
 
-fn presigned_expiry_ms(now: SystemTime) -> u64 {
+fn presigned_expires_at_ms(now: SystemTime) -> u64 {
     let expiry = now + Duration::from_secs(3600);
     expiry
         .duration_since(UNIX_EPOCH)
@@ -233,7 +233,7 @@ impl DirectGetIssuer for LoopbackIssuer {
                 .map(|range| ("range".to_owned(), range))
                 .into_iter()
                 .collect(),
-            expires_at_ms: presigned_expiry_ms(now),
+            expires_at_ms: presigned_expires_at_ms(now),
         })
     }
 }
@@ -253,7 +253,7 @@ impl DirectPutIssuer for LoopbackIssuer {
             method: "PUT".to_owned(),
             url: format!("{}/objects/{}", self.base_url, request.object_key),
             headers: BTreeMap::new(),
-            expires_at_ms: presigned_expiry_ms(now),
+            expires_at_ms: presigned_expires_at_ms(now),
         })
     }
 }
@@ -272,7 +272,7 @@ impl DirectMultipartIssuer for LoopbackIssuer {
                 self.base_url, request.provider_upload_id, request.part_number
             ),
             headers: BTreeMap::new(),
-            expires_at_ms: presigned_expiry_ms(now),
+            expires_at_ms: presigned_expires_at_ms(now),
         })
     }
 }

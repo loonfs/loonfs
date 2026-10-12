@@ -428,7 +428,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     publish(&mut stale, &store, "old")
         .await
         .expect("old writer");
-    let acquired = claim_writer_epoch(&store, &namespace_id, &context(1_000))
+    let claimed = claim_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("takeover fence");
     store.reset();
@@ -449,7 +449,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         .expect("next")
         .is_none());
     let session = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::commit_engine::WriterSessionStatus::Acquired(acquired),
+        crate::commit_engine::WriterSessionStatus::Claimed(claimed),
     ));
     let mut active = NamespaceCommitEngine::new(
         namespace_id.clone(),

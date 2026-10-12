@@ -6,7 +6,7 @@ use loonfs_types::Checksum;
 
 use super::Outcome;
 
-/// A broad operation class selected by a test wrapper.
+/// A broad selector a test wrapper uses to choose the operations it acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationSelector {
     /// Every operation.

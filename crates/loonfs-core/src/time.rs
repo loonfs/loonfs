@@ -12,19 +12,22 @@ pub(crate) use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 #[derive(Debug, Clone)]
 pub struct Deadline {
     timer: Arc<dyn MonotonicTimer>,
-    started_ms: u64,
+    started_at_ms: u64,
 }
 
 impl Deadline {
     /// Starts a deadline at the timer's current time.
     pub fn start(timer: Arc<dyn MonotonicTimer>) -> Self {
-        let started_ms = timer.monotonic_now_ms();
-        Self { timer, started_ms }
+        let started_at_ms = timer.monotonic_now_ms();
+        Self {
+            timer,
+            started_at_ms,
+        }
     }
 
     /// Returns the milliseconds elapsed since the deadline started.
     pub fn elapsed_ms(&self) -> u64 {
-        self.now_ms().saturating_sub(self.started_ms)
+        self.now_ms().saturating_sub(self.started_at_ms)
     }
 
     fn now_ms(&self) -> u64 {
@@ -40,12 +43,12 @@ impl Deadline {
     pub(crate) fn origin(&self) -> Observation {
         Observation {
             timer: Arc::clone(&self.timer),
-            at_ms: self.started_ms,
+            at_ms: self.started_at_ms,
         }
     }
 
     pub(crate) fn elapsed_at(&self, observation: &Observation) -> u64 {
-        observation.at_ms.saturating_sub(self.started_ms)
+        observation.at_ms.saturating_sub(self.started_at_ms)
     }
 
     /// Returns `MetadataPublicationBudgetExceeded` once more than

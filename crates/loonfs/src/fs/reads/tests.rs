@@ -264,10 +264,10 @@ async fn compacted_directory_page_overlaps_segment_reads(
         .collect::<BTreeSet<_>>()
         .len();
     let concurrency = reads.reads();
-    let starts_ms = delayed.read_starts_ms();
+    let read_started_at_ms = delayed.read_started_at_ms();
     assert!(
         concurrency.peak_in_flight >= 8,
-        "{concurrency:?}; starts_ms={starts_ms:?}"
+        "{concurrency:?}; read_started_at_ms={read_started_at_ms:?}"
     );
     assert!(
         concurrency.peak_in_flight <= STORE_READS_IN_FLIGHT,
@@ -276,6 +276,6 @@ async fn compacted_directory_page_overlaps_segment_reads(
     let serial_ms = touched as u128 * latency.as_millis();
     assert!(
         u128::from(elapsed_ms) < serial_ms * 3 / 4,
-        "{elapsed_ms} ms for {touched} segments; starts_ms={starts_ms:?}"
+        "{elapsed_ms} ms for {touched} segments; read_started_at_ms={read_started_at_ms:?}"
     );
 }

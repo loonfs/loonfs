@@ -36,13 +36,13 @@ enum PagerState<C> {
 }
 
 type PageFuture<P, E> = Pin<Box<dyn Future<Output = Result<P, E>> + Send>>;
-type PageFetcher<P, E> =
+type PageLoader<P, E> =
     Box<dyn FnMut(PageRequest<<P as PagedResponse>::Cursor>) -> PageFuture<P, E> + Send>;
 
 /// Fetches pages and retains unused items between bounded collections.
 #[must_use]
 pub struct Pager<P: PagedResponse, E> {
-    load_page: PageFetcher<P, E>,
+    load_page: PageLoader<P, E>,
     state: PagerState<P::Cursor>,
     pending: Option<P>,
 }

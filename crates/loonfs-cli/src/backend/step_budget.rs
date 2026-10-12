@@ -93,13 +93,13 @@ where
     StepTurn: Future<Output = Result<GrepWaitStepOutcome, CliError>>,
 {
     let timer = StdMonotonicTimer::default();
-    let started_ms = timer.monotonic_now_ms();
+    let started_at_ms = timer.monotonic_now_ms();
     let mut steps = 0;
     let mut settled = false;
     loop {
         let lifecycle = read().await?;
         let reached = lifecycle.is_built_through(target_seq);
-        let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
+        let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_at_ms);
         if reached || settled || lifecycle_stopped(&lifecycle) || budget.spent(steps, elapsed_ms) {
             return Ok(GrepWaitProgress { steps, reached });
         }

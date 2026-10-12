@@ -601,14 +601,14 @@ pub struct ResultingReadState {
 /// state treats each one-shot commit as a separate session.
 #[derive(Debug, Default)]
 pub enum WriterSessionStatus {
-    /// No epoch yet: the session's first publish acquires one.
+    /// No epoch yet: the session's first publish claims one.
     #[default]
-    Unacquired,
-    /// Writer epoch acquired on the first publish and reused for the rest of
+    Unclaimed,
+    /// Writer epoch claimed on the first publish and reused for the rest of
     /// the session.
-    Acquired(ClaimedWriter),
+    Claimed(ClaimedWriter),
     /// Permanent fencing record for this session. Later publishes return
-    /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
+    /// `writer_fenced` without accessing the store. Claiming a new writer epoch
     /// requires an explicit caller action.
     Fenced(WriterFence),
 }
@@ -847,17 +847,17 @@ impl NamespaceCommitEngine {
         store: &S,
         context: &MutationContext,
     ) -> Result<ClaimedWriter> {
-        let already_acquired = match &*self.lock_session() {
+        let already_claimed = match &*self.lock_session() {
             WriterSessionStatus::Fenced(fence) => {
                 return Err(CoreError::WriterFenced(fence.clone()))
             }
-            WriterSessionStatus::Acquired(acquired_writer) => Some(acquired_writer.clone()),
-            WriterSessionStatus::Unacquired => None,
+            WriterSessionStatus::Claimed(claimed_writer) => Some(claimed_writer.clone()),
+            WriterSessionStatus::Unclaimed => None,
         };
-        if let Some(acquired_writer) = already_acquired {
-            return Ok(acquired_writer);
+        if let Some(claimed_writer) = already_claimed {
+            return Ok(claimed_writer);
         }
-        let (acquired_writer, anchor) =
+        let (claimed_writer, anchor) =
             claim_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
         self.acquired_anchor = Some(anchor);
         let mut session = self.lock_session();
@@ -866,8 +866,8 @@ impl NamespaceCommitEngine {
             // the epoch. Preserve the fenced state.
             return Err(CoreError::WriterFenced(fence.clone()));
         }
-        *session = WriterSessionStatus::Acquired(acquired_writer.clone());
-        Ok(acquired_writer)
+        *session = WriterSessionStatus::Claimed(claimed_writer.clone());
+        Ok(claimed_writer)
     }
 
     /// Deletes the namespace using this writer session (format spec,
@@ -884,12 +884,12 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
     ) -> Result<DeleteNamespaceResponse> {
         let deadline = Deadline::start(Arc::clone(&self.timer));
-        let acquired_writer = self.session_writer_epoch(store, context).await?;
+        let claimed_writer = self.session_writer_epoch(store, context).await?;
         let deleted = crate::namespace::delete::delete_namespace(
             store,
             &self.namespace_id,
             options,
-            acquired_writer,
+            claimed_writer,
             context,
             &deadline,
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
@@ -925,7 +925,7 @@ impl NamespaceCommitEngine {
         }
 
         let candidate_count = candidates.len();
-        let acquired_writer = match self.session_writer_epoch(store, context).await {
+        let claimed_writer = match self.session_writer_epoch(store, context).await {
             Ok(value) => value,
             Err(error) => {
                 return NamespaceCommitEnginePublishResult {
@@ -985,7 +985,7 @@ impl NamespaceCommitEngine {
             store,
             self.segment_cache.as_deref(),
             &self.namespace_id,
-            acquired_writer,
+            claimed_writer,
             cached_projection,
             acquired_anchor,
         )

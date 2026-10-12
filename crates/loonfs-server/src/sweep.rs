@@ -175,9 +175,9 @@ impl Sweep {
     /// streaming compaction stops at its next block.
     pub async fn run_pass(&self, collect_garbage: bool) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
-        let started_ms = inner.timer.monotonic_now_ms();
+        let started_at_ms = inner.timer.monotonic_now_ms();
         let listed = self.visit_every_namespace(collect_garbage).await;
-        let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_ms);
+        let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_at_ms);
         inner
             .metrics
             .pass_seconds

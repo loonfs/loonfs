@@ -79,13 +79,13 @@ pub(crate) async fn claim_writer<S: ObjectStore + ?Sized>(
 
 pub(crate) fn ensure_writer_not_fenced(
     head: &NamespaceReadState,
-    acquired_writer: &ClaimedWriter,
+    claimed_writer: &ClaimedWriter,
 ) -> Result<()> {
-    if head.writer_epoch == acquired_writer.writer_epoch {
+    if head.writer_epoch == claimed_writer.writer_epoch {
         return Ok(());
     }
     Err(CoreError::WriterFenced(WriterFence {
-        fenced_epoch: acquired_writer.writer_epoch,
+        fenced_epoch: claimed_writer.writer_epoch,
         active_epoch: head.writer_epoch,
         active_writer_id: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
         active_acquired_at_ms: head.writer.as_ref().map(|writer| writer.acquired_at_ms),

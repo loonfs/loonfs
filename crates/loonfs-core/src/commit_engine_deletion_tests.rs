@@ -187,7 +187,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .pop()
         .expect("result")
         .expect("publish inline content");
-    let acquired_writer = engine
+    let claimed_writer = engine
         .session_writer_epoch(&store, &context)
         .await
         .expect("acquired writer");
@@ -203,7 +203,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             DeleteNamespaceOptions {
                 expected_head_seq: Some(expected_head_seq),
             },
-            acquired_writer.clone(),
+            claimed_writer.clone(),
             &context,
             &deadline,
             Arc::default(),

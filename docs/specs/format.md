@@ -697,7 +697,7 @@ A writer session acquires authority lazily, before its first publication that ch
 
 ```text
 +-------+  claim published   +-------+  fence written   +----------+
-| Claim | -----------------> | Fence | ---------------> | Acquired |
+| Claim | -----------------> | Fence | ---------------> | Claimed  |
 +-------+                    +-------+                  +----------+
                                  |                           |
                                  +-------------+-------------+
@@ -715,7 +715,7 @@ A writer session acquires authority lazily, before its first publication that ch
    - After a collision, or a budget that expired before the put, the session discovers the tip again and retries at the new number. These retries stop when the acquisition's `METADATA_PUBLICATION_BUDGET_MS` expires, and the next retry fails the acquisition instead.
    - A transport failure, or a put that returns after its budget, fails the acquisition. The next attempt claims a new epoch.
    - Between the claim and the fence, the previous writer can still commit at `tip + 1`. Those commits are valid, because their epoch is below the manifest's, and the new writer's discovery includes them (a fence planned before such a commit collides with it and retries above it).
-3. **Acquired.** After the fence is written, the session is acquired, and it uses that epoch for every later batch. If a later discovery finds a higher epoch (after a collision or after a refresh), the session is fenced. A fenced session returns `writer_fenced`, and it doesn't reacquire authority on its own.
+3. **Claimed.** After the fence is written, the session holds the epoch, and it uses it for every later batch. If a later discovery finds a higher epoch (after a collision or after a refresh), the session is fenced. A fenced session returns `writer_fenced`, and it doesn't reacquire authority on its own.
 
 When another session acquires a higher epoch, its fence prevents an older writer from extending the log from a tip it saw earlier. The stale writer's put collides, discovery finds the higher epoch, and the session returns `writer_fenced`.
 
@@ -958,7 +958,7 @@ A chain whose pieces start at offset 0 writes the whole object at its own key, w
 
 The resulting layout is the remaining extents, followed by the new extent. Its `committed_seq` is the newest commit whose bytes it covers. When segments are built, the layout's row replaces any tail layout row for the same content ID, and it's included in the fold's delta run. Revision digests are copied from the deltas, and a fold never recomputes them. A manifest at `folded_wal_no` `n` includes layouts for all pieces through WAL object `n`, and garbage collection relies on that before it deletes a WAL object.
 
-Folds, validation (when it writes pending pieces to content objects), direct-download writes, and proxied staging all share the execution budget's content-write permits. `max_content_writes` defaults to 32 and is configurable. Each write uses one permit until it finishes, and runtimes that share a budget share the limit. `STORE_WRITE_WAVE` also limits how many writes one fold starts at a time. The adapter chooses how to write by the result's size (see [Immutable writes and retries](#32-immutable-writes-and-retries)), and an assembly buffers at most one part window (or one read chunk on the local store).
+Folds, validation (when it writes pending pieces to content objects), direct-download writes, and proxied staging all share the execution budget's content-write permits. `max_content_writes` defaults to 32 and is configurable. Each write uses one permit until it finishes, and runtimes that share a budget share the limit. `STORE_WRITES_IN_FLIGHT` also limits how many writes one fold starts at a time. The adapter chooses how to write by the result's size (see [Immutable writes and retries](#32-immutable-writes-and-retries)), and an assembly buffers at most one part window (or one read chunk on the local store).
 
 Every successor manifest MUST:
 
@@ -1339,7 +1339,7 @@ For example, suppose a collector observes hint 8 and current manifest 10. It kee
 
 ### 11.4 Clock and operation assumptions
 
-Garbage collection decides by age, and an object's age is calculated as `now_ms.saturating_sub(last_modified_ms)`. So safety depends on a bound on how much an age can be overstated. The collector's clock might be ahead of the provider's, timestamps might have limited precision, and a process might pause around a publication check.
+Garbage collection decides by age, and an object's age is calculated as `now_ms.saturating_sub(last_modified_at_ms)`. So safety depends on a bound on how much an age can be overstated. The collector's clock might be ahead of the provider's, timestamps might have limited precision, and a process might pause around a publication check.
 
 The combined allowance (`GC_SAFETY_WINDOW_MS`) is 180,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not three minutes for each participant. A provider whose clock is ahead of the collector's only delays garbage collection. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
 

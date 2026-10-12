@@ -1505,7 +1505,7 @@ impl NamespacePublisher {
                 return false;
             }
         };
-        let started_ms = self.timer.monotonic_now_ms();
+        let started_at_ms = self.timer.monotonic_now_ms();
         let segment_cache = self.runtime_core.metadata_segment_cache();
         let result = loonfs_core::fold_wal_tail(
             self.runtime_core.store(),
@@ -1528,7 +1528,7 @@ impl NamespacePublisher {
         .await;
         self.runtime_core
             .instruments()
-            .publisher_wal_fold_duration(self.elapsed_ms_since(started_ms));
+            .publisher_wal_fold_duration(self.elapsed_ms_since(started_at_ms));
         self.engine
             .lock()
             .await

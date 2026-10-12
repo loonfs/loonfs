@@ -40,7 +40,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         .as_ref()
         .map(|tombstone| live.deadline(tombstone));
     report.next_reclamation_at_ms = match live.retirement_status() {
-        RetirementStatus::Retained { until_ms } => until_ms,
+        RetirementStatus::Retained { reclaimable_at_ms } => reclaimable_at_ms,
         _ => None,
     };
     let content = ContentSweep::load(

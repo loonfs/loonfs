@@ -30,7 +30,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum RetirementStatus {
     Active,
-    Retained { until_ms: Option<u64> },
+    Retained { reclaimable_at_ms: Option<u64> },
     Eligible,
 }
 
@@ -245,10 +245,12 @@ impl LiveSet {
         let deadline_ms = self.deadline(tombstone);
         if self.now_ms < deadline_ms {
             RetirementStatus::Retained {
-                until_ms: Some(deadline_ms),
+                reclaimable_at_ms: Some(deadline_ms),
             }
         } else if self.has_pins {
-            RetirementStatus::Retained { until_ms: None }
+            RetirementStatus::Retained {
+                reclaimable_at_ms: None,
+            }
         } else {
             RetirementStatus::Eligible
         }

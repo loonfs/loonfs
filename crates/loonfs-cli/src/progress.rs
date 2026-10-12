@@ -73,7 +73,7 @@ struct ProgressState {
     current: Option<String>,
     /// Byte count included in the last report.
     reported_bytes: Option<u64>,
-    reported_ms: u64,
+    reported_at_ms: u64,
     reported_percent: Option<u64>,
     /// Width of the current terminal line.
     drawn_width: usize,
@@ -88,7 +88,7 @@ impl ProgressState {
         if self.reported_bytes.is_none() {
             return true;
         }
-        now_ms.saturating_sub(self.reported_ms) >= MIN_REPORT_INTERVAL_MS
+        now_ms.saturating_sub(self.reported_at_ms) >= MIN_REPORT_INTERVAL_MS
             || self.percent() != self.reported_percent
     }
 
@@ -119,7 +119,7 @@ pub(crate) struct ProgressReporter {
     /// root for a tree.
     path: String,
     timer: StdMonotonicTimer,
-    started_ms: u64,
+    started_at_ms: u64,
     state: Mutex<ProgressState>,
 }
 
@@ -128,13 +128,13 @@ impl ProgressReporter {
     /// invocation asked for progress.
     pub(crate) fn new(runtime: RuntimeBehavior, op: ProgressOp, path: impl Into<String>) -> Self {
         let timer = StdMonotonicTimer::default();
-        let started_ms = timer.monotonic_now_ms();
+        let started_at_ms = timer.monotonic_now_ms();
         Self {
             mode: runtime.progress,
             op,
             path: path.into(),
             timer,
-            started_ms,
+            started_at_ms,
             state: Mutex::new(ProgressState {
                 bytes_done: 0,
                 bytes_moved: 0,
@@ -143,7 +143,7 @@ impl ProgressReporter {
                 files_total: None,
                 current: None,
                 reported_bytes: None,
-                reported_ms: started_ms,
+                reported_at_ms: started_at_ms,
                 reported_percent: None,
                 drawn_width: 0,
             }),
@@ -266,7 +266,7 @@ impl ProgressReporter {
                 path: &self.path,
                 phase,
                 bytes_done: state.bytes_done,
-                elapsed_ms: now_ms.saturating_sub(self.started_ms),
+                elapsed_ms: now_ms.saturating_sub(self.started_at_ms),
             }),
             ProgressMode::Human => {
                 let line = format!("{} {} {phase}...", self.op.as_str(), self.path);
@@ -294,7 +294,7 @@ impl ProgressReporter {
     fn elapsed_ms(&self) -> u64 {
         self.timer
             .monotonic_now_ms()
-            .saturating_sub(self.started_ms)
+            .saturating_sub(self.started_at_ms)
     }
 
     /// Recovers a poisoned lock rather than failing a transfer over it: the
@@ -306,7 +306,7 @@ impl ProgressReporter {
     }
 
     fn report(&self, state: &mut ProgressState, now_ms: u64) {
-        let elapsed_ms = now_ms.saturating_sub(self.started_ms);
+        let elapsed_ms = now_ms.saturating_sub(self.started_at_ms);
         let rate_bps = rate_bps(state.bytes_moved, elapsed_ms);
         match self.mode {
             ProgressMode::Events => self.emit_event(&Event::Progress {
@@ -327,7 +327,7 @@ impl ProgressReporter {
             ProgressMode::Off => return,
         }
         state.reported_bytes = Some(state.bytes_done);
-        state.reported_ms = now_ms;
+        state.reported_at_ms = now_ms;
         state.reported_percent = state.percent();
     }
 
@@ -480,7 +480,7 @@ mod tests {
             files_total: None,
             current: None,
             reported_bytes: None,
-            reported_ms: 0,
+            reported_at_ms: 0,
             reported_percent: None,
             drawn_width: 0,
         }
@@ -509,7 +509,7 @@ mod tests {
             files_total: None,
             current: None,
             reported_bytes: None,
-            reported_ms: 0,
+            reported_at_ms: 0,
             reported_percent: None,
             drawn_width: 0,
         };

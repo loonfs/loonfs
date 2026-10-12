@@ -74,7 +74,7 @@ impl fmt::Debug for BlockingInterceptor {
 pub type BlockingStore<S> = InterceptStore<S, BlockingInterceptor>;
 
 impl<S> InterceptStore<S, BlockingInterceptor> {
-    /// Selects operations by key predicate and operation class.
+    /// Selects operations by key predicate and operation selector.
     pub fn new(inner: S, keys: KeyPredicate, operation: OperationSelector) -> Self {
         Self::matching(inner, move |context| {
             keys.matches(context.key()) && operation.matches(context.kind())
