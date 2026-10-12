@@ -117,6 +117,40 @@ fn grant_from(content_ref: ContentRef, url: &str, start_offset: u64) -> CreateDo
     }
 }
 
+/// A grant from offset 0 with one range per length, each signing its own
+/// span of one object.
+fn grant_of_ranges(content_ref: ContentRef, url: &str, lengths: &[u64]) -> CreateDownloadResponse {
+    let mut start_offset = 0;
+    let ranges = lengths
+        .iter()
+        .enumerate()
+        .map(|(index, &length)| {
+            let range = DownloadRange {
+                start_offset,
+                length,
+                access: ObjectTransferAccess::PresignedUrl {
+                    method: "GET".to_owned(),
+                    url: format!("{url}?signed={index}"),
+                    headers: BTreeMap::from([(
+                        "range".to_owned(),
+                        format!("bytes={start_offset}-{}", start_offset + length - 1),
+                    )]),
+                    expires_at_ms: 0,
+                },
+            };
+            start_offset += length;
+            range
+        })
+        .collect();
+    CreateDownloadResponse {
+        namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+        path: AbsolutePath::parse("/big.bin").expect("absolute path"),
+        revision_no: RevisionNo(1),
+        ranges,
+        content_ref,
+    }
+}
+
 #[tokio::test]
 async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named() {
     let payload = b"the bytes the grant described".to_vec();
@@ -255,6 +289,107 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
 
     assert_eq!(written, payload.len() as u64);
     assert_eq!(sink, payload);
+}
+
+#[tokio::test]
+async fn ranges_up_to_the_window_are_requested_while_the_current_one_is_read() {
+    let payload: Vec<u8> = (0u8..50).collect();
+    let content_ref = ContentRef::blob_v1(
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
+    );
+    let grant = grant_of_ranges(content_ref, "http://example.invalid/object", &[10; 5]);
+    let transport = scripted_transport::script(grant.ranges.iter().map(|range| {
+        let start = range.start_offset as usize;
+        Outcome::Success(payload[start..start + range.length as usize].to_vec())
+    }));
+    let client = client_for(&transport);
+
+    let mut download = client
+        .open_direct_download(&grant)
+        .await
+        .expect("open the grant");
+    assert_eq!(transport.attempts(), 1);
+    let first = download.next_chunk().await.expect("first range");
+    assert_eq!(first.as_deref(), Some(&payload[..10]));
+    assert_eq!(transport.attempts(), RANGE_WINDOW);
+    let second = download.next_chunk().await.expect("second range");
+    assert_eq!(second.as_deref(), Some(&payload[10..20]));
+    assert_eq!(transport.attempts(), RANGE_WINDOW + 1);
+    let mut rest = Vec::new();
+    while let Some(chunk) = download.next_chunk().await.expect("verified download") {
+        rest.extend_from_slice(&chunk);
+    }
+
+    assert_eq!(rest, payload[20..]);
+    let urls: Vec<String> = transport.sent().into_iter().map(|sent| sent.url).collect();
+    let expected: Vec<String> = (0..5)
+        .map(|index| format!("http://example.invalid/object?signed={index}"))
+        .collect();
+    assert_eq!(urls, expected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_next_range_does_not_time_out_while_the_current_one_is_read() {
+    let payload = b"abcde".to_vec();
+    let content_ref = ContentRef::blob_v1(
+        loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        ContentId::generate(),
+        &payload,
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
+    );
+    let grant = grant_of_ranges(content_ref, "http://example.invalid/object", &[3, 2]);
+    let clock = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let service = {
+        let clock = clock.clone();
+        tower::service_fn(move |request: http::Request<crate::Body>| {
+            let clock = clock.clone();
+            async move {
+                if request.uri().query() != Some("signed=0") {
+                    return Ok(http::Response::new(crate::Body::from(Bytes::from_static(
+                        b"de",
+                    ))));
+                }
+                let chunks = futures::stream::iter(*b"abc").then(move |byte| {
+                    let clock = clock.clone();
+                    async move {
+                        clock.advance_ms(30_000);
+                        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+                        Ok::<_, std::io::Error>(Bytes::from(vec![byte]))
+                    }
+                });
+                Ok::<_, crate::TransportError>(http::Response::new(crate::Body::from_stream(
+                    chunks,
+                )))
+            }
+        })
+    };
+    let mut client = Client::with_transport(
+        ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        service,
+    )
+    .expect("valid client config");
+    client.timer = clock.clone();
+
+    let mut download = client
+        .open_direct_download(&grant)
+        .await
+        .expect("open the grant");
+    let mut received = Vec::new();
+    while let Some(chunk) = download.next_chunk().await.expect("verified download") {
+        received.extend_from_slice(&chunk);
+    }
+
+    assert_eq!(received, payload);
+    assert_eq!(clock.now_ms(), 90_000);
 }
 
 #[tokio::test]
@@ -482,7 +617,9 @@ async fn ranges_verify_the_whole_revision_and_resume_inside_the_second_object() 
         Outcome::Success(b"second".to_vec()),
         Outcome::Success(b"cond".to_vec()),
         Outcome::Success(b"firs".to_vec()),
+        Outcome::Success(b"second".to_vec()),
         Outcome::Success(b"firsts".to_vec()),
+        Outcome::Success(b"second".to_vec()),
         Outcome::Success(b"first".to_vec()),
         Outcome::Success(b"SECOND".to_vec()),
     ]);
@@ -504,7 +641,7 @@ async fn ranges_verify_the_whole_revision_and_resume_inside_the_second_object() 
     assert_eq!(sent[0].header("range"), Some("bytes=7-11"));
     assert_eq!(sent[1].header("range"), Some("bytes=0-5"));
     assert_eq!(sent[2].header("range"), Some("bytes=2-5"));
-    for expected_attempts in [4, 5, 7] {
+    for expected_attempts in [5, 7, 9] {
         let error = client
             .download_via_presigned_url(&whole, &mut Vec::new())
             .await

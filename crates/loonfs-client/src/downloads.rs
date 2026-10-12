@@ -2,7 +2,15 @@
 
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
+use futures::future::BoxFuture;
+use futures::FutureExt as _;
 use loonfs_types::api::v0::DownloadRange;
+use std::collections::VecDeque;
+use std::task::{Context, Poll};
+
+/// The most range responses a download holds open at once: the one being
+/// read and the ones requested behind it, in range order.
+const RANGE_WINDOW: usize = 4;
 
 /// Options for a download of a file's content by path or by inode.
 ///
@@ -26,10 +34,14 @@ pub struct DownloadOptions {
 /// Verification completes only when [`Self::next_chunk`] returns `None`.
 /// A caller that stops earlier has received provisional bytes, just as with
 /// any streaming read whose digest cannot be known until the end.
+///
+/// The ranges after the current one are requested while it is read, up to a
+/// fixed window of open responses.
 pub struct DirectDownloadStream {
     body: payload::PayloadStream,
+    next: VecDeque<NextRange>,
     client: Client,
-    ranges: std::collections::VecDeque<DownloadRange>,
+    ranges: VecDeque<DownloadRange>,
     range_remaining: u64,
     expected: ContentRef,
     target: String,
@@ -41,6 +53,18 @@ pub struct DirectDownloadStream {
     /// Number of prefix bytes included in checksum verification so far.
     prefix_folded: u64,
     finished: bool,
+}
+
+enum NextRange {
+    Opening {
+        length: u64,
+        open: BoxFuture<'static, Result<payload::PayloadStream>>,
+    },
+    Open {
+        length: u64,
+        body: payload::PayloadStream,
+    },
+    Failed(ClientError),
 }
 
 impl DirectDownloadStream {
@@ -73,7 +97,12 @@ impl DirectDownloadStream {
             return Ok(None);
         }
         loop {
-            match self.body.next().await {
+            let polled = tokio::select! {
+                biased;
+                () = std::future::poll_fn(|context| poll_opens(&mut self.next, context)) => continue,
+                polled = self.body.next() => polled,
+            };
+            match polled {
                 Some(Ok(chunk)) => {
                     let length = chunk.len() as u64;
                     if length > self.range_remaining {
@@ -103,11 +132,17 @@ impl DirectDownloadStream {
                             self.target, self.range_remaining
                         )));
                     }
-                    if let Some(range) = self.ranges.pop_front() {
+                    if let Some(next) = self.next.pop_front() {
                         self.finished = true;
-                        self.body = self.client.open_download_range(&range).await?;
-                        self.range_remaining = range.length;
+                        let (length, body) = match next {
+                            NextRange::Opening { length, open } => (length, open.await?),
+                            NextRange::Open { length, body } => (length, body),
+                            NextRange::Failed(error) => return Err(error),
+                        };
+                        self.body = body;
+                        self.range_remaining = length;
                         self.finished = false;
+                        self.request_next_range();
                         continue;
                     }
                     self.finished = true;
@@ -139,6 +174,43 @@ impl DirectDownloadStream {
                 }
             }
         }
+    }
+
+    fn request_next_range(&mut self) {
+        while self.next.len() < RANGE_WINDOW - 1 {
+            let Some(range) = self.ranges.pop_front() else {
+                return;
+            };
+            let client = self.client.clone();
+            self.next.push_back(NextRange::Opening {
+                length: range.length,
+                open: Box::pin(async move { client.open_download_range(&range).await }),
+            });
+        }
+    }
+}
+
+/// Polls every pending open once and resolves when any of them completed.
+fn poll_opens(next: &mut VecDeque<NextRange>, context: &mut Context<'_>) -> Poll<()> {
+    let mut changed = false;
+    for entry in next.iter_mut() {
+        let NextRange::Opening { length, open } = entry else {
+            continue;
+        };
+        let Poll::Ready(opened) = open.poll_unpin(context) else {
+            continue;
+        };
+        let length = *length;
+        *entry = match opened {
+            Ok(body) => NextRange::Open { length, body },
+            Err(error) => NextRange::Failed(error),
+        };
+        changed = true;
+    }
+    if changed {
+        Poll::Ready(())
+    } else {
+        Poll::Pending
     }
 }
 
@@ -358,8 +430,9 @@ impl Client {
             .split_first()
             .expect("validated grant should contain a range");
         let body = self.open_download_range(first).await?;
-        Ok(DirectDownloadStream {
+        let mut stream = DirectDownloadStream {
             body,
+            next: VecDeque::new(),
             client: self.clone(),
             ranges: remaining.iter().cloned().collect(),
             range_remaining: first.length,
@@ -370,7 +443,9 @@ impl Client {
             resumed_from: start_offset,
             prefix_folded: 0,
             finished: false,
-        })
+        };
+        stream.request_next_range();
+        Ok(stream)
     }
 
     async fn open_download_range(&self, range: &DownloadRange) -> Result<payload::PayloadStream> {

@@ -1,12 +1,13 @@
 import asyncio
 import json
 import re
+import threading
 from pathlib import Path
 
 import httpx
 import pytest
 from loonfs.server import AsyncLoonFS, LoonFS
-from loonfs._transfer_runtime import _checksum
+from loonfs._transfer_runtime import _RANGE_WINDOW, _checksum
 
 CASES = json.loads(
     (Path(__file__).parents[1] / "fixtures/streaming_downloads.json").read_text()
@@ -38,7 +39,7 @@ class Chunks(httpx.SyncByteStream, httpx.AsyncByteStream):
         self.closed = True
 
 
-def stream_client(fixture, direct, body, asynchronous=False):
+def stream_client(fixture, direct, body, asynchronous=False, range_body=None):
     claim = {
         "kind": "blob_v1",
         "owner_namespace_id": "demo",
@@ -54,11 +55,14 @@ def stream_client(fixture, direct, body, asynchronous=False):
         assert request.extensions["timeout"]["read"] == 7
         path = request.url.path
         if path.startswith("/object/"):
-            part = fixture["ranges"][int(path.rsplit("/", 1)[1])]
+            index = int(path.rsplit("/", 1)[1])
+            part = fixture["ranges"][index]
             assert "authorization" not in request.headers
             assert "x-private" not in request.headers
             assert "cookie" not in request.headers
             assert request.headers.get_list("range") == [part["range"]]
+            if range_body is not None:
+                return httpx.Response(200, stream=range_body(index))
             return httpx.Response(200, content=part["content"].encode())
         if path == "/object":
             assert "authorization" not in request.headers
@@ -185,9 +189,7 @@ def test_streaming_download_conformance(fixture, direct, asynchronous):
         direct and (fixture["size_bytes"] == 0 or "ranges" in fixture)
     )
     if direct:
-        assert [
-            r.url.path for r in requests if r.url.host == "objects.test"
-        ] == fixture["object_requests"]
+        assert sorted(object_requests(requests)) == fixture["object_requests"]
     else:
         assert [r.url.path.rsplit("/", 1)[1] for r in requests] == [
             "capabilities",
@@ -228,3 +230,80 @@ def test_streaming_download_backpressure_and_early_close(direct, asynchronous):
                 assert body.reads == 1
     assert body.closed
     assert body.reads == 1
+
+
+FIVE_RANGES = {
+    "size_bytes": 9,
+    "algorithm": "crc64nvme",
+    "checksum": _checksum("crc64nvme", b"123456789").value,
+    "range": None,
+    "ranges": [
+        {"start_offset": 0, "length": 2, "range": "bytes=4-5", "content": "12"},
+        {"start_offset": 2, "length": 2, "range": "bytes=0-1", "content": "34"},
+        {"start_offset": 4, "length": 2, "range": "bytes=8-9", "content": "56"},
+        {"start_offset": 6, "length": 2, "range": "bytes=2-3", "content": "78"},
+        {"start_offset": 8, "length": 1, "range": "bytes=6-6", "content": "9"},
+    ],
+}
+
+
+def object_requests(requests):
+    return [r.url.path for r in requests if r.url.host == "objects.test"]
+
+
+def test_streaming_download_requests_a_window_of_ranges_while_one_is_read():
+    bodies = [Chunks([part["content"].encode()]) for part in FIVE_RANGES["ranges"]]
+    requested = [threading.Event() for _ in bodies]
+
+    def range_body(index):
+        requested[index].set()
+        return bodies[index]
+
+    client, http, requests = stream_client(
+        FIVE_RANGES, True, None, range_body=range_body
+    )
+    with http:
+        with client.files.download_stream(
+            "demo", path="/file", request_options={"timeout": 7}
+        ) as stream:
+            assert next(stream) == b"12"
+            assert all(event.wait(5) for event in requested[:_RANGE_WINDOW])
+            assert len(object_requests(requests)) == _RANGE_WINDOW
+            assert not requested[_RANGE_WINDOW].is_set()
+            assert next(stream) == b"34"
+            assert requested[_RANGE_WINDOW].wait(5)
+            assert b"".join(stream) == b"56789"
+    assert sorted(object_requests(requests)) == [f"/object/{i}" for i in range(5)]
+    assert all(body.closed for body in bodies)
+
+
+def test_async_streaming_download_requests_a_window_of_ranges_while_one_is_read():
+    bodies = [Chunks([part["content"].encode()]) for part in FIVE_RANGES["ranges"]]
+
+    async def read():
+        requested = [asyncio.Event() for _ in bodies]
+
+        def range_body(index):
+            requested[index].set()
+            return bodies[index]
+
+        client, http, requests = stream_client(
+            FIVE_RANGES, True, None, True, range_body=range_body
+        )
+        async with http:
+            async with await client.files.download_stream(
+                "demo", path="/file", request_options={"timeout": 7}
+            ) as stream:
+                assert await stream.__anext__() == b"12"
+                for event in requested[:_RANGE_WINDOW]:
+                    await asyncio.wait_for(event.wait(), 5)
+                assert len(object_requests(requests)) == _RANGE_WINDOW
+                assert not requested[_RANGE_WINDOW].is_set()
+                assert await stream.__anext__() == b"34"
+                await asyncio.wait_for(requested[_RANGE_WINDOW].wait(), 5)
+                assert b"".join([chunk async for chunk in stream]) == b"56789"
+        return requests
+
+    requests = asyncio.run(read())
+    assert sorted(object_requests(requests)) == [f"/object/{i}" for i in range(5)]
+    assert all(body.closed for body in bodies)
