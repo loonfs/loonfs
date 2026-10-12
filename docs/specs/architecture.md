@@ -25,7 +25,7 @@ Manifests and WAL objects are numbered 1, 2, 3, and so on, with a separate count
 
 The hint is a best-effort pointer to a recent manifest. It's a safe place to start, but not an authoritative pointer to the current manifest, so readers load the hinted manifest and then check for newer ones. The [format specification](format.md#2-objects-and-references) defines the complete layout and the stored fields.
 
-Why have a hint at all? Without it, a reader would have to list the namespace's manifests to find a place to start. Why is it best effort? Updating the hint is a separate write from publishing a manifest, and keeping the two in step would need a transaction across two objects, which object storage doesn't offer.
+Why have a hint at all? Without it, a reader would have to list the namespace's manifests to find a place to start, and object-storage listings are slow (LoonFS keeps them off every hot path). Why is it best effort? Updating the hint is a separate write from publishing a manifest. Keeping the two in step would need a transaction across two objects, which object storage doesn't support.
 
 ## Writing a file
 
@@ -71,7 +71,7 @@ A lost response can hide a successful commit. To find out what happened, a clien
 
 Warning: when a client retries a commit, it shouldn't retry the upload too. If the upload is retried, it's assigned a different content ID, so the retried commit is no longer the same request. If the original commit succeeded, the retry would fail with `commit_id_reuse_conflict` instead of returning the original result.
 
-Why use epochs instead of a writer lease? With a lease, a new writer would have to wait for the old lease to expire, and safety would depend on clocks. With epochs, a new writer can take over at any time, and safety depends only on put-if-absent.
+Why use epochs instead of a writer lease? With a lease, a new writer would have to wait for the old lease to expire. With epochs, a new writer can take over at any time, and correctness depends only on conditional writes.
 
 ## Reading a file
 
@@ -101,7 +101,7 @@ A "fork" is a new namespace that starts as a copy of another namespace at one po
 
 A fork can keep reading objects owned by its source and the source's ancestors. When the fork publishes its own manifests, those objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
 
-User checkpoints and snapshots are pins too, with different rules for reading and removal. Operators manage checkpoints through the maintenance API, and a checkpoint can be kept without an expiry time. Snapshots are for applications. The read endpoints accept a `snapshot_id`, and every snapshot has a required expiry time and counts against a per-namespace limit, so applications can't keep old data around indefinitely. Each create call writes a new pin with a new ID, so a checkpoint's name is a label, not a key (two checkpoints can have the same name).
+User checkpoints and snapshots are pins too, with different rules for reading and removal. Snapshots are for applications. The read endpoints accept a `snapshot_id`, and every snapshot has a required expiry time and counts against a per-namespace limit, so applications can't keep old data around indefinitely. Checkpoints, by contrast, are for operators. They're managed through the maintenance API, and a checkpoint can be kept without an expiry time. Each create call writes a new pin with a new ID, so a checkpoint's name is a label, not a key (two checkpoints can have the same name).
 
 | Pin | Readable | Removed |
 | --- | --- | --- |

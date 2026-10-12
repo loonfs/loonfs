@@ -204,11 +204,11 @@ A stored record that keeps one manifest, and every segment it lists, from being 
 
 ### Checkpoint
 
-A pin that an operator manages through the maintenance API to keep one version of a namespace. A checkpoint can have an expiry time, or none, and it stays readable for as long as it exists, even after its expiry time. The API also calls any pin's ID a `checkpoint_id`.
+A pin that an operator manages through the maintenance API to keep one version of a namespace. A checkpoint can have an expiry time, or none, and it stays readable for as long as it exists, even after its expiry time. Snapshots, by contrast, are for applications, and they always expire. The API also calls any pin's ID a `checkpoint_id`.
 
 ### Snapshot
 
-A pin that applications use to read a namespace as it was at one point in time. The regular read endpoints accept a `snapshot_id`, and a snapshot can be read until it expires. Unlike a checkpoint, every snapshot has a required expiry time with a maximum lifetime, and each namespace has a limit on live snapshots. Those limits let applications use snapshots without keeping old data around indefinitely. A snapshot's expiry time can be extended, up to its maximum lifetime.
+A pin that applications use to read a namespace as it was at one point in time. The regular read endpoints accept a `snapshot_id`, and a snapshot can be read until it expires. Every snapshot has a required expiry time and a maximum lifetime (its expiry can be extended up to that maximum), and each namespace has a limit on live snapshots, so applications can't keep old data around indefinitely. Checkpoints, by contrast, are managed by operators through the maintenance API, and they can be kept without an expiry time.
 
 ### Fork
 

@@ -61,8 +61,6 @@ The root directory has inode ID 1. A new namespace starts at sequence 0, with in
 
 Version 1 of the format defines two inode kinds, `dir` and `file`. ([Reserved functionality](#125-reserved-functionality) reserves a third kind, `link`.) An inode row records only the item's kind and creation metadata. The item's current parent and name are stored as directory bindings, and its contents are stored as file revisions, so neither the path nor the current content reference is stored on the inode row.
 
-Why aren't the path and the contents stored on the inode row? Keeping them in separate rows means the inode row never changes after it's created. A rename writes only binding rows, a content change writes only a revision row, and each kind of history can be kept and compacted on its own.
-
 ### 1.2 Commits and revisions
 
 A "commit" is one successfully published mutation request. A request can contain several operations, and they're all published together at one namespace sequence number (`seq`).
@@ -326,7 +324,7 @@ The namespace's counters advance at different times:
 
 For example, manifest 5 might cover WAL objects through 8 and sequences through 40. WAL object 9 can be a fence at sequence 40, and WAL object 10 can contain commits 41 to 43. The read view is then at sequence 43. A fold can publish manifest 6, covering WAL object 10, without allocating sequence 44.
 
-Why does the hint exist, and why can it lag? A reader needs a place to start that doesn't require listing the namespace's manifests. LoonFS updates the hint after it publishes a manifest, as a separate compare-and-swap, and keeping the two in step would need a transaction across two objects. So readers treat the hint as a starting point and check for newer manifests (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
+Why does the hint exist, and why can it lag? A reader needs a place to start that doesn't require listing the namespace's manifests, because object-storage listings are slow, and LoonFS keeps them off every hot path. LoonFS updates the hint after it publishes a manifest, as a separate compare-and-swap. Keeping the hint and the manifest in step would need a transaction across two objects, which object storage doesn't support. So readers treat the hint as a starting point and check for newer manifests (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
 
 ### 2.5 Manifest references
 
@@ -460,8 +458,6 @@ A large create completes conditionally where the provider accepts a precondition
 The incremental-write adapter reads the whole payload before it evaluates its existence precondition. So a digest computed while forwarding the stream covers the complete payload, even when the write is refused.
 
 A failed or cancelled multipart transfer MUST attempt a provider-side abort. An abort can fail and leave incomplete parts behind, so deployments also need the provider cleanup policy that their adapter assumes. An abort doesn't delete a content object that has already completed. Cleanup of that object follows the upload's durable lifecycle.
-
-Why check an occupied key by its checksum instead of reading the object back? The provider's stored checksum already identifies the object's bytes, and reading a large object back would cost a full download on every retry.
 
 ### 3.3 Timing assumptions
 
@@ -727,7 +723,7 @@ A fence keeps `head_seq` and `next_inode_id` unchanged and contains no commit re
 
 There's no writer lease or writer-expiry timestamp. The `writer_id` and `acquired_at_ms` fields describe the acquisition, and the epoch alone determines authority. An acquisition retried after an uncertain outcome can raise the epoch again. Commit retries are identified separately, with durable receipts (see [Commit identity and retries](#65-commit-identity-and-retries)).
 
-Why use epochs instead of a lease? With a lease, a new writer would have to wait for the old lease to expire before it could take over, and safety would depend on clocks. With epochs, a new writer can take over at any time, and safety depends only on conditional writes. Taking over costs a manifest publication and a fence write (about 200 ms), so most deployments keep one long-lived writer session in a server that many clients share.
+Why use epochs instead of a lease? With a lease, a new writer would have to wait for the old lease to expire before it could take over. With epochs, a new writer can take over at any time, and correctness depends only on conditional writes. Taking over costs a manifest publication and a fence write (about 200 ms), so most deployments keep one long-lived writer session in a server that many clients share.
 
 ### 6.2 Validation
 
@@ -1463,7 +1459,7 @@ Tail and session IDs protect every object of their chains. A direct download cap
 The shared base filter follows these rules:
 
 - It has no false negatives. A false positive keeps an unreferenced object for this pass.
-- The pass's `now_ms` seeds the filter, so a pass with a different clock uses a different seed (and a false positive in one pass usually isn't repeated in the next).
+- The pass's `now_ms` seeds the filter, so a pass with a different clock uses a different seed.
 - It uses xxh64 double hashing and seven probes.
 - Its initial expected entry count is the current manifest's layout row count, with a minimum of one. Each insertion counts toward the current level's expectation, including repeated keys. When an insertion would exceed that expectation, the filter adds a level with twice the expectation and a seed derived from the pass seed and the level index. A key matches the filter when any level matches.
 - Each level is sized at ten bits per expected entry, so a filter with `n` levels has roughly `n` times the false-positive rate of one level.
@@ -1566,10 +1562,8 @@ The naming mode `labels` is reserved. In a namespace with that mode, names would
 
 This section describes designs that were considered for the format and the reasons they weren't used. The design notes cover narrower choices: [commit history](../design/commit-history.md#alternatives-considered), [inline small content](../design/inline-small-content.md#alternatives-considered), and [directory bindings](../design/directory-bindings.md#costs-and-alternatives).
 
-- **A writer lease.** A writer could take a lease with an expiry time instead of an epoch. A new writer would then have to wait for the old lease to expire before it could take over, and safety would depend on clocks. With epochs and fences, a new writer can take over at any time, and safety depends only on conditional writes (see [Writer ownership](#61-writer-ownership)).
+- **A writer lease.** A writer could take a lease with an expiry time instead of an epoch. A new writer would then have to wait for the old lease to expire before it could take over. With epochs and fences, a new writer can take over at any time, and correctness depends only on conditional writes (see [Writer ownership](#61-writer-ownership)).
 - **A durable record of used WAL and manifest numbers.** Recording every number that was used would remove the provider timing assumption in [Clock and operation assumptions](#114-clock-and-operation-assumptions), because a deleted number could never be mistaken for a free one. But checking the record would add a read to every commit acknowledgement and every read of the current state, and it would remove only that one assumption.
-- **Content IDs derived from the bytes (content addressing).** A SHA-256 content ID would deduplicate identical uploads and make retries match automatically. But direct uploads go straight to the provider, which verifies a CRC checksum, not SHA-256, so the server can't get a trusted content hash for them without reading the bytes back. Hash-addressed keys in a shared store would also let a client check whether some known bytes are already stored. Random content IDs avoid both problems, at the cost of storing identical uploads twice (see [File contents and ownership](#15-file-contents-and-ownership)).
-- **Durable progress records for garbage collection and compaction.** A pass or job could store a cursor and resume after a crash. Instead, each one starts from the current manifest and fresh roots, so there's no stored state that can disagree with the manifest after a failure (see [One complete pass](#111-one-complete-pass) and [Streaming compaction](#104-streaming-compaction)).
 
 ## Appendix A. Durable records and byte encodings
 
