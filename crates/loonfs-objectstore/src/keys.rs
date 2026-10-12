@@ -171,15 +171,15 @@ mod tests {
 
         let mut patterns = std::collections::BTreeMap::new();
         for line in section.lines() {
-            let Some(row) = line.strip_prefix("| **") else {
+            let Some(row) = line.strip_prefix("| ") else {
                 continue;
             };
-            let Some((family, rest)) = row.split_once("**") else {
+            let Some((family, rest)) = row.split_once(" | ") else {
                 continue;
             };
             let Some(pattern) = rest
-                .rsplit_once("| `")
-                .and_then(|(_, tail)| tail.split_once('`'))
+                .strip_prefix('`')
+                .and_then(|tail| tail.split_once('`'))
                 .map(|(pattern, _)| pattern)
             else {
                 continue;
