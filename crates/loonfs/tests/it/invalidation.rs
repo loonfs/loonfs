@@ -882,7 +882,7 @@ async fn read_after_write_only_probes_the_next_wal_number_without_replay() {
         .expect("steady-state put");
     writer.drain().await.expect("finish background hints");
     let _view = namespace
-        .read_view_at_snapshot(&snapshot.checkpoint_id)
+        .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
         .expect("a snapshot read view keeps the live read cache");
     let next_wal_no = head_state(&store, &namespace_id)

@@ -435,13 +435,8 @@ async fn create_upload_session_with_state<S: ObjectStore + ?Sized>(
         },
     };
     let object_key = upload_session(catalog.namespace_id(), &upload_id);
-    let encoded =
-        encode_control_state(ControlObjectKind::UploadSession, &state).map_err(|error| {
-            CoreError::Codec {
-                object_key: object_key.clone(),
-                message: error.to_string(),
-            }
-        })?;
+    let encoded = encode_control_state(ControlObjectKind::UploadSession, &state)
+        .expect("an upload session record should encode");
     let metadata =
         create_control_object_under_generated_id(store, &object_key, Bytes::from(encoded)).await?;
     Ok((state, metadata))
@@ -540,11 +535,7 @@ async fn claim_staging_slot<S: ObjectStore + ?Sized>(
         let upload_id = upload_id.to_owned();
         async move {
             ensure_session_open(&state, now_ms)?;
-            let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
-                return Err(CoreError::Internal(
-                    "staging slot requested from a direct upload session".to_owned(),
-                ));
-            };
+            let staging = proxied_staging(&mut state.mode);
             match staging {
                 ProxiedStaging::Idle => {
                     *staging = ProxiedStaging::Claimed;
@@ -600,6 +591,18 @@ async fn release_staging_claim<S: ObjectStore + ?Sized>(
              the session cannot stage again until its lease passes"
         );
     }
+}
+
+/// Returns the staging state of a service-proxied session.
+///
+/// A session's mode is set when it is created, and every staging step runs
+/// after `read_open_proxied_session` checked that the mode is service-proxied.
+fn proxied_staging(mode: &mut UploadSessionMode) -> &mut ProxiedStaging {
+    match mode {
+        UploadSessionMode::ServiceProxied { staging } => Some(staging),
+        _ => None,
+    }
+    .expect("a staging step should run only on a service-proxied session")
 }
 
 async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
@@ -823,11 +826,7 @@ async fn record_staged_content<S: ObjectStore + ?Sized>(
         let staged = staged.clone();
         async move {
             ensure_session_open(&state, now_ms)?;
-            let UploadSessionMode::ServiceProxied { staging } = &mut state.mode else {
-                return Err(CoreError::Internal(
-                    "staged content recorded for a direct upload session".to_owned(),
-                ));
-            };
+            let staging = proxied_staging(&mut state.mode);
             if already_present {
                 return Err(CoreError::UploadContentConflict { upload_id });
             }
@@ -1058,7 +1057,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         // The identity is 128 fresh random bits and this session has made no
         // earlier attempt, so an occupied key is corruption rather than a
         // replay, and it fails loudly.
-        return Err(CoreError::Internal(format!(
+        return Err(CoreError::NamespaceCorrupt(format!(
             "content object `{}` already holds bytes under a freshly minted identity",
             content_blob(
                 &staged.content_ref.owner_namespace_id,
@@ -1475,16 +1474,6 @@ fn completion_plan<'a>(
     session: &'a UploadSessionPayload,
     completion: &'a ResolvedUploadCompletion,
 ) -> Result<CompletionPlan<'a>> {
-    let session_mode = upload_mode(&session.mode);
-    let completion_mode = completion.mode();
-    if completion_mode != session_mode {
-        return Err(CoreError::InvalidUploadContent(format!(
-            "completion mode `{}` does not match stored upload mode `{}`",
-            completion_mode.as_str(),
-            session_mode.as_str()
-        )));
-    }
-
     match (&session.mode, completion) {
         (UploadSessionMode::ServiceProxied { staging }, ResolvedUploadCompletion::KnownContent) => {
             Ok(CompletionPlan::Proxied { staging })
@@ -1518,9 +1507,11 @@ fn completion_plan<'a>(
             checksum_algorithm: *checksum_algorithm,
             parts,
         }),
-        _ => Err(CoreError::Internal(
-            "upload completion mode should match the session mode".to_owned(),
-        )),
+        _ => Err(CoreError::InvalidUploadContent(format!(
+            "completion mode `{}` does not match stored upload mode `{}`",
+            completion.mode().as_str(),
+            upload_mode(&session.mode).as_str()
+        ))),
     }
 }
 

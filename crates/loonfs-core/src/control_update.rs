@@ -157,10 +157,7 @@ where
                 }
             }
             let encoded = encode_control_state(ControlObjectKind::UploadSession, next.as_ref())
-                .map_err(|error| CoreError::Codec {
-                    object_key: loaded.object_key.clone(),
-                    message: error.to_string(),
-                })?;
+                .expect("an upload session record should encode");
             match store
                 .compare_and_swap(&loaded.object_key, &loaded.etag, Bytes::from(encoded))
                 .await

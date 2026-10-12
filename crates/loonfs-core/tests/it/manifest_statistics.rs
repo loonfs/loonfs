@@ -221,7 +221,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .create_snapshot("baseline".to_owned(), u64::MAX / 2)
         .await
         .expect("snapshot");
-    let baseline = load_checkpoint_statistics(&store, &parent, &snapshot.checkpoint_id)
+    let baseline = load_checkpoint_statistics(&store, &parent, &snapshot.snapshot_id)
         .await
         .expect("pin activity");
     write_file_bytes(&store, &parent, "/file", b"newer", &context, Some("newer"))
@@ -235,7 +235,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     );
     unavailable_wal.fail_all();
     assert_eq!(
-        load_checkpoint_statistics(&unavailable_wal, &parent, &snapshot.checkpoint_id)
+        load_checkpoint_statistics(&unavailable_wal, &parent, &snapshot.snapshot_id)
             .await
             .expect("checkpoint statistics exclude newer WAL"),
         baseline
@@ -282,7 +282,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         ])
     );
     assert_eq!(
-        load_checkpoint_statistics(&store, &parent, &layout_snapshot.checkpoint_id)
+        load_checkpoint_statistics(&store, &parent, &layout_snapshot.snapshot_id)
             .await
             .expect("checkpoint layout statistics"),
         layout
@@ -291,7 +291,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .fork_namespace(
             &child,
             &loonfs_test_support::test_actor(),
-            Some(&snapshot.checkpoint_id),
+            Some(&snapshot.snapshot_id),
         )
         .await
         .expect("fork old snapshot");
@@ -347,7 +347,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         observed.manifest
     );
     assert_eq!(
-        load_checkpoint_statistics(&store, &parent, &snapshot.checkpoint_id)
+        load_checkpoint_statistics(&store, &parent, &snapshot.snapshot_id)
             .await
             .expect("pin unchanged"),
         baseline

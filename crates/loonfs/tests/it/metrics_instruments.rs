@@ -218,7 +218,7 @@ fn snapshot_read_views_report_the_snapshot_view_counter() {
             .await
             .expect("create snapshot");
         let _snapshot_view = namespace
-            .read_view_at_snapshot(&reader_snapshot.checkpoint_id)
+            .read_view_at_snapshot(&reader_snapshot.snapshot_id)
             .await
             .expect("view snapshot");
         recorder.snapshot()

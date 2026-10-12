@@ -103,23 +103,15 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         return PublishBatchReport::unchanged(Vec::new());
     }
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
-    if view.head.namespace_id != *namespace_id {
-        return PublishBatchReport::unchanged(vec![
-            Err(CoreError::Internal(
-                "publish view namespace mismatch".to_owned()
-            ));
-            candidates.len()
-        ]);
-    }
+    assert_eq!(
+        view.head.namespace_id, *namespace_id,
+        "a batch should publish against its own namespace's view"
+    );
     let elapsed_before_attempt_ms = clock.batch.elapsed_at(&clock.attempt);
-    let Some(admission_now_ms) = context.now_ms.checked_add(elapsed_before_attempt_ms) else {
-        return PublishBatchReport::unchanged(vec![
-            Err(CoreError::Internal(
-                "publication time overflow".to_owned()
-            ));
-            candidates.len()
-        ]);
-    };
+    let admission_now_ms = context
+        .now_ms
+        .checked_add(elapsed_before_attempt_ms)
+        .expect("the admission time should fit in `u64` milliseconds");
     let mut slots = Vec::with_capacity(candidates.len());
     let mut session = PublishPlanningSession::new(&view.head, view.wal_tail());
     let mut accepted_commits = Vec::new();
@@ -196,19 +188,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
                 continue;
             }
             let allocation = candidate_request.allocation;
-            let resulting_next_inode_id = match session.commit_candidate(allocation) {
-                Ok(resulting_next_inode_id) => resulting_next_inode_id,
-                Err(error) => {
-                    slots.push(settle_admission(
-                        BatchOutcomeSlot::Settled {
-                            outcome: Err(error),
-                            depends_on_batch: true,
-                        },
-                        !accepted_commits.is_empty(),
-                    ));
-                    continue;
-                }
-            };
+            let resulting_next_inode_id = session.commit_candidate(allocation);
             let plan = {
                 let _span =
                     tracing::debug_span!("loonfs.phase", phase = "finish_commit_plan").entered();
@@ -247,28 +227,18 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if accepted_commits.is_empty() {
         return PublishBatchReport::unchanged(finish_batch_outcomes(&slots));
     }
-    let wal = match prepare_wal_object(
+    let wal = prepare_wal_object(
         namespace_id.clone(),
         view.claimed_writer.writer_epoch,
         &view.head,
         &accepted_commits,
-    ) {
-        Ok(wal) => wal,
-        Err(error) => {
-            return abort_batch(
-                slots,
-                &CoreError::Internal(format!("WAL build failed: {error}")),
-            )
-        }
-    };
+    );
     let resulting_head = view.head.after_wal_object(wal.envelope().payload());
     let elapsed_ms = clock.batch.elapsed_ms();
-    let Some(publication_now_ms) = context.now_ms.checked_add(elapsed_ms) else {
-        return abort_batch(
-            slots,
-            &CoreError::Internal("publication time overflow".to_owned()),
-        );
-    };
+    let publication_now_ms = context
+        .now_ms
+        .checked_add(elapsed_ms)
+        .expect("the publication time should fit in `u64` milliseconds");
     for (candidate, slot) in candidates.iter().zip(&mut slots) {
         if matches!(slot, BatchOutcomeSlot::Accepted) {
             if let Err(error) =
@@ -393,6 +363,7 @@ mod tests {
     use crate::protocol::load_publish_metadata_view;
     use crate::test_support::ops::create;
     use crate::time::StdMonotonicTimer;
+    use futures::FutureExt;
     use loonfs_objectstore::keys::{hint, wal_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
@@ -490,7 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequence_exhaustion_writes_neither_wal_nor_hint() {
+    async fn sequence_exhaustion_panics_before_writing_wal_or_hint() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -533,27 +504,34 @@ mod tests {
             },
         ));
         let batch = Deadline::start(std::sync::Arc::new(StdMonotonicTimer::default()));
-        let result = publish_namespace_commits_batch_against_publish_view(
-            &store,
-            &namespace_id,
-            &[candidate],
-            &context,
-            &view,
-            PublicationClock {
-                batch: &batch,
-                attempt: batch.observe(),
-                tip: batch.observe(),
-            },
-            &tokio::sync::Semaphore::new(32),
-        )
-        .await;
-
-        let error = result.results[0]
-            .as_ref()
-            .expect_err("exhausted sequence must reject the commit");
-        assert_eq!(error.code(), loonfs_types::ErrorCode::ServerError);
-        assert!(error.to_string().contains("cannot exceed"));
-        assert!(matches!(result.effect, PublishViewEffect::Unchanged));
+        let content_writes = tokio::sync::Semaphore::new(32);
+        let panicked =
+            std::panic::AssertUnwindSafe(publish_namespace_commits_batch_against_publish_view(
+                &store,
+                &namespace_id,
+                &[candidate],
+                &context,
+                &view,
+                PublicationClock {
+                    batch: &batch,
+                    attempt: batch.observe(),
+                    tip: batch.observe(),
+                },
+                &content_writes,
+            ))
+            .catch_unwind()
+            .await
+            .map(drop)
+            .expect_err("an exhausted sequence should panic");
+        let message = panicked
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panicked.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(
+            message.contains("the namespace sequence should stay below its limit"),
+            "{message}"
+        );
         assert_eq!(
             store
                 .get(&hint_key, None)

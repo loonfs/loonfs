@@ -3,7 +3,7 @@
 
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_layouts};
 use super::runs::{MetadataFamilySegments, MetadataRunPolicy, MANIFEST_ROW_FAMILIES};
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::metadata::MetadataState;
 use bytes::Bytes;
@@ -117,7 +117,7 @@ where
     for family in MANIFEST_ROW_FAMILIES {
         let mut writer = MetadataSegmentWriter::new(family, namespace_id);
         for row in rows_for_family(family) {
-            writer.push(row, &mut |_| {})?;
+            writer.push(row, &mut |_| {});
             writer.roll_full_segments(&mut puts, policy).await?;
         }
         segments_by_family.push(MetadataFamilySegments {
@@ -265,11 +265,7 @@ impl<'a> MetadataSegmentWriter<'a> {
         }
     }
 
-    pub(super) fn push(
-        &mut self,
-        row: MetadataRow,
-        fold_encoded_row: &mut impl FnMut(&[u8]),
-    ) -> Result<()> {
+    pub(super) fn push(&mut self, row: MetadataRow, fold_encoded_row: &mut impl FnMut(&[u8])) {
         let encoded = self
             .builder
             .push_with_encoded_row(
@@ -277,11 +273,8 @@ impl<'a> MetadataSegmentWriter<'a> {
                 &row.filter_key_for_family(self.family),
                 &row,
             )
-            .map_err(|error| {
-                CoreError::Internal(format!("failed to encode metadata segment: {error}"))
-            })?;
+            .expect("a metadata segment row should encode in ascending key order");
         fold_encoded_row(&encoded);
-        Ok(())
     }
 
     pub(super) async fn roll_full_segments<S: ObjectStore + ?Sized>(
@@ -312,9 +305,9 @@ impl<'a> MetadataSegmentWriter<'a> {
         puts: &mut MetadataSegmentPuts<'_, S>,
     ) -> Result<()> {
         puts.wait_for_capacity(0).await?;
-        let built = std::mem::take(&mut self.builder).build().map_err(|error| {
-            CoreError::Internal(format!("failed to encode metadata segment: {error}"))
-        })?;
+        let built = std::mem::take(&mut self.builder)
+            .build()
+            .expect("a metadata segment should encode");
         let (descriptor, bytes) = prepare_manifest_segment(self.namespace_id, self.family, built);
         puts.put(&descriptor, bytes).await?;
         self.segments.push(descriptor);

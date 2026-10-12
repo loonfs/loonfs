@@ -63,15 +63,14 @@ async fn submit_operation<S: ObjectStore + ?Sized>(
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     )
     .await;
-    if results.len() != 1 {
-        return Err(CoreError::Internal(format!(
-            "path mutation batch returned {count} results for one candidate",
-            count = results.len(),
-        )));
-    }
+    assert_eq!(
+        results.len(),
+        1,
+        "a single-candidate batch should return one result"
+    );
     results
         .pop()
-        .expect("single-candidate batch should hold exactly one result")
+        .expect("a single-candidate batch should hold one result")
 }
 
 pub(crate) async fn put_file<S: ObjectStore + ?Sized>(
@@ -304,8 +303,7 @@ pub(crate) async fn append_wal_commit<S: ObjectStore + ?Sized>(
             inline_content,
         }],
     };
-    let object = encode_wal_object_envelope_zstd(payload)
-        .map_err(|error| CoreError::Internal(error.to_string()))?;
+    let object = encode_wal_object_envelope_zstd(payload).expect("a test WAL object should encode");
     let key = loonfs_objectstore::keys::wal_object(namespace_id, &wal_no);
     store
         .put(&key, object.into_bytes().into(), PutMode::CreateIfAbsent)

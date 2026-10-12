@@ -29,4 +29,4 @@ pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::list::list_checkpoints_page;
 pub(crate) use self::read_basis::load_pin_basis;
 pub(crate) use self::snapshot::{classify_live_snapshot, delete_snapshot, extend_snapshot_expiry};
-pub(crate) use self::summary::checkpoint_summary;
+pub(crate) use self::summary::{checkpoint_summary, snapshot_summary};

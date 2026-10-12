@@ -130,10 +130,10 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
         .await
         .expect("create namespace");
 
-    let before_create = loonfs::current_time_ms().expect("current time");
+    let before_create = loonfs::current_time_ms();
     let created = create_snapshot(&harness.server_url, namespace.as_str(), "report", 5_000)
         .expect("create snapshot");
-    let after_create = loonfs::current_time_ms().expect("current time");
+    let after_create = loonfs::current_time_ms();
     assert_eq!(created.namespace_id, namespace);
     assert_eq!(created.name, "report");
     assert_eq!(created.captured_seq, ChangeSeq(0));

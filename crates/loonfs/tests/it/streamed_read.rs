@@ -224,7 +224,7 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .await
         .expect("historical stream");
     let view = namespace
-        .read_view_at_snapshot(&snapshot.checkpoint_id)
+        .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
         .expect("view snapshot");
     let snapshot_stream = view

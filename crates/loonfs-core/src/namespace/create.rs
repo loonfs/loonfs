@@ -33,7 +33,7 @@ pub(super) async fn publish_namespace<S: ObjectStore + ?Sized>(
         manifest_no: ManifestNo(1),
     };
     put_control_if_absent(store, hint(namespace_id), ControlObjectKind::Hint, &first).await?;
-    let manifest = encode_manifest(start.clone())?;
+    let manifest = encode_manifest(start.clone());
     match publish_manifest(store, manifest, deadline).await? {
         ManifestPublicationOutcome::Published(_) => Ok(()),
         ManifestPublicationOutcome::CoveredByCurrent(_)
@@ -57,10 +57,7 @@ async fn put_control_if_absent<S: ObjectStore + ?Sized, T: Serialize>(
     kind: ControlObjectKind,
     state: &T,
 ) -> Result<()> {
-    let bytes = encode_control_state(kind, state).map_err(|error| CoreError::Codec {
-        object_key: object_key.clone(),
-        message: error.to_string(),
-    })?;
+    let bytes = encode_control_state(kind, state).expect("a control object should encode");
     match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
         Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
         Err(error) => Err(CoreError::store(&object_key, &error)),

@@ -62,18 +62,13 @@ fn a_created_snapshot_is_listed_with_its_snapshot_owner() {
         &SnapshotPolicy::default(),
     ))
     .expect("create snapshot");
-    assert_eq!(
-        snapshot.owner,
-        CheckpointOwnerSummary::Snapshot {
-            name: "report-run".to_owned(),
-        }
-    );
+    assert_eq!(snapshot.name, "report-run");
 
     let listed = block_on(list_snapshots(&fs.reader, &namespace_id)).expect("list snapshots");
     let listed_snapshot = listed
         .snapshots
         .iter()
-        .find(|listed| listed.snapshot_id == snapshot.checkpoint_id.clone())
+        .find(|listed| listed.snapshot_id == snapshot.snapshot_id.clone())
         .expect("the snapshot is in the snapshot listing");
     assert_eq!(listed_snapshot.name, "report-run");
     assert_eq!(listed_snapshot.expires_at_ms, expires_at_ms);
@@ -116,7 +111,7 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
     assert_eq!(listed.snapshots.len(), 1);
     assert_eq!(
         listed.snapshots[0].snapshot_id,
-        snapshot.checkpoint_id.clone()
+        snapshot.snapshot_id.clone()
     );
 }
 
@@ -151,7 +146,7 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
 
     let extended = namespace
         .extend_snapshot(
-            &snapshot.checkpoint_id,
+            &snapshot.snapshot_id,
             u64::MAX,
             &SnapshotPolicy {
                 max_lifetime_ms: u64::MAX,
@@ -194,11 +189,11 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
     store.fail_next(1);
 
     assert_core_error_kind(
-        namespace.delete_snapshot(&snapshot.checkpoint_id).await,
+        namespace.delete_snapshot(&snapshot.snapshot_id).await,
         ErrorCode::ServerError,
     );
     assert_core_error_kind(
-        namespace.delete_snapshot(&snapshot.checkpoint_id).await,
+        namespace.delete_snapshot(&snapshot.snapshot_id).await,
         ErrorCode::SnapshotNotFound,
     );
 
@@ -498,7 +493,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .await
         .expect("delete");
     let options = loonfs::StatOptions {
-        snapshot_id: Some(snapshot.checkpoint_id.clone()),
+        snapshot_id: Some(snapshot.snapshot_id.clone()),
         ..Default::default()
     };
     assert_eq!(
@@ -525,7 +520,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .list_with_options(
             "/",
             &loonfs::ListOptions {
-                snapshot_id: Some(snapshot.checkpoint_id.clone()),
+                snapshot_id: Some(snapshot.snapshot_id.clone()),
                 ..Default::default()
             },
         )
@@ -536,7 +531,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .list_by_inode_with_options(
             root.inode_id,
             &loonfs::ListOptions {
-                snapshot_id: Some(snapshot.checkpoint_id),
+                snapshot_id: Some(snapshot.snapshot_id),
                 ..Default::default()
             },
         )

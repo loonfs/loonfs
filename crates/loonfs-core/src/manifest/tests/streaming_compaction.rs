@@ -2865,10 +2865,9 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         ),
         async {
             blocked.wait_until_blocked().await;
-            let published =
-                publish_manifest(&store, encode_manifest(winner.clone()).expect("winner"))
-                    .await
-                    .expect("competing publication");
+            let published = publish_manifest(&store, encode_manifest(winner.clone()))
+                .await
+                .expect("competing publication");
             assert!(matches!(
                 published,
                 ManifestPublicationOutcome::Published(_)
@@ -3089,7 +3088,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     successor.manifest_no = successor.manifest_no.successor().expect("next number");
     let error = super::super::publish::publish_manifest(
         &store,
-        super::super::publish::encode_manifest(successor).expect("encode"),
+        super::super::publish::encode_manifest(successor),
         &Deadline::start(timer.clone()),
     )
     .await

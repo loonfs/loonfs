@@ -482,16 +482,14 @@ pub(super) async fn create_snapshot(
         .map_err(ApiResponseError::for_namespace(&namespace_id))?;
     let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
-    let checkpoint = namespace
+    let snapshot = namespace
         .create_snapshot(&request.name, expires_at_ms, &state.options.snapshot_policy)
         .await
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace_writer(&state.namespaces, &namespace_id, error)
                 .with_invalid_request_param("/name")
         })?;
-    Ok(Json(SnapshotSummary::from_checkpoint(checkpoint).expect(
-        "snapshot creation should return a snapshot-owned checkpoint",
-    )))
+    Ok(Json(snapshot))
 }
 
 #[cfg_attr(

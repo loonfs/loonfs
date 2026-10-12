@@ -57,7 +57,7 @@ async fn publish_after_retry_delay(remaining_ms: u64, apply_then_fail: bool) -> 
         )
         .await
         .expect("complete upload");
-    let issued = loonfs_core::time::current_time_ms().expect("wall time");
+    let issued = loonfs_core::time::current_time_ms();
     let token = loonfs_core::content::mint_content_token(
         "secret",
         completed.evidence.as_ref().expect("evidence"),

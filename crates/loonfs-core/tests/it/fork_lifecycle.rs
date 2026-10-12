@@ -96,7 +96,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .create_snapshot("basis".to_owned(), u64::MAX / 2)
         .await
         .expect("snapshot");
-    let snapshot_record = load_pin(&store, &source, &snapshot.checkpoint_id).await;
+    let snapshot_record = load_pin(&store, &source, &snapshot.snapshot_id).await;
     write_file_bytes(
         &store,
         &source,
@@ -145,7 +145,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .fork_namespace(
             &target,
             &loonfs_test_support::test_actor(),
-            Some(&snapshot.checkpoint_id),
+            Some(&snapshot.snapshot_id),
         )
         .await
         .expect("fork snapshot");
@@ -161,11 +161,11 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         ["later.txt", "shared.txt"]
     );
     assert_eq!(
-        load_pin(&store, &source, &snapshot.checkpoint_id).await,
+        load_pin(&store, &source, &snapshot.snapshot_id).await,
         snapshot_record
     );
     engine
-        .delete_snapshot(&snapshot.checkpoint_id)
+        .delete_snapshot(&snapshot.snapshot_id)
         .await
         .expect("release snapshot");
     aged.now_ms = u64::MAX / 2;
@@ -215,8 +215,8 @@ async fn invalid_snapshot_forks_write_nothing() {
         .await
         .expect("user checkpoint");
     for (snapshot_id, expected_code) in [
-        (expired.checkpoint_id, ErrorCode::SnapshotGone),
-        (foreign.checkpoint_id, ErrorCode::SnapshotNotFound),
+        (expired.snapshot_id, ErrorCode::SnapshotGone),
+        (foreign.snapshot_id, ErrorCode::SnapshotNotFound),
         (checkpoint.checkpoint_id, ErrorCode::SnapshotNotFound),
     ] {
         store.take();
@@ -253,7 +253,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
             store,
             KeyPredicate::exact(loonfs_objectstore::keys::pin(
                 &source,
-                &snapshot.checkpoint_id,
+                &snapshot.snapshot_id,
             )),
             OperationSelector::Read,
         ),
@@ -263,7 +263,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let engine = namespace_engine(&store, &source, &context);
     store.block_next();
     let actor_id = loonfs_test_support::test_actor();
-    let forking = engine.fork_namespace(&target, &actor_id, Some(&snapshot.checkpoint_id));
+    let forking = engine.fork_namespace(&target, &actor_id, Some(&snapshot.snapshot_id));
     let deleting = async {
         store.wait_until_blocked().await;
         store.inner().block_next();
@@ -278,7 +278,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
             2
         );
         namespace_engine(store.inner().inner(), &source, &context)
-            .delete_snapshot(&snapshot.checkpoint_id)
+            .delete_snapshot(&snapshot.snapshot_id)
             .await
             .expect("delete snapshot after fork pin is durable");
         store.inner().release();

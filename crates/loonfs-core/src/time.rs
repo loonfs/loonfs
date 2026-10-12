@@ -120,7 +120,7 @@ pub struct SystemWallClock;
 
 impl WallClock for SystemWallClock {
     fn now_ms(&self) -> Result<u64> {
-        current_time_ms()
+        Ok(current_time_ms())
     }
 }
 
@@ -130,16 +130,17 @@ impl WallClock for SystemWallClock {
 /// session, maintenance schedule — is stamped here and then carried as a
 /// value, so replay below this boundary stays deterministic.
 #[allow(clippy::disallowed_methods)]
-pub fn current_time_ms() -> Result<u64> {
+pub fn current_time_ms() -> u64 {
     unix_ms(SystemTime::now())
 }
 
-/// Converts a wall-clock instant to unix milliseconds, failing clearly on a
-/// pre-epoch clock instead of stamping timestamp zero into durable state.
-fn unix_ms(now: SystemTime) -> Result<u64> {
+/// Converts a wall-clock instant to unix milliseconds. A pre-epoch clock
+/// panics instead of stamping timestamp zero into durable state, because
+/// LoonFS can't run in that environment.
+fn unix_ms(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
-        .map_err(|_| CoreError::Internal("system time is before unix epoch".to_owned()))
+        .expect("the system clock should be after the unix epoch")
 }
 
 #[cfg(test)]
@@ -162,11 +163,8 @@ mod tests {
     }
 
     #[test]
-    fn pre_epoch_clock_is_an_error_not_timestamp_zero() {
-        let error = unix_ms(UNIX_EPOCH - Duration::from_secs(1)).expect_err("pre-epoch must fail");
-        assert!(
-            error.to_string().contains("before unix epoch"),
-            "unexpected error: {error}"
-        );
+    #[should_panic(expected = "the system clock should be after the unix epoch")]
+    fn pre_epoch_clock_panics_instead_of_stamping_timestamp_zero() {
+        unix_ms(UNIX_EPOCH - Duration::from_secs(1));
     }
 }

@@ -990,11 +990,7 @@ impl crate::Namespace<crate::Writable> {
                 } => Some(*access_revision_no),
                 _ => None,
             })
-            .ok_or_else(|| {
-                Error::Core(crate::CoreError::Internal(
-                    "administrator recovery published no access change".to_owned(),
-                ))
-            })?;
+            .expect("administrator recovery should publish an access change");
         Ok(loonfs_types::RecoverAdministratorResponse {
             namespace_id: commit.namespace_id,
             commit_id: commit.commit_id,

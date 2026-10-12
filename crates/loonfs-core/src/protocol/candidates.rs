@@ -216,16 +216,18 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
     {
         Ok(Some(commit)) => commit,
         Ok(None) => {
-            return Err(CoreError::Internal(format!(
-            "commit receipt for `{}` names sequence `{}`, where the change feed reports no commit",
-            record.commit_id, record.committed_seq
-        )))
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "commit receipt for `{}` refers to sequence `{}`, where the change feed reports \
+                 no commit",
+                record.commit_id, record.committed_seq
+            )))
         }
         Err(error) => return Err(error),
     };
     if commit.commit_id != record.commit_id {
-        return Err(CoreError::Internal(format!(
-            "commit receipt for `{}` names sequence `{}`, where the change feed reports commit `{}`",
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "commit receipt for `{}` refers to sequence `{}`, where the change feed reports \
+             commit `{}`",
             record.commit_id, record.committed_seq, commit.commit_id
         )));
     }

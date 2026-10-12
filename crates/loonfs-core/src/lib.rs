@@ -186,6 +186,7 @@ pub use error::{
     MetadataViewError, Result, WriterFence,
 };
 pub use gc::{gc_namespace, grace_age, GcOptions, GraceAge};
+pub use manifest::ManifestLoadError;
 pub use manifest::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
     CompactionStepOutcome, FoldedWalTail, MetadataCompactionCancellation,
@@ -193,7 +194,6 @@ pub use manifest::{
     MetadataFamilyGroup, MetadataRunPolicy, RetentionTarget, SegmentBlockLoader,
     SegmentRowIterator,
 };
-pub use manifest::{ManifestLoadError, ManifestLoadFailureKind};
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange,

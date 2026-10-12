@@ -107,7 +107,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
         .stat("/")
         .await
         .expect("inherited member grant");
-    let now_ms = loonfs_core::time::current_time_ms().expect("clock");
+    let now_ms = loonfs_core::time::current_time_ms();
     assert_eq!(
         member_namespace_writer
             .create_snapshot("snapshot", now_ms + 60_000, &SnapshotPolicy::default())
@@ -122,7 +122,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
         .expect("root snapshot");
     assert_eq!(
         member_namespace_writer
-            .delete_snapshot(&snapshot.checkpoint_id)
+            .delete_snapshot(&snapshot.snapshot_id)
             .await
             .expect_err("member snapshot delete")
             .code(),
@@ -308,12 +308,12 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
     let (_temp_dir, writer, namespace) = create_namespace().await;
     let root = writer.with_subject(subject("root", "prn_root"));
     let namespace_writer = root.open_namespace(&namespace).expect("open namespace");
-    let now_ms = loonfs_core::time::current_time_ms().expect("clock");
+    let now_ms = loonfs_core::time::current_time_ms();
     let snapshot = namespace_writer
         .create_snapshot("protected", now_ms + 60_000, &SnapshotPolicy::default())
         .await
         .expect("create snapshot");
-    let snapshot_id = snapshot.checkpoint_id;
+    let snapshot_id = snapshot.snapshot_id;
     let options = loonfs::PutFileOptions::default();
     namespace_writer
         .put_file_with_options(
@@ -436,7 +436,7 @@ async fn snapshot_after_administrator_change() -> (
     let snapshot = namespace_writer
         .create_snapshot(
             "old-admin",
-            loonfs_core::time::current_time_ms().expect("clock") + 60_000,
+            loonfs_core::time::current_time_ms() + 60_000,
             &SnapshotPolicy::default(),
         )
         .await
@@ -467,13 +467,7 @@ async fn snapshot_after_administrator_change() -> (
         .await
         .expect("fresh reader");
     writer.shutdown().await.expect("shutdown writer");
-    (
-        directory,
-        reader,
-        namespace,
-        snapshot.checkpoint_id,
-        content,
-    )
+    (directory, reader, namespace, snapshot.snapshot_id, content)
 }
 
 #[tokio::test]

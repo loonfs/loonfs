@@ -37,7 +37,7 @@ pub use self::compaction_merge::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use self::compaction_step::{CompactionStepOutcome, MetadataCompactionPolicy};
-pub use self::error::{ManifestLoadError, ManifestLoadFailureKind};
+pub use self::error::ManifestLoadError;
 pub use self::fold::{fold_wal_tail, next_run_no_after, FoldedWalTail};
 pub use self::retention::RetentionTarget;
 pub use self::runs::{MetadataFamilyGroup, MetadataRunPolicy};

@@ -63,10 +63,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             store.release();
         };
         let (result, ()) = futures::join!(renew, expire);
-        assert_eq!(
-            result.expect("the extension landed").expires_at_ms,
-            Some(1_002)
-        );
+        assert_eq!(result.expect("the extension landed").expires_at_ms, 1_002);
         let stored = load_pin(&inner, &namespace_id, &pin.pin_id)
             .await
             .expect("load");

@@ -41,7 +41,7 @@ fn administrator_grants(administrator: &str) -> AccessGrants {
 /// Runs one collection pass on `namespace_id` at a clock far enough ahead
 /// that every unreferenced segment is past its age gate.
 async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
-    let now_ms = loonfs::current_time_ms().expect("wall clock")
+    let now_ms = loonfs::current_time_ms()
         + 2 * loonfs_core::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
         + 2 * loonfs::GcOptions::default().grace_window_ms;
     loonfs_core::gc_namespace(
@@ -329,7 +329,7 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
         },
         &loonfs_core::MutationContext {
             writer_id: loonfs_types::WriterId::parse("collector").expect("writer id"),
-            now_ms: loonfs::current_time_ms().expect("clock")
+            now_ms: loonfs::current_time_ms()
                 + loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
                 + 1,
         },

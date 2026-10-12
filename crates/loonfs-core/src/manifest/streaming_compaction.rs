@@ -481,7 +481,7 @@ pub(super) async fn finalize_metadata_compaction<S: ObjectStore + ?Sized>(
                 placement: spec.placement,
             },
             spec.frozen_floor_seq(),
-        )?;
+        );
 
         // The last check before the swap that makes this output reader
         // truth. Everything above it is reads and objects nothing references.
@@ -856,20 +856,16 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         row_key: &str,
     ) -> Result<()> {
         if let Some(previous) = self.last_input_key_by_family.get(&family) {
-            match row_key.cmp(previous.as_str()) {
-                std::cmp::Ordering::Greater => {}
-                std::cmp::Ordering::Equal => {
-                    return Err(CoreError::NamespaceCorrupt(format!(
-                        "metadata family `{family:?}` contains duplicate row key `{row_key}`; \
-                         refusing to merge it into a run"
-                    )));
-                }
-                std::cmp::Ordering::Less => {
-                    return Err(CoreError::Internal(format!(
-                        "metadata merge read row key `{row_key}` after `{previous}` in family \
-                         `{family:?}`"
-                    )));
-                }
+            assert!(
+                row_key >= previous.as_str(),
+                "the metadata merge should read row key `{row_key}` after `{previous}` in \
+                 family `{family:?}`, not before it"
+            );
+            if row_key == previous {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "metadata family `{family:?}` contains duplicate row key `{row_key}`; \
+                     refusing to merge it into a run"
+                )));
             }
         }
         self.last_input_key_by_family
@@ -1047,12 +1043,12 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             .expect("a cluster should write only the families it merges");
         match index_pair(self.group) {
             Some((canonical, _)) if family == canonical => {
-                writer.push(row, &mut |encoded| self.canonical_digest.fold(encoded))?;
+                writer.push(row, &mut |encoded| self.canonical_digest.fold(encoded));
             }
             Some((_, index)) if family == index => {
-                writer.push(row, &mut |encoded| self.index_digest.fold(encoded))?;
+                writer.push(row, &mut |encoded| self.index_digest.fold(encoded));
             }
-            _ => writer.push(row, &mut |_| {})?,
+            _ => writer.push(row, &mut |_| {}),
         }
         writer.roll_full_segments(puts, self.policy).await
     }

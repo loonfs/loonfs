@@ -28,8 +28,6 @@ pub enum WalObjectError {
     SeqOverflow,
     #[error("activity counter cannot exceed 9007199254740991")]
     ActivityOverflow,
-    #[error("WAL number cannot exceed 9007199254740991")]
-    NumberOverflow,
     #[error(
         "WAL object writer epoch mismatch: expected at most `{expected_max}`, actual `{actual}`"
     )]

@@ -10,7 +10,7 @@ use crate::codec::{
     extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, MAX_INDEX_GRAMS_FILE_BYTES,
 };
 use crate::index_read::{load_data_block_span, load_index_block};
-use crate::keyspace::{hint_key, segment_key};
+use crate::keyspace::segment_key;
 use crate::manifest::{
     load_current_grep_manifest, publish_grep_manifest, ChangeFeedResume, GrepIndexState,
     GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef, LoadedGrepManifest,
@@ -31,9 +31,8 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
 use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_types::format::segment_blocks::{
-    DecodedDataBlock, SegmentBlockCodecError, SegmentBlocksBuilder, SegmentIndexEntry,
-    DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS,
-    DEFAULT_MAX_ROWS_PER_SEGMENT,
+    DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+    DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_types::{
     ChangeSeq, ContentRef, ErrorCode, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId,
@@ -235,25 +234,18 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 });
             }
         }
-        let manifest_no = next_manifest_no(current.as_ref())?;
+        let manifest_no = next_manifest_no(current.as_ref());
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
         let next_run_no = current.as_ref().map_or(RunNo(0), |manifest| {
             manifest.manifest_state().index().next_run_no
         });
-        let next = match backfilling_manifest(
+        let next = backfilling_manifest(
             namespace_id,
             manifest_no,
             checkpoint.captured_seq,
             checkpoint.checkpoint_id.clone(),
             next_run_no,
-        ) {
-            Ok(next) => next,
-            Err(error) => {
-                self.delete_pin_if_present(namespace_id, &checkpoint.checkpoint_id)
-                    .await;
-                return Err(error);
-            }
-        };
+        );
         let published =
             publish_grep_manifest(&self.store, current.as_ref(), &next, &deadline).await;
         match published {
@@ -294,7 +286,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let next = GrepManifestState::new(
             namespace_id.clone(),
-            next_manifest_no(Some(&current))?,
+            next_manifest_no(Some(&current)),
             GrepIndexStatus::Disabled {},
             GrepIndexState {
                 reorganize: None,
@@ -302,7 +294,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             },
             Vec::new(),
         )
-        .map_err(|error| core_state_error(namespace_id, error))?;
+        .expect("the next grep manifest state should be valid");
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
@@ -479,22 +471,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepIndexStatus::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
             GrepIndexStatus::Active { .. } | GrepIndexStatus::Disabled {} => None,
         };
-        let manifest_no = next_manifest_no(Some(current))?;
+        let manifest_no = next_manifest_no(Some(current));
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let next = match backfilling_manifest(
+        let next = backfilling_manifest(
             namespace_id,
             manifest_no,
             checkpoint.captured_seq,
             checkpoint.checkpoint_id.clone(),
             current.manifest_state().index().next_run_no,
-        ) {
-            Ok(next) => next,
-            Err(error) => {
-                self.delete_pin_if_present(namespace_id, &checkpoint.checkpoint_id)
-                    .await;
-                return Err(error);
-            }
-        };
+        );
         match publish_grep_manifest(&self.store, Some(current), &next, deadline).await {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
@@ -530,14 +515,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             stats,
             progress,
         } = unit;
-        let rows = gram_postings_rows(postings)?;
+        let rows = gram_postings_rows(postings);
         let current_run_no = current.manifest_state().index().next_run_no;
         let next_run_no = if rows.is_empty() {
             current_run_no
         } else {
-            next_run_no_after(current_run_no)?
+            next_run_no_after(current_run_no)
         };
-        let manifest_no = next_manifest_no(Some(&current))?;
+        let manifest_no = next_manifest_no(Some(&current));
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
@@ -598,7 +583,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             },
             segments,
         )
-        .map_err(|error| core_state_error(namespace_id, error))?;
+        .expect("the next grep manifest state should be valid");
         match publish_grep_manifest(&self.store, Some(&current), &next, deadline).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
@@ -624,7 +609,7 @@ fn backfilling_manifest(
     captured_seq: ChangeSeq,
     checkpoint_id: PinId,
     next_run_no: RunNo,
-) -> Result<GrepManifestState> {
+) -> GrepManifestState {
     GrepManifestState::new(
         namespace_id.clone(),
         manifest_no,
@@ -639,7 +624,7 @@ fn backfilling_manifest(
         },
         Vec::new(),
     )
-    .map_err(|error| core_state_error(namespace_id, error))
+    .expect("a backfilling grep manifest state should be valid")
 }
 
 /// The answers that mean "the state this projection was built from is
@@ -691,21 +676,20 @@ impl IncrementalCursor {
         event_index: usize,
         event_count: usize,
         after_event: bool,
-    ) -> Result<()> {
+    ) {
         if !after_event && event_index == 0 {
-            return Ok(());
+            return;
         }
         let next_index = event_index
             .checked_add(usize::from(after_event))
-            .ok_or_else(|| CoreError::Internal("grep event cursor overflow".to_owned()))?;
+            .expect("an index into a commit's events should not overflow");
         let next_event_index = if next_index < event_count {
             u32::try_from(next_index)
-                .map_err(|_| CoreError::Internal("grep event cursor overflow".to_owned()))?
+                .expect("an index into one commit's events should fit in `u32`")
         } else {
             0
         };
         self.resume = ChangeFeedResume::new(change_seq, next_event_index);
-        Ok(())
     }
 
     fn finish_change(&mut self, change_seq: ChangeSeq) {
@@ -837,11 +821,7 @@ async fn plan_incremental_unit(
     let mut planned_content_bytes = 0u64;
     let mut examined_files = 0usize;
     'changes: for change in feed.changes {
-        let start_event_index = resume
-            .start_event_index(change.committed_seq)
-            .map_err(|_| {
-                CoreError::Internal("grep event cursor does not fit in memory".to_owned())
-            })?;
+        let start_event_index = resume.start_event_index(change.committed_seq);
         let events = &change.events;
         if start_event_index > events.len() {
             return Err(GrepError::IndexCorrupt {
@@ -861,7 +841,7 @@ async fn plan_incremental_unit(
                 && planned_content_bytes.saturating_add(revision.content_ref.size_bytes)
                     > policy.max_content_bytes_per_step.get();
             if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget {
-                cursor.stop_at(change.committed_seq, event_index, events.len(), false)?;
+                cursor.stop_at(change.committed_seq, event_index, events.len(), false);
                 break 'changes;
             }
             examined_files += 1;
@@ -878,7 +858,7 @@ async fn plan_incremental_unit(
             if examined_files >= policy.max_files_per_step.get()
                 || planned_content_bytes >= policy.max_content_bytes_per_step.get()
             {
-                cursor.stop_at(change.committed_seq, event_index, events.len(), true)?;
+                cursor.stop_at(change.committed_seq, event_index, events.len(), true);
                 break 'changes;
             }
         }
@@ -943,18 +923,19 @@ async fn index_planned_unit(
     })
 }
 
-fn gram_postings_rows(postings: BTreeMap<Gram, Vec<GramPosting>>) -> Result<Vec<IndexRow>> {
+fn gram_postings_rows(postings: BTreeMap<Gram, Vec<GramPosting>>) -> Vec<IndexRow> {
     let mut rows = Vec::new();
     for (gram, mut gram_postings) in postings {
         gram_postings.sort_unstable();
         gram_postings.dedup();
         for batch in gram_postings.chunks(GRAM_POSTING_BATCH_TARGET) {
-            rows.push(IndexRow::gram_postings(gram, batch).map_err(|error| {
-                CoreError::Internal(format!("failed to build gram postings row: {error}"))
-            })?);
+            rows.push(
+                IndexRow::gram_postings(gram, batch)
+                    .expect("a non-empty gram postings batch should encode"),
+            );
         }
     }
-    Ok(rows)
+    rows
 }
 
 async fn write_index_segments<S: ObjectStore + ?Sized>(
@@ -989,17 +970,13 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
 ) -> Result<GrepSegmentRef> {
     let segment_id = IndexSegmentId::generate();
     let object_key = segment_key(namespace_id, &segment_id);
-    let codec_error = |error: SegmentBlockCodecError| CoreError::Codec {
-        object_key: object_key.clone(),
-        message: error.to_string(),
-    };
     let mut builder = SegmentBlocksBuilder::default();
     for row in &rows {
         builder
             .push(&row.row_key(), &row.filter_key(), row)
-            .map_err(codec_error)?;
+            .expect("a grep index row should encode in ascending key order");
     }
-    let built = builder.build().map_err(codec_error)?;
+    let built = builder.build().expect("a grep index segment should encode");
     let filter_inline = built.inline_filter_hex();
     store
         .put_immutable_verified(&object_key, bytes::Bytes::from(built.bytes))
@@ -1092,7 +1069,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                         output_level,
                         run_no: current_run_no,
                     },
-                    next_run_no_after(current_run_no)?,
+                    next_run_no_after(current_run_no),
                 )
             }
         };
@@ -1121,8 +1098,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             policy.max_decoded_input_rows_per_step.get(),
         )
         .await?;
-        let rows = gram_postings_rows(merged.postings)?;
-        let manifest_no = next_manifest_no(Some(&current))?;
+        let rows = gram_postings_rows(merged.postings);
+        let manifest_no = next_manifest_no(Some(&current));
         let new_segments = write_index_segments(
             &self.store,
             namespace_id,
@@ -1161,7 +1138,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             },
             segments,
         )
-        .map_err(|error| core_state_error(namespace_id, error))?;
+        .expect("the next grep manifest state should be valid");
         match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
             Ok(_) => Ok(GrepReorganizeOutcome::UnitPublished {
                 merged_rows: merged.rows,
@@ -1311,17 +1288,6 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
     }
 }
 
-fn core_state_error(
-    namespace_id: &NamespaceId,
-    error: crate::manifest::GrepManifestStateError,
-) -> GrepError {
-    CoreError::Codec {
-        object_key: hint_key(namespace_id),
-        message: error.to_string(),
-    }
-    .into()
-}
-
 fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
     let fallback_object_key = error.object_key().to_owned();
     match error {
@@ -1339,11 +1305,11 @@ fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
     }
 }
 
-fn next_manifest_no(current: Option<&LoadedGrepManifest>) -> Result<ManifestNo> {
-    current.map_or(Ok(ManifestNo(1)), |current| {
+fn next_manifest_no(current: Option<&LoadedGrepManifest>) -> ManifestNo {
+    current.map_or(ManifestNo(1), |current| {
         current
             .manifest_no()
             .successor()
-            .map_err(|error| CoreError::Internal(error.to_string()).into())
+            .expect("the grep manifest number should stay below its limit")
     })
 }

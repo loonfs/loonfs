@@ -1,19 +1,8 @@
 //! Manifest load errors, classified as corruption versus store trouble.
 
 use loonfs_types::format::manifest::MetadataRowFamily;
-use loonfs_types::{ManifestNo, NamespaceId};
-use serde::{Deserialize, Serialize};
+use loonfs_types::{ErrorCode, ManifestNo, NamespaceId};
 use thiserror::Error;
-
-/// Coarse failure class of a manifest load: corruption versus store trouble.
-///
-/// Deliberately not named `*ErrorKind` to avoid colliding with the wire-level
-/// caller-action concept in [`loonfs_types::ErrorKind`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ManifestLoadFailureKind {
-    Corrupt,
-    Store,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
@@ -87,9 +76,11 @@ pub enum ManifestLoadError {
 }
 
 impl ManifestLoadError {
-    pub fn kind(&self) -> ManifestLoadFailureKind {
+    pub fn code(&self) -> ErrorCode {
         match self {
-            Self::ReadManifest { .. } | Self::ReadSegment { .. } => ManifestLoadFailureKind::Store,
+            Self::ReadManifest { kind, .. } | Self::ReadSegment { kind, .. } => {
+                crate::error::classify_store_failure(*kind)
+            }
             Self::MissingManifest { .. }
             | Self::ManifestCodec { .. }
             | Self::ManifestNamespaceMismatch { .. }
@@ -101,7 +92,7 @@ impl ManifestLoadError {
             | Self::SegmentCodec { .. }
             | Self::SegmentDescriptorMismatch { .. }
             | Self::SegmentRowKindMismatch { .. }
-            | Self::DuplicateRevisionRow { .. } => ManifestLoadFailureKind::Corrupt,
+            | Self::DuplicateRevisionRow { .. } => ErrorCode::NamespaceCorrupt,
         }
     }
 }

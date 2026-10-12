@@ -209,7 +209,7 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
             placement: input.placement,
         },
         floor_seq,
-    )?;
+    );
 
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let manifest_no = manifest.envelope().payload().manifest_no;
@@ -752,11 +752,11 @@ pub(super) fn build_replacement_manifest(
     surviving: Vec<MetadataRunRef>,
     output: ReplacementOutput,
     floor_seq: ChangeSeq,
-) -> Result<EncodedEnvelope<NamespaceManifestPayload>> {
+) -> EncodedEnvelope<NamespaceManifestPayload> {
     let next_run_no = if output.segments.is_empty() {
         previous.payload().next_run_no
     } else {
-        next_run_no_after(previous.payload().next_run_no)?
+        next_run_no_after(previous.payload().next_run_no)
     };
     let mut runs = surviving;
     if !output.segments.is_empty() {
@@ -768,7 +768,7 @@ pub(super) fn build_replacement_manifest(
         });
     }
     let retention_floor_seq = previous.payload().retention_floor_seq.max(floor_seq);
-    let manifest_no = next_manifest_no_after(previous.payload().manifest_no)?;
+    let manifest_no = next_manifest_no_after(previous.payload().manifest_no);
     encode_manifest(NamespaceManifestPayload {
         compactor_epoch: previous.payload().compactor_epoch,
         namespace_id: namespace_id.clone(),

@@ -165,14 +165,12 @@ impl ChangeFeedResume {
         self.built_through_seq
     }
 
-    pub(crate) fn start_event_index(
-        self,
-        change_seq: ChangeSeq,
-    ) -> std::result::Result<usize, std::num::TryFromIntError> {
+    pub(crate) fn start_event_index(self, change_seq: ChangeSeq) -> usize {
         if change_seq == self.built_through_seq {
             usize::try_from(self.next_event_index)
+                .expect("a `u32` event index should fit in `usize`")
         } else {
-            Ok(0)
+            0
         }
     }
 

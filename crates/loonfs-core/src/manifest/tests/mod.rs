@@ -790,7 +790,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     let run_no = previous_manifest
         .as_ref()
         .map_or(RunNo(0), |previous| previous.manifest.payload().next_run_no);
-    let mut next_run_no = next_run_no_after(run_no)?;
+    let mut next_run_no = next_run_no_after(run_no);
     let runs = match previous_manifest {
         Some(previous) if is_bootstrap_seed_manifest(previous.manifest.payload()) => {
             let run_segments = build_manifest_segments(
@@ -870,7 +870,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         }
     };
 
-    encode_namespace_manifest_json(NamespaceManifestPayload {
+    Ok(encode_namespace_manifest_json(NamespaceManifestPayload {
         activity: Default::default(),
         created_at_ms: head.created_at_ms,
         created_by: head.created_by.clone(),
@@ -892,11 +892,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         runs,
     })
     .map(|encoded| encoded.into_envelope())
-    .map_err(|err| {
-        CoreError::Internal(format!(
-            "failed to build namespace manifest envelope: {err}"
-        ))
-    })
+    .expect("a test namespace manifest should encode"))
 }
 
 #[cfg(test)]

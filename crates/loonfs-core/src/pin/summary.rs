@@ -28,3 +28,12 @@ pub(crate) fn checkpoint_summary(
         captured_seq: record.head_seq,
     }
 }
+
+/// Converts a snapshot-owned pin record to the snapshot summary the API
+/// returns.
+pub(crate) fn snapshot_summary(
+    record: loonfs_types::format::control::PinPayload,
+) -> loonfs_types::SnapshotSummary {
+    loonfs_types::SnapshotSummary::from_checkpoint(checkpoint_summary(record))
+        .expect("a snapshot pin record should have a snapshot owner with an expiry")
+}

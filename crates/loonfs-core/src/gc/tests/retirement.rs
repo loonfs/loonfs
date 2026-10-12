@@ -338,7 +338,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     let basis = payload.fork_basis.as_mut().expect("fork basis");
     basis.manifest.payload_checksum = format!("sha256:{}", "0".repeat(64));
     let pin_id = basis.source_pin_id.clone();
-    let bytes = crate::manifest::publish::encode_manifest(payload).expect("manifest");
+    let bytes = crate::manifest::publish::encode_manifest(payload);
     store
         .put_overwrite(&current.object_key, bytes.into_bytes().into())
         .await

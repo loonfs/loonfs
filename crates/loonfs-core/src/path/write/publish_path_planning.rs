@@ -280,7 +280,7 @@ pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
             creating_missing_ancestors = true;
         }
 
-        let child_inode_id = allocation.allocate()?;
+        let child_inode_id = allocation.allocate();
         ops.push(CommitOperation::CreateDirectory {
             child_inode_id,
             parent_inode_id: current_inode,

@@ -34,9 +34,8 @@ pub async fn append_wal_objects<S: loonfs_objectstore::ObjectStore + ?Sized>(
     );
     for _ in 0..count {
         let commit_id = loonfs_types::CommitId::generate();
-        let path = loonfs_types::AbsolutePath::parse(format!("/wal-tail-{commit_id}")).map_err(
-            |error| crate::error::CoreError::Internal(format!("test WAL-tail path: {error}")),
-        )?;
+        let path = loonfs_types::AbsolutePath::parse(format!("/wal-tail-{commit_id}"))
+            .expect("a generated WAL-tail test path should parse");
         let request = crate::publish::CommitIntent::single(
             commit_id,
             loonfs_types::ActorId::loonfs(),
@@ -55,15 +54,14 @@ pub async fn append_wal_objects<S: loonfs_objectstore::ObjectStore + ?Sized>(
             )
             .await
             .results;
-        if results.len() != 1 {
-            return Err(crate::error::CoreError::Internal(format!(
-                "test WAL-tail publish returned {count} results for one candidate",
-                count = results.len(),
-            )));
-        }
+        assert_eq!(
+            results.len(),
+            1,
+            "a single-candidate test publish should return one result"
+        );
         results
             .pop()
-            .expect("single-candidate test publish should hold one result")?;
+            .expect("a single-candidate test publish should hold one result")?;
     }
     Ok(())
 }

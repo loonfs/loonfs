@@ -37,7 +37,7 @@ pub(crate) async fn claim_writer<S: ObjectStore + ?Sized>(
             payload.writer_epoch = payload
                 .writer_epoch
                 .successor()
-                .map_err(|error| CoreError::Internal(format!("writer epoch {error}")))?;
+                .expect("the writer epoch should stay below its limit");
             payload.writer = Some(WriterBlock {
                 writer_id: context.writer_id.clone(),
                 acquired_at_ms: context.now_ms,
@@ -57,8 +57,7 @@ pub(crate) async fn claim_writer<S: ObjectStore + ?Sized>(
         let head = &anchor.read_state;
         ensure_writer_not_fenced(head, &acquired)?;
         super::control::ensure_namespace_live(head)?;
-        let fence = prepare_wal_object(namespace_id.clone(), acquired.writer_epoch, head, &[])
-            .map_err(|error| CoreError::Internal(format!("WAL fence build failed: {error}")))?;
+        let fence = prepare_wal_object(namespace_id.clone(), acquired.writer_epoch, head, &[]);
         match publish_wal_object(store, &fence, &tip).await {
             Ok(()) => {
                 anchor.read_state = head.after_wal_object(fence.envelope().payload());

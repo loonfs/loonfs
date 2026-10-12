@@ -45,7 +45,7 @@ pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
     .await?;
     ensure_vacant_path(view, absolute_path).await?;
     let display_name = final_component(absolute_path)?;
-    let child_inode_id = allocation.allocate()?;
+    let child_inode_id = allocation.allocate();
     ops.push(CommitOperation::CreateDirectory {
         child_inode_id,
         parent_inode_id: parents.parent_inode_id,
@@ -282,7 +282,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
             if expected_file_state.is_some() {
                 return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
             }
-            let child_inode_id = allocation.allocate()?;
+            let child_inode_id = allocation.allocate();
             ops.push(CommitOperation::CreateFile {
                 child_inode_id,
                 parent_inode_id: parents.parent_inode_id,

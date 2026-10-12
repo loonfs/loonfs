@@ -68,7 +68,6 @@ pub(super) async fn plan_append_file<S: ObjectStore + ?Sized>(
         content_writes,
         view,
         pieces,
-        absolute_path.as_str(),
         revision,
         expected.and_then(|expected| expected.revision_no),
         bytes,
@@ -108,7 +107,6 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
         content_writes,
         view,
         pieces,
-        target.absolute_path.as_str(),
         revision,
         expected_revision_no,
         bytes,
@@ -119,16 +117,11 @@ pub(super) async fn plan_append_file_by_inode<S: ObjectStore + ?Sized>(
 /// Plans the next revision of a file as its current bytes followed by
 /// `bytes`. The guard is checked first so that a stale caller hears about
 /// the revision, not about the content it would have extended.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "an append carries the commit's pieces, the store, and content write permits"
-)]
 async fn plan_append<S: ObjectStore + ?Sized>(
     store: &S,
     content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     pieces: &CommitPieces<'_>,
-    target: &str,
     revision: RevisionRecord,
     expected_revision_no: Option<RevisionNo>,
     bytes: &[u8],
@@ -144,16 +137,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
         }
         .into());
     }
-    let appended = append_to(
-        store,
-        content_writes,
-        view,
-        pieces,
-        target,
-        &revision,
-        bytes,
-    )
-    .await?;
+    let appended = append_to(store, content_writes, view, pieces, &revision, bytes).await?;
     Ok(CompiledFilesystemOperation {
         ops: vec![CommitOperation::ReplaceFile {
             inode_id: revision.inode_id,
@@ -169,7 +153,6 @@ async fn append_to<S: ObjectStore + ?Sized>(
     content_writes: &tokio::sync::Semaphore,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     pieces: &CommitPieces<'_>,
-    target: &str,
     base_row: &RevisionRecord,
     bytes: &[u8],
 ) -> Result<AppendedContent> {
@@ -183,12 +166,10 @@ async fn append_to<S: ObjectStore + ?Sized>(
         && head_size == base.size_bytes
         && base.size_bytes > 0;
     let added = bytes.len() as u64;
-    let size_bytes = base.size_bytes.checked_add(added).ok_or_else(|| {
-        CoreError::Internal(format!(
-            "appending {added} bytes to `{target}` overflows its {} bytes",
-            base.size_bytes
-        ))
-    })?;
+    let size_bytes = base
+        .size_bytes
+        .checked_add(added)
+        .expect("an appended file size should fit in `u64` bytes");
     let algorithm = store.checksum_algorithm();
     if base.checksum.algorithm != algorithm {
         return Err(CoreError::NamespaceCorrupt(format!(

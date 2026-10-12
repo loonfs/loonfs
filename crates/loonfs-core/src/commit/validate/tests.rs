@@ -277,7 +277,7 @@ async fn build_commit_plan(
         };
         if let Some(assigned) = assigned {
             assert_eq!(
-                allocation.allocate().expect("test inode allocation"),
+                allocation.allocate(),
                 assigned,
                 "test create operations must carry their planned inode ids"
             );
@@ -289,9 +289,7 @@ async fn build_commit_plan(
             CoreError::CommitValidation(error) => error,
             error => panic!("unexpected validation dependency error: {error}"),
         })?;
-    let resulting_next_inode_id = allocator
-        .commit_candidate(allocation)
-        .expect("commit test allocation");
+    let resulting_next_inode_id = allocator.commit_candidate(allocation);
     Ok(ValidatedCommitPlan {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: validated_commit_id(),

@@ -130,11 +130,7 @@ impl GrepService {
                     .ok_or(GrepError::NotEnabled)?;
                 let state = Arc::new(current.manifest_state().clone());
                 let decoded_bytes = serde_json::to_vec(current.manifest_state())
-                    .map_err(|error| {
-                        CoreError::Internal(format!(
-                            "failed to size decoded grep manifest: {error}"
-                        ))
-                    })?
+                    .expect("a decoded grep manifest state should encode")
                     .len()
                     .saturating_mul(2);
                 self.block_cache.insert(
@@ -319,7 +315,7 @@ impl GrepService {
                 break;
             }
         }
-        let next_cursor = walk.next_cursor()?;
+        let next_cursor = walk.next_cursor();
         Ok(GrepResponse {
             namespace_id: plan.reads.namespace_id().clone(),
             head_seq: plan.head_seq,
@@ -574,12 +570,7 @@ async fn tail_revisions(
             .list_changes_after(after_seq, TAIL_FEED_PAGE_COMMITS)
             .await?;
         for change in &feed.changes {
-            let start_event_index =
-                resume
-                    .start_event_index(change.committed_seq)
-                    .map_err(|_| {
-                        CoreError::Internal("grep event cursor does not fit in memory".to_owned())
-                    })?;
+            let start_event_index = resume.start_event_index(change.committed_seq);
             let events = &change.events;
             if start_event_index > events.len() {
                 let next_event_index = resume.next_event_index();
@@ -949,25 +940,23 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
         true
     }
 
-    fn next_cursor(&self) -> Result<Option<String>> {
+    fn next_cursor(&self) -> Option<String> {
         if !self.has_more {
-            return Ok(None);
+            return None;
         }
-        let (last_inode_id, last_byte_offset) =
-            self.resume_cursor.or(self.plan.resume).ok_or_else(|| {
-                CoreError::Internal(
-                    "a truncated page must have scanned at least one candidate".to_owned(),
-                )
-            })?;
-        Ok(Some(
+        let (last_inode_id, last_byte_offset) = self
+            .resume_cursor
+            .or(self.plan.resume)
+            .expect("a truncated page should have scanned at least one candidate");
+        Some(
             encode_cursor(&GrepPageCursor {
                 head_seq: self.plan.head_seq,
                 last_inode_id,
                 last_byte_offset,
                 fingerprint: self.plan.fingerprint,
             })
-            .map_err(|error| CoreError::Internal(error.to_string()))?,
-        ))
+            .expect("a grep page cursor should encode"),
+        )
     }
 }
 

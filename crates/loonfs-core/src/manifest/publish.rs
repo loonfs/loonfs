@@ -31,12 +31,8 @@ enum ManifestKind {
 
 pub(crate) fn encode_manifest(
     payload: NamespaceManifestPayload,
-) -> Result<EncodedEnvelope<NamespaceManifestPayload>> {
-    let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
-    encode_namespace_manifest_json(payload).map_err(|error| CoreError::Codec {
-        object_key,
-        message: error.to_string(),
-    })
+) -> EncodedEnvelope<NamespaceManifestPayload> {
+    encode_namespace_manifest_json(payload).expect("a namespace manifest should encode")
 }
 
 pub(crate) enum ManifestChange<T> {
@@ -64,8 +60,8 @@ where
             ManifestChange::Finished(result) => return Ok((result, current, hint)),
             ManifestChange::Again => continue,
         };
-        payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
-        let manifest = encode_manifest(payload)?;
+        payload.manifest_no = super::fold::next_manifest_no_after(predecessor);
+        let manifest = encode_manifest(payload);
         let manifest_bytes = manifest.as_bytes().len() as u64;
         let (outcome, raised) =
             publish_manifest_from(store, manifest, deadline, Some(current), Some(hint.clone()))
@@ -175,12 +171,7 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
             .map_err(|error| error.to_string()),
         None => Err("has no predecessor".to_owned()),
     };
-    if let Err(reason) = legal {
-        return Err(CoreError::Internal(format!(
-            "manifest `{}` of namespace `{namespace_id}` {reason}",
-            payload.manifest_no
-        )));
-    }
+    legal.expect("a candidate manifest should be a legal successor of the current manifest");
     let object_key = metadata_manifest_object(namespace_id, &candidate.manifest().manifest_no);
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let outcome = match store

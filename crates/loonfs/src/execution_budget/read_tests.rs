@@ -368,7 +368,7 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
         .await
         .expect("snapshot");
     let stat = StatOptions {
-        snapshot_id: Some(snapshot.checkpoint_id.clone()),
+        snapshot_id: Some(snapshot.snapshot_id.clone()),
         ..StatOptions::default()
     };
     let list = ListOptions {
@@ -405,7 +405,7 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
         .one_read(
             fixture
                 .namespace
-                .read_view_at_snapshot(&snapshot.checkpoint_id),
+                .read_view_at_snapshot(&snapshot.snapshot_id),
         )
         .await;
     fixture.one_read(view.stat("/")).await;

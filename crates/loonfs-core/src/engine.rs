@@ -41,8 +41,8 @@ use loonfs_types::{
     AdvanceRetentionResponse, ChangeSeq, Checkpoint, CommitId, ContentRef,
     DeleteCheckpointResponse, DeleteNamespaceResponse, DeleteSnapshotResponse, DirectoryPageCursor,
     FileBytes, FileRevision, FileRevisionsPageCursor, FoldWalResponse, InodeId, NamespaceAccess,
-    NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo, Subject,
-    TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
+    NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry, PinId, RevisionNo,
+    SnapshotSummary, Subject, TrashEntry, TrashPageCursor, UploadId, WriterId, ROOT_INODE_ID,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -1116,7 +1116,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         subject: Option<&Subject>,
         completion: ResolvedUploadCompletion,
     ) -> Result<CompletedUpload> {
-        self.own_catalog(catalog)?;
+        self.own_catalog(catalog);
         crate::protocol::complete_upload(
             &self.store,
             &self.namespace_id,
@@ -1143,7 +1143,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     where
         F: FnOnce(UploadMode) -> std::result::Result<ResolvedUploadCompletion, String>,
     {
-        self.own_catalog(catalog)?;
+        self.own_catalog(catalog);
         crate::protocol::complete_upload_for_mode(
             &self.store,
             &self.namespace_id,
@@ -1175,7 +1175,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .expect("content write semaphore should remain open");
         crate::protocol::stage_owned_bytes(
             &self.store,
-            self.own_catalog(catalog)?,
+            self.own_catalog(catalog),
             subject_id,
             bytes,
             &self.mutation_context()?,
@@ -1203,7 +1203,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     where
         S: Clone + 'static,
     {
-        let catalog = self.own_catalog(catalog)?;
+        let catalog = self.own_catalog(catalog);
         let context = self.mutation_context()?;
         let location = match owner_location {
             Some(location) => location,
@@ -1244,7 +1244,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .expect("content write semaphore should remain open");
         crate::protocol::stage_owned_stream(
             &self.store,
-            self.own_catalog(catalog)?,
+            self.own_catalog(catalog),
             subject_id,
             body,
             StreamedPayloadKind::Request,
@@ -1258,15 +1258,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     fn own_catalog<'c>(
         &self,
         catalog: &'c VerifiedNamespaceCatalogEntry,
-    ) -> Result<&'c VerifiedNamespaceCatalogEntry> {
-        if catalog.namespace_id() != &self.namespace_id {
-            return Err(CoreError::Internal(format!(
-                "an operation on namespace `{}` was given namespace `{}`'s catalog",
-                self.namespace_id,
-                catalog.namespace_id()
-            )));
-        }
-        Ok(catalog)
+    ) -> &'c VerifiedNamespaceCatalogEntry {
+        assert_eq!(
+            catalog.namespace_id(),
+            &self.namespace_id,
+            "a runtime should give an engine its own namespace's catalog"
+        );
+        catalog
     }
 
     /// Aborts an upload session, then deletes the content object it owned.
@@ -1342,7 +1340,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Creates a snapshot of the current namespace state.
-    pub async fn create_snapshot(&self, name: String, expires_at_ms: u64) -> Result<Checkpoint> {
+    pub async fn create_snapshot(
+        &self,
+        name: String,
+        expires_at_ms: u64,
+    ) -> Result<SnapshotSummary> {
         let context = self.mutation_context()?;
         crate::pin::create_pin(
             &self.store,
@@ -1357,7 +1359,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.content_writes,
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(crate::pin::snapshot_summary)
     }
 }
 
@@ -1390,7 +1392,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         checkpoint_id: &PinId,
         requested_expires_at_ms: u64,
         max_lifetime_ms: u64,
-    ) -> Result<Checkpoint> {
+    ) -> Result<SnapshotSummary> {
         crate::pin::extend_snapshot_expiry(
             &self.store,
             &self.namespace_id,

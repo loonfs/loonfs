@@ -1223,14 +1223,17 @@ impl NamespacePublisher {
                 retry_count += 1;
                 self.claim_publish_slot().await;
             }
+            let candidate_count = results.len();
             let results = results
                 .into_iter()
-                .map(|result| {
-                    result
-                        .expect("each candidate should receive a publication result")
-                        .map_err(Error::Core)
-                })
+                .flatten()
+                .map(|result| result.map_err(Error::Core))
                 .collect::<Vec<_>>();
+            assert_eq!(
+                results.len(),
+                candidate_count,
+                "each candidate should receive a publication result"
+            );
             (results, retry_count)
         }
         .instrument(publish_span.clone())
@@ -1739,24 +1742,12 @@ impl NamespacePublisher {
             if state.queue.is_empty() {
                 state.last_publish = None;
             }
-            // Positional pairing is meaningless once lengths differ, so a
-            // count mismatch fails every candidate instead of delivering
-            // misaligned results to the earlier ones.
-            let count_mismatch = (results.len() != commit_ids.len()).then(|| {
-                Error::Core(CoreError::Internal(format!(
-                    "publisher batch returned {got} results for {want} candidates",
-                    got = results.len(),
-                    want = commit_ids.len(),
-                )))
-            });
-            let mut results = results.into_iter();
-            for commit_id in commit_ids {
-                let result = match &count_mismatch {
-                    Some(error) => Err(error.clone()),
-                    None => results
-                        .next()
-                        .expect("equal-length batch should hold one result per candidate"),
-                };
+            assert_eq!(
+                results.len(),
+                commit_ids.len(),
+                "a publisher batch should return one result per candidate"
+            );
+            for (commit_id, result) in commit_ids.into_iter().zip(results) {
                 wait_traces.push((result_label(&result), self.elapsed_ms_since(selected_at)));
                 if let Some(in_flight) = state.in_flight.remove(&commit_id) {
                     for waiter in in_flight.waiters {

@@ -260,15 +260,14 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             &plan.deltas,
             &plan.appended,
         ) + WAL_OBJECT_OVERHEAD_BYTES;
-        let next_inode_id = session.commit_candidate(allocation).expect("allocation");
+        let next_inode_id = session.commit_candidate(allocation);
         let prepared = PreparedCommit {
             commit: plan.finish(next_inode_id),
             committed_at_ms: u64::MAX,
             inline_content: candidate.inline_content().to_vec(),
         };
         let encoded =
-            prepare_wal_object(namespace_id.clone(), head.writer_epoch, &head, &[prepared])
-                .expect("encode");
+            prepare_wal_object(namespace_id.clone(), head.writer_epoch, &head, &[prepared]);
         assert!(
             encoded.document_bytes() <= estimate,
             "{kind}: {} > {estimate}",

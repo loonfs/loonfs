@@ -32,7 +32,6 @@ use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
 use loonfs_types::{
     ChangeSeq, ContentId, FoldWalOutcome, FoldWalResponse, ManifestNo, NamespaceId, RunNo,
-    MAX_PUBLIC_INTEGER,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -283,7 +282,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
     policy: MetadataRunPolicy,
 ) -> Result<TryFoldWalOutcome> {
     deadline.ensure_metadata_publication_budget(namespace_id)?;
-    let manifest_no = next_manifest_no_after(projection.basis.manifest_no())?;
+    let manifest_no = next_manifest_no_after(projection.basis.manifest_no());
     let manifest = build_namespace_manifest_for_projection(
         store,
         namespace_id,
@@ -293,7 +292,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
         policy,
     )
     .await?;
-    let manifest = encode_manifest(manifest)?;
+    let manifest = encode_manifest(manifest);
     // Written segments may outlive the GC grace if publication exceeds its budget.
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let (outcome, current) = match publish_manifest(store, manifest, deadline).await? {
@@ -495,20 +494,18 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     })
 }
 
-pub(super) fn next_manifest_no_after(current: ManifestNo) -> Result<ManifestNo> {
-    current.successor().map_err(|_| {
-        CoreError::Internal(format!(
-            "manifest number cannot exceed {MAX_PUBLIC_INTEGER}"
-        ))
-    })
+pub(super) fn next_manifest_no_after(current: ManifestNo) -> ManifestNo {
+    current
+        .successor()
+        .expect("the manifest number should stay below its limit")
 }
 
 /// Advances the manifest's run allocator after a producer has taken
 /// `current`.
-pub fn next_run_no_after(current: RunNo) -> Result<RunNo> {
+pub fn next_run_no_after(current: RunNo) -> RunNo {
     current
         .successor()
-        .map_err(|error| CoreError::Internal(format!("run number {error}")))
+        .expect("the run number should stay below its limit")
 }
 
 async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
@@ -553,7 +550,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                         .await?,
                 ),
             }],
-            next_run_no_after(run_no)?,
+            next_run_no_after(run_no),
         )
     } else {
         let previous_manifest = projection.manifest_segments.manifest();
@@ -579,7 +576,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
                     .await?,
                 ),
             });
-            next_run_no = next_run_no_after(run_no)?;
+            next_run_no = next_run_no_after(run_no);
         }
         (runs, next_run_no)
     };
@@ -600,21 +597,16 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod ordinal_tests {
     use super::*;
+    use loonfs_types::MAX_PUBLIC_INTEGER;
 
     #[test]
-    fn manifest_no_advancement_accepts_the_maximum_and_rejects_the_next_value() {
+    #[should_panic(expected = "the manifest number should stay below its limit")]
+    fn manifest_no_advancement_accepts_the_maximum_and_panics_past_it() {
         assert_eq!(
-            next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER - 1))
-                .expect("advance to public maximum"),
+            next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER - 1)),
             ManifestNo(MAX_PUBLIC_INTEGER)
         );
-
-        let error = next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER))
-            .expect_err("manifest number must not exceed the public maximum");
-        assert!(matches!(
-            error,
-            CoreError::Internal(message) if message.contains("cannot exceed")
-        ));
+        next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER));
     }
 }
 

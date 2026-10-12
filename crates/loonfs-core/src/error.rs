@@ -216,10 +216,16 @@ pub enum CoreError {
     },
     #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
     OutcomeUnknown { object_key: String, message: String },
-    #[error("failed to encode `{object_key}`: {message}")]
-    Codec { object_key: String, message: String },
-    /// Non-store internal failure (codec, overflow, invariant breach). Same
-    /// wire code as [`ErrorCode::ServerError`]; the message is the detail.
+    /// Concurrent writers changed a control object on every compare-and-swap
+    /// attempt this operation was allowed. Retrying can succeed.
+    #[error(
+        "`{object_key}` lost all {} compare-and-swap attempts to concurrent writers",
+        crate::limits::MAX_CONTENTION_ATTEMPTS
+    )]
+    StoreContention { object_key: String },
+    /// A panic that the runtime caught in background work, or a task that
+    /// failed to join. It uses the `server_error` code, and the message is the
+    /// detail. A bug in this process's own computation panics instead.
     #[error("internal error: {0}")]
     Internal(String),
     #[error("namespace `{namespace_id}` already exists")]
@@ -310,10 +316,7 @@ impl MetadataProjectionLoadError {
             Self::LoadHead(error) => error.code(),
             Self::WalTailLoad(error) => error.code(),
             Self::WalReplay { .. } => ErrorCode::NamespaceCorrupt,
-            Self::ManifestLoad(error) => match error.kind() {
-                crate::manifest::ManifestLoadFailureKind::Corrupt => ErrorCode::NamespaceCorrupt,
-                crate::manifest::ManifestLoadFailureKind::Store => ErrorCode::ServerError,
-            },
+            Self::ManifestLoad(error) => error.code(),
         }
     }
 }
@@ -371,7 +374,9 @@ impl CoreError {
     }
 
     pub(crate) fn contention_exhausted(object_key: &str) -> Self {
-        Self::Internal(contention_message(object_key))
+        Self::StoreContention {
+            object_key: object_key.to_owned(),
+        }
     }
 
     pub fn kind(&self) -> ErrorKind {
@@ -386,12 +391,13 @@ impl CoreError {
             CoreError::VisiblePath(error) => error.code(),
             CoreError::DurableContent(error) => error.code(),
             CoreError::CommitValidation(error) => error.code(),
-            CoreError::Codec { .. } | CoreError::Internal(_) => ErrorCode::ServerError,
+            CoreError::Internal(_) => ErrorCode::ServerError,
             CoreError::WalWrite { kind, .. } | CoreError::Store { kind, .. } => {
                 classify_store_failure(*kind)
             }
             CoreError::WalPublish(error) => error.code(),
             CoreError::OutcomeUnknown { .. } => ErrorCode::OutcomeUnknown,
+            CoreError::StoreContention { .. } => ErrorCode::StoreContention,
             CoreError::InvalidPath(_)
             | CoreError::RootMutationForbidden
             | CoreError::SubjectRequired { .. }
@@ -536,8 +542,8 @@ impl CoreError {
             | CoreError::NonDirectoryPathComponent(_)
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
-            | CoreError::Codec { .. }
             | CoreError::OutcomeUnknown { .. }
+            | CoreError::StoreContention { .. }
             | CoreError::Internal(_)
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
@@ -629,13 +635,6 @@ impl CoreError {
     }
 }
 
-pub(crate) fn contention_message(object_key: &str) -> String {
-    format!(
-        "`{object_key}` lost all {} compare-and-swap attempts to contention",
-        crate::limits::MAX_CONTENTION_ATTEMPTS
-    )
-}
-
 fn metadata_projection_store_message(
     error: &MetadataProjectionLoadError,
 ) -> Option<std::borrow::Cow<'static, str>> {
@@ -711,8 +710,8 @@ impl std::fmt::Display for WriterFence {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitValidationError, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
-        MetadataViewError, ObjectStoreErrorKind, WriterFence,
+        CommitValidationError, CoreError, ErrorCode, ErrorKind, ManifestLoadError,
+        MetadataProjectionLoadError, MetadataViewError, ObjectStoreErrorKind, WriterFence,
     };
     use crate::commit_engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
@@ -926,6 +925,20 @@ mod tests {
         };
         let error = CoreError::store("namespaces/demo/metadata/segment", &invalid_range);
         assert_eq!(error.code(), ErrorCode::ServerError);
+
+        let segment_read = CoreError::from(MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::ReadSegment {
+                object_key: "namespaces/demo/metadata/segment".to_owned(),
+                message: "permission denied: bucket policy".to_owned(),
+                kind: ObjectStoreErrorKind::PermissionDenied,
+            },
+        ));
+        assert_eq!(segment_read.code(), ErrorCode::StoragePermissionDenied);
+
+        let contended = CoreError::contention_exhausted("namespaces/demo/pins/p");
+        assert_eq!(contended.code(), ErrorCode::StoreContention);
+        assert_eq!(contended.kind(), ErrorKind::Unavailable);
+        assert!(contended.code().retryable_without_operator_action());
     }
 
     #[test]

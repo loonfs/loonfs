@@ -30,7 +30,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
     next_public_ordinal, ChangeSeq, ContentId, DestinationPrecondition, InlineContentIdentity,
-    NamespaceId, PreconditionFields, MAX_PUBLIC_INTEGER,
+    NamespaceId, PreconditionFields,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -44,7 +44,7 @@ pub(crate) fn commit_fingerprint(
     request: &CommitIntent,
     inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> Result<CommitFingerprint> {
-    loonfs_types::semantic_commit_fingerprint(
+    match loonfs_types::semantic_commit_fingerprint(
         namespace_id,
         &request.actor_id,
         request.subject.as_ref().map(|subject| &subject.subject_id),
@@ -52,13 +52,12 @@ pub(crate) fn commit_fingerprint(
         &request.operations,
         &request.preconditions,
         inline_content_identities,
-    )
-    .map_err(|error| match error {
-        loonfs_types::SemanticFingerprintError::InvalidContentSource => {
-            CoreError::InvalidCommitRequest(error.to_string())
+    ) {
+        Err(error @ loonfs_types::SemanticFingerprintError::InvalidContentSource) => {
+            Err(CoreError::InvalidCommitRequest(error.to_string()))
         }
-        error => CoreError::Internal(format!("failed to fingerprint mutation: {error}")),
-    })
+        fingerprint => Ok(fingerprint.expect("a mutation fingerprint preimage should encode")),
+    }
 }
 
 /// Compiles and validates a mutation request into one commit in a single
@@ -91,11 +90,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     let request = candidate.intent();
     let committed_seq = next_public_ordinal(head.seq.0)
         .map(ChangeSeq)
-        .ok_or_else(|| {
-            CoreError::Internal(format!(
-                "namespace sequence cannot exceed {MAX_PUBLIC_INTEGER}"
-            ))
-        })?;
+        .expect("the namespace sequence should stay below its limit");
 
     let authorizer =
         Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
@@ -234,13 +229,13 @@ async fn carry_revision_layouts<S: ObjectStore + ?Sized>(
             .filter(|layout| layout.size_bytes() >= prefix.size_bytes)
         {
             crate::storage::tail_content::cut_layout(layout, prefix.size_bytes);
-        } else if first_offset.is_some() {
-            return Err(CoreError::Internal(format!(
-                "fresh content `{}` requires a layout covering {} bytes",
-                content_ref.content_id, prefix.size_bytes
-            ))
-            .at_operation(delta.semantic_operation_index as usize));
         } else {
+            assert!(
+                first_offset.is_none(),
+                "append planning should give fresh content `{}` a layout covering {} bytes",
+                content_ref.content_id,
+                prefix.size_bytes
+            );
             let content = pieces.content(&prefix);
             *layout = Some(
                 crate::storage::tail_content::materialize_content_layout(

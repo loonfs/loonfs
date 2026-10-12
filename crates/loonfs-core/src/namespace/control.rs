@@ -106,10 +106,7 @@ pub(crate) async fn raise_hint<S: ObjectStore + ?Sized>(
         }
         let bytes =
             loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &raised)
-                .map_err(|error| CoreError::Codec {
-                object_key: object_key.clone(),
-                message: error.to_string(),
-            })?;
+                .expect("a namespace hint should encode");
         match store
             .compare_and_swap(&object_key, &current.etag, bytes::Bytes::from(bytes))
             .await

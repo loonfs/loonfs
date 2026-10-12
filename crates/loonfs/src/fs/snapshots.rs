@@ -1,8 +1,8 @@
 //! Snapshot reads and mutations.
 
 use crate::{
-    Checkpoint, DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result,
-    SnapshotSummary, Writable,
+    DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result, SnapshotSummary,
+    Writable,
 };
 use loonfs_core::CheckpointPageCursor;
 use loonfs_types::PageRequest;
@@ -103,12 +103,11 @@ impl<M> Namespace<M> {
         let engine = self.core.reader_engine(&self.namespace_id);
         loop {
             let remaining = requested - snapshots.len();
-            let limit = NonZeroU32::new(u32::try_from(remaining).map_err(|error| {
-                Error::Core(loonfs_core::CoreError::Internal(format!(
-                    "snapshot page limit does not fit u32: {error}"
-                )))
-            })?)
-            .expect("a snapshot page with room remaining should have a nonzero limit");
+            let limit =
+                NonZeroU32::new(u32::try_from(remaining).expect(
+                    "a snapshot page limit within the pagination maximum should fit in `u32`",
+                ))
+                .expect("a snapshot page with room remaining should have a nonzero limit");
             let page = engine
                 .list_checkpoints_page(PageRequest {
                     limit: loonfs_types::EffectiveLimit::new(limit),
@@ -165,7 +164,7 @@ impl Namespace<Writable> {
         name: &str,
         expires_at_ms: u64,
         policy: &SnapshotPolicy,
-    ) -> Result<Checkpoint> {
+    ) -> Result<SnapshotSummary> {
         self.core.record_trace_context(&tracing::Span::current());
         self.ensure_administrator().await?;
         self.ensure_live_snapshot_limit(policy.max_live_per_namespace, 1)
@@ -178,15 +177,15 @@ impl Namespace<Writable> {
             engine.create_snapshot(name.to_owned(), expires_at_ms).await
         }
         .map_err(Error::from);
-        let checkpoint = self.finish_namespace_mutation(result)?;
+        let snapshot = self.finish_namespace_mutation(result)?;
         if let Err(error) = self
             .ensure_live_snapshot_limit(policy.max_live_per_namespace, 0)
             .await
         {
-            if let Err(cleanup_error) = engine.delete_snapshot(&checkpoint.checkpoint_id).await {
+            if let Err(cleanup_error) = engine.delete_snapshot(&snapshot.snapshot_id).await {
                 tracing::warn!(
                     namespace_id = %self.namespace_id,
-                    snapshot_id = %checkpoint.checkpoint_id,
+                    snapshot_id = %snapshot.snapshot_id,
                     error = %error,
                     cleanup_error = %cleanup_error,
                     "failed to delete a refused snapshot; it stays until it expires"
@@ -194,7 +193,7 @@ impl Namespace<Writable> {
             }
             return Err(error);
         }
-        Ok(checkpoint)
+        Ok(snapshot)
     }
 
     async fn ensure_live_snapshot_limit(
@@ -264,14 +263,7 @@ impl Namespace<Writable> {
             .writer_engine(&self.mode.bits.identity, &self.namespace_id)
             .extend_snapshot(snapshot_id, requested_expires_at_ms, policy.max_lifetime_ms)
             .await
-            .map_err(Error::from)
-            .and_then(|checkpoint| {
-                SnapshotSummary::from_checkpoint(checkpoint).ok_or_else(|| {
-                    Error::Core(loonfs_core::CoreError::Internal(
-                        "snapshot extension returned a non-snapshot checkpoint".to_owned(),
-                    ))
-                })
-            });
+            .map_err(Error::from);
         self.finish_namespace_mutation(result)
     }
 

@@ -117,7 +117,7 @@ impl<'a> PublishPlanningSession<'a> {
     pub(crate) fn commit_candidate(
         &mut self,
         allocation: CandidateAllocation,
-    ) -> Result<loonfs_types::InodeId> {
+    ) -> loonfs_types::InodeId {
         self.inode_allocator.commit_candidate(allocation)
     }
 
@@ -290,7 +290,7 @@ mod tests {
                 )
                 .await
                 .expect("plan");
-            let next_inode_id = session.commit_candidate(allocation).expect("allocation");
+            let next_inode_id = session.commit_candidate(allocation);
             payloads.push(wal_payload_from_prepared_commit(&PreparedCommit {
                 commit: plan.finish(next_inode_id),
                 committed_at_ms: 1,
