@@ -15,7 +15,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
-use loonfs_types::format::sst_blocks::{key_range_may_intersect, string_prefix_upper_bound};
+use loonfs_types::format::segment_blocks::{key_range_may_intersect, string_prefix_upper_bound};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

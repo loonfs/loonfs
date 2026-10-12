@@ -2834,7 +2834,7 @@ async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writa
     LoonFs::builder_with_store(store)
         .writer_id(writer_id)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(ConfiguredObjectStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")
@@ -3643,7 +3643,7 @@ mod direct_download {
                 Ok(response.map(|body| Body::new(body.map_err(TransportError::body))))
             }
         });
-        let client = Client::with_transport(
+        let client = Client::new_with_transport(
             ClientConfig {
                 server_url: "http://127.0.0.1".to_owned(),
                 auth_token: Some("test-token".into()),

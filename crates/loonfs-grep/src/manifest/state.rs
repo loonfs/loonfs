@@ -1,7 +1,7 @@
 //! Constructor-validated grep manifest payload and its discovery hint.
 
 use super::error::GrepManifestStateError;
-use loonfs_types::format::sst_blocks::BlockHandle;
+use loonfs_types::format::segment_blocks::BlockHandle;
 use loonfs_types::{ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, PinId, RunNo};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -256,7 +256,7 @@ impl GrepManifestState {
     pub fn index_stored_bytes(&self) -> crate::Result<u64> {
         self.segments.iter().try_fold(0_u64, |total, segment| {
             let key = crate::keyspace::segment_key(&self.namespace_id, &segment.segment_id);
-            let bytes = crate::index_read::segment_object_len(&key, segment)?;
+            let bytes = crate::index_read::segment_object_bytes(&key, segment)?;
             total
                 .checked_add(bytes)
                 .ok_or_else(|| crate::GrepError::IndexCorrupt {

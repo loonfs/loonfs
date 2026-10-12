@@ -762,7 +762,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert!(revisions_compacted);
     let read_context = crate::common::read_context(&store, &clone_namespace_id).await;
     let revisions = engine
-        .list_file_revisions_for_inode_page(
+        .list_file_revisions_by_inode_page(
             clone_entry.inode_id,
             loonfs_types::PageRequest {
                 limit: loonfs_test_support::ids::page_limit(10),

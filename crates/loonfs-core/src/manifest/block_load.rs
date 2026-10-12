@@ -1,12 +1,12 @@
 //! SST block-range selection and per-view block memoization.
 
-#[cfg(test)]
-use super::block_fetch::load_segment_index;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
 use super::data_block_load::{
     load_segment_data_block_span, load_segment_data_block_with_readahead,
 };
 use super::error::ManifestLoadError;
+#[cfg(test)]
+use super::index_block_load::load_segment_index;
 use super::scan::Readahead;
 #[cfg(test)]
 use super::validate::validate_manifest_row_seq_range;
@@ -20,8 +20,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::MetadataRow;
 use loonfs_types::format::manifest::MetadataSegmentRef;
 #[cfg(test)]
-use loonfs_types::format::sst_blocks::index_blocks_for_key_range;
-use loonfs_types::format::sst_blocks::DecodedDataBlock;
+use loonfs_types::format::segment_blocks::index_blocks_for_key_range;
+use loonfs_types::format::segment_blocks::DecodedDataBlock;
 #[cfg(test)]
 use loonfs_types::ChangeSeq;
 use std::collections::{HashMap, VecDeque};
@@ -292,7 +292,7 @@ pub(super) async fn load_segment_blocks_with_readahead<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     memo: &SessionBlockMemo,
     descriptor: &MetadataSegmentRef,
-    index: &[loonfs_types::format::sst_blocks::SegmentIndexEntry],
+    index: &[loonfs_types::format::segment_blocks::SegmentIndexEntry],
     range: std::ops::Range<usize>,
     readahead: Readahead,
 ) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {

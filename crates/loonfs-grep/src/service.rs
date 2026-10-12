@@ -13,7 +13,7 @@ use crate::manifest::{
     GrepSegmentRef,
 };
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
-use crate::reads::{published_revision, resolve_batch_size, NamespaceReadView, NamespaceReads};
+use crate::reads::{effective_batch_size, published_revision, NamespaceReadView, NamespaceReads};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs::engine::{Observation, SegmentBlockKind};
@@ -21,7 +21,7 @@ use loonfs::{CoreError, CurrentFileState};
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::hex::hex_decode_bytes;
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
     string_prefix_upper_bound,
 };
@@ -350,9 +350,7 @@ fn materialized_snapshot_from_state(
 impl Default for GrepService {
     fn default() -> Self {
         Self::new(Arc::new(GrepBlockCache::new(
-            loonfs::engine::DecodedBlockCacheConfig::with_max_decoded_bytes(
-                DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-            ),
+            loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
         )))
     }
 }
@@ -836,7 +834,7 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
                     budget_exhausted = true;
                     break;
                 }
-                let wanted = resolve_batch_size(
+                let wanted = effective_batch_size(
                     examinable.min(self.ordered_candidates.len() - self.next_candidate),
                 );
                 let chunk =

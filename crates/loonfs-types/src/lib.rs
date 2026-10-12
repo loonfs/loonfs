@@ -30,7 +30,7 @@ mod path;
 pub mod public_inode_id;
 mod retry;
 mod secret;
-mod sst_blocks;
+mod segment_blocks;
 mod wal;
 
 pub mod api {
@@ -66,10 +66,10 @@ pub mod format {
         pub use crate::envelope::*;
     }
 
-    pub mod sst_blocks {
+    pub mod segment_blocks {
         //! Block handles, builders, and codecs for metadata and index segments.
 
-        pub use crate::sst_blocks::*;
+        pub use crate::segment_blocks::*;
     }
 
     pub mod wal {

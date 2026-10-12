@@ -254,7 +254,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         create(&store, &namespace_id, &context)
             .await
             .expect("bootstrap");
-        crate::namespace::writer_epoch::acquire_writer_epoch(&store, &namespace_id, &context)
+        crate::namespace::writer_epoch::claim_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire");
         let current = load_current_manifest(&store, &namespace_id)
@@ -315,7 +315,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                     retention_floor_seq: ChangeSeq(0),
                     metadata_state: &projection.metadata_state,
                 },
-                MetadataLsmPolicy::default(),
+                MetadataRunPolicy::default(),
                 payload.manifest_no,
             )
             .await

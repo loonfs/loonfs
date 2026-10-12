@@ -1,11 +1,11 @@
-//! The metadata view used while validating a commit for publication.
+//! The metadata session used while validating a commit for publication.
 
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{ActorId, ChangeSeq, CommitId};
 
-/// The publish view: it holds the loaded [`MetadataView`] plus the
+/// The publish session: it holds the loaded [`MetadataView`] plus the
 /// accumulating commit overlay, rebuilding an overlaid view for each lookup.
 pub(crate) struct PublishValidationSession<'a, S: ObjectStore + ?Sized> {
     base_view: MetadataView<'a, 'a, S>,
@@ -63,5 +63,5 @@ impl<S: ObjectStore + ?Sized> PublishValidationSession<'_, S> {
 }
 
 #[cfg(test)]
-#[path = "view_tests.rs"]
+#[path = "session_tests.rs"]
 mod tests;

@@ -162,7 +162,7 @@ pub mod control {
 /// publisher, and re-exported as `loonfs::publish` for the server's
 /// filesystem handlers.
 pub mod publish {
-    pub use crate::commit::{CommitFingerprint, WalPublishError};
+    pub use crate::commit::CommitFingerprint;
     pub use crate::commit_engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionStatus,
@@ -171,6 +171,7 @@ pub mod publish {
     pub use crate::path::write::{CommitIntent, FilesystemOperation};
     pub use crate::storage::content_admission::PreparedContent;
     pub use crate::storage::inline_content::InlineContent;
+    pub use crate::wal::{is_retryable_wal_publish, settle_publish_attempt, WalPublishError};
 }
 
 // Crate-root re-exports used by `loonfs` or required by public return types.
@@ -181,22 +182,21 @@ pub use engine::{
     Writable,
 };
 pub use error::{
-    Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
-    WriterFence,
+    Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, WriterFence,
 };
 pub use gc::{gc_namespace, grace_age, GcOptions, GraceAge};
 pub use manifest::{
     fold_wal_tail, next_run_no_after, refill_iterators, select_next_iterator,
     CompactionStepOutcome, FoldedWalTail, MetadataCompactionCancellation,
     MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataCompactionSpec,
-    MetadataFamilyGroup, MetadataLsmPolicy, RetentionTarget, SegmentBlockLoader,
+    MetadataFamilyGroup, MetadataRunPolicy, RetentionTarget, SegmentBlockLoader,
     SegmentRowIterator,
 };
 pub use manifest::{ManifestLoadError, ManifestLoadFailureKind};
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange,
-    MAX_RESOLVE_CURRENT_FILES,
+    MAX_CURRENT_FILES_PER_STAT,
 };
 pub use pin::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,

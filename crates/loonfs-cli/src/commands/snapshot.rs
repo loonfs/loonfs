@@ -1,3 +1,5 @@
+//! `loonfs snapshot` commands: create, list, extend, and delete.
+
 use super::context::{parse_snapshot_id_arg, resolve_profile_context, CommandContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::pagination::{collect_or_stream_pages, page_request, PagePlan, PagedListing};

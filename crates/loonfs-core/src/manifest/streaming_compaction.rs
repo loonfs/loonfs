@@ -9,7 +9,6 @@
 //! Only base merges may remove rows below the
 //! retention floor. Every merge drops superseded layout rows.
 
-use super::block_fetch::segment_object_len;
 use super::block_load::SessionBlockMemo;
 use super::build::{MetadataSegmentPuts, MetadataSegmentWriter};
 use super::compaction_merge::{
@@ -21,9 +20,10 @@ use super::compaction_step::{
     build_replacement_manifest, group_run_descriptors, MergePlacement, ReplacementOutput,
 };
 use super::error::ManifestLoadError;
+use super::index_block_load::segment_object_bytes;
 use super::load::load_manifest_segments;
 use super::publish::{publish_manifest, ManifestPublicationOutcome};
-use super::runs::{MetadataFamilyGroup, MetadataLsmPolicy, MetadataRunManifest};
+use super::runs::{MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
@@ -214,7 +214,7 @@ pub(super) async fn merge_group_in_step<S: ObjectStore + ?Sized>(
     runs: &[MetadataRunManifest],
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Result<MetadataMergeReport> {
     let merge = GroupMerge::new(
         basis,
@@ -243,7 +243,7 @@ pub(super) async fn run_metadata_compaction<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<std::result::Result<MetadataMergeReport, MetadataCompactionJobOutcome>> {
     let merge = GroupMerge::new(
@@ -288,7 +288,7 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     compactor_epoch: CompactorEpoch,
     spec: &MetadataCompactionSpec,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
 ) -> Result<MetadataCompactionJobOutcome> {
     let timer = Arc::new(StdMonotonicTimer::default());
@@ -670,7 +670,7 @@ struct GroupMerge<'a, S: ObjectStore + ?Sized> {
     /// Where the output stands in the group and whether rows may be dropped.
     placement: MergePlacement,
     frozen_floor_seq: ChangeSeq,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
     output_run_no: Option<RunNo>,
@@ -725,14 +725,14 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         group: MetadataFamilyGroup,
         placement: MergePlacement,
         frozen_floor_seq: ChangeSeq,
-        policy: MetadataLsmPolicy,
+        policy: MetadataRunPolicy,
         input_runs: Vec<MetadataRunManifest>,
         progress: Option<ProgressReporter>,
     ) -> Self {
         let input_bytes = input_runs
             .iter()
             .flat_map(|run| group_run_descriptors(run, group))
-            .map(segment_object_len)
+            .map(segment_object_bytes)
             .sum();
         Self {
             store: basis.store,
@@ -984,7 +984,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             self.result.output_bytes = self
                 .result
                 .output_bytes
-                .saturating_add(segments.iter().map(segment_object_len).sum());
+                .saturating_add(segments.iter().map(segment_object_bytes).sum());
             self.result.output_segments.extend(segments);
         }
         Ok(None)

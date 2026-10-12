@@ -51,9 +51,9 @@ async fn local_fs_passes_the_store_contract_probe() {
 #[tokio::test]
 async fn local_fs_lists_child_prefixes_inside_its_key_prefix() {
     let temp_dir = test_dir("child-prefixes");
-    let store = LocalFsStore::with_key_prefix(temp_dir.path(), Some("tenant-a"))
+    let store = LocalFsStore::new_with_key_prefix(temp_dir.path(), Some("tenant-a"))
         .expect("create scoped local object store");
-    let neighbour = LocalFsStore::with_key_prefix(temp_dir.path(), Some("tenant-b"))
+    let neighbour = LocalFsStore::new_with_key_prefix(temp_dir.path(), Some("tenant-b"))
         .expect("create neighbouring local object store");
     neighbour
         .put_overwrite("outside/1", Bytes::from_static(b"outside"))

@@ -6,7 +6,6 @@ use super::live_set::LiveSet;
 use super::sweep::Sweep;
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::manifest::cache::read_working_memory;
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::metadata::row_decode::content_layout_from_manifest_row;
@@ -17,7 +16,7 @@ use loonfs_objectstore::keys::{content_prefix, metadata_segment_object_key};
 use loonfs_objectstore::layout::content_id_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{lookup_keys, ContentLayoutRecord, MetadataRowFamily};
-use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
+use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{ContentExtent, GcResponse, NamespaceId};
 use std::collections::HashSet;
 use std::ops::ControlFlow;
@@ -38,27 +37,7 @@ impl<'a> ContentSweep<'a> {
         live: &'a LiveSet,
         shard_rows: usize,
         seed: u64,
-    ) -> Result<Option<Self>> {
-        Self::load_with_byte_limit(
-            store,
-            cache,
-            namespace_id,
-            live,
-            shard_rows,
-            seed,
-            MAX_BLOOM_FILTER_BYTES,
-        )
-        .await
-    }
-
-    pub(super) async fn load_with_byte_limit<S: ObjectStore + ?Sized>(
-        store: &S,
-        cache: Option<&MetadataSegmentCache>,
-        namespace_id: &NamespaceId,
-        live: &'a LiveSet,
-        shard_rows: usize,
-        seed: u64,
-        byte_limit: usize,
+        max_bytes: usize,
     ) -> Result<Option<Self>> {
         if live.namespace_deleted {
             tracing::info!(namespace_id = %namespace_id, shard_width = 0,
@@ -90,7 +69,7 @@ impl<'a> ContentSweep<'a> {
             shard_width += 1;
         }
         let expected_entries = live.content_layout_rows;
-        let Some(mut shared) = BloomFilter::with_byte_limit(expected_entries, seed, byte_limit)
+        let Some(mut shared) = BloomFilter::new_with_max_bytes(expected_entries, seed, max_bytes)
         else {
             tracing::info!(namespace_id = %namespace_id, shard_width, layout_views = 0, expected_entries,
                 "shared base filter exceeded its byte limit; skipped content sweep");

@@ -1,7 +1,7 @@
 //! Loading and classification shared by mutable control-object families.
 
 use super::ControlObjectLoadError;
-use crate::error::StoreFailureClass;
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{decode_control_object, ControlObjectKind};
 use loonfs_types::format::envelope::EnvelopeCodecError;
@@ -56,7 +56,7 @@ where
             ControlObjectLoadError::Store {
                 object_key: object_key.clone(),
                 message: error.to_string(),
-                class: StoreFailureClass::of(&error),
+                kind: ObjectStoreErrorKind::of(&error),
             }
         })?;
     let envelope = decode_control_object(&body.bytes, kind)
@@ -135,7 +135,7 @@ fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadE
         ControlLoadFailure::Store(error) => ControlObjectLoadError::Store {
             object_key: object_key.to_owned(),
             message: error.public_message().into_owned(),
-            class: StoreFailureClass::of(&error),
+            kind: ObjectStoreErrorKind::of(&error),
         },
     }
 }
@@ -143,11 +143,11 @@ fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::StoreFailureClass;
     use bytes::Bytes;
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
+    use loonfs_objectstore::ObjectStoreErrorKind;
     use loonfs_test_support::stores::{
         FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
     };
@@ -231,7 +231,7 @@ mod tests {
         assert!(matches!(
             error,
             ControlObjectLoadError::Store {
-                class: StoreFailureClass::PermissionDenied,
+                kind: ObjectStoreErrorKind::PermissionDenied,
                 ..
             }
         ));
@@ -257,7 +257,7 @@ mod tests {
         assert!(matches!(
             error,
             ControlObjectLoadError::Store {
-                class: StoreFailureClass::Other,
+                kind: ObjectStoreErrorKind::Other,
                 ..
             }
         ));
@@ -279,7 +279,7 @@ mod tests {
         assert!(matches!(
             error,
             ControlObjectLoadError::Store {
-                class: StoreFailureClass::Other,
+                kind: ObjectStoreErrorKind::Other,
                 message,
                 ..
             } if message.contains("required control-object etag")

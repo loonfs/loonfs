@@ -236,7 +236,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         enabled.lifecycle
     );
     assert_eq!(
-        server.binding.namespaces.with_held(&namespace_id, |held| (
+        server.binding.namespaces.visit_held(&namespace_id, |held| (
             held.handle.last_published_seq(),
             held.index_dirty
         )),
@@ -247,7 +247,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         server
             .binding
             .namespaces
-            .with_held(&namespace_id, |held| held.index_dirty),
+            .visit_held(&namespace_id, |held| held.index_dirty),
         Some(false)
     );
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
@@ -319,7 +319,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         server
             .binding
             .namespaces
-            .with_held(&namespace_id, |held| held.index_dirty),
+            .visit_held(&namespace_id, |held| held.index_dirty),
         Some(true)
     );
     assert_eq!(disabled_response.lifecycle, GrepIndexLifecycle::Disabled);
@@ -791,7 +791,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,
         max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
+        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,

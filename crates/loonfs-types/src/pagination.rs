@@ -265,7 +265,7 @@ impl PaginationPolicy {
     }
 
     /// Resolves a caller-supplied limit into the enforced page size.
-    pub fn resolve_limit(self, requested: Option<u32>) -> Result<EffectiveLimit, LimitError> {
+    pub fn effective_limit(self, requested: Option<u32>) -> Result<EffectiveLimit, LimitError> {
         match requested {
             None => Ok(EffectiveLimit(self.default_limit)),
             Some(value) if value > self.max_limit.get() => Err(LimitError::ExceedsMax {
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn default_policy_resolves_omitted_limit_to_default() {
         let policy = PaginationPolicy::default();
-        let limit = policy.resolve_limit(None).expect("default limit");
+        let limit = policy.effective_limit(None).expect("default limit");
 
         assert_eq!(limit.get(), DEFAULT_PAGE_LIMIT);
         assert_eq!(limit.limit_plus_one(), 1_001);
@@ -680,9 +680,9 @@ mod tests {
     fn policy_rejects_invalid_limits() {
         let policy = PaginationPolicy::default();
 
-        assert_eq!(policy.resolve_limit(Some(0)), Err(LimitError::Zero));
+        assert_eq!(policy.effective_limit(Some(0)), Err(LimitError::Zero));
         assert_eq!(
-            policy.resolve_limit(Some(DEFAULT_MAX_PAGE_LIMIT + 1)),
+            policy.effective_limit(Some(DEFAULT_MAX_PAGE_LIMIT + 1)),
             Err(LimitError::ExceedsMax {
                 requested: DEFAULT_MAX_PAGE_LIMIT + 1,
                 max_limit: DEFAULT_MAX_PAGE_LIMIT,

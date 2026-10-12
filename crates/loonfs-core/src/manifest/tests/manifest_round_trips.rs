@@ -130,7 +130,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     .expect("load delta run");
     assert!(metadata_states_equivalent(
         &expected_tail.merged_rows(),
-        &actual_tail.finish()
+        &actual_tail.build()
     ));
 }
 
@@ -520,9 +520,9 @@ async fn manifest_materialization_uses_written_segments() {
     let compacted_manifest_no = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await
@@ -756,9 +756,9 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         &store,
         &namespace_id,
         |family| manifest_rows_for_family(&materialization.metadata_state, family),
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::MAX,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await
@@ -773,9 +773,9 @@ async fn manifest_run_rejects_rows_after_run_seq() {
                 first,
             )
         },
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::MAX,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await
@@ -847,10 +847,10 @@ async fn manifest_base_run_segments_have_sorted_segment_coverage() {
             .await
             .expect("write file");
     }
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_rows_per_segment: NonZeroUsize::new(2)
             .expect("test segment row budget should be nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     let materialization_before = load_current_projection(&store, &namespace_id)
         .await
@@ -927,7 +927,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
         covering_manifest_no,
     )
     .await

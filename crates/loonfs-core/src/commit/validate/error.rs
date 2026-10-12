@@ -180,7 +180,7 @@ pub enum CommitValidationError {
         base_access_revision_no: AccessRevisionNo,
     },
     #[error("op index overflow")]
-    OpIndexOverflow,
+    OperationIndexOverflow,
     #[error("delta index overflow")]
     DeltaIndexOverflow,
 }
@@ -207,7 +207,7 @@ impl CommitValidationError {
             Self::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
             Self::RestoreRevisionOverflow { .. }
             | Self::ReplaceFileRevisionOverflow { .. }
-            | Self::OpIndexOverflow
+            | Self::OperationIndexOverflow
             | Self::DeltaIndexOverflow => ErrorCode::ServerError,
         }
     }

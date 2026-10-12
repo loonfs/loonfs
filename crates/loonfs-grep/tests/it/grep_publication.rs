@@ -93,7 +93,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
         // Advance GC's explicit clock past manifest retention without sleeping.
         successor
             .worker
-            .garbage_collect_namespace(&namespace_id, modified + GREP_GC_GRACE_WINDOW_MS + 1)
+            .gc_namespace(&namespace_id, modified + GREP_GC_GRACE_WINDOW_MS + 1)
             .await
             .expect("collect the old manifest");
         assert!(base.get(&first_key, None).await.expect("first").is_none());

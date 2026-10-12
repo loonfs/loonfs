@@ -57,7 +57,7 @@ impl<M> Namespace<M> {
             return self
                 .core
                 .read(&self.namespace_id, |engine, context| async move {
-                    Ok(engine.get_file(absolute_path, &context, max_bytes).await?)
+                    Ok(engine.read_file(absolute_path, &context, max_bytes).await?)
                 })
                 .await;
         };
@@ -65,7 +65,7 @@ impl<M> Namespace<M> {
         let engine = self.core.reader_engine(&self.namespace_id);
         let current = self.current_file_target(absolute_path, &cached);
         let target = if cached.target.supports_speculative_read() {
-            let content = engine.get_speculative_file_content(&cached.target);
+            let content = engine.read_speculative_file_content(&cached.target);
             tokio::pin!(current, content);
             // An old content error matters only if current metadata still names it.
             let (current_result, content_result) = tokio::select! {
@@ -90,7 +90,7 @@ impl<M> Namespace<M> {
         };
 
         // The obsolete future and any completed buffer are dropped before this read.
-        let bytes = engine.get_resolved_file_content(&target).await?;
+        let bytes = engine.read_resolved_file_content(&target).await?;
         Ok(FileBytes {
             entry: target.entry,
             bytes,

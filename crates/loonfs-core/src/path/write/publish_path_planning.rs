@@ -2,7 +2,7 @@
 
 use crate::authorize::{Absence, Authorizer, Replacement};
 use crate::binding_version;
-use crate::commit::{AppendedContent, CandidateAllocation, CommitOp, ResolvedBinding};
+use crate::commit::{AppendedContent, CandidateAllocation, CommitOperation, ResolvedBinding};
 use crate::error::{CoreError, Result};
 use crate::metadata::access::{access_chain, effective_rights, is_administrator};
 use crate::metadata::MetadataVisibilityReads;
@@ -25,7 +25,7 @@ pub(super) fn is_missing_visible_path(error: &CoreError) -> bool {
     )
 }
 
-pub(super) async fn require_vacant_path<S: ObjectStore + ?Sized>(
+pub(super) async fn ensure_vacant_path<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     path: &AbsolutePath,
 ) -> Result<()> {
@@ -42,12 +42,12 @@ pub(super) async fn require_vacant_path<S: ObjectStore + ?Sized>(
 /// One filesystem operation compiled into the commit operations it needs,
 /// with the bytes it appends when it is an append.
 pub(super) struct CompiledFilesystemOperation {
-    pub(super) ops: Vec<CommitOp>,
+    pub(super) ops: Vec<CommitOperation>,
     pub(super) appended: Option<AppendedContent>,
 }
 
 impl CompiledFilesystemOperation {
-    pub(super) fn new(ops: Vec<CommitOp>) -> Self {
+    pub(super) fn new(ops: Vec<CommitOperation>) -> Self {
         Self {
             ops,
             appended: None,
@@ -116,7 +116,7 @@ pub(super) async fn resolve_visible_child<S: ObjectStore + ?Sized>(
 }
 
 /// Requires the binding version supplied by the caller to still be current.
-pub(super) fn check_binding_version<S: ObjectStore + ?Sized>(
+pub(super) fn ensure_binding_version<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
     expected_binding_version: &BindingVersionToken,
@@ -243,7 +243,7 @@ pub(super) struct ResolvedParents {
 pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-    ops: &mut Vec<CommitOp>,
+    ops: &mut Vec<CommitOperation>,
     allocation: &mut CandidateAllocation,
 ) -> Result<ResolvedParents> {
     let components = absolute_path.components();
@@ -281,7 +281,7 @@ pub(super) async fn ensure_parent_directories<S: ObjectStore + ?Sized>(
         }
 
         let child_inode_id = allocation.allocate()?;
-        ops.push(CommitOp::CreateDirectory {
+        ops.push(CommitOperation::CreateDirectory {
             child_inode_id,
             parent_inode_id: current_inode,
             display_name,

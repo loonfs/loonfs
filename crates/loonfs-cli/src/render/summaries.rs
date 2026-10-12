@@ -26,7 +26,7 @@ pub(crate) enum StoreProbeRunOutcome {
     Passed,
 }
 
-pub(crate) fn store_probe_verdict(
+pub(crate) fn store_probe_run_outcome(
     response: &loonfs_types::api::v0::StoreProbeResponse,
 ) -> StoreProbeRunOutcome {
     let counted = |outcome: StoreProbeCheckOutcome| {
@@ -51,7 +51,7 @@ pub(crate) fn store_probe_summary_line(
 ) -> String {
     let run_id = &response.run_id;
     let total = response.checks.len();
-    match store_probe_verdict(response) {
+    match store_probe_run_outcome(response) {
         StoreProbeRunOutcome::Failed { checks } => {
             format!("store probe {run_id}: {checks} of {total} checks failed")
         }

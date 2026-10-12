@@ -21,7 +21,7 @@ pub use loonfs_types::options::{
 
 /// Overrides for the metadata-upkeep action.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataMaintenanceOptions {
+pub struct MaintainMetadataOptions {
     /// Fold the visible WAL tail once it reaches this many WAL objects.
     pub max_wal_tail_objects: NonZeroU64,
     /// Fold once unfolded inline bytes reach this size; defaults to 2 MiB.
@@ -35,7 +35,7 @@ pub struct MetadataMaintenanceOptions {
     pub compaction_policy: MetadataCompactionPolicy,
 }
 
-impl Default for MetadataMaintenanceOptions {
+impl Default for MaintainMetadataOptions {
     fn default() -> Self {
         Self {
             max_wal_tail_objects: const { NonZeroU64::new(FOLD_AT_WAL_OBJECTS).unwrap() },
@@ -49,7 +49,7 @@ impl Default for MetadataMaintenanceOptions {
     }
 }
 
-impl MetadataMaintenanceOptions {
+impl MaintainMetadataOptions {
     /// Resolves a wire-level metadata maintenance request.
     pub fn from_request(request: MetadataMaintenanceRequest) -> Result<Self> {
         let Some(threshold) = request.max_wal_tail_objects else {
@@ -100,12 +100,12 @@ impl MetadataMaintenanceOptions {
 
 /// Options for advancing a namespace's retention floor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AdvanceRetentionOptions {
+pub struct AdvanceRetentionFloorOptions {
     /// Where the floor moves. The default is the folded manifest head.
     pub target: RetentionTarget,
 }
 
-impl AdvanceRetentionOptions {
+impl AdvanceRetentionFloorOptions {
     /// Resolves a wire-level retention request, which names at most one
     /// target.
     pub fn from_request(request: AdvanceRetentionRequest) -> Result<Self> {
@@ -181,16 +181,16 @@ mod tests {
     #[test]
     fn an_absent_threshold_resolves_to_the_default() {
         assert_eq!(
-            MetadataMaintenanceOptions::from_request(MetadataMaintenanceRequest::default())
+            MaintainMetadataOptions::from_request(MetadataMaintenanceRequest::default())
                 .expect("default metadata options should resolve"),
-            MetadataMaintenanceOptions::default()
+            MaintainMetadataOptions::default()
         );
     }
 
     #[test]
     fn a_useless_fold_threshold_is_rejected() {
         for threshold in [0, MAX_UNFOLDED_WAL_OBJECTS + 1] {
-            let error = MetadataMaintenanceOptions::from_request(MetadataMaintenanceRequest {
+            let error = MaintainMetadataOptions::from_request(MetadataMaintenanceRequest {
                 max_wal_tail_objects: Some(threshold),
             })
             .expect_err("the threshold is out of range");

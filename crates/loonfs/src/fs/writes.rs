@@ -124,7 +124,7 @@ impl Namespace<Writable> {
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
         let prepared_content = self.prepare_content_inner(bytes).await?;
         self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
             .await
@@ -197,7 +197,7 @@ impl Namespace<Writable> {
     pub async fn prepare_content(&self, bytes: &[u8]) -> Result<PreparedContent> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
         self.prepare_content_inner(bytes).await
     }
 
@@ -265,7 +265,7 @@ impl Namespace<Writable> {
                 let mut chunk = chunk.map_err(|error| crate::CoreError::Store {
                     object_key: "upload body".to_owned(),
                     message: error.public_message().into_owned(),
-                    class: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
+                    kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
                 })?;
                 let take = chunk.len().min(threshold + 1 - buffered.len());
                 buffered.extend_from_slice(&chunk.split_to(take));
@@ -342,7 +342,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record(
             "payload_class",
-            crate::trace::payload_class(
+            crate::trace::payload_kind(
                 usize::try_from(prepared_content.content_ref().size_bytes).unwrap_or(usize::MAX),
             ),
         );
@@ -418,7 +418,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record(
             "payload_class",
-            crate::trace::payload_class(
+            crate::trace::payload_kind(
                 usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
             ),
         );
@@ -451,7 +451,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record(
             "payload_class",
-            crate::trace::payload_class(
+            crate::trace::payload_kind(
                 usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
             ),
         );
@@ -467,7 +467,7 @@ impl Namespace<Writable> {
             .core
             .pinned_metadata_read(&content_ref.owner_namespace_id)
             .await?;
-        owner.require_administrator(&context).await?;
+        owner.ensure_administrator(&context).await?;
         let owner_location = Some(
             owner
                 .resolve_content_location(&content_ref, &context)
@@ -572,7 +572,7 @@ impl Namespace<Writable> {
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
         self.commit_one(
             actor,
             &options.commit,

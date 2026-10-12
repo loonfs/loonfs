@@ -38,7 +38,7 @@ impl Rival {
                         store,
                         namespace_id,
                         CompactorEpoch(0),
-                        MetadataLsmPolicy::default(),
+                        MetadataRunPolicy::default(),
                         MetadataCompactionPolicy::CompactImmediately,
                         Arc::default(),
                     )

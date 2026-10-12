@@ -286,7 +286,7 @@ pub(super) struct AppJson<T>(pub(super) T);
 pub(super) const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 async fn extract_json<S, T>(
-    req: axum::extract::Request,
+    request: axum::extract::Request,
     state: &S,
     body_too_large: ApiResponseError,
 ) -> Result<T, ApiResponseError>
@@ -294,7 +294,7 @@ where
     T: serde::de::DeserializeOwned,
     S: Send + Sync,
 {
-    let body = match Json::<Box<serde_json::value::RawValue>>::from_request(req, state).await {
+    let body = match Json::<Box<serde_json::value::RawValue>>::from_request(request, state).await {
         Ok(Json(body)) => body,
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
             return Err(body_too_large);
@@ -459,7 +459,7 @@ where
 }
 
 async fn extract_body_bytes<S>(
-    mut req: axum::extract::Request,
+    mut request: axum::extract::Request,
     state: &S,
     max_bytes: usize,
     body_too_large: ApiResponseError,
@@ -467,8 +467,8 @@ async fn extract_body_bytes<S>(
 where
     S: Send + Sync,
 {
-    DefaultBodyLimit::max(max_bytes).apply(&mut req);
-    match Bytes::from_request(req, state).await {
+    DefaultBodyLimit::max(max_bytes).apply(&mut request);
+    match Bytes::from_request(request, state).await {
         Ok(body) => Ok(body),
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
             Err(body_too_large)

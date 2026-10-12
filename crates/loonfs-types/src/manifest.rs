@@ -4,7 +4,7 @@
 
 use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
-use crate::sst_blocks::BlockHandle;
+use crate::segment_blocks::BlockHandle;
 use crate::wal::WalCommitPayload;
 use crate::CompactorEpoch;
 use crate::{
@@ -969,7 +969,7 @@ pub mod lookup_keys {
     }
 
     /// Builds a prefix for one revision number within an inode.
-    pub fn revision_number_prefix(inode_id: InodeId, revision_no: RevisionNo) -> String {
+    pub fn revision_no_prefix(inode_id: InodeId, revision_no: RevisionNo) -> String {
         format!(
             "{}{:020}-",
             revision_prefix(inode_id),
@@ -986,7 +986,7 @@ pub mod lookup_keys {
     ) -> String {
         format!(
             "{}{:020}-{:010}",
-            revision_number_prefix(inode_id, revision_no),
+            revision_no_prefix(inode_id, revision_no),
             u64::MAX - committed_seq.0,
             u32::MAX - delta_index
         )

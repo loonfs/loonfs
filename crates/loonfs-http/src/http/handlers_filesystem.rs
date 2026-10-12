@@ -9,8 +9,8 @@ use super::handlers_uploads::{
     content_preparation_for_puts, ContentTokenVerifier, PutContentPreparation,
 };
 use super::query_params::{
-    checked_cursor, parse_include_attributes, parse_public_ordinal, parse_revision_no,
-    required_query_param, resolve_page_limit,
+    checked_cursor, effective_page_limit, parse_include_attributes, parse_public_ordinal,
+    parse_revision_no, required_query_param,
 };
 #[cfg(feature = "openapi")]
 use super::query_params::{
@@ -22,7 +22,7 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    payload_class, ChangeSeq, DownloadOptions, ErrorCode, InodeId, ListOptions, Namespace, PinId,
+    payload_kind, ChangeSeq, DownloadOptions, ErrorCode, InodeId, ListOptions, Namespace, PinId,
     ReadOnly, ReadView, StatOptions, TraceMode,
 };
 #[cfg(feature = "openapi")]
@@ -32,9 +32,8 @@ use loonfs_types::ApiError;
 // are one type. The alias keeps the two request names readable side by side.
 use loonfs_types::{
     api::v0::{Commit, ListChangesResponse},
-    CommitRequest as ApiCommitRequest, DirectoryPageCursor, FileRevisionsPageCursor,
-    FilesystemOperation, ListFileRevisionsResponse, ListTrashResponse, PageRequest, RevisionNo,
-    TrashPageCursor,
+    CommitRequest, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
+    ListFileRevisionsResponse, ListTrashResponse, PageRequest, RevisionNo, TrashPageCursor,
 };
 use tracing::Instrument;
 
@@ -264,7 +263,7 @@ pub(super) async fn list_path_entries(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let request = PageRequest {
-        limit: resolve_page_limit(query.limit)?,
+        limit: effective_page_limit(query.limit)?,
         cursor: checked_cursor::<DirectoryPageCursor>(query.cursor)?,
     };
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
@@ -435,7 +434,7 @@ pub(super) async fn list_trash(
     let response = namespace
         .list_trash()
         .page(PageRequest {
-            limit: resolve_page_limit(query.limit)?,
+            limit: effective_page_limit(query.limit)?,
             cursor: checked_cursor::<TrashPageCursor>(query.cursor)?,
         })
         .await
@@ -489,7 +488,7 @@ pub(super) async fn list_file_revisions(
     let response = namespace
         .list_file_revisions(&path)
         .page(PageRequest {
-            limit: resolve_page_limit(query.limit)?,
+            limit: effective_page_limit(query.limit)?,
             cursor: checked_cursor::<FileRevisionsPageCursor>(query.cursor)?,
         })
         .await
@@ -512,7 +511,7 @@ pub(super) async fn list_file_revisions(
         summary = "Apply a commit",
         description = "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. Request preconditions check the pre-state after receipt resolution and before operations; a failed precondition names its position in `details.precondition_index`. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
         params(("namespace_id" = String, Path, description = "Namespace id")),
-        request_body = ApiCommitRequest,
+        request_body = CommitRequest,
         responses(
             (status = 200, description = "Commit applied", body = Commit),
             (status = 400, description = "Invalid commit", body = ApiError),
@@ -532,9 +531,9 @@ pub(super) async fn create_commit(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-    AppJson(request): AppJson<ApiCommitRequest>,
+    AppJson(request): AppJson<CommitRequest>,
 ) -> Result<Json<Commit>, ApiResponseError> {
-    let ApiCommitRequest {
+    let CommitRequest {
         preconditions,
         commit_id,
         message,
@@ -574,7 +573,7 @@ pub(super) async fn create_commit(
             .map(|content_ref| content_ref.size_bytes)
             .fold(0, u64::saturating_add);
         Some((
-            payload_class(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
+            payload_kind(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
             content_preparation_for_puts(
                 &state.namespaces,
                 &namespace,
@@ -668,7 +667,7 @@ pub(super) async fn list_changes(
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
-    let limit = resolve_page_limit(query.limit)?;
+    let limit = effective_page_limit(query.limit)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
     let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
     let response = target

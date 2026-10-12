@@ -7,8 +7,8 @@ use super::handlers_filesystem::{
     parse_optional_snapshot_id, read_target, reject_snapshot_with_revision, PageQuery,
 };
 use super::query_params::{
-    checked_cursor, invalid_path_id_error, parse_include_attributes, parse_revision_no,
-    resolve_page_limit,
+    checked_cursor, effective_page_limit, invalid_path_id_error, parse_include_attributes,
+    parse_revision_no,
 };
 use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath};
 use axum::extract::State;
@@ -167,7 +167,7 @@ pub(super) async fn list_inode_children(
     let listing = target
         .list_by_inode_with_options(inode_id, &options)
         .page(PageRequest {
-            limit: resolve_page_limit(query.limit)?,
+            limit: effective_page_limit(query.limit)?,
             cursor: checked_cursor::<DirectoryPageCursor>(query.cursor)?,
         })
         .await
@@ -223,7 +223,7 @@ pub(super) async fn list_file_revisions_by_inode(
     let response = namespace
         .list_file_revisions_by_inode(inode_id)
         .page(PageRequest {
-            limit: resolve_page_limit(query.limit)?,
+            limit: effective_page_limit(query.limit)?,
             cursor: checked_cursor::<FileRevisionsPageCursor>(query.cursor)?,
         })
         .await

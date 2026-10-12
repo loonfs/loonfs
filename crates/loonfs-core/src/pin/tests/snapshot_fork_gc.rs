@@ -64,7 +64,7 @@ impl Fixture {
             &store,
             &source,
             selected.state.compactor_epoch(),
-            MetadataLsmPolicy::default(),
+            MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             Arc::default(),
         )
@@ -287,7 +287,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
 async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification() {
     let content_writes = tokio::sync::Semaphore::new(32);
     let fixture = Fixture::new().await;
-    let writer = acquire_writer_epoch(fixture.store.as_ref(), &fixture.source, &fixture.context)
+    let writer = claim_writer_epoch(fixture.store.as_ref(), &fixture.source, &fixture.context)
         .await
         .expect("writer");
     let gate = BlockingStore::new(

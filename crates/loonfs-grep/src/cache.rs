@@ -7,7 +7,7 @@ use loonfs::engine::{
     SegmentCacheKey,
 };
 use loonfs::metrics::{CounterHandle, MetricsRecorder, RESULT_HIT, RESULT_MISS};
-use loonfs_types::format::sst_blocks::DEFAULT_TARGET_BLOCK_BYTES;
+use loonfs_types::format::segment_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use std::sync::Arc;
 
 /// Default decoded-byte budget for cached grep manifests and segment blocks.
@@ -60,7 +60,7 @@ pub fn new_grep_block_cache(
 ) -> GrepBlockCache {
     GrepBlockCache::new(DecodedBlockCacheConfig {
         observer: Some(Arc::new(GrepBlockCacheMetrics::register(recorder))),
-        ..DecodedBlockCacheConfig::with_max_decoded_bytes(max_decoded_bytes)
+        ..DecodedBlockCacheConfig::new(max_decoded_bytes)
     })
 }
 
@@ -91,7 +91,7 @@ mod tests {
     use super::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockCacheMetrics};
     use loonfs::engine::SegmentBlockKind;
     use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
-    use loonfs_types::format::sst_blocks::DecodedDataBlock;
+    use loonfs_types::format::segment_blocks::DecodedDataBlock;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -129,7 +129,7 @@ mod tests {
         let recorder = DefaultMetricsRecorder::new();
         let cache = GrepBlockCache::new(loonfs::engine::DecodedBlockCacheConfig {
             observer: Some(Arc::new(GrepBlockCacheMetrics::register(&recorder))),
-            ..loonfs::engine::DecodedBlockCacheConfig::with_max_decoded_bytes(1_000)
+            ..loonfs::engine::DecodedBlockCacheConfig::new(1_000)
         });
         cache.insert(key("a"), block(600));
         cache.insert(key("b"), block(600));
@@ -165,9 +165,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_loads_of_one_key_run_one_underlying_load() {
-        let cache = GrepBlockCache::new(
-            loonfs::engine::DecodedBlockCacheConfig::with_max_decoded_bytes(1_000),
-        );
+        let cache = GrepBlockCache::new(loonfs::engine::DecodedBlockCacheConfig::new(1_000));
         let loads = AtomicUsize::new(0);
         let cache_key = key("a");
         let first = cache.get_or_load(&cache_key, || async {

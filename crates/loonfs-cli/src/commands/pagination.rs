@@ -120,7 +120,7 @@ pub(super) fn page_request<C>(
     limit: Option<u32>,
 ) -> Result<PageRequest<C>, CliError> {
     let limit = PaginationPolicy::default()
-        .resolve_limit(limit)
+        .effective_limit(limit)
         .map_err(|error| CliError::invalid_request(error.to_string()).with_param("limit"))?;
     Ok(PageRequest { limit, cursor })
 }

@@ -8,15 +8,15 @@
 //! publications leave unreferenced output for garbage collection.
 //! [`MetadataCompactionPolicy`] decides when input sizes warrant a merge.
 
-use super::block_fetch::{load_segment_index_for_compaction, segment_object_len};
 use super::block_load::SessionBlockMemo;
 use super::error::ManifestLoadError;
 use super::fold::{next_manifest_no_after, next_run_no_after};
+use super::index_block_load::{load_segment_index_for_compaction, segment_object_bytes};
 use super::load::load_manifest_segments;
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
 use super::runs::{
     delta_run_count, runs_in_merge_order, runs_newest_first, MetadataFamilyGroup,
-    MetadataLsmPolicy, MetadataRunManifest,
+    MetadataRunManifest, MetadataRunPolicy,
 };
 use super::scan::VerifiedMetadataSegments;
 use super::streaming_compaction::{merge_group_in_step, MetadataCompactionSpec};
@@ -103,7 +103,7 @@ pub(crate) async fn compaction_step<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     compactor_epoch: CompactorEpoch,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
     pool: Arc<ReadWorkingMemory>,
 ) -> Result<CompactionStepOutcome> {
@@ -124,7 +124,7 @@ pub(super) async fn compaction_step_with_deadline<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     compactor_epoch: CompactorEpoch,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
     deadline: &Deadline,
     pool: Arc<ReadWorkingMemory>,
@@ -246,7 +246,7 @@ pub fn metadata_compaction_due(
     manifest_has_compaction_work(
         manifest,
         &runs_newest_first(manifest),
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
         compaction_policy,
     )
 }
@@ -394,7 +394,7 @@ fn select_merge_window(
             && policy == MetadataCompactionPolicy::CompactImmediately
             && candidates.len() > MAX_COMPACTION_INPUT_RUNS
             && group_run_descriptors(candidates[0], group)
-                .map(segment_object_len)
+                .map(segment_object_bytes)
                 .sum::<u64>()
                 > small_run_bytes
         {
@@ -431,7 +431,7 @@ fn window_is_eligible(
     }
     let stored_bytes = |run: &&MetadataRunManifest| {
         group_run_descriptors(run, group)
-            .map(segment_object_len)
+            .map(segment_object_bytes)
             .sum::<u64>()
     };
     let oldest_bytes = stored_bytes(oldest);
@@ -450,7 +450,7 @@ fn window_is_eligible(
 pub(super) async fn select_compaction_input<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     group: MetadataFamilyGroup,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     frozen_floor_seq: ChangeSeq,
     compaction_policy: &MetadataCompactionPolicy,
 ) -> std::result::Result<CompactionSelection, ManifestLoadError> {
@@ -595,7 +595,7 @@ fn report_group_bottom_over_budget(
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
     bottom: &OverBudgetRun,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) {
     tracing::debug!(
         namespace_id = namespace_id.as_str(),
@@ -641,7 +641,7 @@ fn manifest_has_partial_compaction(runs: &[MetadataRunManifest]) -> bool {
 fn manifest_has_compaction_work(
     payload: &NamespaceManifestPayload,
     runs: &[MetadataRunManifest],
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> bool {
     compaction_triggered(payload, runs, policy, compaction_policy)
@@ -651,7 +651,7 @@ fn manifest_has_compaction_work(
 fn compaction_triggered(
     payload: &NamespaceManifestPayload,
     runs: &[MetadataRunManifest],
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> bool {
     compaction_policy == MetadataCompactionPolicy::CompactImmediately
@@ -698,7 +698,7 @@ pub(super) fn select_family_group(
     runs: &[MetadataRunManifest],
     payload: &NamespaceManifestPayload,
     compaction_policy: MetadataCompactionPolicy,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Option<MetadataFamilyGroup> {
     for group in ranked_family_groups(payload) {
         let candidates = group_candidates(runs, group);

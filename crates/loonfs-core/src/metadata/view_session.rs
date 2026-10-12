@@ -94,8 +94,8 @@ pub(crate) struct VisibleChildEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LeafRevisionPrefetch {
-    Prefetch,
+pub(crate) enum LeafRevisionPreload {
+    Preload,
     Skip,
 }
 
@@ -480,9 +480,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn resolve_visible_path(
         &mut self,
         absolute_path: &AbsolutePath,
-        prefetch_leaf_revision: LeafRevisionPrefetch,
+        preload_leaf_revision: LeafRevisionPreload,
     ) -> Result<ResolvedVisiblePath, CoreError> {
-        self.preload_path_walk(absolute_path, prefetch_leaf_revision)
+        self.preload_path_walk(absolute_path, preload_leaf_revision)
             .await?;
         let naming = self.base.naming();
         visibility::resolve_visible_path(self, naming, absolute_path).await
@@ -491,7 +491,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     async fn preload_path_walk(
         &mut self,
         absolute_path: &AbsolutePath,
-        prefetch_leaf_revision: LeafRevisionPrefetch,
+        preload_leaf_revision: LeafRevisionPreload,
     ) -> Result<(), CoreError> {
         let naming = self.base.naming();
         let component_name_keys: Vec<NameKey> = absolute_path
@@ -511,8 +511,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 self.latest_parent_binding_cache
                     .insert(current_inode_id, Some(binding));
             }
-            let prefetch_revision =
-                is_leaf_wave && prefetch_leaf_revision == LeafRevisionPrefetch::Prefetch;
+            let preload_revision =
+                is_leaf_wave && preload_leaf_revision == LeafRevisionPreload::Preload;
 
             let base = &self.base;
             let (inode, tombstone, parent_binding, bound_child, revision) = futures::try_join!(
@@ -552,7 +552,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                     Ok(Some((cache_key, binding)))
                 },
                 async {
-                    if !prefetch_revision {
+                    if !preload_revision {
                         return Ok(None);
                     }
                     match self.cached_latest_revision_head_of_visible(current_inode_id) {
@@ -569,7 +569,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 .insert(current_inode_id, tombstone);
             self.latest_parent_binding_cache
                 .insert(current_inode_id, parent_binding);
-            if prefetch_revision {
+            if preload_revision {
                 self.latest_revision_head_cache
                     .insert(current_inode_id, revision);
             }
@@ -746,7 +746,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(())
     }
 
-    pub(crate) async fn revisions_for_inode_page_desc(
+    pub(crate) async fn revisions_by_inode_page_desc(
         &mut self,
         inode_id: InodeId,
         start_after: Option<manifest_index::RevisionPagePosition>,
@@ -754,7 +754,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     ) -> Result<Vec<RevisionRecord>, CoreError> {
         self.counters.scan_range_page_calls = self.counters.scan_range_page_calls.saturating_add(1);
         self.base
-            .revisions_for_inode_page_desc(inode_id, start_after, limit)
+            .revisions_by_inode_page_desc(inode_id, start_after, limit)
             .await
     }
 

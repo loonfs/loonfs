@@ -93,7 +93,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         store,
         namespace_id,
         selected.state.compactor_epoch(),
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
         MetadataCompactionPolicy::CompactImmediately,
         Arc::default(),
     )
@@ -175,7 +175,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let writer = acquire_writer_epoch(&store, &namespace_id, &context)
+    let writer = claim_writer_epoch(&store, &namespace_id, &context)
         .await
         .expect("writer");
     let current = load_current_manifest(&store, &namespace_id)

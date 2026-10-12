@@ -349,7 +349,7 @@ impl ProviderObjectStore {
         }
     }
 
-    fn metadata_from_meta(&self, meta: ObjectMeta) -> ObjectMetadata {
+    fn metadata_from_provider(&self, meta: ObjectMeta) -> ObjectMetadata {
         self.with_compare_token(ObjectMetadata {
             etag: meta.e_tag,
             version: meta.version,
@@ -825,7 +825,7 @@ impl ObjectStore for ProviderObjectStore {
         let path = self.to_path(key)?;
         match self.inner.get(&path).await {
             Ok(result) => {
-                let metadata = self.metadata_from_meta(result.meta.clone());
+                let metadata = self.metadata_from_provider(result.meta.clone());
                 let bytes = result
                     .bytes()
                     .await
@@ -1056,7 +1056,7 @@ impl ObjectStore for ProviderObjectStore {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        crate::assembly::check_algorithms(self.checksum_algorithm(), key, sources, expected)
+        crate::assembly::validate_algorithms(self.checksum_algorithm(), key, sources, expected)
             .map_err(|source| crate::ImmutableWriteError::Transport {
                 object_key: key.to_owned(),
                 source,
@@ -1066,7 +1066,7 @@ impl ObjectStore for ProviderObjectStore {
         };
         match self.head(key).await {
             Ok(Some(existing)) => {
-                return crate::immutable_write::check_stored_checksum(key, expected, existing)
+                return crate::immutable_write::verify_stored_checksum(key, expected, existing)
             }
             Err(source) => {
                 return Err(crate::ImmutableWriteError::Transport {
@@ -1336,9 +1336,9 @@ impl ProviderObjectStore {
 /// Unix epoch zero. Returning that value would make garbage collection treat
 /// the object as extremely old. Non-positive timestamps are therefore
 /// returned as `None`, which causes unknown-age objects to be retained.
-fn last_modified_ms(timestamp_millis: i64) -> Option<u64> {
-    match timestamp_millis > 0 {
-        true => u64::try_from(timestamp_millis).ok(),
+fn last_modified_ms(timestamp_ms: i64) -> Option<u64> {
+    match timestamp_ms > 0 {
+        true => u64::try_from(timestamp_ms).ok(),
         false => None,
     }
 }
@@ -1349,12 +1349,15 @@ enum RangedGet {
     Refused(provider_store::Error),
 }
 
-fn provider_not_found(err: &provider_store::Error) -> bool {
-    matches!(err, provider_store::Error::NotFound { .. })
+fn provider_not_found(error: &provider_store::Error) -> bool {
+    matches!(error, provider_store::Error::NotFound { .. })
 }
 
-pub(crate) fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectStoreError {
-    match err {
+pub(crate) fn map_provider_error(
+    object_key: &str,
+    error: provider_store::Error,
+) -> ObjectStoreError {
+    match error {
         provider_store::Error::NotFound { .. } => ObjectStoreError::NotFound {
             object_key: object_key.to_owned(),
         },

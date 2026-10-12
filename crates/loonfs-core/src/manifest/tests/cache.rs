@@ -17,9 +17,9 @@ async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
             .await
             .expect("write file");
     }
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_rows_per_segment: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     checkpoint_then_compact(store, namespace_id, context, policy).await
 }
@@ -291,9 +291,9 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
         .await
         .expect("write c");
 
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_rows_per_segment: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
     write_file_bytes(&store, &namespace_id, "/docs/b.txt", b"b\n", &context, None)
@@ -479,7 +479,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
             &store,
             &namespace_id,
             &context,
-            MetadataLsmPolicy::default(),
+            MetadataRunPolicy::default(),
         )
         .await;
         current_manifest_number(&store, &namespace_id).await
@@ -545,7 +545,7 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
         &store,
         &namespace_id,
         &context,
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
     )
     .await;
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
@@ -871,7 +871,7 @@ async fn warm_local_block_cache(
     load::load_segment_filter(store, Some(&cache), &memo, descriptor)
         .await
         .expect("warm the filter");
-    block_fetch::load_segment_index(store, Some(&cache), &memo, descriptor)
+    index_block_load::load_segment_index(store, Some(&cache), &memo, descriptor)
         .await
         .expect("warm the index")
 }
@@ -908,7 +908,7 @@ async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
 
     // That fetch published the index into the view memo, so asking for it
     // costs nothing and tells this test which data blocks the segment holds.
-    let index = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
+    let index = index_block_load::load_segment_index(&store, Some(&cache), &memo, &descriptor)
         .await
         .expect("load index");
     assert_eq!(store.count(OperationClass::Read), 1);
@@ -954,7 +954,7 @@ async fn warm_block_caches_reuse_only_the_same_owner_and_segment() {
     let cache = segment_cache_over(&blocks);
     let memo = load::SessionBlockMemo::default();
     store.reset();
-    let warm_index = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
+    let warm_index = index_block_load::load_segment_index(&store, Some(&cache), &memo, &descriptor)
         .await
         .expect("index from the local cache");
     load::load_segment_filter(&store, Some(&cache), &memo, &descriptor)
@@ -993,7 +993,7 @@ async fn warm_block_caches_reuse_only_the_same_owner_and_segment() {
     let mut other_segment = descriptor.clone();
     other_segment.segment_id = loonfs_types::MetadataSegmentId::generate();
     for missing in [other_owner, other_segment] {
-        let error = block_fetch::load_segment_index(&store, Some(&cache), &memo, &missing)
+        let error = index_block_load::load_segment_index(&store, Some(&cache), &memo, &missing)
             .await
             .expect_err("another object should miss every cache");
         match error {
@@ -1031,7 +1031,7 @@ async fn a_local_block_cache_entry_that_does_not_decode_is_dropped_and_refetched
     let cache = segment_cache_over(&blocks);
     let memo = load::SessionBlockMemo::default();
     store.reset();
-    let repaired = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
+    let repaired = index_block_load::load_segment_index(&store, Some(&cache), &memo, &descriptor)
         .await
         .expect("a local entry that does not decode must not fail the read");
 
@@ -1066,7 +1066,7 @@ async fn a_closed_local_block_cache_reads_as_a_miss() {
     let cache = segment_cache_over(&blocks);
     let memo = load::SessionBlockMemo::default();
     store.reset();
-    let index = block_fetch::load_segment_index(&store, Some(&cache), &memo, &descriptor)
+    let index = index_block_load::load_segment_index(&store, Some(&cache), &memo, &descriptor)
         .await
         .expect("a closed local cache must not fail the read");
 
@@ -1158,7 +1158,7 @@ async fn multi_block_direntry_segment() -> (
         "the rebuilt descriptor must carry the segment's last row key"
     );
 
-    let index = block_fetch::load_segment_index(
+    let index = index_block_load::load_segment_index(
         &store,
         None,
         &load::SessionBlockMemo::default(),
@@ -1181,7 +1181,7 @@ async fn segment_rows(
     descriptor: &MetadataSegmentRef,
 ) -> Vec<MetadataRow> {
     let memo = load::SessionBlockMemo::default();
-    let index = block_fetch::load_segment_index(store, None, &memo, descriptor)
+    let index = index_block_load::load_segment_index(store, None, &memo, descriptor)
         .await
         .expect("segment index");
     data_block_load::load_segment_data_block_span(store, None, Some(&memo), descriptor, &index)
@@ -1223,7 +1223,11 @@ fn seed_decoded_blocks(
         let decoded = decode_data_block(&stored_block_bytes(object, &handle), &handle)
             .expect("seeded block decodes");
         cache.insert(
-            block_fetch::segment_block_cache_key(descriptor, SegmentBlockKind::Data, handle.offset),
+            index_block_load::segment_block_cache_key(
+                descriptor,
+                SegmentBlockKind::Data,
+                handle.offset,
+            ),
             data_block_load::decoded_data_cache_block(decoded),
         );
     }

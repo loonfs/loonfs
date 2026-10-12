@@ -9,7 +9,8 @@
 //! primitive stay in its own presigner.
 
 use crate::object_store::Result;
-use crate::presign::{PresignedUrl, MAX_PRESIGN_EXPIRY};
+use crate::presign::limits::MAX_PRESIGN_EXPIRY;
+use crate::presign::PresignedUrl;
 use crate::ObjectStoreError;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -164,10 +165,10 @@ pub(crate) fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64> {
     Ok(duration.as_millis() as u64)
 }
 
-fn before_unix_epoch(object_key: &str, err: SystemTimeError) -> ObjectStoreError {
+fn before_unix_epoch(object_key: &str, error: SystemTimeError) -> ObjectStoreError {
     ObjectStoreError::transport(
         object_key,
-        format!("system time is before unix epoch: {err}"),
+        format!("system time is before unix epoch: {error}"),
     )
 }
 

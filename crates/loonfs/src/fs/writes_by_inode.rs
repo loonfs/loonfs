@@ -60,7 +60,7 @@ impl Namespace<Writable> {
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
         let prepared_content = self.prepare_content_inner(bytes).await?;
         let operation = FilesystemOperation::CreateFileByInode {
             parent_inode_id,
@@ -122,7 +122,7 @@ impl Namespace<Writable> {
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
         let prepared_content = self.prepare_content_inner(bytes).await?;
         let operation = FilesystemOperation::PutFileRevisionByInode {
             inode_id,
@@ -175,7 +175,7 @@ impl Namespace<Writable> {
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
         self.commit_one(
             actor,
             &options.commit,

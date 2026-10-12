@@ -238,7 +238,7 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
                 .sweep
                 .inner
                 .namespaces
-                .with_held(&namespace_id, |held| held.index_dirty),
+                .visit_held(&namespace_id, |held| held.index_dirty),
             Some(true)
         );
         store.inner().reset();
@@ -298,7 +298,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
     store.release();
     visit.await.expect("finish collection");
     assert_eq!(
-        namespaces.with_held(&namespace_id, |held| held.collected_seq),
+        namespaces.visit_held(&namespace_id, |held| held.collected_seq),
         Some(None)
     );
     store.inner().reset();

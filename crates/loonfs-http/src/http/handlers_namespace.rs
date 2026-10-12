@@ -5,14 +5,14 @@ use super::error::ApiResponseError;
 use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, SubjectHeaders};
 use super::handlers_query::{grep_index_not_maintained, map_grep_error};
 use super::query_params::{
-    checked_cursor, parse_path_id, parse_public_ordinal, resolve_page_limit,
+    checked_cursor, effective_page_limit, parse_path_id, parse_public_ordinal,
 };
 use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{
-    AdvanceRetentionOptions, CheckpointPageCursor, CreateNamespaceOptions, DeleteNamespaceOptions,
-    GcOptions, MetadataMaintenanceOptions,
+    AdvanceRetentionFloorOptions, CheckpointPageCursor, CreateNamespaceOptions,
+    DeleteNamespaceOptions, GcOptions, MaintainMetadataOptions,
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ApiError;
@@ -538,7 +538,7 @@ pub(super) async fn list_snapshots(
     let response = namespace
         .list_snapshots()
         .page(PageRequest {
-            limit: resolve_page_limit(query.limit)?,
+            limit: effective_page_limit(query.limit)?,
             cursor,
         })
         .await
@@ -759,7 +759,7 @@ pub(super) async fn list_checkpoints(
         .maintenance
         .list_checkpoints(&namespace_id)
         .page(PageRequest {
-            limit: resolve_page_limit(query.limit)?,
+            limit: effective_page_limit(query.limit)?,
             cursor,
         })
         .await
@@ -851,9 +851,9 @@ pub(super) async fn run_maintenance(
     let maintenance = &state.maintenance;
     let response = match request {
         RunMaintenanceRequest::Metadata(request) => {
-            let options = MetadataMaintenanceOptions {
+            let options = MaintainMetadataOptions {
                 idle_fold_after_ms: state.options.idle_fold_after_ms,
-                ..MetadataMaintenanceOptions::from_request(request)
+                ..MaintainMetadataOptions::from_request(request)
                     .map_err(ApiResponseError::for_namespace(&namespace_id))?
             };
             maintenance
@@ -862,7 +862,7 @@ pub(super) async fn run_maintenance(
                 .map(RunMaintenanceResponse::Metadata)
         }
         RunMaintenanceRequest::MetadataCompaction(_) => maintenance
-            .compact_metadata(&namespace_id)
+            .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
             .await
             .map(RunMaintenanceResponse::MetadataCompaction),
         RunMaintenanceRequest::Gc(request) => maintenance
@@ -870,7 +870,7 @@ pub(super) async fn run_maintenance(
             .await
             .map(RunMaintenanceResponse::Gc),
         RunMaintenanceRequest::Retention(request) => {
-            let options = AdvanceRetentionOptions::from_request(request)
+            let options = AdvanceRetentionFloorOptions::from_request(request)
                 .map_err(ApiResponseError::for_namespace(&namespace_id))?;
             maintenance
                 .advance_retention_floor_with_options(&namespace_id, &options)
@@ -882,7 +882,7 @@ pub(super) async fn run_maintenance(
                 return Err(grep_index_not_maintained().await);
             }
             let now_ms = maintenance.now_ms().map_err(ApiResponseError::runtime)?;
-            return loonfs_grep::run_grep_gc(state.grep_worker(), &namespace_id, now_ms)
+            return loonfs_grep::gc_grep(state.grep_worker(), &namespace_id, now_ms)
                 .await
                 .map(Json)
                 .map_err(|error| map_grep_error(&namespace_id, error));

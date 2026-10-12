@@ -1,8 +1,8 @@
 //! Operation validation for one commit.
 
-use super::super::{CommitOp, CommitValidationError, ResolvedBinding};
+use super::super::{CommitOperation, CommitValidationError, ResolvedBinding};
 use super::error::CommitOperand;
-use super::view::PublishValidationSession;
+use super::session::PublishValidationSession;
 use crate::error::CoreError;
 use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
@@ -25,7 +25,7 @@ impl CommitNumbering {
         self.next_op_index = self
             .next_op_index
             .checked_add(1)
-            .ok_or(CommitValidationError::OpIndexOverflow)?;
+            .ok_or(CommitValidationError::OperationIndexOverflow)?;
         Ok(op_index)
     }
 
@@ -39,8 +39,8 @@ impl CommitNumbering {
     }
 }
 
-pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
-    ops: &[CommitOp],
+pub(crate) async fn validate_operations<S: ObjectStore + ?Sized>(
+    ops: &[CommitOperation],
     view: &mut PublishValidationSession<'_, S>,
     numbering: &mut CommitNumbering,
     commit_id: &CommitId,
@@ -53,7 +53,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
     for op in ops {
         let op_index = numbering.reserve_op_index()?;
         let mut operation_deltas = match op {
-            CommitOp::CreateDirectory {
+            CommitOperation::CreateDirectory {
                 child_inode_id,
                 parent_inode_id,
                 display_name,
@@ -68,7 +68,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 )
                 .await?
             }
-            CommitOp::CreateFile {
+            CommitOperation::CreateFile {
                 child_inode_id,
                 parent_inode_id,
                 display_name,
@@ -85,7 +85,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 )
                 .await?
             }
-            CommitOp::ReplaceFile {
+            CommitOperation::ReplaceFile {
                 inode_id,
                 base_revision_no,
                 content_ref,
@@ -93,7 +93,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 validate_replace_file(view, numbering, *inode_id, *base_revision_no, content_ref)
                     .await?
             }
-            CommitOp::RestoreRevision {
+            CommitOperation::RestoreRevision {
                 inode_id,
                 source_revision_no,
                 base_revision_no,
@@ -107,11 +107,11 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 )
                 .await?
             }
-            CommitOp::DeleteFile {
+            CommitOperation::DeleteFile {
                 inode_id,
                 source_binding,
             } => validate_delete_file(view, numbering, *inode_id, source_binding).await?,
-            CommitOp::Rename {
+            CommitOperation::Rename {
                 inode_id,
                 source_binding,
                 new_parent_inode_id,
@@ -127,7 +127,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 )
                 .await?
             }
-            CommitOp::DeleteSubtree {
+            CommitOperation::DeleteSubtree {
                 root_inode_id,
                 source_binding,
                 require_empty,
@@ -141,7 +141,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 )
                 .await?
             }
-            CommitOp::Undelete {
+            CommitOperation::Undelete {
                 inode_id,
                 deletion_seq,
                 parent_inode_id,
@@ -157,7 +157,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 )
                 .await?
             }
-            CommitOp::UpdateAttributes {
+            CommitOperation::UpdateAttributes {
                 inode_id,
                 base_attributes_revision_no,
                 attributes,
@@ -171,7 +171,7 @@ pub(crate) async fn validate_ops<S: ObjectStore + ?Sized>(
                 )
                 .await?
             }
-            CommitOp::UpdateAccess {
+            CommitOperation::UpdateAccess {
                 inode_id,
                 base_access_revision_no,
                 boundary,

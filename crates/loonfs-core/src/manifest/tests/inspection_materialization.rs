@@ -96,7 +96,7 @@ pub(crate) async fn load_manifest_metadata_state_for_inspection_from_manifest<
         .await?;
     }
 
-    Ok(metadata_state.finish())
+    Ok(metadata_state.build())
 }
 
 #[cfg(test)]

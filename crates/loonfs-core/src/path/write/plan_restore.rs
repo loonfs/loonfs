@@ -5,7 +5,7 @@ use super::publish_path_planning::{
     CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::Absence;
-use crate::commit::CommitOp;
+use crate::commit::CommitOperation;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::ensure_mutation_path;
 use loonfs_objectstore::ObjectStore;
@@ -44,7 +44,7 @@ pub(super) async fn plan_restore_revision<S: ObjectStore + ?Sized>(
         .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
 
     Ok(CompiledFilesystemOperation::new(vec![
-        CommitOp::RestoreRevision {
+        CommitOperation::RestoreRevision {
             inode_id: target.inode_id,
             source_revision_no,
             base_revision_no: revision.revision_no,
@@ -77,7 +77,7 @@ pub(super) async fn plan_restore_revision_by_inode<S: ObjectStore + ?Sized>(
         .await?
         .ok_or(CoreError::InodeNotFound(inode_id))?;
     Ok(CompiledFilesystemOperation::new(vec![
-        CommitOp::RestoreRevision {
+        CommitOperation::RestoreRevision {
             inode_id,
             source_revision_no,
             base_revision_no: revision.revision_no,

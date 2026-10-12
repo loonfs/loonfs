@@ -96,7 +96,7 @@ impl ExecutionBudget {
             },
             max_merge_input_bytes: const {
                 NonZeroUsize::new(
-                    loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+                    loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
                 )
                 .unwrap()
             },

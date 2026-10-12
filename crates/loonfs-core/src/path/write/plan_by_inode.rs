@@ -3,11 +3,11 @@
 use super::plan_delete::plan_delete;
 use super::plan_transfer::plan_move;
 use super::publish_path_planning::{
-    check_binding_version, classify_replace_destination, resolve_visible_child,
+    classify_replace_destination, ensure_binding_version, resolve_visible_child,
     resolve_visible_inode, CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Replacement};
-use crate::commit::{CandidateAllocation, CommitOp};
+use crate::commit::{CandidateAllocation, CommitOperation};
 use crate::error::{CoreError, Result};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
@@ -48,12 +48,12 @@ pub(super) async fn plan_create_by_inode<S: ObjectStore + ?Sized>(
     }
     let child_inode_id = allocation.allocate()?;
     let op = match child {
-        NewChild::Directory => CommitOp::CreateDirectory {
+        NewChild::Directory => CommitOperation::CreateDirectory {
             child_inode_id,
             parent_inode_id,
             display_name: display_name.clone(),
         },
-        NewChild::File(content_ref) => CommitOp::CreateFile {
+        NewChild::File(content_ref) => CommitOperation::CreateFile {
             child_inode_id,
             parent_inode_id,
             display_name: display_name.clone(),
@@ -83,7 +83,7 @@ pub(super) async fn plan_put_file_revision_by_inode<S: ObjectStore + ?Sized>(
         });
     }
     Ok(CompiledFilesystemOperation::new(vec![
-        CommitOp::ReplaceFile {
+        CommitOperation::ReplaceFile {
             inode_id,
             base_revision_no: expected_revision_no,
             content_ref,
@@ -136,7 +136,7 @@ pub(super) async fn plan_move_by_inode<S: ObjectStore + ?Sized>(
         Absence::Inode,
     )
     .await?;
-    check_binding_version(view, &source, expected_binding_version)?;
+    ensure_binding_version(view, &source, expected_binding_version)?;
     let replaced = classify_replace_destination(occupant, behavior, inode_id, &destination_path)?;
     plan_move(
         view,
@@ -158,7 +158,7 @@ pub(super) async fn plan_delete_by_inode<S: ObjectStore + ?Sized>(
 ) -> Result<CompiledFilesystemOperation> {
     let target = resolve_visible_inode(view, inode_id).await?;
     plan_delete(view, &target, behavior, Absence::Inode, || {
-        check_binding_version(view, &target, expected_binding_version)
+        ensure_binding_version(view, &target, expected_binding_version)
     })
     .await
 }

@@ -152,11 +152,11 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
     drain_compaction(
         store,
         namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy {
+            ..MetadataRunPolicy {
                 max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
-                ..MetadataLsmPolicy::default()
+                ..MetadataRunPolicy::default()
             }
         },
     )
@@ -243,11 +243,11 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
     drain_compaction(
         store,
         namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy {
+            ..MetadataRunPolicy {
                 max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
-                ..MetadataLsmPolicy::default()
+                ..MetadataRunPolicy::default()
             }
         },
     )
@@ -277,23 +277,23 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
 
 /// A budget that admits the whole group in one step, so the ordinary merge can
 /// rebuild in one unit whatever the streaming job did incrementally.
-fn merge_everything_policy() -> MetadataLsmPolicy {
-    MetadataLsmPolicy {
+fn merge_everything_policy() -> MetadataRunPolicy {
+    MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(4_000_000).expect("nonzero"),
         max_decoded_input_bytes_per_step: NonZeroUsize::new(1 << 30).expect("nonzero"),
         max_input_runs_per_step: NonZeroUsize::new(64).expect("nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     }
 }
 
 /// A budget one byte wide, which admits no run whole, so the planner has no
 /// window that makes progress and answers with a compaction.
-fn starving_policy() -> MetadataLsmPolicy {
-    MetadataLsmPolicy {
+fn starving_policy() -> MetadataRunPolicy {
+    MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     }
 }
 
@@ -306,7 +306,7 @@ async fn policy_that_starves_the_group<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
-) -> MetadataLsmPolicy {
+) -> MetadataRunPolicy {
     let segments = load_current_manifest_segments(store, namespace_id).await;
     let base_rows: u64 = runs_newest_first(segments.manifest().payload())
         .iter()
@@ -320,21 +320,21 @@ async fn policy_that_starves_the_group<S: ObjectStore + ?Sized>(
         base_rows > 1,
         "the seed must leave this group a base run to starve"
     );
-    MetadataLsmPolicy {
+    MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_rows_per_step: NonZeroUsize::new(
             usize::try_from(base_rows).expect("test row counts are small") - 1,
         )
         .expect("nonzero"),
         max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     }
 }
 
 /// A budget that rolls many small output segments, so the job's writers are
 /// exercised rather than producing one segment per family.
-fn small_segment_policy() -> MetadataLsmPolicy {
-    MetadataLsmPolicy {
+fn small_segment_policy() -> MetadataRunPolicy {
+    MetadataRunPolicy {
         max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
         ..merge_everything_policy()
     }
@@ -383,10 +383,10 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
     let selection = select_compaction_input(
         &segments,
         group,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
             max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
         frozen_floor_seq,
         &MetadataCompactionPolicy::CompactImmediately,
@@ -407,7 +407,7 @@ async fn run_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     spec: &MetadataCompactionSpec,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
 ) -> std::result::Result<MetadataMergeReport, MetadataCompactionJobOutcome> {
     let segments = load_current_manifest_segments(store, namespace_id).await;
@@ -625,10 +625,10 @@ async fn the_planner_answers_with_a_merge_or_with_a_compaction() {
     let starved = select_compaction_input(
         &segments,
         group,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
             max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
         floor_seq,
         &MetadataCompactionPolicy::default(),
@@ -769,9 +769,9 @@ async fn small_delta_batches_are_consolidated_by_merges_rather_than_by_jobs() {
     let context = test_context();
     seed_bindings_workload(&store, &namespace_id).await;
     let group = MetadataFamilyGroup::Bindings;
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
 
     // Budgets this group fits: every merge starts at the group's oldest run,
@@ -1186,7 +1186,7 @@ async fn a_repeated_revision_row_key_is_refused() {
     drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
             ..merge_everything_policy()
         },
@@ -1468,9 +1468,9 @@ async fn seed_binding_history(
     drain_compaction(
         store,
         namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy {
+            ..MetadataRunPolicy {
                 max_rows_per_segment: NonZeroUsize::new(16).expect("nonzero"),
                 ..merge_everything_policy()
             }
@@ -1575,9 +1575,9 @@ async fn install_synthetic_bindings_base(
             rows.sort_by_key(|row| row.row_key_for_family(family));
             rows
         },
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: rows_per_segment,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await
@@ -1941,9 +1941,9 @@ async fn large_compaction_inputs(
                     Vec::new()
                 }
             },
-            MetadataLsmPolicy {
+            MetadataRunPolicy {
                 max_rows_per_segment: NonZeroUsize::new(1_200).expect("nonzero"),
-                ..MetadataLsmPolicy::default()
+                ..MetadataRunPolicy::default()
             },
         )
         .await
@@ -1982,9 +1982,10 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
         .iter()
         .flat_map(|run| group_run_descriptors(run, group))
     {
-        let index = block_fetch::load_segment_index_for_compaction(&local, None, None, descriptor)
-            .await
-            .expect("index");
+        let index =
+            index_block_load::load_segment_index_for_compaction(&local, None, None, descriptor)
+                .await
+                .expect("index");
         input_bytes += index
             .iter()
             .map(|entry| entry.block.stored_bytes as usize)
@@ -2008,7 +2009,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
             output_seq: ChangeSeq(3),
         },
         ChangeSeq(0),
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
     )
     .await
     .expect("merge");
@@ -2029,9 +2030,10 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
     let local = store.inner().inner();
     let mut actual = Vec::new();
     for descriptor in &result.output_segments {
-        let index = block_fetch::load_segment_index_for_compaction(local, None, None, descriptor)
-            .await
-            .expect("output index");
+        let index =
+            index_block_load::load_segment_index_for_compaction(local, None, None, descriptor)
+                .await
+                .expect("output index");
         for entry in index.iter() {
             let block =
                 data_block_load::load_segment_data_block(local, None, None, descriptor, entry)
@@ -2491,7 +2493,7 @@ async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     _context: &MutationContext,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> MetadataCompactionSpec {
     for _step in 0..64 {
         let report = super::super::compaction_step(
@@ -3377,12 +3379,12 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
             },
         });
     }
-    let state = state.finish();
+    let state = state.build();
     let mut head =
         NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_types::ActorId::loonfs());
     head.seq = ChangeSeq(2);
     head.next_inode_id = InodeId(3);
-    let policy = MetadataLsmPolicy::default();
+    let policy = MetadataRunPolicy::default();
     let manifest = build_namespace_manifest_from_metadata_state(
         &store,
         &namespace_id,
@@ -3465,10 +3467,11 @@ async fn layout_merges_prune_absent_chains_only_at_the_base_and_keep_all_at_the_
             assert_eq!(result.rows_written, expected);
             let mut layouts = Vec::new();
             for descriptor in &result.output_segments {
-                let index =
-                    block_fetch::load_segment_index_for_compaction(&store, None, None, descriptor)
-                        .await
-                        .expect("index");
+                let index = index_block_load::load_segment_index_for_compaction(
+                    &store, None, None, descriptor,
+                )
+                .await
+                .expect("index");
                 for entry in index.iter() {
                     let block = data_block_load::load_segment_data_block(
                         &store, None, None, descriptor, entry,

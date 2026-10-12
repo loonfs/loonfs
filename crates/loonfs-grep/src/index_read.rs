@@ -5,9 +5,9 @@ use crate::codec::IndexRow;
 use crate::manifest::GrepSegmentRef;
 use crate::{GrepError, Result};
 use loonfs::engine::SegmentBlockKind;
-use loonfs::StoreFailureClass;
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_objectstore::{ByteRange, ObjectStore};
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_filter_block, decode_index_block, BlockHandle, DecodedDataBlock,
     SegmentFilter, SegmentIndexEntry,
 };
@@ -78,7 +78,7 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
                 bytes.len(),
                 handle.stored_bytes
             ),
-            class: StoreFailureClass::Other,
+            kind: ObjectStoreErrorKind::Other,
         });
     }
     Ok(bytes.to_vec())
@@ -89,7 +89,7 @@ struct WholeSegment {
     entries: Arc<Vec<SegmentIndexEntry>>,
 }
 
-pub(crate) fn segment_object_len(object_key: &str, descriptor: &GrepSegmentRef) -> Result<u64> {
+pub(crate) fn segment_object_bytes(object_key: &str, descriptor: &GrepSegmentRef) -> Result<u64> {
     descriptor
         .index_block
         .offset
@@ -106,11 +106,11 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     cache: &GrepBlockCache,
     object_key: &str,
     descriptor: &GrepSegmentRef,
-    object_len: u64,
+    object_bytes: u64,
 ) -> Result<WholeSegment> {
     let whole_handle = BlockHandle {
         offset: 0,
-        stored_bytes: object_len as u32,
+        stored_bytes: object_bytes as u32,
         decoded_bytes: 0,
         crc32c: 0,
     };
@@ -164,10 +164,14 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     let key = cache_key(&descriptor.segment_id, SegmentBlockKind::Filter, handle);
     let decoded = cache
         .get_or_load(&key, || async {
-            let object_len = segment_object_len(object_key, descriptor)?;
-            if object_len <= WHOLE_SEGMENT_LOAD_MAX_BYTES {
+            let object_bytes = segment_object_bytes(object_key, descriptor)?;
+            if object_bytes <= WHOLE_SEGMENT_LOAD_MAX_BYTES {
                 let whole = load_and_publish_segment_sections(
-                    store, cache, object_key, descriptor, object_len,
+                    store,
+                    cache,
+                    object_key,
+                    descriptor,
+                    object_bytes,
                 )
                 .await?;
                 cache.insert(
@@ -211,10 +215,14 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     let handle = &descriptor.index_block;
     let load = || async {
         if let Some(cache) = cache {
-            let object_len = segment_object_len(object_key, descriptor)?;
-            if object_len <= WHOLE_SEGMENT_LOAD_MAX_BYTES {
+            let object_bytes = segment_object_bytes(object_key, descriptor)?;
+            if object_bytes <= WHOLE_SEGMENT_LOAD_MAX_BYTES {
                 let whole = load_and_publish_segment_sections(
-                    store, cache, object_key, descriptor, object_len,
+                    store,
+                    cache,
+                    object_key,
+                    descriptor,
+                    object_bytes,
                 )
                 .await?;
                 cache.insert(
@@ -348,7 +356,7 @@ mod tests {
     use loonfs_test_support::stores::{
         delegate_object_store, ConcurrencyWatchStore, KeyPredicate, RecordingStore,
     };
-    use loonfs_types::format::sst_blocks::{decode_index_block, SegmentBlocksBuilder};
+    use loonfs_types::format::segment_blocks::{decode_index_block, SegmentBlocksBuilder};
     use loonfs_types::{InodeId, RevisionNo};
     use std::num::NonZeroUsize;
     use std::sync::Arc;

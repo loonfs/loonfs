@@ -65,7 +65,7 @@ async fn read_during_compaction_and_collection(
             .maintenance
             .maintain_metadata_with_options(
                 &namespace,
-                &loonfs::MetadataMaintenanceOptions {
+                &loonfs::MaintainMetadataOptions {
                     compaction_policy: loonfs::MetadataCompactionPolicy::CompactImmediately,
                     ..metadata_options(1)
                 },
@@ -158,7 +158,7 @@ async fn read_during_compaction_and_collection(
         for _ in 0..16 {
             let outcome = runtime
                 .maintenance
-                .compact_metadata(&namespace)
+                .compact_metadata(&namespace, &loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("compact");
             if matches!(
@@ -468,7 +468,7 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .await
         .expect("view first snapshot");
     let limit = PaginationPolicy::default()
-        .resolve_limit(Some(2))
+        .effective_limit(Some(2))
         .expect("page limit");
     let first_page = first_view
         .list("/")
@@ -616,7 +616,7 @@ async fn checkpoint_directory_cursor_resumes_only_at_its_checkpoint() {
         );
     }
     let limit = PaginationPolicy::default()
-        .resolve_limit(Some(2))
+        .effective_limit(Some(2))
         .expect("page limit");
     let first_page = views[0]
         .list("/")
@@ -729,7 +729,7 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
         .list("/")
         .page(PageRequest {
             limit: PaginationPolicy::default()
-                .resolve_limit(None)
+                .effective_limit(None)
                 .expect("default page limit"),
             cursor: None,
         })
@@ -744,7 +744,7 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
         ["/before.txt"]
     );
     let states = view
-        .resolve_current_files(&[before.inode_id])
+        .stat_current_files_by_inode(&[before.inode_id])
         .await
         .expect("resolve inode through the view");
     assert_eq!(states[0].current_revision_no, before.revision_no());
@@ -1087,7 +1087,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
         .expect("view the first snapshot");
     let other = snapshots[1].checkpoint_id.clone();
     let limit = PaginationPolicy::default()
-        .resolve_limit(None)
+        .effective_limit(None)
         .expect("limit");
     let root = view.stat("/").await.expect("root entry").inode_id;
 

@@ -118,7 +118,7 @@ impl CliConfig {
             )));
         }
         if let Some(default_profile) = &self.default_profile {
-            require_non_empty("default_profile", default_profile)?;
+            validate_non_empty("default_profile", default_profile)?;
             if !self.profiles.contains_key(default_profile) {
                 return Err(CliError::invalid_config(format!(
                     "`default_profile` points to missing profile `{default_profile}`"
@@ -402,7 +402,7 @@ fn default_config_location() -> Result<ConfigLocation, CliError> {
 }
 
 pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {
-    require_non_empty("profile name", name)
+    validate_non_empty("profile name", name)
 }
 
 fn profile_field(name: &str, field: &str) -> String {
@@ -677,7 +677,7 @@ fn redacted_config_value(key: Option<&str>, value: &toml::Value) -> toml::Value 
     }
 }
 
-fn require_non_empty(field: &str, value: &str) -> Result<(), CliError> {
+fn validate_non_empty(field: &str, value: &str) -> Result<(), CliError> {
     if value.trim().is_empty() {
         return Err(CliError::invalid_config(format!("missing `{field}`")));
     }
@@ -1297,9 +1297,9 @@ root = "/tmp/store"
         let removed =
             crate::profiles::delete_profile_in_table(&mut table, "broken").expect("delete broken");
         assert_eq!(removed.mode, "embedded");
-        crate::profiles::make_default_profile_in_table(&mut table, "ok").expect("switch default");
+        crate::profiles::set_default_profile_in_table(&mut table, "ok").expect("switch default");
         assert!(
-            crate::profiles::make_default_profile_in_table(&mut table, "gone").is_err(),
+            crate::profiles::set_default_profile_in_table(&mut table, "gone").is_err(),
             "unknown profile must not become the default"
         );
         super::save_config_table(&path, &table).expect("save repaired table");

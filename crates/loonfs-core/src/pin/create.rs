@@ -2,13 +2,13 @@
 
 use super::record::{delete_failed_pin, verify_pin_basis, write_pin, PinBasisVerification};
 use crate::cache::MetadataSegmentCache;
-use crate::commit::WalPublishError;
 use crate::context::MutationContext;
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::manifest::{try_fold_wal, MetadataLsmPolicy, TryFoldWalOutcome};
+use crate::manifest::{try_fold_wal, MetadataRunPolicy, TryFoldWalOutcome};
 use crate::time::{Deadline, StdMonotonicTimer};
+use crate::wal::WalPublishError;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{PinOwner, PinPayload};
 use loonfs_types::{NamespaceId, PinId};
@@ -23,7 +23,7 @@ pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     owner: PinOwner,
     context: &MutationContext,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<PinPayload> {

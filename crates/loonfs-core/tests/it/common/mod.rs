@@ -353,7 +353,7 @@ pub(crate) mod commit_split_support {
     ) -> Result<loonfs_types::FileBytes, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
-            .get_file(absolute_path, &context, None)
+            .read_file(absolute_path, &context, None)
             .await
     }
 

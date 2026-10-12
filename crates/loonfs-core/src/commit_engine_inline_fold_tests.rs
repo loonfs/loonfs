@@ -349,7 +349,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         )
         .await,
         Err(CoreError::Store {
-            class: crate::error::StoreFailureClass::PermissionDenied,
+            kind: loonfs_objectstore::ObjectStoreErrorKind::PermissionDenied,
             ..
         })
     ));
@@ -574,7 +574,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
         matches!(
             error,
             CoreError::Store {
-                class: crate::error::StoreFailureClass::RetryableTransport,
+                kind: loonfs_objectstore::ObjectStoreErrorKind::RetryableTransport,
                 ..
             }
         ),

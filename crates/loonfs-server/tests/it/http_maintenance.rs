@@ -499,7 +499,7 @@ impl loonfs::WallClock for FixedWallClock {
 
 #[tokio::test]
 async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
-    let default_idle_ms = loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms;
+    let default_idle_ms = loonfs::MaintainMetadataOptions::default().idle_fold_after_ms;
     for (idle_fold_after_ms, expected) in [
         (0, loonfs_types::WalFoldStepOutcome::NotNeeded),
         (

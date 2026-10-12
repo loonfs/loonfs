@@ -3,7 +3,7 @@
 //! The frozen tokenizer, posting-batch, and row-key grammar is specified in
 //! [`docs/specs/format.md` Appendix D](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#appendix-d-grep-extension-format).
 
-use loonfs_types::format::sst_blocks::{read_varint, write_varint, SstBlockCodecError};
+use loonfs_types::format::segment_blocks::{read_varint, write_varint, SegmentBlockCodecError};
 use loonfs_types::{InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -196,7 +196,7 @@ fn read_revision_no(bytes: &[u8], cursor: &mut usize) -> Result<RevisionNo, Inde
     })
 }
 
-fn malformed_varint(error: SstBlockCodecError) -> IndexGramsCodecError {
+fn malformed_varint(error: SegmentBlockCodecError) -> IndexGramsCodecError {
     IndexGramsCodecError::Malformed(error.to_string())
 }
 
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn segment_max_row_key_survives_a_full_final_block() {
-        use loonfs_types::format::sst_blocks::SegmentBlocksBuilder;
+        use loonfs_types::format::segment_blocks::SegmentBlocksBuilder;
 
         let mut builder = SegmentBlocksBuilder::new(std::num::NonZeroUsize::MIN);
         let mut last_row_key = String::new();

@@ -92,7 +92,7 @@ impl Maintenance {
 
 /// Stops a maintenance call that takes it, such as
 /// [`Maintenance::maintain_metadata_while_due`] or
-/// [`Maintenance::compact_metadata_with_cancellation`]. Clones share one
+/// [`Maintenance::compact_metadata`]. Clones share one
 /// state.
 #[derive(Debug, Clone, Default)]
 pub struct MaintenanceCancellation(loonfs_core::MetadataCompactionCancellation);

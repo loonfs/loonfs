@@ -6,7 +6,7 @@ use super::*;
 use crate::{InlineContentPolicy, MetadataCompactionOutcome};
 use loonfs_core::control::CurrentManifest;
 use loonfs_types::format::manifest::RunTier;
-use loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS;
+use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
 
 /// Each write leaves one inline byte in the tail, so each write is folded.
 fn fold_every_write() -> InlineContentPolicy {
@@ -359,7 +359,7 @@ async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
     let direct = writer.maintenance(loonfs_test_support::ids::writer_id("direct-maintenance"));
     assert_eq!(
         direct
-            .compact_metadata(&namespace_id)
+            .compact_metadata(&namespace_id, &crate::MaintenanceCancellation::new())
             .await
             .expect("compact through another maintenance value")
             .compaction,

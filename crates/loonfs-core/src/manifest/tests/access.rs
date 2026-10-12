@@ -40,7 +40,7 @@ fn the_merge_keeps_a_latest_empty_revision() {
     builder.push_access_revision(cleared.clone());
     let mut rows_by_family = BTreeMap::from([(
         ApiMetadataRowFamily::Access,
-        manifest_rows_for_family(&builder.finish(), ApiMetadataRowFamily::Access),
+        manifest_rows_for_family(&builder.build(), ApiMetadataRowFamily::Access),
     )]);
 
     merge_rows_with_retention(
@@ -70,16 +70,16 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
     for record in &records {
         builder.push_access_revision(record.clone());
     }
-    let state = builder.finish();
+    let state = builder.build();
 
     let segments = build_manifest_segments(
         &store,
         &namespace_id,
         &state,
         &HashMap::new(),
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await
@@ -154,9 +154,9 @@ async fn every_metadata_source_resolves_the_same_effective_rights() {
         &namespace_id,
         &state,
         &HashMap::new(),
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await

@@ -5,12 +5,13 @@
 //! object key instead of as `#[source]` chains. The server and CLI use source
 //! chains where these constraints do not apply.
 
-use crate::commit::{CommitValidationError, WalPublishError};
+use crate::commit::CommitValidationError;
 use crate::commit_engine::ContentPreparationError;
 use crate::control_object::ControlObjectLoadError;
 use crate::manifest::ManifestLoadError;
 use crate::metadata::VisiblePathError;
 use crate::storage::content::DurableContentValidationError;
+use crate::wal::WalPublishError;
 use crate::wal::{WalObjectError, WalTailLoadError};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use loonfs_types::{
@@ -29,7 +30,7 @@ pub use self::CoreError as Error;
 /// expose this as `std::result::Result<T, Error>`.
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
-pub use loonfs_objectstore::ObjectStoreErrorKind as StoreFailureClass;
+use loonfs_objectstore::ObjectStoreErrorKind;
 pub use loonfs_types::{ErrorCode, ErrorKind};
 
 /// Detailed core error.
@@ -57,7 +58,7 @@ pub enum CoreError {
     WalWrite {
         object_key: String,
         message: String,
-        class: StoreFailureClass,
+        kind: ObjectStoreErrorKind,
     },
     #[error("invalid absolute path `{0}`")]
     InvalidPath(String),
@@ -218,7 +219,7 @@ pub enum CoreError {
     Store {
         object_key: String,
         message: String,
-        class: StoreFailureClass,
+        kind: ObjectStoreErrorKind,
     },
     #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
     OutcomeUnknown { object_key: String, message: String },
@@ -331,29 +332,29 @@ impl From<ImmutableWriteError> for CoreError {
             ImmutableWriteError::Transport { object_key, source } => Self::Store {
                 object_key,
                 message: source.public_message().into_owned(),
-                class: StoreFailureClass::of(&source),
+                kind: ObjectStoreErrorKind::of(&source),
             },
             error => Self::Store {
                 object_key: fallback_object_key,
                 message: error.to_string(),
-                class: StoreFailureClass::Other,
+                kind: ObjectStoreErrorKind::Other,
             },
         }
     }
 }
 
-pub(crate) fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
-    match class {
-        StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
-        StoreFailureClass::NotFound
-        | StoreFailureClass::InvalidRequest
-        | StoreFailureClass::InvalidKey
-        | StoreFailureClass::PreconditionFailed
-        | StoreFailureClass::StoredChecksumMissing
-        | StoreFailureClass::Unsupported
-        | StoreFailureClass::Configuration
-        | StoreFailureClass::RetryableTransport
-        | StoreFailureClass::Other => ErrorCode::ServerError,
+pub(crate) fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
+    match kind {
+        ObjectStoreErrorKind::PermissionDenied => ErrorCode::StoragePermissionDenied,
+        ObjectStoreErrorKind::NotFound
+        | ObjectStoreErrorKind::InvalidRequest
+        | ObjectStoreErrorKind::InvalidKey
+        | ObjectStoreErrorKind::PreconditionFailed
+        | ObjectStoreErrorKind::StoredChecksumMissing
+        | ObjectStoreErrorKind::Unsupported
+        | ObjectStoreErrorKind::Configuration
+        | ObjectStoreErrorKind::RetryableTransport
+        | ObjectStoreErrorKind::Other => ErrorCode::ServerError,
     }
 }
 
@@ -364,7 +365,7 @@ impl CoreError {
         Self::Store {
             object_key: object_key.into(),
             message: error.public_message().into_owned(),
-            class: StoreFailureClass::of(error),
+            kind: ObjectStoreErrorKind::of(error),
         }
     }
 
@@ -385,8 +386,8 @@ impl CoreError {
             CoreError::DurableContent(error) => error.code(),
             CoreError::CommitValidation(error) => error.code(),
             CoreError::Codec { .. } | CoreError::Internal(_) => ErrorCode::ServerError,
-            CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
-                classify_store_failure(*class)
+            CoreError::WalWrite { kind, .. } | CoreError::Store { kind, .. } => {
+                classify_store_failure(*kind)
             }
             CoreError::WalPublish(error) => error.code(),
             CoreError::OutcomeUnknown { .. } => ErrorCode::OutcomeUnknown,
@@ -476,8 +477,8 @@ impl CoreError {
             CoreError::WalPublish(WalPublishError::OutcomeUnknown(message)) => {
                 Some(std::borrow::Cow::Owned(message.clone()))
             }
-            CoreError::WalWrite { class, .. } | CoreError::Store { class, .. } => {
-                Some(class.public_message())
+            CoreError::WalWrite { kind, .. } | CoreError::Store { kind, .. } => {
+                Some(kind.public_message())
             }
             CoreError::FailedOperation { source, .. } => source.object_store_public_message(),
             CoreError::DurableContent(
@@ -652,7 +653,7 @@ fn control_object_store_message(
     error: &ControlObjectLoadError,
 ) -> Option<std::borrow::Cow<'static, str>> {
     match error {
-        ControlObjectLoadError::Store { class, .. } => Some(class.public_message()),
+        ControlObjectLoadError::Store { kind, .. } => Some(kind.public_message()),
         _ => None,
     }
 }
@@ -710,7 +711,7 @@ impl std::fmt::Display for WriterFence {
 mod tests {
     use super::{
         CommitValidationError, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
-        MetadataViewError, StoreFailureClass, WriterFence,
+        MetadataViewError, ObjectStoreErrorKind, WriterFence,
     };
     use crate::commit_engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
@@ -931,7 +932,7 @@ mod tests {
         let denied = ControlObjectLoadError::Store {
             object_key: "namespaces/demo/hint.json".to_owned(),
             message: "permission denied: bucket policy".to_owned(),
-            class: StoreFailureClass::PermissionDenied,
+            kind: ObjectStoreErrorKind::PermissionDenied,
         };
 
         let core_wrappers = [

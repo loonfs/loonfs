@@ -30,7 +30,7 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
             Ok(response.map(|body| Body::new(body.map_err(TransportError::body))))
         }
     });
-    let client = Client::with_transport(
+    let client = Client::new_with_transport(
         ClientConfig {
             server_url: "http://127.0.0.1".to_owned(),
             auth_token: Some("test-token".into()),

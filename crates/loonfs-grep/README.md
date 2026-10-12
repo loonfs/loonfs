@@ -2,7 +2,7 @@
 
 `loonfs-grep` implements LoonFS's optional gram index, which `loonfs grep` uses to search file content. Each namespace stores its own index under `namespaces/{namespace_id}/extensions/grep/`. You need this crate only if you're writing a host (the program that runs the index steps). If you run `loonfs-server`, the server already runs these steps, and you configure them in its `[grep]` table (shown below). To build or collect an index by hand, use the `loonfs maintenance` commands described below.
 
-Grep never scans the store to discover namespaces. Instead, its host calls these typed steps on `GrepWorker`, passing the ID of the namespace to work on: `build_step`, `reorganize_step`, and `garbage_collect_namespace`.
+Grep never scans the store to discover namespaces. Instead, its host calls these typed steps on `GrepWorker`, passing the ID of the namespace to work on: `build_step`, `reorganize_step`, and `gc_namespace`.
 
 Commits don't schedule index work. The reference server (`loonfs-server`) runs index work in two passes:
 

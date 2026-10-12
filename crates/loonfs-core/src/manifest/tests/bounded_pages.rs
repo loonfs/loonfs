@@ -266,7 +266,7 @@ async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
     segment_rows.extend(expected.clone());
     segment_rows.extend(rows(2, 2, 1));
     let descriptor = segment(&store, &segment_rows).await;
-    let index = block_fetch::load_segment_index(
+    let index = index_block_load::load_segment_index(
         &store,
         None,
         &load::SessionBlockMemo::default(),
@@ -359,7 +359,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
     let store = LocalFsStore::new(temp.path()).expect("store");
     let expected = rows(0, 1024, 1);
     let descriptor = segment(&store, &expected).await;
-    let index = block_fetch::load_segment_index(
+    let index = index_block_load::load_segment_index(
         &store,
         None,
         &load::SessionBlockMemo::default(),
@@ -439,10 +439,10 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
         .await
         .expect("write segment");
         assert_eq!(
-            block_fetch::segment_object_len(&descriptor) <= 256 * 1024,
+            index_block_load::segment_object_bytes(&descriptor) <= 256 * 1024,
             count == 16
         );
-        let index = block_fetch::load_segment_index(
+        let index = index_block_load::load_segment_index(
             &store,
             None,
             &load::SessionBlockMemo::default(),
@@ -473,7 +473,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 &descriptor,
                 ChangeSeq(1),
                 &lower,
-                loonfs_types::format::sst_blocks::string_prefix_upper_bound(&lower).as_deref(),
+                loonfs_types::format::segment_blocks::string_prefix_upper_bound(&lower).as_deref(),
                 1,
                 scan::Readahead::Stored,
             )
@@ -518,7 +518,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
     let pool = Arc::new(ReadWorkingMemory::default());
     let memo = load::SessionBlockMemo::new(Arc::clone(&pool));
     store.reset();
-    let index = block_fetch::load_segment_index(&store, None, &memo, &descriptor)
+    let index = index_block_load::load_segment_index(&store, None, &memo, &descriptor)
         .await
         .expect("index");
     let index_bytes = index_block_heap_bytes(&index);
@@ -536,14 +536,14 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         "the index and memo containers are charged"
     );
     assert_eq!(store.count(OperationClass::Read), 1);
-    let filter = block_fetch::load_segment_filter(&store, None, &memo, &descriptor)
+    let filter = index_block_load::load_segment_filter(&store, None, &memo, &descriptor)
         .await
         .expect("filter");
     let filter_bytes = filter.decoded_bytes() + 2 * std::mem::size_of::<usize>();
     assert!(pool.in_use() >= index_reservation + filter_bytes);
     assert_eq!(store.count(OperationClass::Read), 2);
     assert_eq!(
-        *block_fetch::load_segment_index(&store, None, &memo, &descriptor)
+        *index_block_load::load_segment_index(&store, None, &memo, &descriptor)
             .await
             .expect("retained index"),
         *index

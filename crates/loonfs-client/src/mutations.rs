@@ -820,7 +820,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let max_attempts = DEFAULT.max_retries as usize + 1;
         let transport = crate::scripted_transport::failures(max_attempts);
-        let retrying = Client::with_transport(
+        let retrying = Client::new_with_transport(
             ClientConfig {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,
@@ -839,7 +839,7 @@ mod tests {
         assert_eq!(transport.attempts(), max_attempts);
 
         let transport = crate::scripted_transport::failures(1);
-        let single_shot = Client::with_transport(
+        let single_shot = Client::new_with_transport(
             ClientConfig {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,
@@ -858,7 +858,7 @@ mod tests {
     }
 
     fn retry_policy_client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-        Client::with_transport(
+        Client::new_with_transport(
             ClientConfig {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,

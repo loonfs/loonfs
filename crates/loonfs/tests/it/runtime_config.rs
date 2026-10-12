@@ -16,7 +16,7 @@ fn builder_object_store_metrics_recorder_instruments_object_store() {
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let fs = open_runtime_with(store(temp_dir.path()), "metrics-test", |builder| {
         builder
-            .trace_store_kind(ConfiguredObjectStoreKind::LocalFs)
+            .store_kind(ConfiguredObjectStoreKind::LocalFs)
             .object_store_metrics_recorder(recorder.clone())
     });
 

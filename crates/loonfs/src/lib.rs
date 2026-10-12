@@ -79,7 +79,7 @@ pub use loonfs_core::{
     CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
     ErrorCode, ErrorKind, FileContentStream, GcOptions, ListCheckpointFilesOptions,
     MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, RetentionTarget,
-    StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
+    WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::api::v0::{
     Commit, CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, FilesystemChange,
@@ -198,8 +198,8 @@ pub mod control {
 }
 
 pub use loonfs_objectstore::{
-    ByteStream, ConfiguredObjectStoreKind, ObjectStore, ObjectStoreError, SharedObjectStore,
-    StoreConfig,
+    ByteStream, ConfiguredObjectStoreKind, ObjectStore, ObjectStoreError, ObjectStoreErrorKind,
+    SharedObjectStore, StoreConfig,
 };
 
 pub use config::{InlineContentPolicy, PublicationPolicy};
@@ -220,16 +220,16 @@ pub use metadata_cache::{
     DEFAULT_MAX_SEGMENT_BYTES,
 };
 pub use options::{
-    AccessState, AdvanceRetentionOptions, AppendFileByInodeOptions, AppendFileOptions,
+    AccessState, AdvanceRetentionFloorOptions, AppendFileByInodeOptions, AppendFileOptions,
     AttributeChanges, CommitOptions, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     DeleteByInodeOptions, DeleteOptions, DirectMultipartUploadOptions, DownloadOptions,
-    ForkNamespaceOptions, ListOptions, MetadataMaintenanceOptions, MoveOptions, PutFileOptions,
+    ForkNamespaceOptions, ListOptions, MaintainMetadataOptions, MoveOptions, PutFileOptions,
     ReadFileStreamOptions, StatOptions, UndeleteDestination, UndeleteOptions,
     UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
     UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
-pub use trace::{payload_class, TraceMode};
+pub use trace::{payload_kind, TraceMode};
 
 /// Result type used by the embedded runtime.
 pub type Result<T> = std::result::Result<T, Error>;

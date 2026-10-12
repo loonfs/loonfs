@@ -2,7 +2,7 @@
 //! segments a manifest references.
 
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_layouts};
-use super::runs::{MetadataFamilySegments, MetadataLsmPolicy, MANIFEST_ROW_FAMILIES};
+use super::runs::{MetadataFamilySegments, MetadataRunPolicy, MANIFEST_ROW_FAMILIES};
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
 use crate::store_waves::STORE_WRITE_WAVE;
@@ -15,8 +15,8 @@ use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
 };
 #[cfg(test)]
-pub(super) use loonfs_types::format::sst_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
-use loonfs_types::format::sst_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
+pub(super) use loonfs_types::format::segment_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
+use loonfs_types::format::segment_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
 use loonfs_types::{ChangeSeq, ContentId, MetadataSegmentId, NamespaceId};
 use std::collections::HashMap;
 use std::future::Future;
@@ -32,7 +32,7 @@ pub(super) async fn build_manifest_segments<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     metadata_state: &MetadataState,
     layouts: &HashMap<ContentId, ContentLayoutRecord>,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
@@ -78,7 +78,7 @@ pub(super) async fn build_manifest_delta_run_segments<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     metadata_state: &MetadataState,
     layouts: &HashMap<ContentId, ContentLayoutRecord>,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Result<Vec<MetadataFamilySegments>> {
     build_manifest_segments_from_rows(
         store,
@@ -106,7 +106,7 @@ pub(super) async fn build_manifest_segments_from_rows<S, RowsForFamily>(
     store: &S,
     namespace_id: &NamespaceId,
     mut rows_for_family: RowsForFamily,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Result<Vec<MetadataFamilySegments>>
 where
     S: ObjectStore + ?Sized,
@@ -287,7 +287,7 @@ impl<'a> MetadataSegmentWriter<'a> {
     pub(super) async fn roll_full_segments<S: ObjectStore + ?Sized>(
         &mut self,
         puts: &mut MetadataSegmentPuts<'_, S>,
-        policy: MetadataLsmPolicy,
+        policy: MetadataRunPolicy,
     ) -> Result<()> {
         if self.builder.row_count() >= policy.max_rows_per_segment.get() as u64
             || self.builder.decoded_data_bytes() >= policy.target_segment_bytes.get()

@@ -51,9 +51,7 @@ impl GrepHost {
             .expect("build maintenance")
             .maintenance(loonfs_test_support::ids::writer_id(actor));
         let block_cache = Arc::new(GrepBlockCache::new(
-            loonfs::engine::DecodedBlockCacheConfig::with_max_decoded_bytes(
-                DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-            ),
+            loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
         ));
         Self {
             store: store.clone(),
@@ -266,13 +264,13 @@ pub(crate) fn observation() -> loonfs::engine::Observation {
 
 pub(crate) fn default_page_limit() -> EffectiveLimit {
     PaginationPolicy::default()
-        .resolve_limit(None)
+        .effective_limit(None)
         .expect("the pagination policy should accept its own default")
 }
 
 pub(crate) fn page_limit(matches: u32) -> EffectiveLimit {
     PaginationPolicy::default()
-        .resolve_limit(Some(matches))
+        .effective_limit(Some(matches))
         .expect("test page limits should be within the pagination policy")
 }
 

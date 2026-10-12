@@ -1,12 +1,12 @@
 //! Publish plans that delete visible paths.
 
-use super::ensure_expected_inode;
+use super::preconditions::ensure_expected_inode;
 use super::publish_path_planning::{
     resolve_visible_path_for_authorization, source_binding, CompiledFilesystemOperation,
     PublishPathPlanningView,
 };
 use crate::authorize::Absence;
-use crate::commit::CommitOp;
+use crate::commit::CommitOperation;
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
@@ -61,16 +61,16 @@ pub(super) async fn plan_delete<S: ObjectStore + ?Sized>(
     let recursive = behavior == DeleteDirectoryBehavior::Recursive;
     let source_binding = source_binding(view, resolved).await?;
     let op = match resolved.inode_kind {
-        InodeKind::File => CommitOp::DeleteFile {
+        InodeKind::File => CommitOperation::DeleteFile {
             inode_id: resolved.inode_id,
             source_binding,
         },
-        InodeKind::Directory if recursive => CommitOp::DeleteSubtree {
+        InodeKind::Directory if recursive => CommitOperation::DeleteSubtree {
             root_inode_id: resolved.inode_id,
             source_binding,
             require_empty: false,
         },
-        InodeKind::Directory => CommitOp::DeleteSubtree {
+        InodeKind::Directory => CommitOperation::DeleteSubtree {
             root_inode_id: resolved.inode_id,
             source_binding,
             require_empty: true,

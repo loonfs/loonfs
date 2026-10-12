@@ -1,8 +1,9 @@
 //! Public grep failures and their wire-code classification.
 
 use crate::manifest::GrepManifestError;
-use loonfs::{CoreError, StoreFailureClass};
+use loonfs::CoreError;
 use loonfs_objectstore::ObjectStoreError;
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::{ErrorCode, ErrorKind};
 use thiserror::Error;
 
@@ -53,7 +54,7 @@ pub enum GrepError {
         /// Provider failure text without a repeated object key.
         message: String,
         /// Classification retained from the provider boundary.
-        class: StoreFailureClass,
+        kind: ObjectStoreErrorKind,
     },
     /// Grep's rebuildable derived state failed validation.
     #[error("grep index is corrupt: {message}; disable and re-enable grep to rebuild it")]
@@ -87,7 +88,7 @@ impl GrepError {
         Self::StoreUnavailable {
             object_key: object_key.into(),
             message: error.public_message().into_owned(),
-            class: StoreFailureClass::of(error),
+            kind: ObjectStoreErrorKind::of(error),
         }
     }
 
@@ -119,8 +120,8 @@ impl GrepError {
             Self::InvalidQuery(_) => ErrorCode::InvalidRequest,
             Self::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
             Self::IndexLagging { .. } => ErrorCode::IndexLagging,
-            Self::StoreUnavailable { class, .. } => match class {
-                StoreFailureClass::PermissionDenied => ErrorCode::StoragePermissionDenied,
+            Self::StoreUnavailable { kind, .. } => match kind {
+                ObjectStoreErrorKind::PermissionDenied => ErrorCode::StoragePermissionDenied,
                 _ => ErrorCode::ServerError,
             },
             Self::IndexCorrupt { .. } => ErrorCode::IndexCorrupt,
@@ -132,7 +133,7 @@ impl GrepError {
     /// Returns an error message safe to show to users.
     pub fn public_message(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::StoreUnavailable { class, .. } => class.public_message(),
+            Self::StoreUnavailable { kind, .. } => kind.public_message(),
             Self::Runtime(error) => error.public_message(),
             Self::PublicationConflict { .. } => {
                 std::borrow::Cow::Borrowed("grep index publication conflict; retry")
@@ -148,11 +149,11 @@ impl From<GrepManifestError> for GrepError {
             GrepManifestError::Store {
                 object_key,
                 message,
-                class,
+                kind,
             } => Self::StoreUnavailable {
                 object_key,
                 message,
-                class,
+                kind,
             },
             GrepManifestError::Conflict { object_key } => Self::PublicationConflict { object_key },
             error @ (GrepManifestError::Corrupt { .. }
@@ -168,22 +169,22 @@ pub type Result<T> = std::result::Result<T, GrepError>;
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorCode, GrepError, StoreFailureClass};
+    use super::{ErrorCode, GrepError, ObjectStoreErrorKind};
 
     #[test]
-    fn store_failure_class_survives_the_grep_boundary() {
-        for (class, expected) in [
+    fn store_failure_kind_survives_the_grep_boundary() {
+        for (kind, expected) in [
             (
-                StoreFailureClass::PermissionDenied,
+                ObjectStoreErrorKind::PermissionDenied,
                 ErrorCode::StoragePermissionDenied,
             ),
-            (StoreFailureClass::InvalidRequest, ErrorCode::ServerError),
-            (StoreFailureClass::Other, ErrorCode::ServerError),
+            (ObjectStoreErrorKind::InvalidRequest, ErrorCode::ServerError),
+            (ObjectStoreErrorKind::Other, ErrorCode::ServerError),
         ] {
             let error = GrepError::StoreUnavailable {
                 object_key: "namespaces/demo/extensions/grep/hint.json".to_owned(),
                 message: "provider failure".to_owned(),
-                class,
+                kind,
             };
             assert_eq!(error.code(), expected);
         }

@@ -13,10 +13,10 @@ use super::{create, record};
 use crate::error::{CoreError, ErrorCode};
 use crate::manifest::tests::*;
 use crate::manifest::{
-    compaction_step, fold_wal, CompactionStepOutcome, MetadataCompactionPolicy, MetadataLsmPolicy,
+    compaction_step, fold_wal, CompactionStepOutcome, MetadataCompactionPolicy, MetadataRunPolicy,
 };
 use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
-use crate::namespace::writer_epoch::acquire_writer_epoch;
+use crate::namespace::writer_epoch::claim_writer_epoch;
 use crate::path::read::load_current_metadata_view;
 use crate::pin::record::load_pin;
 use crate::test_support::ops::{create, write_file_bytes};

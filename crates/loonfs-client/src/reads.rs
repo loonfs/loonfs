@@ -753,7 +753,7 @@ mod tests {
     use loonfs_types::{ContentId, EntryInodeKind, PathEntryKind};
 
     fn client_for(transport: &scripted_transport::ScriptedTransport) -> Client {
-        Client::with_transport(
+        Client::new_with_transport(
             ClientConfig {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,

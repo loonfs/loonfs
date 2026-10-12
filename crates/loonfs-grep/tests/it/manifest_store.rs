@@ -543,7 +543,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             timer.advance_ms(loonfs_grep::GREP_GC_GRACE_WINDOW_MS + 1);
             let report = host
                 .worker
-                .garbage_collect_namespace(&namespace_id, timer.now_ms())
+                .gc_namespace(&namespace_id, timer.now_ms())
                 .await
                 .expect("collect old manifests");
             assert_eq!(report.deleted_other_objects, 2);

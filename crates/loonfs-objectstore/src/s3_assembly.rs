@@ -1,7 +1,7 @@
 //! Create-only puts, multipart copy, and bounded reads for S3 and R2 assemblies.
 
 use super::{assembled_crc64nvme, S3RequestSigner, MULTIPART_CONTROL_TTL};
-use crate::assembly::{check_expected, plan_parts, source_range, READ_BYTES};
+use crate::assembly::{plan_parts, source_range, verify_expected, READ_BYTES};
 use crate::provider_object_store::{
     StoredChecksumReader, MAX_PROVIDER_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
@@ -20,7 +20,7 @@ impl S3RequestSigner {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
-        crate::assembly::check_algorithms(ChecksumAlgorithm::Crc64nvme, key, sources, expected)?;
+        crate::assembly::validate_algorithms(ChecksumAlgorithm::Crc64nvme, key, sources, expected)?;
         let mut ranges = Vec::with_capacity(sources.len());
         let mut etags = Vec::with_capacity(sources.len());
         for source in sources {
@@ -50,7 +50,7 @@ impl S3RequestSigner {
                     },
                 )
                 .await?;
-            check_expected(key, expected, &Checksum::crc64nvme(&bytes))?;
+            verify_expected(key, expected, &Checksum::crc64nvme(&bytes))?;
             return self.create_assembly(key, bytes, expected).await;
         }
         let plan = plan_parts(
@@ -103,7 +103,7 @@ impl S3RequestSigner {
                 )
             }))
             .expect("nonempty multipart parts should have valid CRC-64/NVME checksums");
-            check_expected(key, expected, &crc)?;
+            verify_expected(key, expected, &crc)?;
         }
         let etag = self
             .finish_upload(
@@ -208,7 +208,7 @@ impl S3RequestSigner {
                 offset = chunk_end;
             }
             if part.start_inclusive <= start && part.end_exclusive >= end {
-                check_expected(
+                verify_expected(
                     &source.key,
                     &source.checksum,
                     &Checksum::crc64nvme(&bytes[first_byte..]),

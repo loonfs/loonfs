@@ -1,6 +1,6 @@
 //! Cached reads and current retention-floor reads use different manifest requests.
 
-use loonfs::{LoonFs, MetadataMaintenanceOptions, NamespaceId, SharedObjectStore};
+use loonfs::{LoonFs, MaintainMetadataOptions, NamespaceId, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use std::sync::Arc;
@@ -44,7 +44,7 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
     maintenance
         .maintain_metadata_with_options(
             namespace_id,
-            &MetadataMaintenanceOptions {
+            &MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },

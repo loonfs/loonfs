@@ -1,6 +1,6 @@
 //! Errors shared by every mutable control-object loader.
 
-use crate::error::StoreFailureClass;
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::NamespaceId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -46,7 +46,9 @@ pub enum ControlObjectLoadError {
     Store {
         object_key: String,
         message: String,
-        class: StoreFailureClass,
+        // The serialized field name `class` is frozen.
+        #[serde(rename = "class")]
+        kind: ObjectStoreErrorKind,
     },
 }
 
@@ -61,7 +63,7 @@ impl ControlObjectLoadError {
             | Self::KeyLayout { .. }
             | Self::ChecksumMismatch { .. }
             | Self::Codec { .. } => ErrorCode::NamespaceCorrupt,
-            Self::Store { class, .. } => crate::error::classify_store_failure(*class),
+            Self::Store { kind, .. } => crate::error::classify_store_failure(*kind),
         }
     }
 }

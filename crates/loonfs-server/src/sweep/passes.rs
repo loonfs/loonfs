@@ -88,7 +88,7 @@ impl Sweep {
                 }
             }
             Due::Collection => {
-                if self.collect(&namespace_id).await {
+                if self.gc(&namespace_id).await {
                     self.record_collection(&entry, seq);
                 }
             }

@@ -6,14 +6,14 @@ use loonfs::metrics::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, RESULT_ERROR, RESULT_OK,
 };
 use loonfs::{
-    ChangeSeq, ErrorCode, Maintenance, MaintenanceCancellation, MetadataMaintenanceOptions,
+    ChangeSeq, ErrorCode, MaintainMetadataOptions, Maintenance, MaintenanceCancellation,
     NamespaceId, SharedObjectStore,
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
 };
 use loonfs_http::{HeldNamespace, Namespaces};
-use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PAGE_LIMIT};
+use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::EffectiveLimit;
@@ -56,7 +56,7 @@ pub struct Sweep {
 struct SweepInner {
     store: SharedObjectStore,
     maintenance: Maintenance,
-    metadata: MetadataMaintenanceOptions,
+    metadata: MaintainMetadataOptions,
     grep: Option<GrepIndexing>,
     namespaces: Arc<Namespaces>,
     max_concurrent_visits: usize,
@@ -129,9 +129,9 @@ impl Sweep {
             inner: Arc::new(SweepInner {
                 store,
                 maintenance,
-                metadata: MetadataMaintenanceOptions {
+                metadata: MaintainMetadataOptions {
                     idle_fold_after_ms: config.idle_fold_after_ms,
-                    ..MetadataMaintenanceOptions::default()
+                    ..MaintainMetadataOptions::default()
                 },
                 grep,
                 namespaces,
@@ -144,7 +144,7 @@ impl Sweep {
                 visiting: Mutex::default(),
                 slots: Semaphore::new(config.max_concurrent_maintenance),
                 page_limit: EffectiveLimit::new(
-                    NonZeroU32::new(MAX_NAMESPACE_IDS_PAGE_LIMIT)
+                    NonZeroU32::new(MAX_NAMESPACE_IDS_PER_PAGE)
                         .expect("the namespace page limit should be nonzero"),
                 ),
                 stop: MaintenanceCancellation::new(),
@@ -269,7 +269,7 @@ impl Sweep {
             self.maintain_index(grep, &namespace_id, entry.as_deref(), seq)
                 .await;
         }
-        if collect_garbage && self.collect(&namespace_id).await {
+        if collect_garbage && self.gc(&namespace_id).await {
             if let Some(entry) = &entry {
                 self.record_collection(entry, seq);
             }
@@ -364,7 +364,7 @@ impl Sweep {
         Some((visit, permit))
     }
 
-    async fn collect(&self, namespace_id: &NamespaceId) -> bool {
+    async fn gc(&self, namespace_id: &NamespaceId) -> bool {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
             return false;
@@ -383,7 +383,7 @@ impl Sweep {
         let result = match inner.maintenance.now_ms() {
             Ok(now_ms) => grep
                 .worker
-                .garbage_collect_namespace(namespace_id, now_ms)
+                .gc_namespace(namespace_id, now_ms)
                 .await
                 .map(drop),
             Err(error) => Err(GrepError::from(error)),

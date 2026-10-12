@@ -5,7 +5,7 @@
 
 use crate::common::*;
 use loonfs::{
-    AdvanceRetentionOptions, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior,
+    AdvanceRetentionFloorOptions, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior,
     ErrorCode, InodeId, ListFileRevisionsResponse, PageRequest, PathEntry, PutFileOptions,
     RetentionTarget, RevisionNo,
 };
@@ -864,7 +864,7 @@ async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips(
         .maintenance
         .advance_retention_floor_with_options(
             &namespace_id,
-            &AdvanceRetentionOptions {
+            &AdvanceRetentionFloorOptions {
                 target: RetentionTarget::Seq(committed[2]),
             },
         )

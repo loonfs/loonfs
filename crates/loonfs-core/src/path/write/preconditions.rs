@@ -1,18 +1,18 @@
 //! Request preconditions against the candidate pre-state.
 
 use super::publish_path_planning::{
-    check_binding_version, hidden_inode_binding_error, is_missing_visible_path,
+    ensure_binding_version, hidden_inode_binding_error, is_missing_visible_path,
     resolve_visible_inode, PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Authorizer, CommitAuthority};
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
-use crate::metadata::{MetadataView, VisiblePathError};
+use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AbsolutePath, AccessRevisionNo, AccessRight, AccessRights, BindingVersion, CommitPrecondition,
-    InodeId, InodeKind, NameKey,
+    DisplayName, InodeId, InodeKind, NameKey, NamespaceNaming, ROOT_INODE_ID,
 };
 
 pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
@@ -94,7 +94,7 @@ pub(super) async fn evaluate_preconditions<S: ObjectStore + ?Sized>(
                 .await?;
                 let checked = match resolve_visible_inode(&view, *inode_id).await {
                     Ok(resolved) => {
-                        check_binding_version(&view, &resolved, expected_binding_version)
+                        ensure_binding_version(&view, &resolved, expected_binding_version)
                     }
                     Err(CoreError::InodeNotFound(_)) => Err(hidden_inode_binding_error(
                         &view,
@@ -273,7 +273,7 @@ async fn evaluate_binding<S: ObjectStore + ?Sized>(
         .into());
     }
     if let (Some(binding), Some(expected)) = (actual, expected_binding_version) {
-        check_binding_version(view, &binding, expected)
+        ensure_binding_version(view, &binding, expected)
             .map_err(|error| at_precondition(error, precondition_index))?;
     }
     Ok(())
@@ -299,4 +299,30 @@ fn at_precondition(error: CoreError, precondition_index: Option<u32>) -> CoreErr
         },
         error => error,
     }
+}
+
+pub(super) fn ensure_expected_inode(
+    naming: NamespaceNaming,
+    resolved: &ResolvedVisiblePath,
+    expected: Option<InodeId>,
+    name: &DisplayName,
+) -> Result<()> {
+    if let Some(expected) = expected {
+        if resolved.inode_id != expected {
+            return Err(
+                crate::commit::CommitValidationError::BindingPreconditionMismatch {
+                    target: format!(
+                        "name `{}` under parent inode `{}`",
+                        NameKey::for_display_name(naming, name),
+                        resolved.parent_inode_id.unwrap_or(ROOT_INODE_ID)
+                    ),
+                    expected_inode_id: Some(expected),
+                    actual_inode_id: Some(resolved.inode_id),
+                    precondition_index: None,
+                }
+                .into(),
+            );
+        }
+    }
+    Ok(())
 }

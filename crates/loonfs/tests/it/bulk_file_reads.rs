@@ -697,7 +697,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
         directory,
     ];
     let states = namespace
-        .resolve_current_files(&requested)
+        .stat_current_files_by_inode(&requested)
         .await
         .expect("resolve current files");
 
@@ -776,25 +776,25 @@ async fn resolve_current_files_refuses_a_batch_over_the_cap() {
         .expect("stat file")
         .inode_id;
 
-    let at_cap = vec![alpha; loonfs::MAX_RESOLVE_CURRENT_FILES];
+    let at_cap = vec![alpha; loonfs::MAX_CURRENT_FILES_PER_STAT];
     let states = namespace
-        .resolve_current_files(&at_cap)
+        .stat_current_files_by_inode(&at_cap)
         .await
         .expect("a batch at the cap is answered");
-    assert_eq!(states.len(), loonfs::MAX_RESOLVE_CURRENT_FILES);
+    assert_eq!(states.len(), loonfs::MAX_CURRENT_FILES_PER_STAT);
     assert!(states.iter().all(|state| state.visible));
 
     let mut over_cap = at_cap;
     over_cap.push(alpha);
     let error = namespace
-        .resolve_current_files(&over_cap)
+        .stat_current_files_by_inode(&over_cap)
         .await
         .expect_err("one past the cap is refused");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert!(
         error
             .to_string()
-            .contains(&loonfs::MAX_RESOLVE_CURRENT_FILES.to_string()),
+            .contains(&loonfs::MAX_CURRENT_FILES_PER_STAT.to_string()),
         "the refusal should name the cap: {error}"
     );
 }
@@ -950,7 +950,7 @@ async fn a_standalone_reader_serves_every_operation() {
     assert_eq!(files.len(), 4);
 
     let states = namespace
-        .resolve_current_files(&files.iter().map(|file| file.inode_id).collect::<Vec<_>>())
+        .stat_current_files_by_inode(&files.iter().map(|file| file.inode_id).collect::<Vec<_>>())
         .await
         .expect("resolve current files through a standalone reader");
     assert!(states.iter().all(|state| state.visible));

@@ -3,14 +3,14 @@
 //! one result per candidate.
 
 use crate::authorize::CommitAuthority;
-use crate::commit::{settle_publish_attempt, CommitFingerprint};
+use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::{HeadStateCache, MetadataSegmentCache};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
-use crate::namespace::writer_epoch::acquire_writer;
+use crate::namespace::writer_epoch::claim_writer;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
 use crate::protocol::{
@@ -19,6 +19,7 @@ use crate::protocol::{
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
 use crate::time::{Deadline, MonotonicTimer, Observation, StdMonotonicTimer};
+use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
@@ -40,7 +41,7 @@ use thiserror::Error;
 /// it references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitCandidate {
-    request: CommitIntent,
+    intent: CommitIntent,
     content: ContentPreparation,
     maintenance: bool,
     inline_content: Vec<InlineContent>,
@@ -80,20 +81,20 @@ fn rejected_token_reasons(rejections: &[(ContentId, ContentTokenError)]) -> Stri
 impl CommitCandidate {
     /// Uses the handle subject to authorize this publication.
     pub fn with_subject(mut self, subject: loonfs_types::Subject) -> Self {
-        self.request.subject = Some(subject);
+        self.intent.subject = Some(subject);
         self.maintenance = false;
         self
     }
 
     /// Supplies the subject used to own content staged for this candidate.
     pub fn subject(&self) -> Option<&loonfs_types::Subject> {
-        self.request.subject.as_ref()
+        self.intent.subject.as_ref()
     }
 
     /// A commit no subject check applies to. Only maintenance builds one.
-    pub fn maintenance(request: CommitIntent) -> Self {
+    pub fn maintenance(intent: CommitIntent) -> Self {
         Self {
-            request,
+            intent,
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: true,
             inline_content: Vec::new(),
@@ -105,14 +106,14 @@ impl CommitCandidate {
         if self.maintenance {
             CommitAuthority::Maintenance
         } else {
-            CommitAuthority::Subject(self.request.subject.as_ref())
+            CommitAuthority::Subject(self.intent.subject.as_ref())
         }
     }
 
     /// Wraps a mutation request with no attached content proofs.
-    pub fn new(request: CommitIntent) -> Self {
+    pub fn new(intent: CommitIntent) -> Self {
         Self {
-            request,
+            intent,
             content: ContentPreparation::Ready(Vec::new()),
             maintenance: false,
             inline_content: Vec::new(),
@@ -121,8 +122,8 @@ impl CommitCandidate {
     }
 
     /// Wraps a mutation request with opaque proofs for its prepared content.
-    pub fn prepared(request: CommitIntent, content: Vec<PreparedContent>) -> Self {
-        let mut candidate = Self::new(request);
+    pub fn prepared(intent: CommitIntent, content: Vec<PreparedContent>) -> Self {
+        let mut candidate = Self::new(intent);
         let mut proofs = Vec::new();
         for value in content {
             match value.inline_content() {
@@ -135,8 +136,8 @@ impl CommitCandidate {
     }
 
     /// Wraps a mutation request whose content preparation failed.
-    pub fn rejected(request: CommitIntent, error: ContentPreparationError) -> Self {
-        Self::new(request).reject_content_preparation(error)
+    pub fn rejected(intent: CommitIntent, error: ContentPreparationError) -> Self {
+        Self::new(intent).reject_content_preparation(error)
     }
 
     /// Rejects new publication while preserving the identity needed for receipt replay.
@@ -154,11 +155,11 @@ impl CommitCandidate {
 
     /// Takes `inline_content` as the content bytes carried by the commit.
     pub fn with_inline_content(
-        request: CommitIntent,
+        intent: CommitIntent,
         content: Vec<PreparedContent>,
         inline_content: Vec<InlineContent>,
     ) -> Self {
-        let mut candidate = Self::prepared(request, content);
+        let mut candidate = Self::prepared(intent, content);
         candidate.inline_content.extend(inline_content);
         candidate
     }
@@ -171,7 +172,7 @@ impl CommitCandidate {
     /// Lists inline values in the order their operations first name them.
     pub fn ordered_inline_content(&self, namespace_id: &NamespaceId) -> Result<Vec<InlineContent>> {
         crate::protocol::validate_inline_content_references(
-            &self.request,
+            &self.intent,
             &self.inline_content,
             namespace_id,
         )?;
@@ -181,7 +182,7 @@ impl CommitCandidate {
             .map(|value| (&value.content_ref().content_id, value))
             .collect();
         Ok(self
-            .request
+            .intent
             .operations
             .iter()
             .filter_map(FilesystemOperation::content_ref)
@@ -192,7 +193,7 @@ impl CommitCandidate {
     /// Replaces an inline value with a staged proof without changing its identity form.
     pub fn stage_inline_content(&mut self, content_id: &ContentId, proof: PreparedContent) {
         let reference = proof.content_ref();
-        for operation in &mut self.request.operations {
+        for operation in &mut self.intent.operations {
             match operation {
                 FilesystemOperation::PutFile {
                     content_ref: Some(content_ref),
@@ -258,7 +259,7 @@ impl CommitCandidate {
 
     /// Bytes the request's appends add. They always travel in the WAL.
     pub fn appended_bytes(&self) -> usize {
-        self.request
+        self.intent
             .operations
             .iter()
             .filter_map(FilesystemOperation::appended_content)
@@ -268,7 +269,7 @@ impl CommitCandidate {
     /// Rejects an append of no bytes or of more than one WAL piece holds,
     /// naming the operation.
     pub fn validate_appended_content(&self) -> Result<()> {
-        for (index, operation) in self.request.operations.iter().enumerate() {
+        for (index, operation) in self.intent.operations.iter().enumerate() {
             let Some(bytes) = operation.appended_content() else {
                 continue;
             };
@@ -291,8 +292,8 @@ impl CommitCandidate {
         Ok(())
     }
 
-    pub(crate) fn request(&self) -> &CommitIntent {
-        &self.request
+    pub(crate) fn intent(&self) -> &CommitIntent {
+        &self.intent
     }
 
     pub(crate) fn content_preparation(&self) -> &ContentPreparation {
@@ -301,14 +302,14 @@ impl CommitCandidate {
 
     /// Returns the idempotency key carried by the mutation request.
     pub fn commit_id(&self) -> &CommitId {
-        &self.request.commit_id
+        &self.intent.commit_id
     }
 
     /// Computes semantic identity without applying current operational request limits.
     pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> Result<CommitFingerprint> {
         commit_fingerprint(
             namespace_id,
-            &self.request,
+            &self.intent,
             &self
                 .inline_content
                 .iter()
@@ -370,21 +371,21 @@ impl CommitCandidate {
     ) -> Result<usize> {
         let mut bytes = RequestByteCounter(
             std::mem::size_of_val(self)
-                .saturating_add(std::mem::size_of_val(self.request.operations.as_slice()))
-                .saturating_add(std::mem::size_of_val(self.request.preconditions.as_slice())),
+                .saturating_add(std::mem::size_of_val(self.intent.operations.as_slice()))
+                .saturating_add(std::mem::size_of_val(self.intent.preconditions.as_slice())),
         );
         serde_json::to_writer(
             &mut bytes,
             &(
-                &self.request.commit_id,
-                &self.request.actor_id,
-                &self.request.message,
-                &self.request.operations,
-                &self.request.preconditions,
+                &self.intent.commit_id,
+                &self.intent.actor_id,
+                &self.intent.message,
+                &self.intent.operations,
+                &self.intent.preconditions,
             ),
         )
         .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
-        if let Some(subject) = &self.request.subject {
+        if let Some(subject) = &self.intent.subject {
             serde_json::to_writer(&mut bytes, &subject.subject_id)
                 .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
             for principal_id in subject.principals.iter() {
@@ -442,7 +443,7 @@ impl CommitCandidate {
     /// Bounds the request's WAL bytes before planning adds carried layouts.
     /// Publication adds their extent bounds before accepting the plan.
     pub fn wal_record_bytes_upper_bound(&self) -> usize {
-        crate::commit_wal_size::estimated_wal_record_bytes(&self.request, &self.inline_content)
+        crate::commit_wal_size::estimated_wal_record_bytes(&self.intent, &self.inline_content)
     }
 
     /// Bounds the request after inline selection, before carried layouts.
@@ -450,28 +451,28 @@ impl CommitCandidate {
         &self,
         inline_content: &[InlineContent],
     ) -> usize {
-        crate::commit_wal_size::estimated_wal_record_bytes(&self.request, inline_content)
+        crate::commit_wal_size::estimated_wal_record_bytes(&self.intent, inline_content)
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
         // Apply limits to the complete request because the serialized publisher
         // processes every operation before releasing the write path.
         self.validate_request_has_operations()?;
-        if self.request.operations.len() > crate::limits::MAX_COMMIT_OPERATIONS {
+        if self.intent.operations.len() > crate::limits::MAX_COMMIT_OPERATIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {} operations; maximum is {}",
-                self.request.operations.len(),
+                self.intent.operations.len(),
                 crate::limits::MAX_COMMIT_OPERATIONS
             )));
         }
-        if self.request.preconditions.len() > crate::limits::MAX_COMMIT_PRECONDITIONS {
+        if self.intent.preconditions.len() > crate::limits::MAX_COMMIT_PRECONDITIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {} preconditions; maximum is {}",
-                self.request.preconditions.len(),
+                self.intent.preconditions.len(),
                 crate::limits::MAX_COMMIT_PRECONDITIONS
             )));
         }
-        if let Some(message) = &self.request.message {
+        if let Some(message) = &self.intent.message {
             if message.len() > crate::limits::MAX_COMMIT_MESSAGE_BYTES {
                 return Err(CoreError::InvalidCommitRequest(format!(
                     "mutation message is {} bytes; maximum is {}",
@@ -509,7 +510,7 @@ impl CommitCandidate {
             )));
         }
         let distinct_content_refs = self
-            .request
+            .intent
             .operations
             .iter()
             .filter_map(FilesystemOperation::content_ref)
@@ -525,7 +526,7 @@ impl CommitCandidate {
     }
 
     pub(crate) fn validate_request_has_operations(&self) -> Result<()> {
-        if self.request.operations.is_empty() {
+        if self.intent.operations.is_empty() {
             return Err(CoreError::InvalidCommitRequest(
                 "mutation request carries no operations".to_owned(),
             ));
@@ -755,9 +756,9 @@ impl NamespaceCommitEngine {
         }
     }
 
-    fn remove_tail(&self, position: &PublishTailPosition) {
+    fn invalidate_tail(&self, position: &PublishTailPosition) {
         if let Some(head_state) = &self.head_state {
-            head_state.remove_tail(&position.tail_key(&self.namespace_id));
+            head_state.invalidate_tail(&position.tail_key(&self.namespace_id));
         }
     }
 
@@ -857,7 +858,7 @@ impl NamespaceCommitEngine {
             return Ok(acquired_writer);
         }
         let (acquired_writer, anchor) =
-            acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
+            claim_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
         self.acquired_anchor = Some(anchor);
         let mut session = self.lock_session();
         if let WriterSessionStatus::Fenced(fence) = &*session {
@@ -1075,7 +1076,7 @@ impl NamespaceCommitEngine {
             }
             PublishViewEffect::Advanced { records, head } => {
                 projection.position.wal_tail_objects += 1;
-                self.remove_tail(&projection.position);
+                self.invalidate_tail(&projection.position);
                 let tail_state = Arc::make_mut(&mut projection.tail_state);
                 let chunk = match tail_state.push_object(&self.namespace_id, &records) {
                     Ok(chunk) => chunk,
@@ -1276,7 +1277,7 @@ mod tests {
                 PrincipalId::parse(format!("{index:03}{}", "x".repeat(253))).expect("principal")
             })
             .collect::<BTreeSet<_>>();
-        candidate.request.subject = Some(Subject {
+        candidate.intent.subject = Some(Subject {
             principal_scope: PrincipalScope::parse("scope").expect("scope"),
             subject_id: SubjectId::parse("subject").expect("subject"),
             principals: PrincipalSet::new(principals).expect("principals"),
@@ -1900,7 +1901,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CoreError::WalPublish(crate::commit::WalPublishError::PublishBudgetExceeded { .. })
+                CoreError::WalPublish(crate::wal::WalPublishError::PublishBudgetExceeded { .. })
             ),
             "unexpected error: {error:?}"
         );
@@ -1996,7 +1997,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = gated_store(&directory, KeyPredicate::new(|_| false));
         let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-        crate::namespace::writer_epoch::acquire_writer_epoch(
+        crate::namespace::writer_epoch::claim_writer_epoch(
             &store,
             &namespace_id,
             &context("writer-b"),
@@ -2086,7 +2087,7 @@ mod tests {
     #[tokio::test]
     async fn a_quiet_writer_reloads_after_its_own_compaction() {
         use crate::manifest::{
-            compaction_step, CompactionStepOutcome, MetadataCompactionPolicy, MetadataLsmPolicy,
+            compaction_step, CompactionStepOutcome, MetadataCompactionPolicy, MetadataRunPolicy,
         };
 
         let directory = tempdir().expect("tempdir");
@@ -2117,7 +2118,7 @@ mod tests {
             &store,
             &namespace_id,
             current.state.compactor_epoch(),
-            MetadataLsmPolicy::default(),
+            MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             crate::manifest::read_working_memory(engine.segment_cache.as_deref()),
         )
@@ -2352,7 +2353,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CoreError::WalPublish(crate::commit::WalPublishError::PublishBudgetExceeded { .. })
+                CoreError::WalPublish(crate::wal::WalPublishError::PublishBudgetExceeded { .. })
             ),
             "unexpected error: {error:?}"
         );

@@ -127,10 +127,10 @@ pub(crate) struct ReadConfig {
     /// manifest. Zero checks on every read.
     pub manifest_revalidation_interval_ms: u64,
     /// Layout and input limits for metadata compactions.
-    pub metadata_lsm_policy: loonfs_core::MetadataLsmPolicy,
+    pub metadata_run_policy: loonfs_core::MetadataRunPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
     /// Object-store kind label used by tracing, or `None` when the caller
     /// didn't identify the backend.
-    pub trace_store_kind: Option<ConfiguredObjectStoreKind>,
+    pub store_kind: Option<ConfiguredObjectStoreKind>,
 }

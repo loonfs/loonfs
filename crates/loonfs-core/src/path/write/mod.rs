@@ -17,39 +17,11 @@ mod preconditions;
 mod publish_path_planning;
 mod session;
 
-use crate::error::{CoreError, Result};
-use crate::metadata::ResolvedVisiblePath;
-use loonfs_types::{DisplayName, InodeId, NameKey, NamespaceNaming, ROOT_INODE_ID};
+use crate::error::CoreError;
 
 pub use intent::{CommitIntent, FilesystemOperation};
 pub(crate) use planner::commit_fingerprint;
 pub(crate) use session::PublishPlanningSession;
-
-pub(super) fn ensure_expected_inode(
-    naming: NamespaceNaming,
-    resolved: &ResolvedVisiblePath,
-    expected: Option<InodeId>,
-    name: &DisplayName,
-) -> Result<()> {
-    if let Some(expected) = expected {
-        if resolved.inode_id != expected {
-            return Err(
-                crate::commit::CommitValidationError::BindingPreconditionMismatch {
-                    target: format!(
-                        "name `{}` under parent inode `{}`",
-                        NameKey::for_display_name(naming, name),
-                        resolved.parent_inode_id.unwrap_or(ROOT_INODE_ID)
-                    ),
-                    expected_inode_id: Some(expected),
-                    actual_inode_id: Some(resolved.inode_id),
-                    precondition_index: None,
-                }
-                .into(),
-            );
-        }
-    }
-    Ok(())
-}
 
 impl From<loonfs_types::DestinationPreconditionError> for CoreError {
     fn from(error: loonfs_types::DestinationPreconditionError) -> Self {

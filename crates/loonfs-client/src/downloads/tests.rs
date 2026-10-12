@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 const DEFAULT_PROXY_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
 fn client_for(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-    Client::with_transport(
+    Client::new_with_transport(
         ClientConfig {
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,
@@ -366,7 +366,7 @@ async fn a_held_next_range_does_not_time_out_while_the_current_one_is_read() {
             }
         })
     };
-    let mut client = Client::with_transport(
+    let mut client = Client::new_with_transport(
         ClientConfig {
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,

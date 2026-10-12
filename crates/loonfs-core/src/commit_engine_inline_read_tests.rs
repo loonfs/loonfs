@@ -93,20 +93,20 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
             let bytes = match method {
                 "path" => {
                     engine
-                        .get_file(&path, &context, None)
+                        .read_file(&path, &context, None)
                         .await
                         .expect("path read")
                         .bytes
                 }
                 "revision" => {
                     engine
-                        .get_file_revision(&path, RevisionNo(1), &context, None)
+                        .read_file_revision(&path, RevisionNo(1), &context, None)
                         .await
                         .expect("revision read")
                         .bytes
                 }
                 "inode" => engine
-                    .get_file_revision_for_inode(inode_id, RevisionNo(1), &context, None)
+                    .read_file_revision_by_inode(inode_id, RevisionNo(1), &context, None)
                     .await
                     .expect("inode read"),
                 "speculative" | "resolved" => {
@@ -117,12 +117,12 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                     assert!(target.location.is_resident());
                     if method == "speculative" {
                         engine
-                            .get_speculative_file_content(&target)
+                            .read_speculative_file_content(&target)
                             .await
                             .expect("speculative read")
                     } else {
                         engine
-                            .get_resolved_file_content(&target)
+                            .read_resolved_file_content(&target)
                             .await
                             .expect("resolved read")
                     }
@@ -247,7 +247,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     store.reset();
     assert_eq!(
         engine
-            .get_file("/owned-0", &context, None)
+            .read_file("/owned-0", &context, None)
             .await
             .expect("own read")
             .bytes,
@@ -351,7 +351,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
     );
     engine
-        .get_file("/source-0", &context, None)
+        .read_file("/source-0", &context, None)
         .await
         .expect("cache first tail");
     let copy = CommitCandidate::new(CommitIntent::single(
@@ -373,7 +373,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
         .expect("advance"));
     assert_eq!(
         engine
-            .get_file("/copy", &context, None)
+            .read_file("/copy", &context, None)
             .await
             .expect("read copy")
             .bytes,
@@ -381,7 +381,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     );
     assert_eq!(
         engine
-            .get_file("/source-0", &context, None)
+            .read_file("/source-0", &context, None)
             .await
             .expect("read source")
             .bytes,
@@ -569,7 +569,7 @@ async fn inline_checksum_failures_match_object_validation() {
     );
     store.reset();
     let error = engine
-        .get_file("/valid-0", &context, None)
+        .read_file("/valid-0", &context, None)
         .await
         .expect_err("checksum mismatch");
     assert_no_content_requests(&store);
@@ -650,7 +650,7 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
             store.reset();
             assert_eq!(
                 engine
-                    .get_file(&path, &context, None)
+                    .read_file(&path, &context, None)
                     .await
                     .expect("read")
                     .bytes,
@@ -708,7 +708,7 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
 
     store.reset();
     let buffered = engine
-        .get_file("/file-0", &read_context, None)
+        .read_file("/file-0", &read_context, None)
         .await
         .expect("buffered read")
         .bytes;

@@ -255,7 +255,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             .await
             .expect("plan");
         let estimate = super::planned_wal_record_bytes(
-            candidate.request(),
+            candidate.intent(),
             candidate.inline_content(),
             &plan.deltas,
             &plan.appended,
@@ -270,9 +270,9 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             prepare_wal_object(namespace_id.clone(), head.writer_epoch, &head, &[prepared])
                 .expect("encode");
         assert!(
-            encoded.document_len() <= estimate,
+            encoded.document_bytes() <= estimate,
             "{kind}: {} > {estimate}",
-            encoded.document_len()
+            encoded.document_bytes()
         );
     }
 }

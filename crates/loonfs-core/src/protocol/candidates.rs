@@ -116,7 +116,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     if let Err(error) = candidate.validate_request_has_operations() {
         return CandidateAdmission::independent(Err(error));
     }
-    let mutation = candidate.request();
+    let mutation = candidate.intent();
     let semantic_identity = match candidate.semantic_identity(namespace_id) {
         Ok(semantic_identity) => semantic_identity,
         Err(error) => return CandidateAdmission::independent(Err(error)),
@@ -175,7 +175,7 @@ pub(super) fn validate_candidate_content_references(
 ) -> Result<()> {
     match candidate.content_preparation() {
         ContentPreparation::Ready(admissions) => validate_commit_content_references(
-            candidate.request(),
+            candidate.intent(),
             admissions,
             candidate.inline_content(),
             namespace_id,

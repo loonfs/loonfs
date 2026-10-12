@@ -13,8 +13,8 @@ use loonfs::publish::{
 };
 use loonfs::{
     ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, ListOptions, LoonFs,
-    MetadataCache, MetadataMaintenanceOptions, NamespaceId, PageRequest, ReadOnly,
-    SharedObjectStore, StatOptions, DEFAULT_MAX_HEAD_STATE_BYTES,
+    MaintainMetadataOptions, MetadataCache, NamespaceId, PageRequest, ReadOnly, SharedObjectStore,
+    StatOptions, DEFAULT_MAX_HEAD_STATE_BYTES,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{
@@ -293,7 +293,7 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("seed-maintenance"));
-    let fold = MetadataMaintenanceOptions {
+    let fold = MaintainMetadataOptions {
         max_wal_tail_objects: std::num::NonZeroU64::MIN,
         ..Default::default()
     };

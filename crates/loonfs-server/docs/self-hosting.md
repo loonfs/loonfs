@@ -453,7 +453,7 @@ max_concurrent_publications = 8
 
 These are the defaults without a memory limit. With sizing, `max_estimated_bytes` is derived by default. Every value must be positive. The byte estimate counts request data, prepared proofs, and queue bookkeeping, but not allocator slack, HTTP request buffers, or the metadata and working copies that a publication loads. Size process memory for those costs, and for the separate fold and cache limits too.
 
-An embedded host sets the per-namespace limits with `LoonFsBuilder::publication_limits`. It sets `max_requests`, `max_estimated_bytes`, and `max_concurrent_publications` on the execution budget, with `ExecutionBudgetBuilder::max_admitted_requests`, `max_admitted_bytes`, and `max_concurrent_publications`. Runtimes that share one budget share these three limits, but each runtime keeps its own per-namespace limits.
+An embedded host sets the per-namespace limits with `LoonFsBuilder::publication_policy`. It sets `max_requests`, `max_estimated_bytes`, and `max_concurrent_publications` on the execution budget, with `ExecutionBudgetBuilder::max_admitted_requests`, `max_admitted_bytes`, and `max_concurrent_publications`. Runtimes that share one budget share these three limits, but each runtime keeps its own per-namespace limits.
 
 A hosted server configures [inline content](../../../docs/specs/glossary.md#inline-content) (a small file's bytes, included in the commit itself) in the `[inline_content]` table, with the settings below. Inline writes are enabled by default, with a 64 KiB threshold. To disable them, set `inline_content_threshold_bytes = false`. By default, capability discovery advertises `filesystem.commits.inline_content` and `commit.max_inline_content_bytes_per_operation`, and it leaves out both when inline writes are disabled.
 
@@ -472,7 +472,7 @@ The tail limit uses the tail size that the session recorded at its last publish.
 
 The tail can exceed the limit by at most the WAL object budget, in two cases: a new session's first inline commit, and after a put whose outcome is unknown. Another writer can make the remembered size stale until this session's next publish. The `MAX_UNFOLDED_WAL_OBJECTS` write stop refuses new commits regardless of the inline tail limit.
 
-Explicit metadata maintenance uses `MetadataMaintenanceOptions::inline_content_fold_at_bytes` (also 2 MiB by default) when a writer-derived handle has an observed tail count. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
+Explicit metadata maintenance uses `MaintainMetadataOptions::inline_content_fold_at_bytes` (also 2 MiB by default) when a writer-derived handle has an observed tail count. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
 
 If a commit already succeeded, retrying the same request returns the original result without uploading the file again, as long as the commit receipt is still available. This also works after a restart, or on another server. A retry with changed bytes or a different subject returns `commit_id_reuse_conflict`.
 
@@ -597,7 +597,7 @@ A namespace whose writes stop before its tail reaches the fold thresholds is fol
 
 Set `idle_fold_after_ms = 0` to turn the rule off. An explicit `metadata` maintenance request uses the same period as the sweep. An embedded CLI profile doesn't read the server config, and it always uses 15 minutes.
 
-Embedded hosts pass `MetadataMaintenanceOptions::idle_fold_after_ms` to `Maintenance::maintain_metadata_while_due_with_options`, where zero also turns the rule off. Both `maintain_metadata_while_due` forms return `Result<bool>`. `true` means that, under the options used, no metadata work remains or can become due without another commit. The call works out the result from the reads it has already made.
+Embedded hosts pass `MaintainMetadataOptions::idle_fold_after_ms` to `Maintenance::maintain_metadata_while_due_with_options`, where zero also turns the rule off. Both `maintain_metadata_while_due` forms return `Result<bool>`. `true` means that, under the options used, no metadata work remains or can become due without another commit. The call works out the result from the reads it has already made.
 
 ## Current limitations
 

@@ -1,14 +1,14 @@
 //! Publish plans that create, recover, or replace path content.
 
-use super::ensure_expected_inode;
+use super::preconditions::ensure_expected_inode;
 use super::publish_path_planning::{
-    ensure_parent_directories, is_missing_visible_path, require_vacant_path,
+    ensure_parent_directories, ensure_vacant_path, is_missing_visible_path,
     resolve_parent_directory, resolve_visible_child, resolve_visible_inode,
     resolve_visible_path_for_authorization, CompiledFilesystemOperation, PublishPathPlanningView,
     ResolvedParents,
 };
 use crate::authorize::Absence;
-use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
+use crate::commit::{CandidateAllocation, CommitOperation, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
@@ -43,10 +43,10 @@ pub(super) async fn plan_create_directory<S: ObjectStore + ?Sized>(
         Absence::Path(absolute_path.as_str()),
     )
     .await?;
-    require_vacant_path(view, absolute_path).await?;
+    ensure_vacant_path(view, absolute_path).await?;
     let display_name = final_component(absolute_path)?;
     let child_inode_id = allocation.allocate()?;
-    ops.push(CommitOp::CreateDirectory {
+    ops.push(CommitOperation::CreateDirectory {
         child_inode_id,
         parent_inode_id: parents.parent_inode_id,
         display_name,
@@ -150,7 +150,7 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
-            require_vacant_path(view, absolute_path).await?;
+            ensure_vacant_path(view, absolute_path).await?;
             view.authorize_relocation(inode_id, saved_parent, parent_inode_id)
                 .await?;
             (parent_inode_id, final_component(absolute_path)?.clone())
@@ -194,12 +194,14 @@ pub(super) async fn plan_undelete<S: ObjectStore + ?Sized>(
             (saved_parent, deleted_binding.display_name)
         }
     };
-    Ok(CompiledFilesystemOperation::new(vec![CommitOp::Undelete {
-        inode_id,
-        deletion_seq,
-        parent_inode_id,
-        display_name,
-    }]))
+    Ok(CompiledFilesystemOperation::new(vec![
+        CommitOperation::Undelete {
+            inode_id,
+            deletion_seq,
+            parent_inode_id,
+            display_name,
+        },
+    ]))
 }
 
 pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
@@ -262,7 +264,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
             let base_revision_no = expected_file_state
                 .and_then(|expected| expected.revision_no)
                 .unwrap_or(revision.revision_no);
-            ops.push(CommitOp::ReplaceFile {
+            ops.push(CommitOperation::ReplaceFile {
                 inode_id: existing.inode_id,
                 base_revision_no,
                 content_ref: content_ref.clone(),
@@ -281,7 +283,7 @@ pub(super) async fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
                 return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
             }
             let child_inode_id = allocation.allocate()?;
-            ops.push(CommitOp::CreateFile {
+            ops.push(CommitOperation::CreateFile {
                 child_inode_id,
                 parent_inode_id: parents.parent_inode_id,
                 display_name: final_name.clone(),

@@ -1,6 +1,6 @@
 //! Publish plans that move or copy visible paths.
 
-use super::ensure_expected_inode;
+use super::preconditions::ensure_expected_inode;
 use super::publish_path_planning::ReplaceDestination;
 use super::publish_path_planning::{
     classify_replace_destination, ensure_mutation_inode, is_missing_visible_path,
@@ -9,7 +9,7 @@ use super::publish_path_planning::{
     PublishPathPlanningView,
 };
 use crate::authorize::{Absence, Replacement};
-use crate::commit::{CandidateAllocation, CommitOp, CommitValidationError};
+use crate::commit::{CandidateAllocation, CommitOperation, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
@@ -105,7 +105,7 @@ pub(super) async fn plan_move<S: ObjectStore + ?Sized>(
                 target_name,
             )?;
             ensure_expected_destination_revision(view, existing, expected_destination).await?;
-            ops.push(CommitOp::DeleteFile {
+            ops.push(CommitOperation::DeleteFile {
                 inode_id: existing.inode_id,
                 source_binding: source_binding(view, existing).await?,
             });
@@ -136,7 +136,7 @@ pub(super) async fn plan_move<S: ObjectStore + ?Sized>(
             }
         }
     }
-    ops.push(CommitOp::Rename {
+    ops.push(CommitOperation::Rename {
         inode_id: source.inode_id,
         source_binding: current_source_binding,
         new_parent_inode_id: target_parent,
@@ -321,7 +321,7 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
             let base_revision_no = expected_destination
                 .and_then(|state| state.revision_no)
                 .unwrap_or(existing_revision.revision_no);
-            ops.push(CommitOp::ReplaceFile {
+            ops.push(CommitOperation::ReplaceFile {
                 inode_id: existing.inode_id,
                 base_revision_no,
                 content_ref: revision.content_ref.clone(),
@@ -332,7 +332,7 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
                 return Err(CoreError::PathNotFound(destination_path.to_owned()));
             }
             let child_inode_id = allocation.allocate()?;
-            ops.push(CommitOp::CreateFile {
+            ops.push(CommitOperation::CreateFile {
                 child_inode_id,
                 parent_inode_id: target_parent,
                 display_name: target_name.clone(),
@@ -350,7 +350,7 @@ async fn plan_copy<S: ObjectStore + ?Sized>(
             if !source_attributes.is_empty() {
                 // Both operations carry the one identity assigned above, so
                 // validation cannot allocate a different inode for either.
-                ops.push(CommitOp::UpdateAttributes {
+                ops.push(CommitOperation::UpdateAttributes {
                     inode_id: child_inode_id,
                     base_attributes_revision_no: AttributesRevisionNo(0),
                     attributes: source_attributes,

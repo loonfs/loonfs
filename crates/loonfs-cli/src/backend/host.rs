@@ -47,7 +47,7 @@ pub(crate) fn client(
             .get_or_init(|| loonfs_types::generated_id("content-token").into())
             .clone(),
         request_deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
-        idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
+        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         store_kind,
         auth_policy: AuthPolicy::Unauthenticated,
     });
@@ -85,7 +85,7 @@ pub(crate) fn client(
             Ok(response.map(|body| Body::new(body.map_err(TransportError::body))))
         }
     });
-    Ok(Client::with_transport(
+    Ok(Client::new_with_transport(
         ClientConfig {
             server_url: "http://embedded.invalid".to_owned(),
             auth_token: None,

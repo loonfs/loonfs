@@ -117,7 +117,9 @@ pub enum WalTailLoadError {
     ReadWal {
         object_key: String,
         message: String,
-        class: crate::error::StoreFailureClass,
+        // The serialized field name `class` is frozen.
+        #[serde(rename = "class")]
+        kind: loonfs_objectstore::ObjectStoreErrorKind,
     },
     #[error("missing WAL object `{object_key}`")]
     MissingWalObject { object_key: String },
@@ -142,7 +144,7 @@ impl WalTailLoadError {
     pub fn code(&self) -> loonfs_types::ErrorCode {
         match self {
             Self::ReadWal {
-                class: crate::error::StoreFailureClass::PermissionDenied,
+                kind: loonfs_objectstore::ObjectStoreErrorKind::PermissionDenied,
                 ..
             } => loonfs_types::ErrorCode::StoragePermissionDenied,
             Self::ReadWal { .. } => loonfs_types::ErrorCode::ServerError,

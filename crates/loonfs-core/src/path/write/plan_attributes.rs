@@ -1,12 +1,12 @@
 //! The publish plan for one attribute update.
 
-use super::ensure_expected_inode;
+use super::preconditions::ensure_expected_inode;
 use super::publish_path_planning::{
     ensure_mutation_inode, resolve_visible_inode, resolve_visible_path_for_authorization,
     CompiledFilesystemOperation, PublishPathPlanningView,
 };
 use crate::authorize::Absence;
-use crate::commit::CommitOp;
+use crate::commit::CommitOperation;
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
@@ -106,7 +106,7 @@ async fn update_attributes<S: ObjectStore + ?Sized>(
         CoreError::InvalidCommitRequest(format!("the resulting attribute map is invalid: {error}"))
     })?;
     Ok(CompiledFilesystemOperation::new(vec![
-        CommitOp::UpdateAttributes {
+        CommitOperation::UpdateAttributes {
             inode_id,
             base_attributes_revision_no,
             attributes,

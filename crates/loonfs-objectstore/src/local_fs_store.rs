@@ -56,11 +56,11 @@ impl LocalFsStore {
     /// does not claim atomic rename-replace support, or when the root cannot
     /// be created.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
-        Self::with_key_prefix(root, None)
+        Self::new_with_key_prefix(root, None)
     }
 
     /// Uses the selected algorithm for stored checksums and compare tokens.
-    pub fn with_checksum_algorithm(
+    pub fn new_with_checksum_algorithm(
         root: impl Into<PathBuf>,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<Self> {
@@ -72,8 +72,8 @@ impl LocalFsStore {
 
     /// Opens a local store whose keys are confined beneath `key_prefix`,
     /// matching how the provider adapters scope theirs.
-    pub fn with_key_prefix(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
-        require_atomic_rename_replace()?;
+    pub fn new_with_key_prefix(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
+        ensure_atomic_rename_replace()?;
         let root = root.into();
         std::fs::create_dir_all(&root).map_err(|err| {
             ObjectStoreError::Configuration(format!(
@@ -205,7 +205,7 @@ impl LocalFsStore {
         // never observes a partial object and a crash never leaves a torn
         // file wedging the key. `hard_link` fails if the key exists, which
         // is exactly the create-if-absent precondition.
-        let created_dirs = ensure_parent_dir(key, path).await?;
+        let created_dirs = create_parent_directory(key, path).await?;
         let temp_path = temp_path(path);
         let mut file = OpenOptions::new()
             .write(true)
@@ -233,9 +233,9 @@ impl LocalFsStore {
         linked?;
 
         if created_dirs {
-            sync_dir_chain(key, path, root).await?;
+            sync_directory_chain(key, path, root).await?;
         }
-        sync_parent_dir(key, path).await
+        sync_parent_directory(key, path).await
     }
 
     /// Writes a streamed payload to a sibling staging file, then links or
@@ -253,7 +253,7 @@ impl LocalFsStore {
         expected: Option<&Checksum>,
     ) -> Result<u64> {
         let path = self.resolve_key(key)?;
-        let created_dirs = ensure_parent_dir(key, &path).await?;
+        let created_dirs = create_parent_directory(key, &path).await?;
         let temp_path = temp_path(&path);
         let mut file = OpenOptions::new()
             .write(true)
@@ -280,7 +280,7 @@ impl LocalFsStore {
                 size_bytes += chunk.len() as u64;
             }
             if let (Some(expected), Some(checksum)) = (expected, checksum) {
-                crate::assembly::check_expected(key, expected, &checksum.finish())?;
+                crate::assembly::verify_expected(key, expected, &checksum.finish())?;
             }
             file.sync_all().await.map_err(|err| io_error(key, err))?;
             Ok(size_bytes)
@@ -301,9 +301,9 @@ impl LocalFsStore {
         published?;
 
         if created_dirs {
-            sync_dir_chain(key, &path, &self.root).await?;
+            sync_directory_chain(key, &path, &self.root).await?;
         }
-        sync_parent_dir(key, &path).await?;
+        sync_parent_directory(key, &path).await?;
         Ok(size_bytes)
     }
 
@@ -346,7 +346,7 @@ impl LocalFsStore {
     }
 
     async fn replace_object(key: &str, root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
-        let created_dirs = ensure_parent_dir(key, path).await?;
+        let created_dirs = create_parent_directory(key, path).await?;
         let temp_path = temp_path(path);
 
         let result: Result<()> = async {
@@ -373,9 +373,9 @@ impl LocalFsStore {
         }
 
         if created_dirs {
-            sync_dir_chain(key, path, root).await?;
+            sync_directory_chain(key, path, root).await?;
         }
-        sync_parent_dir(key, path).await
+        sync_parent_directory(key, path).await
     }
 }
 
@@ -518,8 +518,8 @@ impl LocalFsStore {
 
         match fs::remove_file(&path).await {
             Ok(()) => {
-                sync_parent_dir(key, &path).await?;
-                prune_empty_parent_dirs(key, path.parent(), &self.root).await?;
+                sync_parent_directory(key, &path).await?;
+                prune_empty_parent_directories(key, path.parent(), &self.root).await?;
                 Ok(())
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -607,7 +607,12 @@ impl ObjectStore for LocalFsStore {
     ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
         let mut complete = false;
         let created = async {
-            crate::assembly::check_algorithms(self.checksum_algorithm(), key, sources, expected)?;
+            crate::assembly::validate_algorithms(
+                self.checksum_algorithm(),
+                key,
+                sources,
+                expected,
+            )?;
             let scoped = self.scoped(key)?;
             let body = crate::assembly::stream_sources(self, sources, tail)
                 .chain(stream::once(async {
@@ -718,12 +723,12 @@ impl ObjectStore for LocalFsStore {
 }
 
 #[cfg(unix)]
-fn require_atomic_rename_replace() -> Result<()> {
+fn ensure_atomic_rename_replace() -> Result<()> {
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn require_atomic_rename_replace() -> Result<()> {
+fn ensure_atomic_rename_replace() -> Result<()> {
     Err(ObjectStoreError::Configuration(
         "local filesystem provider requires atomic rename-replace and is supported only on \
          Unix-family platforms"
@@ -752,7 +757,7 @@ async fn list_prefix_for_root(
 
 /// Creates the parent directory chain. Returns whether anything was created,
 /// so callers know the new directory entries also need to be made durable.
-async fn ensure_parent_dir(key: &str, path: &Path) -> Result<bool> {
+async fn create_parent_directory(key: &str, path: &Path) -> Result<bool> {
     match path.parent() {
         Some(parent) => {
             if fs::try_exists(parent)
@@ -776,7 +781,7 @@ async fn ensure_parent_dir(key: &str, path: &Path) -> Result<bool> {
 /// Fsyncs the directory holding `path`, making a rename, create, or unlink
 /// of that entry durable. Without this, the file data can survive a crash
 /// while the directory entry pointing at it does not.
-async fn sync_parent_dir(key: &str, path: &Path) -> Result<()> {
+async fn sync_parent_directory(key: &str, path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         // The entry is already in place; a failed sync leaves its durability
@@ -798,7 +803,7 @@ async fn sync_parent_dir(key: &str, path: &Path) -> Result<()> {
 /// Fsyncs every directory from `path`'s parent up to and including the
 /// store root, so a freshly created directory chain survives a crash. The
 /// root itself pre-exists, so the chain never needs to go past it.
-async fn sync_dir_chain(key: &str, path: &Path, root: &Path) -> Result<()> {
+async fn sync_directory_chain(key: &str, path: &Path, root: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         let mut current = path.parent();
@@ -980,7 +985,11 @@ fn relative_key(prefix: &str, root: &Path, path: &Path) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-async fn prune_empty_parent_dirs(key: &str, mut current: Option<&Path>, root: &Path) -> Result<()> {
+async fn prune_empty_parent_directories(
+    key: &str,
+    mut current: Option<&Path>,
+    root: &Path,
+) -> Result<()> {
     while let Some(dir) = current {
         if dir == root {
             break;
@@ -1029,28 +1038,28 @@ fn etag(checksum: &Checksum) -> String {
     )
 }
 
-fn map_create_error(key: &str, err: std::io::Error) -> ObjectStoreError {
-    if err.kind() == std::io::ErrorKind::AlreadyExists {
+fn map_create_error(key: &str, error: std::io::Error) -> ObjectStoreError {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
         ObjectStoreError::PreconditionFailed {
             object_key: key.to_owned(),
         }
     } else {
-        io_error(key, err)
+        io_error(key, error)
     }
 }
 
-fn ambiguous(key: &str, err: std::io::Error) -> ObjectStoreError {
-    ObjectStoreError::transport(key, err.to_string())
+fn ambiguous(key: &str, error: std::io::Error) -> ObjectStoreError {
+    ObjectStoreError::transport(key, error.to_string())
 }
 
-fn io_error(key: &str, err: std::io::Error) -> ObjectStoreError {
-    if err.kind() == std::io::ErrorKind::PermissionDenied {
+fn io_error(key: &str, error: std::io::Error) -> ObjectStoreError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
         return ObjectStoreError::PermissionDenied {
             object_key: key.to_owned(),
-            message: err.to_string(),
+            message: error.to_string(),
         };
     }
-    ObjectStoreError::transport(key, err.to_string())
+    ObjectStoreError::transport(key, error.to_string())
 }
 
 #[cfg(test)]

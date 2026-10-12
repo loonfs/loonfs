@@ -351,7 +351,7 @@ impl MetadataState {
             }
         }
 
-        metadata_state.check_bindings(committed_seq)?;
+        metadata_state.verify_bindings(committed_seq)?;
         Ok(metadata_state)
     }
 

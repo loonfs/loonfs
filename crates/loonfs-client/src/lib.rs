@@ -142,13 +142,13 @@ impl Client {
     pub fn new(config: ClientConfig) -> Result<Self> {
         config.validate()?;
         let service = reqwest_transport::service(&config)?;
-        Self::with_transport(config, service)
+        Self::new_with_transport(config, service)
     }
 
     /// Creates a client for in-process hosts and tests using an HTTP service.
     /// Retries, timeouts, and identity headers apply the same way as with
     /// [`Client::new`].
-    pub fn with_transport<S>(config: ClientConfig, service: S) -> Result<Self>
+    pub fn new_with_transport<S>(config: ClientConfig, service: S) -> Result<Self>
     where
         S: Service<http::Request<Body>, Response = http::Response<Body>, Error = TransportError>
             + Clone

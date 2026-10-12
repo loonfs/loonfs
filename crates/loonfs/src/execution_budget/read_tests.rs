@@ -256,9 +256,12 @@ async fn commits_folds_and_pin_folds_complete_while_a_read_holds_the_only_slot()
     )
     .await
     .expect("snapshot fold");
-    finish(maintenance.compact_metadata(fixture.namespace.id()))
-        .await
-        .expect("compaction");
+    finish(maintenance.compact_metadata(
+        fixture.namespace.id(),
+        &crate::MaintenanceCancellation::new(),
+    ))
+    .await
+    .expect("compaction");
     fixture.assert_counts(1, 0);
     fixture.store.release();
     assert_eq!(

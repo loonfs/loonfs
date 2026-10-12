@@ -77,7 +77,7 @@ async fn revision_test_materialization(
     // The corruptions below target base-run segments, which only exist
     // once compaction has merged the checkpoint's delta runs.
     let manifest_no =
-        checkpoint_then_compact(store, namespace_id, context, MetadataLsmPolicy::default()).await;
+        checkpoint_then_compact(store, namespace_id, context, MetadataRunPolicy::default()).await;
     let materialized =
         load_manifest_materialization_for_inspection(store, namespace_id, manifest_no)
             .await
@@ -216,9 +216,9 @@ async fn seed_merged_base_with_a_delta_run(store: &LocalFsStore, namespace_id: &
     drain_compaction(
         store,
         namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -306,9 +306,9 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     let compacted_manifest_no = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await
@@ -685,7 +685,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
         &store,
         &namespace_id,
         &context,
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
     )
     .await;
     let materialized =
@@ -847,7 +847,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         &store,
         &namespace_id,
         &context,
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
     )
     .await;
     let materialized =
@@ -914,7 +914,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         &store,
         &namespace_id,
         &context,
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
     )
     .await;
     let materialized =
@@ -991,7 +991,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         &store,
         &namespace_id,
         &context,
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
     )
     .await;
     let materialized =

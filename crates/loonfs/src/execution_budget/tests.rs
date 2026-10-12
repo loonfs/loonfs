@@ -125,7 +125,7 @@ impl GatedRuntime {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             maintenance
-                .compact_metadata(&namespace_id)
+                .compact_metadata(&namespace_id, &crate::MaintenanceCancellation::new())
                 .await
                 .expect("merge the delta runs");
         })
@@ -610,13 +610,13 @@ async fn one_namespace_id_in_two_stores_is_charged_separately() {
     let first = gated_runtime(|builder| {
         builder
             .execution_budget(budget.clone())
-            .publication_limits(one_request_per_namespace())
+            .publication_policy(one_request_per_namespace())
     })
     .await;
     let second = gated_runtime(|builder| {
         builder
             .execution_budget(budget.clone())
-            .publication_limits(one_request_per_namespace())
+            .publication_policy(one_request_per_namespace())
     })
     .await;
     let first_documents = first.namespace("documents").await;

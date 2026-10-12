@@ -1,16 +1,16 @@
 //! Cached block loading for ordered metadata scans.
 
-use super::block_fetch::load_segment_index;
 use super::block_load::load_segment_blocks_with_readahead;
 use super::compaction_merge::SegmentBlockLoader;
 use super::data_block_load::MAX_BULK_LOAD_BYTES;
 use super::error::ManifestLoadError;
+use super::index_block_load::load_segment_index;
 use super::scan::{Readahead, VerifiedMetadataSegments};
 use super::validate::validate_manifest_row_seq_range;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataSegmentRef};
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentIndexEntry,
 };
 use loonfs_types::ChangeSeq;

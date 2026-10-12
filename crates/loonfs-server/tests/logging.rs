@@ -374,7 +374,8 @@ async fn store_fault_has_one_error_from_the_boundary() {
     config.maintenance = MaintenanceMode::ServeOnly;
 
     let failing = Arc::new(FailStore::new(
-        LocalFsStore::with_key_prefix(&store_root, Some(key_prefix)).expect("build local store"),
+        LocalFsStore::new_with_key_prefix(&store_root, Some(key_prefix))
+            .expect("build local store"),
         KeyPredicate::hint(
             &loonfs_types::NamespaceId::parse("faulty").expect("valid namespace id"),
         ),
@@ -385,7 +386,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
     let bootstrap = LoonFs::builder_with_store(store.clone())
         .writer_id("logging-store-fault-bootstrap")
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(ConfiguredObjectStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build bootstrap writer");

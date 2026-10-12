@@ -202,7 +202,7 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
             .sweep
             .inner
             .namespaces
-            .with_held(&namespace_id, |held| held.handle.last_published_seq()),
+            .visit_held(&namespace_id, |held| held.handle.last_published_seq()),
         Some(None)
     );
     server.sweep.tick().await;

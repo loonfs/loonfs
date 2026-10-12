@@ -15,7 +15,7 @@ use super::output::{
 use super::pagination::{
     collect_or_stream_pages, page_request, visit_pages, write_jsonl_page, PagePlan, PagedListing,
 };
-use super::partial::{self, PartialDownload, PartialMeta};
+use super::partial::{self, PartialDownload, PartialDownloadMetadata};
 use super::recursive;
 use crate::args::{
     CommandKind, CommitArgs, FilesystemAnnotateArgs, FilesystemAppendArgs, FilesystemCatArgs,
@@ -612,14 +612,14 @@ pub(super) async fn open_resumable_download(
     revision_no: Option<RevisionNo>,
     snapshot_id: Option<&PinId>,
     destination: &Path,
-) -> Result<(FileDownload, Option<PartialMeta>), CliError> {
+) -> Result<(FileDownload, Option<PartialDownloadMetadata>), CliError> {
     let mut download = context
         .target
         .open_file_download(spec, revision_no, snapshot_id, 0)
         .await?;
     let identity = download.resume_identity();
     let resolved_revision = identity.map(|(_, revision)| revision);
-    let meta = identity.map(|(claim, _)| PartialMeta::describe(claim, revision_no));
+    let meta = identity.map(|(claim, _)| PartialDownloadMetadata::describe(claim, revision_no));
     let start_offset = meta
         .as_ref()
         .map_or(0, |meta| partial::resumable_bytes(destination, meta));
@@ -660,7 +660,7 @@ pub(super) async fn open_resumable_download(
 pub(super) async fn stream_download_to_file(
     download: &mut FileDownload,
     destination: &Path,
-    meta: Option<&PartialMeta>,
+    meta: Option<&PartialDownloadMetadata>,
     force: bool,
     derived_name: bool,
     progress: &ProgressReporter,

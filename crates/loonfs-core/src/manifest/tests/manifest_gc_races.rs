@@ -16,7 +16,7 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
         .await
         .expect("bootstrap");
     if start == ManifestNo(2) {
-        acquire_writer_epoch(&store, &namespace_id, &context)
+        claim_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("advance initial hint");
     }
@@ -30,7 +30,7 @@ async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool
     );
     failed_hint.fail_all();
     for _ in start.0..4 {
-        acquire_writer_epoch(&failed_hint, &namespace_id, &context)
+        claim_writer_epoch(&failed_hint, &namespace_id, &context)
             .await
             .expect("publish despite failed hint update");
     }

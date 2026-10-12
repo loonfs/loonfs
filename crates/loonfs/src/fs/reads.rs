@@ -65,7 +65,7 @@ async fn change_feed_page(
     after_seq: ChangeSeq,
     limit: EffectiveLimit,
 ) -> Result<ListChangesResponse> {
-    engine.require_administrator(context).await?;
+    engine.ensure_administrator(context).await?;
     engine
         .list_changes_after(after_seq, limit, context)
         .await
@@ -148,7 +148,7 @@ impl ReadView {
 
     /// Shared read options may name the snapshot this view reads; naming any
     /// other snapshot would silently read the wrong one.
-    fn require_same_snapshot(&self, requested: Option<&PinId>) -> Result<()> {
+    fn ensure_same_snapshot(&self, requested: Option<&PinId>) -> Result<()> {
         let Some(requested) = requested else {
             return Ok(());
         };
@@ -206,7 +206,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<PathEntry> {
         self.read(async {
-            self.require_same_snapshot(options.snapshot_id.as_ref())?;
+            self.ensure_same_snapshot(options.snapshot_id.as_ref())?;
             Ok(self
                 .engine
                 .resolve_path(absolute_path, options.clone(), &self.context)
@@ -255,7 +255,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<ListPathEntriesResponse> {
         self.read(async {
-            self.require_same_snapshot(options.snapshot_id.as_ref())?;
+            self.ensure_same_snapshot(options.snapshot_id.as_ref())?;
             validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
@@ -306,7 +306,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<PathEntry> {
         self.read(async {
-            self.require_same_snapshot(options.snapshot_id.as_ref())?;
+            self.ensure_same_snapshot(options.snapshot_id.as_ref())?;
             Ok(self
                 .engine
                 .stat_inode(inode_id, options.clone(), &self.context)
@@ -348,7 +348,7 @@ impl ReadView {
         _permit: &BudgetPermit<'_>,
     ) -> Result<ListInodeChildrenResponse> {
         self.read(async {
-            self.require_same_snapshot(options.snapshot_id.as_ref())?;
+            self.ensure_same_snapshot(options.snapshot_id.as_ref())?;
             validate_view_directory_cursor(
                 request.cursor.as_ref(),
                 self.head_seq(),
@@ -375,7 +375,7 @@ impl ReadView {
     /// Resolves current visibility, revision, and path against this view.
     ///
     /// Unreadable inodes return `visible: false` with no path or revision.
-    pub async fn resolve_current_files(
+    pub async fn stat_current_files_by_inode(
         &self,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
@@ -408,8 +408,11 @@ impl ReadView {
 
     /// Refuses a reader with no subject on an ACL namespace, for callers
     /// that could otherwise answer before any per-subject read.
-    pub fn require_subject(&self) -> Result<()> {
-        Ok(self.engine.require_subject(&self.context)?)
+    ///
+    /// This is a hook for an extension that answers from its own state
+    /// before it reads through this view, such as `loonfs-grep`.
+    pub fn ensure_subject(&self) -> Result<()> {
+        Ok(self.engine.ensure_subject(&self.context)?)
     }
 
     /// Reads one inode revision through this view's authorization.
@@ -423,7 +426,7 @@ impl ReadView {
         self.read(async {
             Ok(self
                 .engine
-                .get_file_revision_for_inode(inode_id, revision_no, &self.context, Some(max_bytes))
+                .read_file_revision_by_inode(inode_id, revision_no, &self.context, Some(max_bytes))
                 .await?)
         })
         .await
@@ -435,7 +438,7 @@ impl ReadView {
         self.read(async {
             Ok(self
                 .engine
-                .get_file(
+                .read_file(
                     absolute_path,
                     &self.context,
                     self.core.inner.config.max_read_content_bytes,
@@ -508,7 +511,7 @@ impl ReadView {
         self.read(async {
             Ok(self
                 .engine
-                .get_file_by_inode(
+                .read_file_by_inode(
                     inode_id,
                     &self.context,
                     self.core.inner.config.max_read_content_bytes,
@@ -1324,7 +1327,7 @@ impl<M> Namespace<M> {
     /// inodes return `visible: false` with no path or revision. Readable directories
     /// have a path but no revision.
     ///
-    /// A batch larger than [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES)
+    /// A batch larger than [`MAX_CURRENT_FILES_PER_STAT`](crate::MAX_CURRENT_FILES_PER_STAT)
     /// returns `invalid_request` before reading metadata.
     #[tracing::instrument(
         level = "debug",
@@ -1338,7 +1341,7 @@ impl<M> Namespace<M> {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn resolve_current_files(
+    pub async fn stat_current_files_by_inode(
         &self,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
@@ -1528,7 +1531,7 @@ impl<M> Namespace<M> {
                 let request = request.clone();
                 async move {
                     let page = engine
-                        .list_file_revisions_for_inode_page(inode_id, request, &read_context)
+                        .list_file_revisions_by_inode_page(inode_id, request, &read_context)
                         .await?;
                     Ok(file_revisions_page_response(
                         self.namespace_id.clone(),
@@ -1564,7 +1567,7 @@ impl<M> Namespace<M> {
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
                 let read = engine
-                    .get_file_revision(
+                    .read_file_revision(
                         absolute_path,
                         revision_no,
                         &read_context,
@@ -1638,7 +1641,7 @@ impl<M> Namespace<M> {
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
                 let read = engine
-                    .get_file_by_inode(
+                    .read_file_by_inode(
                         inode_id,
                         &read_context,
                         self.core.inner.config.max_read_content_bytes,
@@ -1770,7 +1773,7 @@ impl<M> Namespace<M> {
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
                 let bytes = engine
-                    .get_file_revision_for_inode(
+                    .read_file_revision_by_inode(
                         inode_id,
                         revision_no,
                         &read_context,

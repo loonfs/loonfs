@@ -1,13 +1,13 @@
 //! Publish plans that add bytes to the end of a file.
 
-use super::ensure_expected_inode;
 use super::planned_pieces::CommitPieces;
+use super::preconditions::ensure_expected_inode;
 use super::publish_path_planning::{
     resolve_visible_inode, resolve_visible_path_for_authorization, CompiledFilesystemOperation,
     PublishPathPlanningView,
 };
 use crate::authorize::Absence;
-use crate::commit::{AppendedContent, CommitOp, CommitValidationError};
+use crate::commit::{AppendedContent, CommitOperation, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
@@ -155,7 +155,7 @@ async fn plan_append<S: ObjectStore + ?Sized>(
     )
     .await?;
     Ok(CompiledFilesystemOperation {
-        ops: vec![CommitOp::ReplaceFile {
+        ops: vec![CommitOperation::ReplaceFile {
             inode_id: revision.inode_id,
             base_revision_no: revision.revision_no,
             content_ref: appended.content_ref.clone(),

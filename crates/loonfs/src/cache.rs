@@ -27,7 +27,7 @@ impl RuntimeCore {
 
     /// Looks up the head for a load and counts the hit or miss. A
     /// speculative read peeks first and then loads, so only the load counts.
-    fn lookup_namespace_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
+    fn find_namespace_head(&self, namespace_id: &NamespaceId) -> Option<Arc<CachedReadAnchor>> {
         let head = self.inner.head_state.get_anchor(namespace_id);
         self.inner
             .metadata_cache
@@ -102,7 +102,7 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<CachedReadAnchor, CoreError> {
-        if let Some(cached) = self.lookup_namespace_head(namespace_id) {
+        if let Some(cached) = self.find_namespace_head(namespace_id) {
             let mut head = CachedReadAnchor::clone(&cached);
             // Measure every answer against the previous check, not against the probe
             // it answers. A successor published after that check cannot be collected
@@ -256,7 +256,7 @@ impl RuntimeCore {
         });
         (
             self.reader_engine(namespace_id)
-                .with_authorization_head(self.runtime_read_context(live)),
+                .authorization_head(self.runtime_read_context(live)),
             read_context,
         )
     }

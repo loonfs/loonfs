@@ -41,4 +41,4 @@ pub use worker::{
     GrepReorganizeOutcome, GrepWorker,
 };
 
-pub use gc::{run_grep_gc, GrepGcReport, GREP_GC_GRACE_WINDOW_MS};
+pub use gc::{gc_grep, GrepGcReport, GREP_GC_GRACE_WINDOW_MS};

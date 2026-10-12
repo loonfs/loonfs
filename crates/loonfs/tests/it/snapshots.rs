@@ -517,7 +517,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
     );
     let request = PageRequest {
         limit: PaginationPolicy::default()
-            .resolve_limit(None)
+            .effective_limit(None)
             .expect("limit"),
         cursor: None,
     };

@@ -48,21 +48,21 @@ enum UploadProgress {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourceIdentity {
     size_bytes: u64,
-    modified_ns: i128,
+    modified_at_ms: i128,
 }
 
 impl SourceIdentity {
-    /// Reads a file's length and full-precision modification time.
+    /// Reads a file's length and its modification time in milliseconds.
     pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
         let metadata = std::fs::metadata(path)?;
         let modified = metadata.modified()?;
-        let modified_ns = match modified.duration_since(std::time::UNIX_EPOCH) {
-            Ok(since) => since.as_nanos() as i128,
-            Err(before) => -(before.duration().as_nanos() as i128),
+        let modified_at_ms = match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(since) => since.as_millis() as i128,
+            Err(before) => -(before.duration().as_millis() as i128),
         };
         Ok(Self {
             size_bytes: metadata.len(),
-            modified_ns,
+            modified_at_ms,
         })
     }
 }
@@ -134,7 +134,7 @@ impl UploadJournal {
             local_path,
             options.commit.commit_id.as_ref(),
         )?;
-        let dir = uploads_dir().ok_or_else(|| {
+        let dir = uploads_directory().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "upload journals require an absolute XDG_STATE_HOME or HOME",
@@ -487,7 +487,7 @@ fn journal_key(
 /// Where per-upload records live: `$XDG_STATE_HOME/loonfs/uploads` when that
 /// variable names an absolute directory, and `$HOME/.local/state/loonfs/uploads`
 /// otherwise — the same order, and the same reasoning, as the config file's.
-fn uploads_dir() -> Option<PathBuf> {
+fn uploads_directory() -> Option<PathBuf> {
     if let Some(state_home) = absolute_env_path("XDG_STATE_HOME") {
         return Some(state_home.join(XDG_STATE_SUBDIR).join(UPLOADS_SUBDIR));
     }
@@ -606,7 +606,7 @@ mod tests {
     fn source(size_bytes: u64) -> SourceIdentity {
         SourceIdentity {
             size_bytes,
-            modified_ns: 7,
+            modified_at_ms: 7,
         }
     }
     fn options() -> PutFileOptions {

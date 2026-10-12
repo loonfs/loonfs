@@ -30,7 +30,7 @@ pub(crate) fn missing_source(key: &str) -> ObjectStoreError {
     }
 }
 
-pub(crate) fn check_algorithms(
+pub(crate) fn validate_algorithms(
     algorithm: ChecksumAlgorithm,
     key: &str,
     sources: &[AssemblySource],
@@ -48,7 +48,7 @@ pub(crate) fn check_algorithms(
     Ok(())
 }
 
-pub(crate) fn check_expected(key: &str, expected: &Checksum, actual: &Checksum) -> Result<()> {
+pub(crate) fn verify_expected(key: &str, expected: &Checksum, actual: &Checksum) -> Result<()> {
     if expected == actual {
         Ok(())
     } else {
@@ -111,7 +111,7 @@ async fn source_stream<'a, S: ObjectStore + ?Sized>(
                 return Ok(None);
             };
             if offset == range.end_exclusive {
-                check_expected(&source.key, &source.checksum, &checksum.finish())?;
+                verify_expected(&source.key, &source.checksum, &checksum.finish())?;
                 return Ok(None);
             }
             let end = (offset + READ_BYTES).min(range.end_exclusive);
@@ -130,7 +130,7 @@ async fn source_stream<'a, S: ObjectStore + ?Sized>(
             }
             checksum.update(&chunk);
             let checksum = if end == range.end_exclusive {
-                check_expected(&source.key, &source.checksum, &checksum.finish())?;
+                verify_expected(&source.key, &source.checksum, &checksum.finish())?;
                 None
             } else {
                 Some(checksum)
@@ -148,13 +148,13 @@ pub(crate) async fn read_sources<S: ObjectStore + ?Sized>(
     expected: &Checksum,
     key: &str,
 ) -> Result<Bytes> {
-    check_algorithms(store.checksum_algorithm(), key, sources, expected)?;
+    validate_algorithms(store.checksum_algorithm(), key, sources, expected)?;
     let mut bytes = Vec::new();
     let mut body = stream_sources(store, sources, tail);
     while let Some(chunk) = body.next().await {
         bytes.extend_from_slice(&chunk?);
     }
-    check_expected(
+    verify_expected(
         key,
         expected,
         &Checksum::compute(expected.algorithm, &bytes),

@@ -4,7 +4,7 @@
 
 use crate::common::{collect_path_entries, expect_code, writer};
 use loonfs::{
-    ErrorCode, LoonFs, ManifestNo, MetadataMaintenanceOptions, Namespace, NamespaceId,
+    ErrorCode, LoonFs, MaintainMetadataOptions, ManifestNo, Namespace, NamespaceId,
     NamespaceSessionStatus, ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -107,7 +107,7 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     );
     assert_eq!(failing.attempts(), 0);
     assert_eq!(
-        namespace_writer_a.session_state(),
+        namespace_writer_a.session_status(),
         NamespaceSessionStatus::Fenced
     );
     failing.clear();
@@ -188,7 +188,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let fold_threshold = usize::try_from(
-        MetadataMaintenanceOptions::default()
+        MaintainMetadataOptions::default()
             .max_wal_tail_objects
             .get(),
     )

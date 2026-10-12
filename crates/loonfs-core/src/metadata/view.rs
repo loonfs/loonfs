@@ -5,7 +5,7 @@ use super::durable_cache::{
     DurableVisibilityCache, DurableVisibilityCacheInner, ParentNameCacheKey, SharedRows,
 };
 use super::manifest_index;
-use super::view_session::{latest_visible_binding, LeafRevisionPrefetch};
+use super::view_session::{latest_visible_binding, LeafRevisionPreload};
 use super::visibility::{self, MetadataVisibilityReads};
 use crate::error::CoreError;
 use crate::manifest::VerifiedMetadataSegments;
@@ -21,7 +21,7 @@ use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
-use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
+use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{
     AbsolutePath, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId, InodeId,
@@ -323,7 +323,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         absolute_path: &AbsolutePath,
     ) -> Result<ResolvedVisiblePath, CoreError> {
         self.session()
-            .resolve_visible_path(absolute_path, LeafRevisionPrefetch::Skip)
+            .resolve_visible_path(absolute_path, LeafRevisionPreload::Skip)
             .await
     }
 
@@ -385,9 +385,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         inode_id: InodeId,
     ) -> Result<Option<RevisionRecord>, CoreError> {
-        let row_revision = self.row_latest_revision_for_inode(inode_id);
+        let row_revision = self.row_latest_revision_by_inode(inode_id);
         let manifest_revision = if let Some(segments) = self.manifest_segments() {
-            manifest_index::latest_revision_for_inode(segments, inode_id).await?
+            manifest_index::latest_revision_by_inode(segments, inode_id).await?
         } else {
             None
         };
@@ -397,7 +397,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(revision_order_key))
     }
 
-    pub(crate) async fn revision_for_inode(
+    pub(crate) async fn revision_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -425,9 +425,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Option<RevisionRecord>, CoreError> {
-        let row_revision = self.row_revision_for_inode_no(inode_id, revision_no);
+        let row_revision = self.row_revision_by_inode_no(inode_id, revision_no);
         let manifest_revision = if let Some(segments) = self.manifest_segments() {
-            manifest_index::revision_for_inode_no(segments, inode_id, revision_no).await?
+            manifest_index::revision_by_inode_no(segments, inode_id, revision_no).await?
         } else {
             None
         };
@@ -437,7 +437,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(revision_order_key))
     }
 
-    pub(crate) async fn revisions_for_inode_page_desc(
+    pub(crate) async fn revisions_by_inode_page_desc(
         &self,
         inode_id: InodeId,
         start_after: Option<manifest_index::RevisionPagePosition>,
@@ -447,12 +447,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             return Ok(Vec::new());
         }
         let mut revisions = if let Some(segments) = self.manifest_segments() {
-            manifest_index::revisions_for_inode_page_desc(segments, inode_id, start_after, limit)
+            manifest_index::revisions_by_inode_page_desc(segments, inode_id, start_after, limit)
                 .await?
         } else {
             Vec::new()
         };
-        revisions.extend(self.row_revisions_for_inode_page_desc(inode_id, start_after));
+        revisions.extend(self.row_revisions_by_inode_page_desc(inode_id, start_after));
         revisions.retain(|revision| revision.committed_seq <= self.visible_seq());
         revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
         revisions.truncate(limit);
@@ -482,7 +482,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(|record| attributes_order_key(record))
             .cloned();
         let manifest_record = if let Some(segments) = self.manifest_segments() {
-            manifest_index::attributes_for_inode(segments, inode_id, self.visible_seq()).await?
+            manifest_index::attributes_by_inode(segments, inode_id, self.visible_seq()).await?
         } else {
             None
         };
@@ -506,7 +506,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(|record| access_order_key(record))
             .cloned();
         let manifest_record = if let Some(segments) = self.manifest_segments() {
-            manifest_index::access_for_inode(segments, inode_id, self.visible_seq()).await?
+            manifest_index::access_by_inode(segments, inode_id, self.visible_seq()).await?
         } else {
             None
         };
@@ -803,7 +803,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         .await
     }
 
-    fn row_latest_revision_for_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
+    fn row_latest_revision_by_inode(&self, inode_id: InodeId) -> Option<RevisionRecord> {
         self.row_states()
             .flat_map(|state| state.revisions())
             .filter(|revision| {
@@ -813,7 +813,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .cloned()
     }
 
-    fn row_revision_for_inode_no(
+    fn row_revision_by_inode_no(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -829,7 +829,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .cloned()
     }
 
-    fn row_revisions_for_inode_page_desc(
+    fn row_revisions_by_inode_page_desc(
         &self,
         inode_id: InodeId,
         start_after: Option<manifest_index::RevisionPagePosition>,

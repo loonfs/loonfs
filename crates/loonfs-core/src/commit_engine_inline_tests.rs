@@ -347,7 +347,7 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let inline_candidate = candidate("forms", vec![inline]);
-    let staged_candidate = CommitCandidate::prepared(inline_candidate.request.clone(), vec![proof]);
+    let staged_candidate = CommitCandidate::prepared(inline_candidate.intent.clone(), vec![proof]);
     publish(&mut engine, &store, &context, inline_candidate)
         .await
         .expect("inline publish");
@@ -404,7 +404,7 @@ async fn invalid_inline_candidates_write_nothing() {
     );
     let mut mismatched = candidate("mismatched", vec![different]);
     mismatched
-        .request
+        .intent
         .operations
         .push(put("/staged", staged.content_ref()));
     mismatched.content =
@@ -415,7 +415,7 @@ async fn invalid_inline_candidates_write_nothing() {
     if let FilesystemOperation::PutFile {
         content_ref: Some(content_ref),
         ..
-    } = &mut wrong_checksum.request.operations[0]
+    } = &mut wrong_checksum.intent.operations[0]
     {
         content_ref.checksum = loonfs_types::Checksum::crc32c(b"inline bytes");
     }

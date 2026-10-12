@@ -16,7 +16,7 @@ use loonfs_types::format::manifest::{
     MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestPayload,
     RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
-use loonfs_types::format::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
+use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,

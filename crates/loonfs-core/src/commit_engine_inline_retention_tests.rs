@@ -5,7 +5,7 @@ use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::{gc_namespace, GcOptions};
 use crate::manifest::{
     advance_retention_floor, compaction_step, CompactionStepOutcome, MetadataCompactionPolicy,
-    MetadataLsmPolicy, RetentionTarget,
+    MetadataRunPolicy, RetentionTarget,
 };
 use crate::path::read::{load_metadata_view, ReadLoadContext};
 use crate::pin::{create_pin, load_snapshot_read_basis};
@@ -45,7 +45,7 @@ async fn compact_and_check_pair(
             store,
             namespace_id,
             loonfs_types::CompactorEpoch(0),
-            MetadataLsmPolicy::default(),
+            MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             Arc::default(),
         )

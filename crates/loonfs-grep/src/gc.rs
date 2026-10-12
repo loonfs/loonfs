@@ -34,14 +34,12 @@ pub struct GrepGcReport {
     pub retained_candidates: u64,
 }
 
-pub async fn run_grep_gc<S: ObjectStore + Clone>(
+pub async fn gc_grep<S: ObjectStore + Clone>(
     worker: &GrepWorker<S>,
     namespace_id: &NamespaceId,
     now_ms: u64,
 ) -> Result<RunMaintenanceResponse> {
-    let report = worker
-        .garbage_collect_namespace(namespace_id, now_ms)
-        .await?;
+    let report = worker.gc_namespace(namespace_id, now_ms).await?;
     Ok(RunMaintenanceResponse::GrepGc {
         namespace_id: namespace_id.clone(),
         deleted_segments: report.deleted_segments,
@@ -52,7 +50,7 @@ pub async fn run_grep_gc<S: ObjectStore + Clone>(
 }
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
-    pub async fn garbage_collect_namespace(
+    pub async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
         now_ms: u64,

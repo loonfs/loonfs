@@ -15,7 +15,7 @@ use super::ResolvedBinding;
 
 /// Semantic operation inside a planned commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CommitOp {
+pub(crate) enum CommitOperation {
     /// Create a directory under a parent inode.
     CreateDirectory {
         /// Inode identity assigned once by the candidate allocator during

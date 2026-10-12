@@ -126,7 +126,7 @@ mod tests {
     use loonfs_types::format::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
     };
-    use loonfs_types::format::sst_blocks::BlockHandle;
+    use loonfs_types::format::segment_blocks::BlockHandle;
     use loonfs_types::{
         ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
     };

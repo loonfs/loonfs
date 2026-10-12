@@ -9,10 +9,10 @@ use loonfs::uploads::ResolvedUploadCompletion;
 use loonfs::{
     ActorId, AdvanceRetentionResponse, ChangeSeq, Checkpoint, Commit, ContentRef, DeleteOptions,
     DirectoryPageCursor, Error, ErrorCode, FileBytes, FileRevisionsPager, FoldWalResponse,
-    InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder, Maintenance,
-    MetadataMaintenanceOptions, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics,
-    NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly, SharedObjectStore,
-    UploadId, UploadSession, Writable,
+    InodeChildrenPager, ListChangesResponse, LoonFs, LoonFsBuilder, MaintainMetadataOptions,
+    Maintenance, MetadataMaintenanceResponse, Namespace, NamespaceDiagnostics, NamespaceId,
+    PathEntriesPager, PathEntry, PutFileOptions, ReadOnly, SharedObjectStore, UploadId,
+    UploadSession, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::first_page;
@@ -158,20 +158,20 @@ pub(crate) async fn collect_checkpoints(
 }
 
 /// Metadata maintenance options with an explicit fold threshold.
-pub(crate) fn metadata_options(max_wal_tail_objects: u64) -> MetadataMaintenanceOptions {
-    MetadataMaintenanceOptions {
+pub(crate) fn metadata_options(max_wal_tail_objects: u64) -> MaintainMetadataOptions {
+    MaintainMetadataOptions {
         max_wal_tail_objects: std::num::NonZeroU64::new(max_wal_tail_objects)
             .expect("a fold threshold should be nonzero"),
-        ..MetadataMaintenanceOptions::default()
+        ..MaintainMetadataOptions::default()
     }
 }
 
 /// Runs explicit compaction until no family group is due, so every group
 /// ends in one base run and the retention floor's rules have been applied.
 pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: &NamespaceId) {
-    let options = MetadataMaintenanceOptions {
+    let options = MaintainMetadataOptions {
         compaction_policy: loonfs::MetadataCompactionPolicy::CompactImmediately,
-        ..MetadataMaintenanceOptions::default()
+        ..MaintainMetadataOptions::default()
     };
     for _ in 0..32 {
         let step = maintenance
@@ -429,7 +429,7 @@ pub(crate) trait RuntimeTestExt {
     fn maintain_metadata_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: MetadataMaintenanceOptions,
+        options: MaintainMetadataOptions,
     ) -> loonfs::Result<MetadataMaintenanceResponse>;
     fn fold_wal_blocking(&self, namespace_id: &NamespaceId) -> loonfs::Result<FoldWalResponse>;
     fn stat_path_blocking(
@@ -559,7 +559,7 @@ impl RuntimeTestExt for TestRuntime {
     fn maintain_metadata_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: MetadataMaintenanceOptions,
+        options: MaintainMetadataOptions,
     ) -> loonfs::Result<MetadataMaintenanceResponse> {
         block_on(
             self.maintenance

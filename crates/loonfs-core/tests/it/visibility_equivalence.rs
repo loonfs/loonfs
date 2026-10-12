@@ -1041,7 +1041,7 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
 
     let revisions = harness
         .engine
-        .list_file_revisions_for_inode_page(
+        .list_file_revisions_by_inode_page(
             inode_id,
             PageRequest {
                 limit: loonfs_test_support::ids::page_limit(32),
@@ -1061,7 +1061,7 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
     );
     let bytes = harness
         .engine
-        .get_file_revision_for_inode(inode_id, RevisionNo(1), &context, None)
+        .read_file_revision_by_inode(inode_id, RevisionNo(1), &context, None)
         .await
         .expect("retained revision bytes remain readable by inode");
     assert_eq!(bytes, b"revision one");
@@ -1096,7 +1096,7 @@ async fn revision_history_pages_survive_wal_folds_and_compaction() {
         for page_no in 0..4 {
             let page = harness
                 .engine
-                .list_file_revisions_for_inode_page(
+                .list_file_revisions_by_inode_page(
                     inode_id,
                     PageRequest {
                         limit: loonfs_test_support::ids::page_limit(2),
@@ -1115,7 +1115,7 @@ async fn revision_history_pages_survive_wal_folds_and_compaction() {
         for revision in 1..=8u8 {
             let bytes = harness
                 .engine
-                .get_file_revision_for_inode(
+                .read_file_revision_by_inode(
                     inode_id,
                     RevisionNo(u64::from(revision)),
                     &context,

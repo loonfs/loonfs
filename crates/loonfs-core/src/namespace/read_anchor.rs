@@ -131,7 +131,7 @@ pub async fn manifest_has_successor<S: ObjectStore + ?Sized>(
         .map_err(|error| ControlObjectLoadError::Store {
             object_key: object_key.clone(),
             message: error.public_message().into_owned(),
-            class: crate::error::StoreFailureClass::of(&error),
+            kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
         })?
         .is_some())
 }

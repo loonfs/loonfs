@@ -207,9 +207,9 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
             execution_budget: ExecutionBudget::default(),
             max_read_content_bytes: None,
             manifest_revalidation_interval_ms: 1000,
-            metadata_lsm_policy: loonfs_core::MetadataLsmPolicy::default(),
+            metadata_run_policy: loonfs_core::MetadataRunPolicy::default(),
             trace_mode: TraceMode::Remote,
-            trace_store_kind: Some(ConfiguredObjectStoreKind::LocalFs),
+            store_kind: Some(ConfiguredObjectStoreKind::LocalFs),
         },
         MetadataCache::default(),
         None,
@@ -254,7 +254,7 @@ async fn test_writer_with_interval(
         .writer_id("writer-a")
         .min_publish_interval_ms(min_publish_interval_ms)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(ConfiguredObjectStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")
@@ -271,7 +271,7 @@ async fn test_writer_with_cache(
         .metadata_cache(metadata_cache)
         .metrics_recorder(recorder)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(ConfiguredObjectStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")
@@ -558,7 +558,7 @@ fn try_admit_prepared_candidate(
     candidate: PreparedCandidate,
 ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
     let commit_id = candidate.candidate.commit_id().clone();
-    drop(publisher.check_admission(&publisher.lock_state())?);
+    drop(publisher.ensure_admission(&publisher.lock_state())?);
     let permit = publisher
         .admission
         .acquire_candidate(namespace_id, &candidate)?;
@@ -2475,7 +2475,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
     }
     assert_eq!(writer.execution_budget().stats().folds_running, 1);
     let closing = tokio::spawn(namespace_writers[2].clone().close());
-    while namespace_writers[2].session_state() != NamespaceSessionStatus::Closed {
+    while namespace_writers[2].session_status() != NamespaceSessionStatus::Closed {
         tokio::task::yield_now().await;
     }
 
@@ -3204,7 +3204,7 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
                 .max_concurrent_publications(NonZeroUsize::MIN)
                 .build(),
         )
-        .publication_limits(crate::PublicationPolicy {
+        .publication_policy(crate::PublicationPolicy {
             max_requests_per_namespace: NonZeroUsize::new(1).expect("one request per namespace"),
             ..crate::PublicationPolicy::default()
         })

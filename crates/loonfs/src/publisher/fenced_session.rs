@@ -50,7 +50,7 @@ async fn discover_fence(namespace: &Namespace<Writable>) -> Error {
         .await
         .expect_err("discover the fence");
     assert_eq!(error.code(), ErrorCode::WriterFenced);
-    assert_eq!(namespace.session_state(), NamespaceSessionStatus::Fenced);
+    assert_eq!(namespace.session_status(), NamespaceSessionStatus::Fenced);
     error
 }
 
@@ -161,7 +161,7 @@ async fn a_fenced_session_starts_no_fold_or_compaction() {
     assert!(report.fenced);
     assert_no_work(publisher);
     assert_eq!(store.counts(), requests);
-    assert_eq!(replacement.session_state(), NamespaceSessionStatus::Open);
+    assert_eq!(replacement.session_status(), NamespaceSessionStatus::Open);
     writer.shutdown().await.expect("shutdown");
     assert_eq!(
         writer.execution_budget().stats(),

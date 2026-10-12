@@ -848,14 +848,14 @@ async fn upload_sessions_belong_to_their_subject() {
     let session = engine.begin_upload(Some(&ada)).await.expect("begin");
     assert_eq!(
         engine
-            .get_upload_status(&session.upload_id, Some(&bob))
+            .load_upload_status(&session.upload_id, Some(&bob))
             .await
             .expect_err("hidden session")
             .code(),
         ErrorCode::UploadNotFound
     );
     engine
-        .get_upload_status(&session.upload_id, Some(&ada))
+        .load_upload_status(&session.upload_id, Some(&ada))
         .await
         .expect("owner session");
     let unrestricted = NamespaceId::parse("unrestricted").expect("namespace");
@@ -865,7 +865,7 @@ async fn upload_sessions_belong_to_their_subject() {
     let engine = namespace_engine(&store, &unrestricted, &context);
     let session = engine.begin_upload(Some(&ada)).await.expect("begin");
     engine
-        .get_upload_status(&session.upload_id, None)
+        .load_upload_status(&session.upload_id, None)
         .await
         .expect("subject ignored");
 }
@@ -922,7 +922,7 @@ async fn resolve_path(
 fn read_page<C>(limit: u32) -> PageRequest<C> {
     PageRequest {
         limit: PaginationPolicy::default()
-            .resolve_limit(Some(limit))
+            .effective_limit(Some(limit))
             .expect("limit"),
         cursor: None,
     }
@@ -982,7 +982,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
         .expect("stat");
     assert_eq!(
         viewer
-            .get_file("/team/file", &context, None)
+            .read_file("/team/file", &context, None)
             .await
             .expect("content")
             .bytes,
@@ -1080,7 +1080,7 @@ async fn reads_require_read_and_absence_hides_the_inode() {
     );
     assert_eq!(
         stranger
-            .get_file("/team/file", &context, None)
+            .read_file("/team/file", &context, None)
             .await
             .expect_err("hidden content")
             .code(),
@@ -1128,7 +1128,7 @@ async fn history_needs_the_history_right() {
             };
             assert_eq!(
                 engine
-                    .get_file_revision("/team/file", revision, &context, None)
+                    .read_file_revision("/team/file", revision, &context, None)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.code()),
@@ -1136,7 +1136,7 @@ async fn history_needs_the_history_right() {
             );
             assert_eq!(
                 engine
-                    .get_file_revision_for_inode(inode_id, revision, &context, None)
+                    .read_file_revision_by_inode(inode_id, revision, &context, None)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.code()),
@@ -1174,7 +1174,7 @@ async fn history_needs_the_history_right() {
         );
         assert_eq!(
             engine
-                .list_file_revisions_for_inode_page(inode_id, read_page(10), &context)
+                .list_file_revisions_by_inode_page(inode_id, read_page(10), &context)
                 .await
                 .map(|page| page.items.len())
                 .map_err(|error| error.code()),
@@ -1195,10 +1195,10 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
     )
     .await;
     let head = read_context(&store, &namespace_id).await;
-    let viewer = read_engine(&store, &namespace_id, "viewer").with_authorization_head(head.clone());
+    let viewer = read_engine(&store, &namespace_id, "viewer").authorization_head(head.clone());
     assert_eq!(
         viewer
-            .get_file("/team/file", &snapshot, None)
+            .read_file("/team/file", &snapshot, None)
             .await
             .expect_err("moved historical inode is hidden")
             .code(),
@@ -1206,23 +1206,22 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
     );
     assert_eq!(
         viewer
-            .get_file("/team/kept", &snapshot, None)
+            .read_file("/team/kept", &snapshot, None)
             .await
             .expect_err("snapshot needs history")
             .code(),
         ErrorCode::Forbidden
     );
-    let finance =
-        read_engine(&store, &namespace_id, "finance").with_authorization_head(head.clone());
+    let finance = read_engine(&store, &namespace_id, "finance").authorization_head(head.clone());
     assert_eq!(
         finance
-            .get_file("/team/file", &snapshot, None)
+            .read_file("/team/file", &snapshot, None)
             .await
             .expect("historical inode")
             .bytes,
         b"body"
     );
-    let historian = read_engine(&store, &namespace_id, "historian").with_authorization_head(head);
+    let historian = read_engine(&store, &namespace_id, "historian").authorization_head(head);
     let listing = historian
         .list_path_page("/team", read_page(10), ListOptions::default(), &snapshot)
         .await
@@ -1292,7 +1291,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
     let viewer = read_engine(&store, &namespace_id, "viewer");
     assert_eq!(
         viewer
-            .require_administrator(&context)
+            .ensure_administrator(&context)
             .await
             .expect_err("feed requires administrator")
             .code(),
@@ -1315,7 +1314,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
         ),
     ] {
         engine
-            .require_administrator(&context)
+            .ensure_administrator(&context)
             .await
             .expect("feed authorized");
         assert!(!engine

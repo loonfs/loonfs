@@ -20,7 +20,7 @@ use loonfs_http::HttpMetrics;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
-use loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS;
+use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
 use loonfs_types::{CapabilityDocument, API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0};
 use std::path::Path;
 use std::sync::Arc;
@@ -849,7 +849,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,
         max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms,
+        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,
@@ -864,7 +864,7 @@ async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writa
     LoonFs::builder_with_store(store)
         .writer_id(writer_id)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(ConfiguredObjectStoreKind::LocalFs)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
         .build()
         .await
         .expect("build writer")

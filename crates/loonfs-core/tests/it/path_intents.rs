@@ -239,10 +239,10 @@ async fn list_file_revisions<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<loonfs_types::ListFileRevisionsResponse, CoreError> {
     let entry = resolve_path(store, namespace_id, absolute_path).await?;
-    list_file_revisions_for_inode(store, namespace_id, absolute_path, entry.inode_id).await
+    list_file_revisions_by_inode(store, namespace_id, absolute_path, entry.inode_id).await
 }
 
-async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
+async fn list_file_revisions_by_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     _absolute_path: &str,
@@ -254,7 +254,7 @@ async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     let mut cursor = None;
     loop {
         let page = engine
-            .list_file_revisions_for_inode_page(
+            .list_file_revisions_by_inode_page(
                 inode_id,
                 PageRequest {
                     limit: page_limit(2),
@@ -285,11 +285,11 @@ async fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_types::FileBytes, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
-        .get_file_revision(absolute_path, revision_no, &context, None)
+        .read_file_revision(absolute_path, revision_no, &context, None)
         .await
 }
 
-async fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
+async fn read_file_revision_bytes_by_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
@@ -297,7 +297,7 @@ async fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<u8>, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
-        .get_file_revision_for_inode(inode_id, revision_no, &context, None)
+        .read_file_revision_by_inode(inode_id, revision_no, &context, None)
         .await
 }
 
@@ -993,7 +993,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         Some(replacement_context.now_ms)
     );
     let inode_historical =
-        read_file_revision_bytes_for_inode(&store, &namespace_id, inode_id, RevisionNo(2))
+        read_file_revision_bytes_by_inode(&store, &namespace_id, inode_id, RevisionNo(2))
             .await
             .expect("read inode revision");
     assert_eq!(inode_historical, b"two");
@@ -1016,7 +1016,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         ErrorCode::PathNotFound
     );
     let inode_revisions =
-        list_file_revisions_for_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
+        list_file_revisions_by_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
             .await
             .expect("inode revisions");
     assert_eq!(inode_revisions.revisions.len(), 2);
@@ -1036,7 +1036,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         .expect("read restored");
     assert_eq!(restored.bytes, b"one");
     let restored_revisions =
-        list_file_revisions_for_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
+        list_file_revisions_by_inode(&store, &namespace_id, "/docs/moved.txt", inode_id)
             .await
             .expect("restored revisions");
     assert_eq!(

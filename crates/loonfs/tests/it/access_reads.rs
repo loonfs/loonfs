@@ -178,7 +178,7 @@ async fn check_buffered_read_access(content_size: usize) {
         ErrorCode::PathNotFound
     );
     let states = namespace
-        .resolve_current_files(&[inode_id])
+        .stat_current_files_by_inode(&[inode_id])
         .await
         .expect("resolve revoked file");
     assert_eq!(states.len(), 1);

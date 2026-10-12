@@ -238,7 +238,7 @@ impl LiveSet {
             .saturating_add(self.grace_window_ms)
     }
 
-    pub(super) fn retirement_state(&self) -> RetirementStatus {
+    pub(super) fn retirement_status(&self) -> RetirementStatus {
         let Some(tombstone) = &self.current_tombstone else {
             return RetirementStatus::Active;
         };

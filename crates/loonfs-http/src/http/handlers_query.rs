@@ -1,7 +1,7 @@
 //! The `query/v0` API group: derived-index reads.
 
 use super::extractors::SubjectHeaders;
-use super::query_params::{parse_boolean_query_param, required_query_param, resolve_page_limit};
+use super::query_params::{effective_page_limit, parse_boolean_query_param, required_query_param};
 #[cfg(feature = "openapi")]
 use super::query_params::{OpenApiDefaultFalseBoolean, OpenApiPageLimit};
 use super::{AppQuery, BindingState, NamespaceIdPath, NoQuery};
@@ -75,7 +75,7 @@ pub(super) async fn grep(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(mut query): AppQuery<GrepQuery>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
-    let limit = resolve_page_limit(query.limit.take())?;
+    let limit = effective_page_limit(query.limit.take())?;
     let request = grep_request(query)?;
     let service = state.grep_service();
     // Grep's own segments come off the instrumented store every LoonFS

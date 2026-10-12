@@ -141,7 +141,7 @@ impl Namespaces {
                 if let Some(entry) = handles.get(namespace_id) {
                     let mut held = entry.lock().unwrap_or_else(PoisonError::into_inner);
                     if held.closing.is_none()
-                        && held.handle.session_state() != NamespaceSessionStatus::Closed
+                        && held.handle.session_status() != NamespaceSessionStatus::Closed
                     {
                         held.last_opened_ms = self.now_ms();
                         return Ok(held.handle.clone());
@@ -259,7 +259,7 @@ impl Namespaces {
     }
 
     /// Reads or updates one held entry without cloning its handle.
-    pub fn with_held<T>(
+    pub fn visit_held<T>(
         &self,
         namespace_id: &NamespaceId,
         visit: impl FnOnce(&mut HeldNamespace) -> T,
@@ -279,7 +279,7 @@ impl Namespaces {
     }
 
     pub fn mark_index_dirty(&self, namespace_id: &NamespaceId) {
-        self.with_held(namespace_id, |held| held.index_dirty = true);
+        self.visit_held(namespace_id, |held| held.index_dirty = true);
     }
 
     /// Checks the held session under the table lock, so a late error cannot
@@ -292,7 +292,7 @@ impl Namespaces {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .handle
-                .session_state()
+                .session_status()
                 == NamespaceSessionStatus::Fenced
         }) {
             return false;

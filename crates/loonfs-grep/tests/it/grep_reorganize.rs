@@ -18,7 +18,7 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{ConcurrencyWatchStore, KeyPredicate, RecordingStore};
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, BuiltSegmentBlocks, SegmentBlocksBuilder,
 };
 use loonfs_types::{

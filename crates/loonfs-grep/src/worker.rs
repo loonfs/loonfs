@@ -24,14 +24,14 @@ use loonfs::engine::{
     Observation, SegmentBlockLoader, SegmentRowIterator,
 };
 use loonfs::{
-    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance, ReadOnly,
-    StoreFailureClass,
+    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance,
+    ObjectStoreErrorKind, ReadOnly,
 };
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
 use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
-use loonfs_types::format::sst_blocks::{
-    DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, SstBlockCodecError,
+use loonfs_types::format::segment_blocks::{
+    DecodedDataBlock, SegmentBlockCodecError, SegmentBlocksBuilder, SegmentIndexEntry,
     DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS,
     DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
@@ -989,7 +989,7 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
 ) -> Result<GrepSegmentRef> {
     let segment_id = IndexSegmentId::generate();
     let object_key = segment_key(namespace_id, &segment_id);
-    let codec_error = |error: SstBlockCodecError| CoreError::Codec {
+    let codec_error = |error: SegmentBlockCodecError| CoreError::Codec {
         object_key: object_key.clone(),
         message: error.to_string(),
     };
@@ -1334,7 +1334,7 @@ fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
         error => GrepError::StoreUnavailable {
             object_key: fallback_object_key,
             message: error.to_string(),
-            class: StoreFailureClass::Other,
+            kind: ObjectStoreErrorKind::Other,
         },
     }
 }

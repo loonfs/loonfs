@@ -121,7 +121,7 @@ fn upload_id() -> UploadId {
 }
 
 fn client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-    Client::with_transport(
+    Client::new_with_transport(
         ClientConfig {
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,
@@ -137,7 +137,7 @@ fn client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
 /// A client whose failures are the test's own, not the retry policy's, so a
 /// scripted conversation is exactly as long as it reads.
 fn client_without_retry(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-    Client::with_transport(
+    Client::new_with_transport(
         ClientConfig {
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,

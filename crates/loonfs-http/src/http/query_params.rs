@@ -91,12 +91,12 @@ pub(super) fn parse_snapshot_id(value: &str) -> Result<loonfs_types::PinId, ApiR
         .map_err(|error| invalid_path_id_error("snapshot_id", value, error.reason()))
 }
 
-pub(super) fn resolve_page_limit(
+pub(super) fn effective_page_limit(
     limit: Option<String>,
 ) -> Result<loonfs_types::EffectiveLimit, ApiResponseError> {
     let requested = limit.as_deref().map(parse_page_limit).transpose()?;
     PaginationPolicy::default()
-        .resolve_limit(requested)
+        .effective_limit(requested)
         .map_err(limit_response_error)
 }
 

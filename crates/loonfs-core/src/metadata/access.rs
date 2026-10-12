@@ -236,7 +236,7 @@ mod tests {
                 grants,
             });
         }
-        builder.finish()
+        builder.build()
     }
 
     pub(crate) fn access_fixture_cases() -> Vec<(PrincipalSet, InodeId, AccessRights)> {
@@ -327,7 +327,7 @@ mod tests {
                 delta_index: 0,
             });
         }
-        let state = builder.finish();
+        let state = builder.build();
         let error = effective_rights(
             &mut state.reads_at_seq(ChangeSeq(1)),
             &principals(&["viewer"]),

@@ -148,7 +148,7 @@ impl RuntimeCore {
     }
 
     pub(crate) fn trace_store_kind(&self) -> &'static str {
-        crate::trace::store_kind_label(self.inner.config.trace_store_kind)
+        crate::trace::store_kind_label(self.inner.config.store_kind)
     }
 
     pub(crate) fn record_trace_context(&self, span: &tracing::Span) {
@@ -255,9 +255,9 @@ impl RuntimeCore {
             actor.writer_id.clone(),
             self.inner.config.execution_budget.content_writes(),
         )
-        .with_wall_clock(self.inner.wall_clock.clone())
-        .with_metadata_lsm_policy(self.inner.config.metadata_lsm_policy)
-        .with_metadata_segment_cache(self.metadata_segment_cache())
+        .wall_clock(self.inner.wall_clock.clone())
+        .metadata_run_policy(self.inner.config.metadata_run_policy)
+        .metadata_segment_cache(self.metadata_segment_cache())
     }
 }
 

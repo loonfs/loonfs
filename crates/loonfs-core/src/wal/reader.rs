@@ -37,7 +37,7 @@ pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
                 .map_err(|error| WalTailLoadError::ReadWal {
                     object_key: object_key.clone(),
                     message: error.public_message().into_owned(),
-                    class: crate::error::StoreFailureClass::of(&error),
+                    kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
                 })?
         else {
             return Ok(None);

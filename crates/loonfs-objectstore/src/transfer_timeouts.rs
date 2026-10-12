@@ -31,18 +31,21 @@ use tokio::runtime::Handle;
 #[derive(Debug, Error)]
 pub(crate) enum TransferTimeoutError {
     #[error(
-        "request phase exceeded its transfer bound of {bound_secs}s \
+        "request phase exceeded its transfer bound of {bound:?} \
          (request body {request_body_bytes} bytes)"
     )]
     RequestPhase {
         request_body_bytes: u64,
-        bound_secs: u64,
+        bound: Duration,
     },
     #[error(
-        "response body stalled for {idle_secs}s after {received_bytes} received bytes; \
+        "response body stalled for {idle_bound:?} after {received_bytes} received bytes; \
          aborting the transfer"
     )]
-    ResponseBodyIdle { received_bytes: u64, idle_secs: u64 },
+    ResponseBodyIdle {
+        received_bytes: u64,
+        idle_bound: Duration,
+    },
 }
 
 /// [`HttpConnector`] for provider clients: routes IO onto the store's own
@@ -88,7 +91,7 @@ impl HttpService for TransferTimeoutService {
                     HttpErrorKind::Timeout,
                     TransferTimeoutError::RequestPhase {
                         request_body_bytes,
-                        bound_secs: bound.as_secs(),
+                        bound,
                     },
                 ))
             })?;
@@ -164,7 +167,7 @@ impl Body for IdleDeadlineBody {
                         HttpErrorKind::Timeout,
                         TransferTimeoutError::ResponseBodyIdle {
                             received_bytes: this.received_bytes,
-                            idle_secs: this.idle_bound.as_secs(),
+                            idle_bound: this.idle_bound,
                         },
                     ))));
                 }

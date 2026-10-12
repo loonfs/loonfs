@@ -23,7 +23,9 @@ pub enum ManifestLoadError {
     ReadManifest {
         object_key: String,
         message: String,
-        class: crate::error::StoreFailureClass,
+        // The serialized field name `class` is frozen.
+        #[serde(rename = "class")]
+        kind: loonfs_objectstore::ObjectStoreErrorKind,
     },
     #[error("namespace manifest codec error for `{object_key}`: {message}")]
     ManifestCodec { object_key: String, message: String },

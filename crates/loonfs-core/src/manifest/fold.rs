@@ -5,9 +5,8 @@ use super::build::{build_manifest_delta_run_segments, build_manifest_segments};
 use super::cache::{read_working_memory, MetadataSegmentCache};
 use super::load::load_basis_metadata_segments;
 use super::publish::{encode_manifest, publish_manifest, ManifestPublicationOutcome};
-use super::runs::{flatten_manifest_segments, MetadataLsmPolicy};
+use super::runs::{flatten_manifest_segments, MetadataRunPolicy};
 use super::scan::VerifiedMetadataSegments;
-use crate::commit::WalPublishError;
 use crate::commit_engine::WalFoldInput;
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
@@ -25,6 +24,7 @@ use crate::store_waves::STORE_WRITE_WAVE;
 use crate::time::Deadline;
 use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
+use crate::wal::WalPublishError;
 use futures::{stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
@@ -73,7 +73,7 @@ pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         &deadline,
-        MetadataLsmPolicy::default(),
+        MetadataRunPolicy::default(),
         Arc::default(),
         &tokio::sync::Semaphore::new(32),
     )
@@ -84,7 +84,7 @@ pub(crate) async fn fold_wal_with_deadline<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     deadline: &Deadline,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     pool: Arc<ReadWorkingMemory>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldWalResponse> {
@@ -98,7 +98,7 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     deadline: &Deadline,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     pool: &Arc<ReadWorkingMemory>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldedBasis> {
@@ -134,7 +134,7 @@ pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     deadline: &Deadline,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWalOutcome> {
@@ -174,7 +174,7 @@ async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     mut projection: ManifestProjection<'a, S>,
     deadline: &Deadline,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWalOutcome> {
     if let Some(current) = already_current(&projection) {
@@ -239,7 +239,7 @@ async fn try_fold_wal_projection<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     projection: &ManifestProjection<'_, S>,
     deadline: &Deadline,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWalOutcome> {
     if let Some(current) = already_current(projection) {
@@ -280,7 +280,7 @@ async fn publish_fold<S: ObjectStore + ?Sized>(
     projection: &ManifestProjection<'_, S>,
     layouts: &HashMap<ContentId, ContentLayoutRecord>,
     deadline: &Deadline,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Result<TryFoldWalOutcome> {
     deadline.ensure_metadata_publication_budget(namespace_id)?;
     let manifest_no = next_manifest_no_after(projection.basis.manifest_no())?;
@@ -370,7 +370,7 @@ pub async fn fold_wal_tail<S: ObjectStore + ?Sized>(
     deadline: &Deadline,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<FoldedWalTail> {
-    let policy = MetadataLsmPolicy::default();
+    let policy = MetadataRunPolicy::default();
     let pool = read_working_memory(segment_cache);
     let folded = if let Some(input) = input {
         let loaded_basis = load_basis_metadata_segments(store, segment_cache, &input.basis).await?;
@@ -517,7 +517,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     projection: &ManifestProjection<'_, S>,
     layouts: &HashMap<ContentId, ContentLayoutRecord>,
     manifest_no: ManifestNo,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> Result<NamespaceManifestPayload> {
     let activity = projection
         .manifest_segments

@@ -183,7 +183,7 @@ impl MetadataSegmentCache {
     pub(super) async fn get_or_load<E, F, Fut>(
         &self,
         cache_key: &MetadataSegmentCacheKey,
-        fetch: F,
+        load: F,
     ) -> Result<DecodedMetadataSegmentBlock, E>
     where
         F: FnOnce() -> Fut,
@@ -191,7 +191,7 @@ impl MetadataSegmentCache {
     {
         self.blocks
             .blocks
-            .get_or_load(&(self.scope, cache_key.clone()), fetch)
+            .get_or_load(&(self.scope, cache_key.clone()), load)
             .await
     }
 
@@ -453,7 +453,9 @@ impl HeadStateCache {
     }
 
     pub fn invalidate_anchor(&self, namespace_id: &NamespaceId) {
-        self.shared.entries.remove(&self.anchor_key(namespace_id));
+        self.shared
+            .entries
+            .invalidate(&self.anchor_key(namespace_id));
     }
 
     pub fn get_tail(&self, key: &WalTailProjectionCacheKey) -> Option<Arc<ProjectedWalTail>> {
@@ -492,10 +494,10 @@ impl HeadStateCache {
         }
     }
 
-    pub fn remove_tail(&self, key: &WalTailProjectionCacheKey) {
+    pub fn invalidate_tail(&self, key: &WalTailProjectionCacheKey) {
         self.shared
             .entries
-            .remove(&(self.scope, HeadStateKey::Tail(key.clone())));
+            .invalidate(&(self.scope, HeadStateKey::Tail(key.clone())));
     }
 }
 
@@ -509,7 +511,7 @@ mod tests {
     use crate::block_cache::{DecodedBlock, SegmentBlockKind};
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::wal::ProjectedWalTail;
-    use loonfs_types::format::sst_blocks::DecodedDataBlock;
+    use loonfs_types::format::segment_blocks::DecodedDataBlock;
     use loonfs_types::{ActorId, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
     use std::sync::Arc;
 

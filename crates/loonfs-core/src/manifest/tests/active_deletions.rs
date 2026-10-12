@@ -77,7 +77,7 @@ fn state_from_tombstones(tombstones: Vec<SubtreeTombstoneRecord>) -> MetadataSta
     for tombstone in tombstones {
         builder.push_subtree_tombstone(tombstone);
     }
-    builder.finish()
+    builder.build()
 }
 
 /// The family's rows for a state, as `(row key, listed or removed)` pairs in
@@ -502,9 +502,9 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
     drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -726,9 +726,9 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
     drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -799,9 +799,9 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
         drain_compaction(
             &store,
             &namespace_id,
-            MetadataLsmPolicy {
+            MetadataRunPolicy {
                 max_delta_runs: NonZeroUsize::MIN,
-                ..MetadataLsmPolicy::default()
+                ..MetadataRunPolicy::default()
             },
         )
         .await;
@@ -994,9 +994,9 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
         drain_compaction(
             &store,
             &namespace_id,
-            MetadataLsmPolicy {
+            MetadataRunPolicy {
                 max_delta_runs: NonZeroUsize::MIN,
-                ..MetadataLsmPolicy::default()
+                ..MetadataRunPolicy::default()
             },
         )
         .await;

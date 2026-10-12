@@ -185,7 +185,7 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
                 message: "manifest hint must be at least one".to_owned(),
             });
         }
-        let mut current = load_manifest_by_number(store, namespace_id, manifest_no).await?;
+        let mut current = load_manifest_by_no(store, namespace_id, manifest_no).await?;
         while let Some(previous) = &current {
             // A tombstone is the last manifest of its namespace.
             if previous.state.envelope.payload().status.is_deleted() {
@@ -194,7 +194,7 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
             let Ok(next) = manifest_no.successor() else {
                 break;
             };
-            let Some(manifest) = load_manifest_by_number(store, namespace_id, next).await? else {
+            let Some(manifest) = load_manifest_by_no(store, namespace_id, next).await? else {
                 break;
             };
             previous
@@ -227,7 +227,7 @@ async fn discover_manifest<S: ObjectStore + ?Sized>(
     }
 }
 
-pub(crate) async fn load_manifest_by_number<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_manifest_by_no<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: loonfs_types::ManifestNo,
@@ -243,11 +243,11 @@ pub(crate) async fn load_manifest_by_number<S: ObjectStore + ?Sized>(
         crate::manifest::ManifestLoadError::ReadManifest {
             object_key,
             message,
-            class,
+            kind,
         } => ControlObjectLoadError::Store {
             object_key,
             message,
-            class,
+            kind,
         },
         error => ControlObjectLoadError::Codec {
             object_key: object_key.clone(),

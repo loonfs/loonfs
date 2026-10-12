@@ -9,7 +9,8 @@ use super::state::{GrepHint, GrepManifestState};
 use crate::keyspace::{hint_key, manifest_key};
 use bytes::Bytes;
 use loonfs::engine::{Deadline, Observation, METADATA_PUBLICATION_BUDGET_MS};
-use loonfs::{CoreError, StoreFailureClass};
+use loonfs::CoreError;
+use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::{ManifestNo, NamespaceId};
 
@@ -330,6 +331,6 @@ fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepManifestError 
     GrepManifestError::Store {
         object_key: object_key.to_owned(),
         message: error.public_message().into_owned(),
-        class: StoreFailureClass::of(error),
+        kind: ObjectStoreErrorKind::of(error),
     }
 }

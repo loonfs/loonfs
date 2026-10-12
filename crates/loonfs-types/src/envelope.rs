@@ -203,13 +203,13 @@ impl<T> VerifiedEnvelope<T> {
 pub struct EncodedEnvelope<T> {
     pub(crate) envelope: VerifiedEnvelope<T>,
     pub(crate) bytes: Vec<u8>,
-    pub(crate) document_len: usize,
+    pub(crate) document_bytes: usize,
 }
 
 impl<T> EncodedEnvelope<T> {
     /// Returns the document length before any compression.
-    pub fn document_len(&self) -> usize {
-        self.document_len
+    pub fn document_bytes(&self) -> usize {
+        self.document_bytes
     }
 
     /// Envelope derived while encoding, without decoding or serializing again.
@@ -257,7 +257,7 @@ pub fn encode_json_envelope<T: Serialize>(
             payload_checksum,
             payload,
         },
-        document_len: bytes.len(),
+        document_bytes: bytes.len(),
         bytes,
     })
 }

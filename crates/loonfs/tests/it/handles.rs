@@ -8,9 +8,9 @@
 
 use crate::common::collect_path_entries;
 use loonfs::{
-    Commit, CommitId, CreateDirectoryOptions, Error, ErrorCode, LoonFs, ManifestNo,
-    MetadataMaintenanceOptions, NamespaceId, PutFileOptions, SharedObjectStore, StoreConfig,
-    WalFoldStepOutcome, Writable,
+    Commit, CommitId, CreateDirectoryOptions, Error, ErrorCode, LoonFs, MaintainMetadataOptions,
+    ManifestNo, NamespaceId, PutFileOptions, SharedObjectStore, StoreConfig, WalFoldStepOutcome,
+    Writable,
 };
 use loonfs_core::test_support::append_wal_objects;
 use loonfs_core::MutationContext;
@@ -34,7 +34,7 @@ fn store_config(root: &Path) -> StoreConfig {
 }
 
 fn wal_tail_object_threshold() -> u64 {
-    MetadataMaintenanceOptions::default()
+    MaintainMetadataOptions::default()
         .max_wal_tail_objects
         .get()
 }
@@ -248,9 +248,9 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
         let step = maintenance
             .maintain_metadata_with_options(
                 &namespace_id,
-                &MetadataMaintenanceOptions {
+                &MaintainMetadataOptions {
                     max_wal_tail_objects: std::num::NonZeroU64::MIN,
-                    ..MetadataMaintenanceOptions::default()
+                    ..MaintainMetadataOptions::default()
                 },
             )
             .await

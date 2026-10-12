@@ -1,7 +1,7 @@
 //! Publishes immutable numbered WAL objects.
 
 use super::PreparedWalObject;
-use crate::commit::WalPublishError;
+use crate::wal::WalPublishError;
 use bytes::Bytes;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -12,10 +12,10 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
     wal: &PreparedWalObject,
     tip: &crate::time::Observation,
 ) -> crate::error::Result<()> {
-    if wal.document_len() > loonfs_types::format::wal::MAX_WAL_OBJECT_BYTES {
+    if wal.document_bytes() > loonfs_types::format::wal::MAX_WAL_OBJECT_BYTES {
         return Err(crate::error::CoreError::Internal(format!(
             "WAL document is {} bytes, over `MAX_WAL_OBJECT_BYTES` ({})",
-            wal.document_len(),
+            wal.document_bytes(),
             loonfs_types::format::wal::MAX_WAL_OBJECT_BYTES,
         )));
     }
@@ -38,7 +38,7 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
                     tracing::error!(namespace_id = %payload.namespace_id, %object_key, %error, "WAL publication failed");
                     match error {
                         error @ ObjectStoreError::Transport { .. } => WalPublishError::OutcomeUnknown(error.public_message().into_owned()).into(),
-                        error => crate::error::CoreError::WalWrite { object_key, message: error.public_message().into_owned(), class: crate::error::StoreFailureClass::of(&error) },
+                        error => crate::error::CoreError::WalWrite { object_key, message: error.public_message().into_owned(), kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error) },
                     }
                 }
             }

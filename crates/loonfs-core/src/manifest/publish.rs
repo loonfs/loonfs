@@ -2,7 +2,7 @@
 
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{
-    load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_number,
+    load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_no,
     raise_hint, CurrentManifest, LoadedHint, LoadedManifest,
 };
 use crate::time::Deadline;
@@ -199,10 +199,9 @@ async fn publish_manifest_from<S: ObjectStore + ?Sized>(
         Err(error @ ObjectStoreError::Transport { .. }) => {
             // Only the exact manifest at this number confirms the put;
             // a later manifest may already cover it.
-            let landed =
-                load_manifest_by_number(store, namespace_id, candidate.manifest().manifest_no)
-                    .await
-                    .map_err(CoreError::ControlObjectLoad)?;
+            let landed = load_manifest_by_no(store, namespace_id, candidate.manifest().manifest_no)
+                .await
+                .map_err(CoreError::ControlObjectLoad)?;
             let outcome = match landed {
                 Some(landed) => classify_current(
                     &landed.state,

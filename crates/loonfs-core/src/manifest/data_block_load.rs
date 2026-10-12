@@ -6,20 +6,20 @@
 //! tens of thousands of serial point reads. Scans use the decoded caches and
 //! coalesced store GETs, and they do not populate the stored-byte tier.
 
-use super::block_fetch::{
-    load_section_bytes, offer_stored_block, segment_block_cache_key, segment_codec_error,
-    stored_block_section,
-};
 use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache};
 use super::error::ManifestLoadError;
+use super::index_block_load::{
+    load_section_bytes, offer_stored_block, segment_block_cache_key, segment_codec_error,
+    stored_block_section,
+};
 use super::stored_block_cache::StoredMetadataBlockKind;
 use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::data_block_heap_bytes;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::MetadataSegmentRef;
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_data_block, BlockHandle, DecodedDataBlock, SegmentIndexEntry,
 };
 use std::sync::Arc;

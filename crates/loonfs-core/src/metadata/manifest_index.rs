@@ -18,7 +18,7 @@ use crate::metadata::{
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily};
-use loonfs_types::format::sst_blocks::string_prefix_upper_bound;
+use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey, RevisionNo};
 
@@ -174,22 +174,22 @@ impl RevisionPagePosition {
     }
 }
 
-pub(super) async fn latest_revision_for_inode<S: ObjectStore + ?Sized>(
+pub(super) async fn latest_revision_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
 ) -> Result<Option<RevisionRecord>> {
-    Ok(revisions_for_inode_page_desc(segments, inode_id, None, 1)
+    Ok(revisions_by_inode_page_desc(segments, inode_id, None, 1)
         .await?
         .into_iter()
         .next())
 }
 
-pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
+pub(super) async fn revision_by_inode_no<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Option<RevisionRecord>> {
-    let exact_prefix = lookup_keys::revision_number_prefix(inode_id, revision_no);
+    let exact_prefix = lookup_keys::revision_no_prefix(inode_id, revision_no);
     let filter_probe = lookup_keys::revision_probe(inode_id);
     segments
         .scan_range_page_for_lookup(
@@ -207,7 +207,7 @@ pub(super) async fn revision_for_inode_no<S: ObjectStore + ?Sized>(
         .transpose()
 }
 
-pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
+pub(super) async fn revisions_by_inode_page_desc<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     start_after: Option<RevisionPagePosition>,
@@ -351,12 +351,12 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
 /// the head and has to walk past revisions committed after it.
 const WHOLE_STATE_RAW_SCAN_LIMIT: usize = 16;
 
-pub(super) async fn attributes_for_inode<S: ObjectStore + ?Sized>(
+pub(super) async fn attributes_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     visible_seq: ChangeSeq,
 ) -> Result<Option<AttributesRevisionRecord>> {
-    newest_row_for_inode(
+    newest_row_by_inode(
         segments,
         MetadataRowFamily::Attributes,
         lookup_keys::attributes_prefix(inode_id),
@@ -368,12 +368,12 @@ pub(super) async fn attributes_for_inode<S: ObjectStore + ?Sized>(
     .await
 }
 
-pub(super) async fn access_for_inode<S: ObjectStore + ?Sized>(
+pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     visible_seq: ChangeSeq,
 ) -> Result<Option<AccessRevisionRecord>> {
-    newest_row_for_inode(
+    newest_row_by_inode(
         segments,
         MetadataRowFamily::Access,
         lookup_keys::access_prefix(inode_id),
@@ -389,7 +389,7 @@ pub(super) async fn access_for_inode<S: ObjectStore + ?Sized>(
 /// a family whose keys invert the revision, the sequence, and the delta
 /// index, so an ascending prefix scan reads one inode's rows newest first
 /// and the first row at or below the sequence is the answer.
-async fn newest_row_for_inode<S, R>(
+async fn newest_row_by_inode<S, R>(
     segments: &VerifiedMetadataSegments<'_, S>,
     family: MetadataRowFamily,
     prefix: String,

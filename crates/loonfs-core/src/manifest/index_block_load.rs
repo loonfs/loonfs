@@ -1,4 +1,4 @@
-//! Fetching, decoding, and cache publication for SST index and filter blocks.
+//! Loading, decoding, and cache publication for segment index and filter blocks.
 //!
 //! Index, filter, and point data loads consult the per-view memo, the decoded
 //! block cache, and the node-local cache of stored bytes. Their fetched
@@ -20,9 +20,9 @@ use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::hex::hex_decode_bytes;
 use loonfs_types::format::manifest::MetadataSegmentRef;
-use loonfs_types::format::sst_blocks::{
-    decode_data_block, decode_filter_block, decode_index_block, BlockHandle, SegmentFilter,
-    SegmentIndexEntry, SstBlockCodecError,
+use loonfs_types::format::segment_blocks::{
+    decode_data_block, decode_filter_block, decode_index_block, BlockHandle,
+    SegmentBlockCodecError, SegmentFilter, SegmentIndexEntry,
 };
 use std::sync::Arc;
 
@@ -73,7 +73,7 @@ pub(super) async fn stored_block_section<T>(
     descriptor: &MetadataSegmentRef,
     kind: StoredMetadataBlockKind,
     handle: &BlockHandle,
-    decode: impl FnOnce(&[u8], &BlockHandle) -> Result<T, SstBlockCodecError>,
+    decode: impl FnOnce(&[u8], &BlockHandle) -> Result<T, SegmentBlockCodecError>,
 ) -> Option<T> {
     let cache = stored_block_cache(segment_cache)?;
     let key = stored_block_key(descriptor, kind, handle);
@@ -134,15 +134,14 @@ pub(super) async fn load_section_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     offset: u64,
-    len: u64,
+    size_bytes: u64,
 ) -> Result<Vec<u8>, ManifestLoadError> {
-    let end_exclusive =
-        offset
-            .checked_add(len)
-            .ok_or_else(|| ManifestLoadError::SegmentDescriptorMismatch {
-                object_key: object_key.to_owned(),
-                message: "the named section runs past the address space".to_owned(),
-            })?;
+    let end_exclusive = offset.checked_add(size_bytes).ok_or_else(|| {
+        ManifestLoadError::SegmentDescriptorMismatch {
+            object_key: object_key.to_owned(),
+            message: "the named section runs past the address space".to_owned(),
+        }
+    })?;
     let Some(bytes) = store
         .get(
             object_key,
@@ -161,10 +160,13 @@ pub(super) async fn load_section_bytes<S: ObjectStore + ?Sized>(
             object_key: object_key.to_owned(),
         });
     };
-    if bytes.len() as u64 != len {
+    if bytes.len() as u64 != size_bytes {
         return Err(ManifestLoadError::ReadSegment {
             object_key: object_key.to_owned(),
-            message: format!("ranged read returned {} bytes, expected {len}", bytes.len()),
+            message: format!(
+                "ranged read returned {} bytes, expected {size_bytes}",
+                bytes.len()
+            ),
         });
     }
     Ok(bytes.to_vec())
@@ -172,11 +174,11 @@ pub(super) async fn load_section_bytes<S: ObjectStore + ?Sized>(
 
 pub(super) fn segment_codec_error(
     object_key: &str,
-    err: impl std::fmt::Display,
+    error: impl std::fmt::Display,
 ) -> ManifestLoadError {
     ManifestLoadError::SegmentCodec {
         object_key: object_key.to_owned(),
-        message: err.to_string(),
+        message: error.to_string(),
     }
 }
 
@@ -190,7 +192,7 @@ const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 256 * 1024;
 
 /// A segment object's total stored length: the index block is the last
 /// section, so it ends the object.
-pub(super) fn segment_object_len(descriptor: &MetadataSegmentRef) -> u64 {
+pub(super) fn segment_object_bytes(descriptor: &MetadataSegmentRef) -> u64 {
     descriptor.index_block.offset + u64::from(descriptor.index_block.stored_bytes)
 }
 
@@ -206,8 +208,8 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     let object_key = metadata_segment_object_key(descriptor);
     let filter_handle = descriptor.filter_block;
     let index_handle = descriptor.index_block;
-    let object_len = segment_object_len(descriptor);
-    let fetch_whole_object = object_len <= WHOLE_SEGMENT_LOAD_MAX_BYTES;
+    let object_bytes = segment_object_bytes(descriptor);
+    let fetch_whole_object = object_bytes <= WHOLE_SEGMENT_LOAD_MAX_BYTES;
     let fetch_offset = match want {
         SegmentBlockKind::Data | SegmentBlockKind::Manifest => {
             return Err(segment_codec_error(
@@ -219,8 +221,13 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
         SegmentBlockKind::Filter => filter_handle.offset,
         SegmentBlockKind::Index => index_handle.offset,
     };
-    let bytes =
-        load_section_bytes(store, &object_key, fetch_offset, object_len - fetch_offset).await?;
+    let bytes = load_section_bytes(
+        store,
+        &object_key,
+        fetch_offset,
+        object_bytes - fetch_offset,
+    )
+    .await?;
     let section = |handle: &BlockHandle| -> Option<&[u8]> {
         let start = usize::try_from(handle.offset.checked_sub(fetch_offset)?).ok()?;
         let end = start.checked_add(handle.stored_bytes as usize)?;

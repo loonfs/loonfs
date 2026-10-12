@@ -7,7 +7,7 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CompactionStepOutcome, CreateCheckpointOptions, ErrorCode, FoldWalOutcome,
-    ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy, MetadataMaintenanceOptions,
+    MaintainMetadataOptions, ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy,
     NamespaceId, SharedObjectStore, SnapshotPolicy, WalFoldStepOutcome,
 };
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
@@ -304,7 +304,7 @@ fn the_typed_wrappers_are_single_action_steps() {
     let compaction = fs
         .maintain_metadata_blocking(
             &namespace_id,
-            MetadataMaintenanceOptions {
+            MaintainMetadataOptions {
                 compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                 ..metadata_options(1)
             },
@@ -348,7 +348,11 @@ fn the_typed_wrappers_are_single_action_steps() {
     assert_eq!(retention.retention_floor_seq, advanced.retention_floor_seq);
 
     block_on(fs.maintenance.gc(&namespace_id)).expect("GC run");
-    block_on(fs.maintenance.compact_metadata(&namespace_id)).expect("metadata compaction run");
+    block_on(
+        fs.maintenance
+            .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new()),
+    )
+    .expect("metadata compaction run");
     assert_eq!(
         fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status")
@@ -431,9 +435,12 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
         .expect("create namespace");
     assert_eq!(
-        block_on(fs.maintenance.compact_metadata(&namespace_id))
-            .expect("compact an empty namespace")
-            .compaction,
+        block_on(
+            fs.maintenance
+                .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
+        )
+        .expect("compact an empty namespace")
+        .compaction,
         MetadataCompactionOutcome::NotNeeded
     );
 
@@ -458,9 +465,12 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
     // this call reports exactly that: it published the unit the planner
     // chose, as the next maintenance pass would have, and ran no job.
     assert_eq!(
-        block_on(fs.maintenance.compact_metadata(&namespace_id))
-            .expect("plan a compaction")
-            .compaction,
+        block_on(
+            fs.maintenance
+                .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
+        )
+        .expect("plan a compaction")
+        .compaction,
         MetadataCompactionOutcome::BoundedMergePublished
     );
     assert_ne!(
@@ -516,7 +526,7 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
         assert_eq!(
             runtime
                 .maintenance
-                .compact_metadata(&namespace_id)
+                .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("claim and compact")
                 .compaction,
@@ -535,7 +545,7 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
     assert_eq!(
         first
             .maintenance
-            .compact_metadata(&namespace_id)
+            .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
             .await
             .expect("fenced step")
             .compaction,
@@ -550,7 +560,7 @@ async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
     assert_eq!(
         first
             .maintenance
-            .compact_metadata(&namespace_id)
+            .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
             .await
             .expect("claim again and compact")
             .compaction,
@@ -606,7 +616,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
         assert_eq!(
             runtime
                 .maintenance
-                .compact_metadata(&namespace_id)
+                .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("claim")
                 .compaction,
@@ -615,7 +625,10 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
     }
 
     blocked.block_next();
-    let delayed = first.maintenance.compact_metadata(&namespace_id);
+    let cancellation = loonfs::MaintenanceCancellation::new();
+    let delayed = first
+        .maintenance
+        .compact_metadata(&namespace_id, &cancellation);
     let reclaim = async {
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -626,7 +639,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
         assert_eq!(
             first
                 .maintenance
-                .compact_metadata(&namespace_id)
+                .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("fenced")
                 .compaction,
@@ -635,7 +648,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
         assert_eq!(
             first
                 .maintenance
-                .compact_metadata(&namespace_id)
+                .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
                 .await
                 .expect("claim again")
                 .compaction,
@@ -663,7 +676,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
 
     first
         .maintenance
-        .compact_metadata(&namespace_id)
+        .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("use the current claim");
     let current =

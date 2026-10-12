@@ -63,7 +63,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     state: &UploadSessionPayload,
 ) -> Result<UploadSessionSweep> {
-    match live.retirement_state() {
+    match live.retirement_status() {
         RetirementStatus::Retained { until_ms } => {
             return Ok(UploadSessionSweep::Retain {
                 reclaimable_at_ms: until_ms,
@@ -71,7 +71,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
         }
         RetirementStatus::Active | RetirementStatus::Eligible => {}
     }
-    let retired = live.retirement_state() == RetirementStatus::Eligible;
+    let retired = live.retirement_status() == RetirementStatus::Eligible;
     match &state.status {
         UploadSessionRecordStatus::Open { expires_at_ms, .. } => {
             abort_expired_session(store, grace_window_ms, context, state, *expires_at_ms).await

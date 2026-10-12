@@ -379,7 +379,7 @@ pub fn encode_wal_object_envelope_zstd(
     let mut encoded = Vec::new();
     into_writer(&document, &mut encoded)
         .map_err(|err| EnvelopeCodecError::EnvelopeEncode(err.to_string()))?;
-    let bytes = zstd::stream::encode_all(encoded.as_slice(), crate::sst_blocks::ZSTD_LEVEL)
+    let bytes = zstd::stream::encode_all(encoded.as_slice(), crate::segment_blocks::ZSTD_LEVEL)
         .map_err(|err| EnvelopeCodecError::Compress(err.to_string()))?;
     Ok(crate::envelope::EncodedEnvelope {
         envelope: crate::envelope::VerifiedEnvelope {
@@ -387,7 +387,7 @@ pub fn encode_wal_object_envelope_zstd(
             payload,
         },
         bytes,
-        document_len: encoded.len(),
+        document_bytes: encoded.len(),
     })
 }
 
@@ -868,7 +868,7 @@ mod tests {
         })
         .expect("encode");
         let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");
-        assert_eq!(document.len(), encoded.document_len());
+        assert_eq!(document.len(), encoded.document_bytes());
         assert!(document.len() <= WAL_OBJECT_OVERHEAD_BYTES);
         assert_eq!(
             &decode_wal_object_envelope_zstd_with_limit(encoded.as_bytes(), document.len())

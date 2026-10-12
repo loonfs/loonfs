@@ -90,11 +90,11 @@ pub(super) fn wal_error(error: WalTailLoadError) -> ControlObjectLoadError {
         WalTailLoadError::ReadWal {
             object_key,
             message,
-            class,
+            kind,
         } => ControlObjectLoadError::Store {
             object_key,
             message,
-            class,
+            kind,
         },
         WalTailLoadError::MissingWalObject { ref object_key }
         | WalTailLoadError::NumberMismatch { ref object_key }

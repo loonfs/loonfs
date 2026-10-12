@@ -237,7 +237,7 @@ pub async fn app(
         max_upload_bytes: config.max_upload_bytes,
         max_concurrent_uploads: config.max_concurrent_uploads,
         max_concurrent_downloads: config.max_concurrent_downloads,
-        inline_content: config.inline_content.resolve(),
+        inline_content: config.inline_content.effective_policy(),
         content_token_secret: config.content_token_secret.clone(),
         request_deadline_ms: config.request_deadline_ms,
         idle_fold_after_ms: config.idle_fold_after_ms,
@@ -307,7 +307,7 @@ pub(super) async fn build_handles(
     metrics_jsonl_path: Option<OsString>,
     local_cache: Option<Arc<FoyerStoredMetadataBlockCache>>,
 ) -> Result<(LoonFs<Writable>, Maintenance), ServerConfigError> {
-    let trace_store_kind = config.store.kind();
+    let store_kind = config.store.kind();
     let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
     let invalid_runtime = |error: loonfs::Error| ServerConfigError::InvalidField {
         field: "runtime",
@@ -317,15 +317,15 @@ pub(super) async fn build_handles(
     let mut builder = LoonFs::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .min_publish_interval_ms(config.min_publish_interval_ms)
-        .publication_limits(config.publication.resolve())
-        .inline_content(config.inline_content.resolve())
+        .publication_policy(config.publication.effective_policy())
+        .inline_content(config.inline_content.effective_policy())
         .execution_budget(config.execution_budget(memory, metrics.recorder()))
         // Every read the server serves goes through this runtime, so the
         // read cap covers every proxied content read.
         .max_read_content_bytes(config.max_download_bytes)
         .metadata_cache(memory.metadata_cache(metrics.recorder()))
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(trace_store_kind)
+        .store_kind(store_kind)
         .metrics_recorder(metrics.recorder());
     if let Some(interval_ms) = config.manifest_revalidation_interval_ms {
         builder = builder.manifest_revalidation_interval_ms(interval_ms);

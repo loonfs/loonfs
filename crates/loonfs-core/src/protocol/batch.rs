@@ -8,13 +8,14 @@ use super::candidates::{
 };
 use super::changes::committed_change_from_wal_record;
 use super::publish_view::PublishMetadataView;
-use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit, WalPublishError};
+use crate::commit::{wal_payload_from_prepared_commit, PreparedCommit};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::PublishPlanningSession;
 use crate::time::{Deadline, Observation};
+use crate::wal::WalPublishError;
 use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
@@ -162,7 +163,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             };
             let validated = candidate_request.validated;
             let record_bytes = crate::commit_wal_size::planned_wal_record_bytes(
-                candidate.request(),
+                candidate.intent(),
                 candidate.inline_content(),
                 &validated.deltas,
                 &validated.appended,
@@ -387,7 +388,7 @@ fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<Commit>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::namespace::writer_epoch::acquire_writer_epoch;
+    use crate::namespace::writer_epoch::claim_writer_epoch;
     use crate::path::write::{CommitIntent, FilesystemOperation};
     use crate::protocol::load_publish_metadata_view;
     use crate::test_support::ops::create;
@@ -417,7 +418,7 @@ mod tests {
         create(&store, &namespace_id, &context)
             .await
             .expect("bootstrap");
-        let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
+        let acquired = claim_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
         let view = load_publish_metadata_view(&store, None, &namespace_id, acquired, None, None)
@@ -500,7 +501,7 @@ mod tests {
         create(&store, &namespace_id, &context)
             .await
             .expect("bootstrap namespace");
-        let acquired_writer = acquire_writer_epoch(&store, &namespace_id, &context)
+        let acquired_writer = claim_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
         let mut view =

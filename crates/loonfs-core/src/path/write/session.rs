@@ -93,7 +93,7 @@ impl<'a> PublishPlanningSession<'a> {
         let base_view = base_view.with_durable_cache(&self.durable_cache);
         let pre_state = base_view.with_overlay(None, &self.accepted_rows, self.head.seq);
         evaluate_preconditions(
-            &candidate.request().preconditions,
+            &candidate.intent().preconditions,
             candidate.authority(),
             &self.head,
             &pre_state,
@@ -266,7 +266,7 @@ mod tests {
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("view");
-        let request = create_directory_candidate("wal", "/docs").request().clone();
+        let request = create_directory_candidate("wal", "/docs").intent().clone();
         let mut payloads = Vec::new();
         for preconditions in [
             Vec::new(),

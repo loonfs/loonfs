@@ -212,7 +212,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
         .expect("the paused open");
 
     let held = state.namespaces.open(&namespace_id).await.expect("open");
-    assert_eq!(held.session_state(), NamespaceSessionStatus::Open);
+    assert_eq!(held.session_status(), NamespaceSessionStatus::Open);
     create_directory(&router, &namespace_id, "/after-close").await;
 }
 
@@ -274,8 +274,8 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
 
     create_directory(&router, &fenced, "/replacement").await;
     let replacement = state.namespaces.open(&fenced).await.expect("replacement");
-    assert_eq!(replacement.session_state(), NamespaceSessionStatus::Open);
-    assert_eq!(old.session_state(), NamespaceSessionStatus::Fenced);
+    assert_eq!(replacement.session_status(), NamespaceSessionStatus::Open);
+    assert_eq!(old.session_status(), NamespaceSessionStatus::Fenced);
     let response = ApiResponseError::runtime_for_namespace_writer(
         &state.namespaces,
         &fenced,
@@ -385,8 +385,8 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
         .open(&namespace_id)
         .await
         .expect("new handle");
-    assert_eq!(replacement.session_state(), NamespaceSessionStatus::Open);
-    assert_eq!(old.session_state(), NamespaceSessionStatus::Fenced);
+    assert_eq!(replacement.session_status(), NamespaceSessionStatus::Open);
+    assert_eq!(old.session_status(), NamespaceSessionStatus::Fenced);
     old.close().await.expect("close old clone");
     create_directory(&router, &namespace_id, "/replacement-still-held").await;
     assert_eq!(
@@ -541,7 +541,7 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
         };
         assert_eq!(fresh.last_published_seq(), None);
         assert_eq!(
-            old_entry.lock().expect("entry").handle.session_state(),
+            old_entry.lock().expect("entry").handle.session_status(),
             NamespaceSessionStatus::Closed
         );
         fresh

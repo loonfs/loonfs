@@ -6,7 +6,7 @@ use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::manifest::tests::{
     build_namespace_manifest_from_metadata_state, write_namespace_manifest, ManifestMetadataSource,
 };
-use crate::manifest::MetadataLsmPolicy;
+use crate::manifest::MetadataRunPolicy;
 use crate::metadata::MetadataStateBuilder;
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::content_location::extent_object_key;
@@ -82,9 +82,9 @@ async fn layout_manifest(
             head: &head,
             basis_manifest_no: None,
             retention_floor_seq: head.seq,
-            metadata_state: &state.finish(),
+            metadata_state: &state.build(),
         },
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(8).expect("segment rows"),
             ..Default::default()
         },
@@ -330,16 +330,16 @@ async fn shared_filter_growth_over_the_cap_skips_content_before_any_content_requ
     let live = LiveSet::load(&store, None, &namespace_id, GRACE_MS, &context)
         .await
         .expect("roots");
-    for (byte_limit, expected_sweep) in [(40, true), (18, false)] {
+    for (max_bytes, expected_sweep) in [(40, true), (18, false)] {
         store.reset();
-        let content = ContentSweep::load_with_byte_limit(
+        let content = ContentSweep::load(
             &store,
             None,
             &namespace_id,
             &live,
             128,
             context.now_ms,
-            byte_limit,
+            max_bytes,
         )
         .await
         .expect("load content roots");

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::metadata::LeafRevisionPrefetch;
+use crate::metadata::LeafRevisionPreload;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::store_waves::STORE_READ_WAVE;
@@ -32,9 +32,9 @@ async fn a_cold_path_walk_reads_no_inode() {
         &inner,
         &namespace_id,
         &context,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -59,7 +59,7 @@ async fn a_cold_path_walk_reads_no_inode() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(inode_segments.len(), 4);
     let store = RecordingStore::metadata_segments(inner);
-    for prefetch in [LeafRevisionPrefetch::Skip, LeafRevisionPrefetch::Prefetch] {
+    for preload in [LeafRevisionPreload::Skip, LeafRevisionPreload::Preload] {
         let view = load_current_metadata_view(&store, &namespace_id)
             .await
             .expect("cold view");
@@ -69,7 +69,7 @@ async fn a_cold_path_walk_reads_no_inode() {
             .session()
             .resolve_visible_path(
                 &AbsolutePath::parse("/DOCS/REPORTS/SUMMARY.TXT").expect("path"),
-                prefetch,
+                preload,
             )
             .await
             .expect("resolve path");
@@ -113,9 +113,9 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
         &inner,
         &namespace_id,
         &context,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -280,9 +280,9 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     let (manifest_no, _) = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -388,9 +388,9 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
     let (manifest_no, _) = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;
@@ -497,9 +497,9 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
     let (manifest_no, _) = drain_compaction(
         &store,
         &namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
     )
     .await;

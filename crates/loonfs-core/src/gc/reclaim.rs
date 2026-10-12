@@ -16,7 +16,7 @@ pub(super) async fn reclaim_namespace<S: ObjectStore + ?Sized>(
     live: &LiveSet,
     report: &mut GcResponse,
 ) -> Result<()> {
-    if live.retirement_state() != RetirementStatus::Eligible {
+    if live.retirement_status() != RetirementStatus::Eligible {
         return Ok(());
     }
     let tombstone = live

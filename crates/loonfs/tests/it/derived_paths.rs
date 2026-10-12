@@ -19,7 +19,7 @@ use tempfile::tempdir;
 fn page_request() -> PageRequest<String> {
     PageRequest {
         limit: PaginationPolicy::default()
-            .resolve_limit(None)
+            .effective_limit(None)
             .expect("default page limit"),
         cursor: None,
     }
@@ -111,7 +111,7 @@ async fn assert_inode_addressing_serves(
         [file_path.as_str()]
     );
     let current = namespace
-        .resolve_current_files(&[loose.inode_id])
+        .stat_current_files_by_inode(&[loose.inode_id])
         .await
         .expect("resolve the moved file");
     assert_eq!(

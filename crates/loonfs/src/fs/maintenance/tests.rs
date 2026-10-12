@@ -9,8 +9,8 @@
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::{
-    CompactionStepOutcome, LoonFs, Maintenance, MetadataCompactionOutcome,
-    MetadataCompactionPolicy, MetadataMaintenanceOptions, NamespaceId, SharedObjectStore, Writable,
+    CompactionStepOutcome, LoonFs, MaintainMetadataOptions, Maintenance, MetadataCompactionOutcome,
+    MetadataCompactionPolicy, NamespaceId, SharedObjectStore, Writable,
 };
 use loonfs_core::MetadataFamilyGroup;
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -81,8 +81,8 @@ fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u
     value
 }
 
-fn metadata_options(compaction_policy: MetadataCompactionPolicy) -> MetadataMaintenanceOptions {
-    MetadataMaintenanceOptions {
+fn metadata_options(compaction_policy: MetadataCompactionPolicy) -> MaintainMetadataOptions {
+    MaintainMetadataOptions {
         max_wal_tail_objects: NonZeroU64::MIN,
         compaction_policy,
         ..Default::default()
@@ -414,7 +414,7 @@ async fn compaction_planning_survives_restart_and_explicit_work_has_bounded_fan_
     );
 
     let outcome = standalone
-        .compact_metadata(&explicit)
+        .compact_metadata(&explicit, &crate::MaintenanceCancellation::new())
         .await
         .expect("run the explicit compaction");
     assert!(
@@ -481,7 +481,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
     let response = standalone
         .maintain_metadata_with_options(
             &namespace,
-            &crate::MetadataMaintenanceOptions {
+            &crate::MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                 ..Default::default()
@@ -496,7 +496,7 @@ async fn an_immediate_step_reports_the_compaction_the_explicit_call_runs() {
     );
 
     let outcome = standalone
-        .compact_metadata(&namespace)
+        .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
         .await
         .expect("run the explicit compaction");
     assert!(
@@ -635,7 +635,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
             .collect();
         store.reset();
         let compaction = maintenance
-            .compact_metadata(&namespace)
+            .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
             .await
             .expect("compact one unit")
             .compaction;
@@ -666,7 +666,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                 let response = maintenance
                     .maintain_metadata_with_options(
                         &namespace,
-                        &crate::MetadataMaintenanceOptions {
+                        &crate::MaintainMetadataOptions {
                             compaction_policy: MetadataCompactionPolicy::CompactImmediately,
                             ..Default::default()
                         },
@@ -730,7 +730,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
             .compact_once(&namespace, MetadataCompactionPolicy::SizeTiered, None)
             .await
             .expect("no work"),
-        super::CompactionStep::Concluded(CompactionStepOutcome::NotNeeded {})
+        super::CompactionUnitOutcome::Concluded(CompactionStepOutcome::NotNeeded {})
     ));
     assert_eq!(store.counts().puts, 0);
     let cloned = maintenance.clone();
@@ -856,7 +856,7 @@ async fn the_metadata_loop_stops_after_three_lost_races_and_on_a_fenced_step() {
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("create the namespace");
-    for index in 0..loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS + 2 {
+    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS + 2 {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance
@@ -915,7 +915,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         .expect("create the namespace");
     // One unit merges at most eight runs of one family group, and each
     // folded write adds a run to several groups.
-    for index in 0..3 * loonfs_types::format::sst_blocks::DEFAULT_MAX_DELTA_RUNS {
+    for index in 0..3 * loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance

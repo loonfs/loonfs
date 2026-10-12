@@ -3,7 +3,7 @@
 
 use crate::common::SettableWallClock;
 use loonfs::{
-    CreateCheckpointOptions, LoonFs, MetadataMaintenanceOptions, SharedObjectStore,
+    CreateCheckpointOptions, LoonFs, MaintainMetadataOptions, SharedObjectStore,
     WalFoldStepOutcome, WallClock,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -57,11 +57,11 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .await
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("fresh-worker"));
-    let disabled = MetadataMaintenanceOptions {
+    let disabled = MaintainMetadataOptions {
         idle_fold_after_ms: 0,
-        ..MetadataMaintenanceOptions::default()
+        ..MaintainMetadataOptions::default()
     };
-    let idle_ms = MetadataMaintenanceOptions::default().idle_fold_after_ms;
+    let idle_ms = MaintainMetadataOptions::default().idle_fold_after_ms;
 
     clock
         .0
@@ -220,7 +220,7 @@ async fn every_core_maintenance_operation_runs_without_a_writer() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let threshold = MetadataMaintenanceOptions::default()
+    let threshold = MaintainMetadataOptions::default()
         .max_wal_tail_objects
         .get();
     for index in 0..threshold {
@@ -247,7 +247,7 @@ async fn every_core_maintenance_operation_runs_without_a_writer() {
         .await
         .expect("metadata maintenance");
     maintenance
-        .compact_metadata(&namespace_id)
+        .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("metadata compaction");
     maintenance

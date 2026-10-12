@@ -154,7 +154,7 @@ impl Client {
     /// Like the buffered form this never retries: a create-only PUT that
     /// succeeded can come back as a provider precondition error on a second
     /// attempt, and a source is consumed by the attempt that reads it.
-    pub async fn upload_streamed_via_presigned_url(
+    pub async fn upload_stream_via_presigned_url(
         &self,
         access: &ObjectTransferAccess,
         source: PayloadSource,

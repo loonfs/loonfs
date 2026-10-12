@@ -111,7 +111,7 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
                 ])
                 .boxed();
                 engine
-                    .upload_streamed_content(&begin.upload_id, None, body)
+                    .upload_content_stream(&begin.upload_id, None, body)
                     .await
                     .expect("stream");
             } else {
@@ -395,7 +395,7 @@ mod streamed_content {
         })
         .boxed();
         let engine = namespace_engine(&store, &namespace_id, &context);
-        let uploading = engine.upload_streamed_content(&begin.upload_id, None, stream);
+        let uploading = engine.upload_content_stream(&begin.upload_id, None, stream);
         let collecting = async {
             started_rx
                 .await
@@ -584,7 +584,7 @@ mod streamed_content {
         context: &MutationContext,
     ) -> Result<loonfs_types::api::v0::UploadSession, CoreError> {
         namespace_engine(store, namespace_id, context)
-            .upload_streamed_content(upload_id, None, body(bytes))
+            .upload_content_stream(upload_id, None, body(bytes))
             .await
     }
 

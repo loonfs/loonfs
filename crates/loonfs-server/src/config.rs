@@ -78,7 +78,7 @@ where
 }
 
 impl InlineContentConfig {
-    pub(crate) fn resolve(&self) -> loonfs::InlineContentPolicy {
+    pub(crate) fn effective_policy(&self) -> loonfs::InlineContentPolicy {
         let defaults = loonfs::InlineContentPolicy::default();
         loonfs::InlineContentPolicy {
             inline_content_threshold_bytes: self.inline_content_threshold_bytes,
@@ -112,7 +112,7 @@ pub struct PublicationLimitsConfig {
 
 impl PublicationLimitsConfig {
     /// The per-namespace limits the server's runtime applies.
-    pub(crate) fn resolve(&self) -> loonfs::PublicationPolicy {
+    pub(crate) fn effective_policy(&self) -> loonfs::PublicationPolicy {
         let defaults = loonfs::PublicationPolicy::default();
         loonfs::PublicationPolicy {
             max_requests_per_namespace: self
@@ -409,11 +409,11 @@ fn default_idle_session_close_after_ms() -> u64 {
 }
 
 fn default_max_merge_input_bytes() -> usize {
-    loonfs_types::format::sst_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
+    loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
 }
 
 fn default_idle_fold_after_ms() -> u64 {
-    loonfs::MetadataMaintenanceOptions::default().idle_fold_after_ms
+    loonfs::MaintainMetadataOptions::default().idle_fold_after_ms
 }
 
 /// The server's `[local_cache]` table: where the node-local cache of encoded
@@ -620,7 +620,7 @@ impl ServerConfig {
 
     pub(crate) fn validate(&self) -> Result<MemorySizing, ServerConfigError> {
         let bind = self.bind_addr()?;
-        require_non_empty("writer_id", &self.writer_id)?;
+        validate_non_empty("writer_id", &self.writer_id)?;
 
         if let Some(token) = &self.auth_token {
             if token.expose().trim().is_empty() {
@@ -641,8 +641,8 @@ impl ServerConfig {
             });
         }
         if let Some(tls) = &self.tls {
-            require_non_empty("tls.cert_path", &tls.cert_path)?;
-            require_non_empty("tls.key_path", &tls.key_path)?;
+            validate_non_empty("tls.cert_path", &tls.cert_path)?;
+            validate_non_empty("tls.key_path", &tls.key_path)?;
         } else if bind_serves_beyond_localhost(&bind) && !self.allow_remote_without_tls {
             return Err(ServerConfigError::InvalidField {
                 field: "tls",
@@ -683,13 +683,13 @@ impl ServerConfig {
                     .unwrap_or(default_max_merge_input_bytes()) as u64,
             ),
         ] {
-            require_positive(field, value, None)?;
+            validate_positive(field, value, None)?;
         }
         for (field, value) in [
             ("max_in_flight_requests", self.max_in_flight_requests),
             ("max_connections", self.max_connections),
         ] {
-            require_positive(field, value as u64, None)?;
+            validate_positive(field, value as u64, None)?;
             if value > tokio::sync::Semaphore::MAX_PERMITS {
                 return Err(ServerConfigError::InvalidField {
                     field,
@@ -717,15 +717,15 @@ impl ServerConfig {
                 self.idle_session_close_after_ms,
             ),
         ] {
-            require_positive(
+            validate_positive(
                 field,
                 value,
                 Some("set `maintenance = \"serve_only\"` to turn the maintenance sweep off"),
             )?;
         }
         if let Some(local_cache) = &self.local_cache {
-            require_non_empty("local_cache.path", &local_cache.path)?;
-            require_positive(
+            validate_non_empty("local_cache.path", &local_cache.path)?;
+            validate_positive(
                 "local_cache.memory_bytes",
                 local_cache.memory_bytes,
                 Some("omit the `[local_cache]` table to run without a local cache"),
@@ -752,7 +752,7 @@ impl ServerConfig {
                 reason: error.to_string(),
             });
         }
-        require_non_empty("content_token_secret", self.content_token_secret.expose())?;
+        validate_non_empty("content_token_secret", self.content_token_secret.expose())?;
         self.store.validate()?;
 
         let cgroup_limit = if self.memory_limit_bytes.is_none() && cfg!(target_os = "linux") {
@@ -946,7 +946,7 @@ impl ServerConfig {
         let share =
             |percent: usize| limit.map(|_| (managed as u128 * percent as u128 / 100) as usize);
         let serves_grep = self.grep.mode.serves_grep();
-        require_positive(
+        validate_positive(
             "max_concurrent_compactions",
             self.max_concurrent_compactions as u64,
             None,
@@ -1005,7 +1005,7 @@ impl ServerConfig {
             serves_grep,
         };
         memory.validate()?;
-        require_positive(
+        validate_positive(
             "max_merge_input_bytes",
             memory.merge_input.bytes as u64,
             None,
@@ -1067,7 +1067,7 @@ fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-fn require_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfigError> {
+fn validate_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfigError> {
     if value.trim().is_empty() {
         Err(ServerConfigError::MissingField { field })
     } else {
@@ -1075,7 +1075,7 @@ fn require_non_empty(field: &'static str, value: &str) -> Result<(), ServerConfi
     }
 }
 
-fn require_positive(
+fn validate_positive(
     field: &'static str,
     value: u64,
     hint: Option<&str>,
@@ -1895,12 +1895,12 @@ root = "/tmp/loonfs-server"
         assert_eq!(defaults.inline_content_wal_object_budget_bytes, 1024 * 1024);
         assert_eq!(defaults.inline_content_tail_limit_bytes, 32 * 1024 * 1024);
         assert_eq!(
-            loonfs::MetadataMaintenanceOptions::default()
+            loonfs::MaintainMetadataOptions::default()
                 .inline_content_fold_at_bytes
                 .get(),
             defaults.inline_content_fold_at_bytes
         );
-        assert_eq!(InlineContentConfig::default().resolve(), defaults);
+        assert_eq!(InlineContentConfig::default().effective_policy(), defaults);
         for (source, threshold) in [
             ("", Some(64 * 1024)),
             (
@@ -1913,7 +1913,7 @@ root = "/tmp/loonfs-server"
         ] {
             let overrides: InlineContentConfig = toml::from_str(source).expect("overrides");
             assert_eq!(
-                overrides.resolve().inline_content_threshold_bytes,
+                overrides.effective_policy().inline_content_threshold_bytes,
                 threshold
             );
         }
@@ -1925,7 +1925,10 @@ root = "/tmp/loonfs-server"
     #[test]
     fn publication_overrides_are_strict_and_positive() {
         let defaults: PublicationLimitsConfig = toml::from_str("").expect("empty overrides");
-        assert_eq!(defaults.resolve(), loonfs::PublicationPolicy::default());
+        assert_eq!(
+            defaults.effective_policy(),
+            loonfs::PublicationPolicy::default()
+        );
         for field in [
             "max_requests",
             "max_requests_per_namespace",
@@ -1939,9 +1942,17 @@ root = "/tmp/loonfs-server"
         let overrides: PublicationLimitsConfig =
             toml::from_str("max_requests = 12\nmax_requests_per_namespace = 3").expect("overrides");
         assert_eq!(overrides.max_requests, std::num::NonZeroUsize::new(12));
-        assert_eq!(overrides.resolve().max_requests_per_namespace.get(), 3);
         assert_eq!(
-            overrides.resolve().max_estimated_bytes_per_namespace,
+            overrides
+                .effective_policy()
+                .max_requests_per_namespace
+                .get(),
+            3
+        );
+        assert_eq!(
+            overrides
+                .effective_policy()
+                .max_estimated_bytes_per_namespace,
             loonfs::PublicationPolicy::default().max_estimated_bytes_per_namespace
         );
     }

@@ -4,7 +4,7 @@ use super::*;
 use crate::manifest::row::manifest_rows_for_family;
 use crate::manifest::runs::MANIFEST_ROW_FAMILIES;
 use crate::namespace::control::load_current_manifest;
-use crate::namespace::writer_epoch::acquire_writer_epoch;
+use crate::namespace::writer_epoch::claim_writer_epoch;
 use crate::store_waves::STORE_WRITE_WAVE;
 use crate::test_support::ops::{create, write_file_bytes};
 use crate::time::StdMonotonicTimer;
@@ -22,7 +22,7 @@ use loonfs_types::format::manifest::{
     decode_namespace_manifest_json, MetadataRow, MetadataRowFamily, MetadataSegmentRef,
     NamespaceManifestEnvelope,
 };
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_data_block, decode_filter_block, decode_index_block, BlockHandle,
 };
 use loonfs_types::WriterId;
@@ -39,7 +39,7 @@ async fn seed_tail(store: &LocalFsStore, namespace_id: &NamespaceId) {
     create(store, namespace_id, &context)
         .await
         .expect("namespace");
-    acquire_writer_epoch(store, namespace_id, &context)
+    claim_writer_epoch(store, namespace_id, &context)
         .await
         .expect("writer");
     for index in 0..36 {
@@ -170,9 +170,9 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                 &namespace_id,
                 &projection,
                 &deadline,
-                MetadataLsmPolicy {
+                MetadataRunPolicy {
                     max_rows_per_segment: NonZeroUsize::new(rows_per_segment).expect("row limit"),
-                    ..MetadataLsmPolicy::default()
+                    ..MetadataRunPolicy::default()
                 },
                 &content_writes,
             ),
@@ -257,9 +257,9 @@ async fn a_failed_segment_put_prevents_fold_publication() {
         &namespace_id,
         &projection,
         &Deadline::start(Arc::new(StdMonotonicTimer::default())),
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(2).expect("row limit"),
-            ..MetadataLsmPolicy::default()
+            ..MetadataRunPolicy::default()
         },
         &content_writes,
     )
@@ -267,7 +267,7 @@ async fn a_failed_segment_put_prevents_fold_publication() {
     assert!(matches!(
         result,
         Err(CoreError::Store {
-            class: crate::error::StoreFailureClass::PermissionDenied,
+            kind: loonfs_objectstore::ObjectStoreErrorKind::PermissionDenied,
             ..
         })
     ));

@@ -1,8 +1,8 @@
 //! Streams rows from multiple runs in row-key order with bounded buffering.
 
-use super::block_fetch::load_segment_index_for_compaction;
 use super::block_load::SessionBlockMemo;
 use super::data_block_load::load_segment_data_block_span;
+use super::index_block_load::load_segment_index_for_compaction;
 use super::streaming_compaction::manifest_load_failure;
 use super::validate::validate_manifest_row_seq_range;
 use crate::error::Result;
@@ -10,7 +10,7 @@ use crate::store_waves::STORE_READ_WAVE;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
-use loonfs_types::format::sst_blocks::{DecodedDataBlock, SegmentIndexEntry};
+use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::ChangeSeq;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -65,16 +65,15 @@ pub trait SegmentBlockLoader<Row, Segment> {
     type Error;
 
     /// Selects a prefix of the remaining index; zero ends the segment.
-    fn data_block_count(&self, entries: &[SegmentIndexEntry], decoded_byte_limit: usize) -> usize {
+    fn data_block_count(&self, entries: &[SegmentIndexEntry], max_decoded_bytes: usize) -> usize {
         let mut count = 0;
         let mut stored_bytes = 0;
         let mut decoded_bytes = 0;
-        let target_bytes = ITERATOR_FETCH_TARGET_BYTES.min(decoded_byte_limit);
+        let target_bytes = ITERATOR_FETCH_TARGET_BYTES.min(max_decoded_bytes);
         for entry in entries {
             let next_decoded_bytes = decoded_bytes + entry.block.decoded_bytes as usize;
             // A block cannot be split, even when it exceeds the iterator's share.
-            if count > 0
-                && (stored_bytes >= target_bytes || next_decoded_bytes > decoded_byte_limit)
+            if count > 0 && (stored_bytes >= target_bytes || next_decoded_bytes > max_decoded_bytes)
             {
                 break;
             }
@@ -192,7 +191,7 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
     async fn fill<Loader>(
         &mut self,
         loader: &Loader,
-        decoded_byte_limit: usize,
+        max_decoded_bytes: usize,
     ) -> std::result::Result<(), Loader::Error>
     where
         Segment: Clone,
@@ -216,7 +215,7 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
                 }
             };
             let segment = self.segments[self.next_segment - 1].clone();
-            let count = loader.data_block_count(&index[self.next_block..], decoded_byte_limit);
+            let count = loader.data_block_count(&index[self.next_block..], max_decoded_bytes);
             if count == 0 {
                 self.next_block = index.len();
                 continue;
@@ -330,7 +329,7 @@ where
     Segment: Clone,
     Loader: SegmentBlockLoader<Row, Segment>,
 {
-    let decoded_byte_limit = max_decoded_input_bytes / iterators.len().max(1);
+    let max_decoded_bytes = max_decoded_input_bytes / iterators.len().max(1);
     let mut hungry: Vec<&mut SegmentRowIterator<Row, Segment, SortKey>> = iterators
         .iter_mut()
         .filter(|iterator| iterator.needs_fill())
@@ -338,7 +337,7 @@ where
     for wave in hungry.chunks_mut(STORE_READ_WAVE) {
         futures::future::try_join_all(
             wave.iter_mut()
-                .map(|iterator| Box::pin(iterator.fill(loader, decoded_byte_limit))),
+                .map(|iterator| Box::pin(iterator.fill(loader, max_decoded_bytes))),
         )
         .await?;
     }

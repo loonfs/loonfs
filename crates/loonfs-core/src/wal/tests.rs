@@ -7,7 +7,7 @@ use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::limits::READ_REVALIDATION_BOUND_MS;
 use crate::namespace::control::load_current_manifest;
-use crate::namespace::writer_epoch::{acquire_writer, acquire_writer_epoch};
+use crate::namespace::writer_epoch::{claim_writer, claim_writer_epoch};
 use crate::path::read::load_current_metadata_view;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
@@ -42,7 +42,7 @@ async fn readers_reject_invalid_numbers_epochs_sequences_and_allocation_summarie
         .await
         .expect("create");
     for _ in 0..2 {
-        acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+        claim_writer_epoch(&store, &namespace_id, &context(1_000))
             .await
             .expect("fence");
     }
@@ -99,10 +99,10 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
             .await
             .expect("data commit");
     }
-    acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+    claim_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("first fence");
-    acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+    claim_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("second fence");
     drop(engine);
@@ -154,13 +154,13 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
     let namespace_id = NamespaceId::parse("fences").expect("namespace");
     let setup = context(1_000);
     create(&store, &namespace_id, &setup).await.expect("create");
-    acquire_writer_epoch(&store, &namespace_id, &setup)
+    claim_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("first fence");
     crate::manifest::fold_wal(&store, &namespace_id)
         .await
         .expect("fold fence");
-    acquire_writer_epoch(&store, &namespace_id, &setup)
+    claim_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("second fence");
     let current = load_current_manifest(&store, &namespace_id)
@@ -207,14 +207,14 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup).await.expect("create");
-    acquire_writer_epoch(&store, &namespace_id, &setup)
+    claim_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("first fence");
     store.block_next();
     let (folded, acquired) =
         futures::join!(crate::manifest::fold_wal(&store, &namespace_id), async {
             store.wait_until_blocked().await;
-            let acquired = acquire_writer_epoch(store.inner(), &namespace_id, &setup).await;
+            let acquired = claim_writer_epoch(store.inner(), &namespace_id, &setup).await;
             store.release();
             acquired
         });
@@ -238,13 +238,13 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup).await.expect("create");
-    acquire_writer_epoch(&store, &namespace_id, &setup)
+    claim_writer_epoch(&store, &namespace_id, &setup)
         .await
         .expect("first fence");
     let timer = Arc::new(ManualClock::new(0));
     store.block_next();
     let (acquired, ()) = futures::join!(
-        acquire_writer(&store, &namespace_id, &setup, timer.clone()),
+        claim_writer(&store, &namespace_id, &setup, timer.clone()),
         async {
             // The claim has landed and its hint raise is held. Meanwhile a fold
             // folds the first fence, a compactor claim supersedes the fold, and
@@ -307,7 +307,7 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
     let setup = context(1_000);
     create(&store, &namespace_id, &setup).await.expect("create");
     store.fail_next(1);
-    let error = acquire_writer(&store, &namespace_id, &setup, timer)
+    let error = claim_writer(&store, &namespace_id, &setup, timer)
         .await
         .expect_err("the acquisition runs out of budget");
     assert!(matches!(
@@ -428,7 +428,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     publish(&mut stale, &store, "old")
         .await
         .expect("old writer");
-    let acquired = acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+    let acquired = claim_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("takeover fence");
     store.reset();
@@ -766,7 +766,7 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
     create(&store, &namespace_id, &context(1_000))
         .await
         .expect("create");
-    acquire_writer_epoch(&store, &namespace_id, &context(1_000))
+    claim_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("fence");
     let loaded = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
@@ -876,7 +876,7 @@ async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
         .expect_err("late put must not acknowledge publication");
     assert!(matches!(
         error,
-        crate::error::CoreError::WalPublish(crate::commit::WalPublishError::OutcomeUnknown(_))
+        crate::error::CoreError::WalPublish(crate::wal::WalPublishError::OutcomeUnknown(_))
     ));
     assert_eq!(store.inner().counts().create_if_absent_puts, 1);
     assert_eq!(store.inner().snapshot().len(), 1);
@@ -967,7 +967,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 blocked.inner(),
                 &namespace_id,
                 &Deadline::start(timer_b.clone()),
-                crate::manifest::MetadataLsmPolicy::default(),
+                crate::manifest::MetadataRunPolicy::default(),
                 Arc::default(),
                 &tokio::sync::Semaphore::new(32),
             )

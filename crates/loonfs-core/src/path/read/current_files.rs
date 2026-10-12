@@ -11,7 +11,7 @@ use loonfs_types::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use std::collections::{HashMap, HashSet};
 
 /// Maximum number of inode IDs accepted by a batch resolution.
-pub const MAX_RESOLVE_CURRENT_FILES: usize = loonfs_types::DEFAULT_MAX_PAGE_LIMIT as usize;
+pub const MAX_CURRENT_FILES_PER_STAT: usize = loonfs_types::DEFAULT_MAX_PAGE_LIMIT as usize;
 
 /// Current namespace state for one inode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,10 +32,10 @@ pub struct CurrentFileState {
 ///
 /// Called at the API boundary to enforce the batch limit.
 pub(crate) fn ensure_resolve_batch_within_cap(requested: usize) -> Result<()> {
-    if requested > MAX_RESOLVE_CURRENT_FILES {
+    if requested > MAX_CURRENT_FILES_PER_STAT {
         return Err(CoreError::BatchTooLarge {
             requested,
-            max: MAX_RESOLVE_CURRENT_FILES,
+            max: MAX_CURRENT_FILES_PER_STAT,
         });
     }
     Ok(())
@@ -185,13 +185,13 @@ async fn current_path<S: ObjectStore + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_resolve_batch_within_cap, MAX_RESOLVE_CURRENT_FILES};
+    use super::{ensure_resolve_batch_within_cap, MAX_CURRENT_FILES_PER_STAT};
     use loonfs_types::{ErrorCode, PaginationPolicy};
 
     #[test]
     fn the_batch_cap_is_the_pagination_maximum() {
         assert_eq!(
-            MAX_RESOLVE_CURRENT_FILES,
+            MAX_CURRENT_FILES_PER_STAT,
             PaginationPolicy::default().max_limit().get() as usize,
             "the batch cap is the page limit, not a second number"
         );
@@ -199,14 +199,14 @@ mod tests {
 
     #[test]
     fn a_batch_at_the_cap_is_accepted_and_one_past_it_names_the_cap() {
-        assert!(ensure_resolve_batch_within_cap(MAX_RESOLVE_CURRENT_FILES).is_ok());
-        let error = ensure_resolve_batch_within_cap(MAX_RESOLVE_CURRENT_FILES + 1)
+        assert!(ensure_resolve_batch_within_cap(MAX_CURRENT_FILES_PER_STAT).is_ok());
+        let error = ensure_resolve_batch_within_cap(MAX_CURRENT_FILES_PER_STAT + 1)
             .expect_err("one past the cap is refused");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
         assert!(
             error
                 .to_string()
-                .contains(&MAX_RESOLVE_CURRENT_FILES.to_string()),
+                .contains(&MAX_CURRENT_FILES_PER_STAT.to_string()),
             "the refusal should name the cap: {error}"
         );
     }

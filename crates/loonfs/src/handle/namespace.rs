@@ -119,7 +119,7 @@ impl Namespace<Writable> {
     }
 
     /// Returns the state of this handle's writer session.
-    pub fn session_state(&self) -> NamespaceSessionStatus {
+    pub fn session_status(&self) -> NamespaceSessionStatus {
         self.session().state()
     }
 
@@ -141,6 +141,9 @@ impl Namespace<Writable> {
     }
 
     /// Records a host's metadata result only if no newer commit has published.
+    ///
+    /// This is a hook for a host that runs its own maintenance sweep, such as
+    /// the `loonfs-server` sweep. Embedded applications don't call it.
     pub fn record_metadata_maintenance(&self, expected_seq: Option<ChangeSeq>, caught_up: bool) {
         self.session()
             .record_metadata_maintenance(expected_seq, caught_up);

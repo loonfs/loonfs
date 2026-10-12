@@ -783,7 +783,7 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
             "base",
             vec![inline(&namespace_id, Bytes::copy_from_slice(&bytes))],
         );
-        base.request
+        base.intent
             .operations
             .extend((1..count).map(|_| append("/base-0", &bytes)));
         publish(&mut engine, &store, &context, base)
@@ -826,7 +826,7 @@ async fn a_fresh_chains_commit_size_does_not_grow_with_resident_base_bytes() {
         sizes.push(
             loonfs_types::format::wal::encode_wal_object_envelope_zstd(wal.into_payload())
                 .expect("encode WAL")
-                .document_len(),
+                .document_bytes(),
         );
     }
     assert_eq!(sizes[0], sizes[1]);

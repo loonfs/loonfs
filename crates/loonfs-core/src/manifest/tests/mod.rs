@@ -32,7 +32,7 @@ use super::retention::{advance_retention_floor, RetentionTarget};
 use super::row::{manifest_rows_for_family, metadata_states_equivalent};
 use super::runs::{
     flatten_manifest_segments, runs_in_materialization_order, runs_newest_first,
-    MetadataFamilyGroup, MetadataFamilySegments, MetadataLsmPolicy, MetadataRunManifest,
+    MetadataFamilyGroup, MetadataFamilySegments, MetadataRunManifest, MetadataRunPolicy,
     DEFAULT_MAX_DELTA_RUNS, MANIFEST_ROW_FAMILIES,
 };
 use super::stored_block_cache::{
@@ -43,8 +43,8 @@ use super::streaming_compaction::{
     MetadataCompactionJobOutcome, MetadataCompactionSpec,
 };
 use super::{
-    block_fetch, compaction_step, data_block_load, fold, load, row, scan, CompactionStepOutcome,
-    MetadataCompactionPolicy,
+    compaction_step, data_block_load, fold, index_block_load, load, row, scan,
+    CompactionStepOutcome, MetadataCompactionPolicy,
 };
 use crate::block_cache::SegmentBlockKind;
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
@@ -52,7 +52,7 @@ use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
 use crate::namespace::state::NamespaceReadState;
-use crate::namespace::writer_epoch::acquire_writer_epoch;
+use crate::namespace::writer_epoch::claim_writer_epoch;
 use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
 use crate::pin::record::load_pin;
 use crate::protocol::list_changes_after;
@@ -83,7 +83,7 @@ use loonfs_types::format::manifest::{
     MetadataRowFamily as ApiMetadataRowFamily, MetadataRunRef, MetadataSegmentRef,
     NamespaceManifestEnvelope, NamespaceManifestPayload, RunTier,
 };
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_data_block, string_prefix_upper_bound, BlockHandle, DecodedDataBlock,
     SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
 };
@@ -125,7 +125,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
             })?;
     }
     drop(tail_state);
-    Ok((projection.head, metadata_state.finish()))
+    Ok((projection.head, metadata_state.build()))
 }
 
 /// Every lifecycle test in this file pins as one user owner; owner-specific
@@ -219,7 +219,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_types::NamespaceMetadata, crate::error::CoreError> {
     let summary = create(store, namespace_id, context).await?;
-    acquire_writer_epoch(store, namespace_id, context)
+    claim_writer_epoch(store, namespace_id, context)
         .await
         .expect("acquire fixture writer");
     fold::fold_wal(store, namespace_id)
@@ -254,7 +254,7 @@ async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> ManifestNo {
     create_checkpoint(store, namespace_id, context)
         .await
@@ -262,7 +262,7 @@ async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
     drain_compaction(
         store,
         namespace_id,
-        MetadataLsmPolicy {
+        MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
             ..policy
         },
@@ -328,7 +328,7 @@ fn merge_rows_with_retention(
 async fn drain_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
 ) -> (ManifestNo, usize) {
     let mut published = 0;
     loop {
@@ -367,7 +367,7 @@ async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     _context: &MutationContext,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
 ) -> MetadataCompactionJobOutcome {
     run_metadata_compaction_job(
@@ -447,13 +447,13 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     _context: &MutationContext,
-) -> (MetadataLsmPolicy, MetadataCompactionSpec) {
+) -> (MetadataRunPolicy, MetadataCompactionSpec) {
     // One byte admits no run whole, so the group a step selects has no window
     // that makes progress and is handed to a job.
-    let policy = MetadataLsmPolicy {
+    let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-        ..MetadataLsmPolicy::default()
+        ..MetadataRunPolicy::default()
     };
     let report = compaction_step(
         store,
@@ -502,7 +502,7 @@ pub(crate) async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
 ) {
     let outcome = run_planned_compaction(store, namespace_id, context, policy, spec).await;
@@ -765,7 +765,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     store: &S,
     namespace_id: &NamespaceId,
     source: ManifestMetadataSource<'_>,
-    policy: MetadataLsmPolicy,
+    policy: MetadataRunPolicy,
     manifest_no: ManifestNo,
 ) -> crate::error::Result<NamespaceManifestEnvelope> {
     let head = source.head;

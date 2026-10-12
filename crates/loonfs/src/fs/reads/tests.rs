@@ -181,7 +181,7 @@ async fn create_compacted_directory(
     }
     loop {
         let response = maintenance
-            .compact_metadata(namespace_id)
+            .compact_metadata(namespace_id, &crate::MaintenanceCancellation::new())
             .await
             .expect("compact metadata");
         if response.compaction == MetadataCompactionOutcome::NotNeeded {

@@ -9,6 +9,7 @@ use super::sweep::Sweep;
 use super::GcOptions;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
+use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::manifest::MetadataSegmentCache;
 use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
@@ -38,7 +39,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         .current_tombstone
         .as_ref()
         .map(|tombstone| live.deadline(tombstone));
-    report.next_reclamation_at_ms = match live.retirement_state() {
+    report.next_reclamation_at_ms = match live.retirement_status() {
         RetirementStatus::Retained { until_ms } => until_ms,
         _ => None,
     };
@@ -49,6 +50,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         &live,
         options.content_shard_rows,
         context.now_ms,
+        MAX_BLOOM_FILTER_BYTES,
     )
     .await?;
     let sweep = Sweep {

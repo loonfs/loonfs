@@ -107,7 +107,7 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
 
     let temp_dir = tempfile::tempdir().map_err(config_error)?;
     let store_root = temp_dir.path().join("store");
-    let inner = LocalFsStore::with_checksum_algorithm(&store_root, shape.checksum_algorithm())
+    let inner = LocalFsStore::new_with_checksum_algorithm(&store_root, shape.checksum_algorithm())
         .map_err(config_error)?;
     let (shared_store, multipart_store): (SharedObjectStore, _) = match shape {
         StoreShape::S3 => {

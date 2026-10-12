@@ -9,7 +9,7 @@ use crate::config::{
 };
 use crate::error::CliError;
 use crate::profiles::resolve_profile;
-use crate::render::{store_probe_summary_line, store_probe_verdict, StoreProbeRunOutcome};
+use crate::render::{store_probe_run_outcome, store_probe_summary_line, StoreProbeRunOutcome};
 use crate::resolve::{resolve_namespace, ResolvedTarget};
 use futures::TryStreamExt;
 use loonfs_objectstore::probe::PROBE_RUN_PREFIX;
@@ -472,7 +472,7 @@ fn capability_document_check(result: Result<CapabilityDocument, CliError>) -> Do
 }
 
 fn store_probe_check(response: StoreProbeResponse) -> DoctorCheck {
-    let status = match store_probe_verdict(&response) {
+    let status = match store_probe_run_outcome(&response) {
         StoreProbeRunOutcome::Failed { .. } => DoctorOutcome::Failed,
         StoreProbeRunOutcome::Unsupported { .. } => DoctorOutcome::Warning,
         StoreProbeRunOutcome::Passed => DoctorOutcome::Ok,
@@ -621,7 +621,7 @@ mod tests {
                 key_prefix: Some("tenant".to_owned()),
             };
             let failure = FailStore::new(
-                LocalFsStore::with_key_prefix(directory.path(), Some("tenant"))
+                LocalFsStore::new_with_key_prefix(directory.path(), Some("tenant"))
                     .expect("open scoped store"),
                 KeyPredicate::any(),
                 OperationClass::List,

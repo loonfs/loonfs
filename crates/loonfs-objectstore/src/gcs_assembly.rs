@@ -1,7 +1,7 @@
 //! Create-only GCS media uploads, compose, and temporary object cleanup.
 
 use super::{gcs_object, precondition_failed_when_missing, GcsRequestSigner, GCS_JSON_OBJECTS};
-use crate::assembly::{check_expected, combined_checksum, source_range, READ_BYTES};
+use crate::assembly::{combined_checksum, source_range, verify_expected, READ_BYTES};
 use crate::keys::temporary_object;
 use crate::keyspace::scope_object_key;
 use crate::layout::parse_object_key;
@@ -85,7 +85,7 @@ impl GcsRequestSigner {
         range: ByteRange,
     ) -> Result<ObjectMetadata> {
         if range.start_inclusive == range.end_exclusive {
-            check_expected(
+            verify_expected(
                 &source.key,
                 &source.checksum,
                 &Checksum::compute(source.checksum.algorithm, &[]),
@@ -115,7 +115,7 @@ impl GcsRequestSigner {
                     .await?;
                 checksum.update(&bytes);
                 if end == range.end_exclusive {
-                    check_expected(
+                    verify_expected(
                         &source.key,
                         &source.checksum,
                         &std::mem::replace(
@@ -180,7 +180,7 @@ impl GcsRequestSigner {
         tail: Vec<Bytes>,
         expected: &Checksum,
     ) -> Result<ObjectMetadata> {
-        crate::assembly::check_algorithms(ChecksumAlgorithm::Crc32c, key, sources, expected)?;
+        crate::assembly::validate_algorithms(ChecksumAlgorithm::Crc32c, key, sources, expected)?;
         let namespace_id = parse_object_key(key)
             .and_then(|parsed| NamespaceId::parse(parsed.owner_namespace_id()).ok())
             .ok_or_else(|| ObjectStoreError::InvalidKey {
@@ -197,7 +197,7 @@ impl GcsRequestSigner {
                 }
             })?;
             if source.range.is_none() {
-                check_expected(&source.key, &source.checksum, checksum)?;
+                verify_expected(&source.key, &source.checksum, checksum)?;
             }
             resolved.push((metadata, range));
         }
@@ -214,7 +214,7 @@ impl GcsRequestSigner {
         .ok_or_else(|| ObjectStoreError::ChecksumMismatch {
             object_key: key.to_owned(),
         })?;
-        check_expected(key, expected, &actual)?;
+        verify_expected(key, expected, &actual)?;
         let size_bytes = resolved
             .iter()
             .map(|(_, range)| range.end_exclusive - range.start_inclusive)
@@ -271,7 +271,7 @@ impl GcsRequestSigner {
                 bytes.extend_from_slice(&chunk);
                 offset = end;
             }
-            check_expected(
+            verify_expected(
                 &source.key,
                 &source.checksum,
                 &Checksum::crc32c(&bytes[start..]),
@@ -280,7 +280,7 @@ impl GcsRequestSigner {
         for piece in tail {
             bytes.extend_from_slice(&piece);
         }
-        check_expected(key, expected, &Checksum::crc32c(&bytes))?;
+        verify_expected(key, expected, &Checksum::crc32c(&bytes))?;
         let mut rest = PartReader::new(stream::empty().boxed(), 1);
         rest.next_part().await?;
         self.put_if_absent(key, bytes.into(), rest, 1).await
@@ -325,7 +325,7 @@ impl GcsRequestSigner {
                 .crc_combine(&Checksum::crc32c(piece), piece.len() as u64)
                 .expect("CRC-32C values should combine");
         }
-        check_expected(key, expected, &checksum)?;
+        verify_expected(key, expected, &checksum)?;
         if !tail.is_empty() || objects.is_empty() {
             let name = temporary_object(namespace_id);
             temporary.push((name.clone(), self.temporary_cleanup(&name)));

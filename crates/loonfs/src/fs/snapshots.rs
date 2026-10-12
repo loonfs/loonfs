@@ -91,7 +91,7 @@ impl<M> Namespace<M> {
         if self.core.subject.is_some() {
             self.core
                 .read(&self.namespace_id, |engine, context| async move {
-                    Ok(engine.require_administrator(&context).await?)
+                    Ok(engine.ensure_administrator(&context).await?)
                 })
                 .await?;
         }
@@ -167,7 +167,7 @@ impl Namespace<Writable> {
         policy: &SnapshotPolicy,
     ) -> Result<Checkpoint> {
         self.core.record_trace_context(&tracing::Span::current());
-        self.require_administrator().await?;
+        self.ensure_administrator().await?;
         self.ensure_live_snapshot_limit(policy.max_live_per_namespace, 1)
             .await?;
         let engine = self
@@ -257,7 +257,7 @@ impl Namespace<Writable> {
         requested_expires_at_ms: u64,
         policy: &SnapshotPolicy,
     ) -> Result<SnapshotSummary> {
-        self.require_administrator().await?;
+        self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
@@ -290,7 +290,7 @@ impl Namespace<Writable> {
         )
     )]
     pub async fn delete_snapshot(&self, snapshot_id: &PinId) -> Result<DeleteSnapshotResponse> {
-        self.require_administrator().await?;
+        self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core

@@ -621,7 +621,7 @@ async fn read_open_proxied_session<S: ObjectStore + ?Sized>(
     Ok(session)
 }
 
-async fn check_staging_ownership<S: ObjectStore + ?Sized>(
+async fn ensure_staging_ownership<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
@@ -673,7 +673,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     .await
 }
 
-pub(crate) async fn upload_streamed_content<S: ObjectStore + ?Sized>(
+pub(crate) async fn upload_content_stream<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
@@ -760,7 +760,7 @@ pub(crate) async fn upload_proxied_content<S: ObjectStore + ?Sized>(
             StreamedPayloadKind::Request,
             async {
                 final_request_may_be_sent = true;
-                check_staging_ownership(
+                ensure_staging_ownership(
                     store,
                     namespace_id,
                     upload_id,
@@ -1044,7 +1044,7 @@ pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
         session.content_id.clone(),
         body,
         payload_kind,
-        check_staging_ownership(
+        ensure_staging_ownership(
             store,
             catalog.namespace_id(),
             &session.upload_id,
@@ -1268,7 +1268,7 @@ pub struct UploadSessionView {
     pub direct_put_object_key: Option<String>,
 }
 
-pub(crate) async fn get_upload_status<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_upload_status<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
@@ -1659,7 +1659,7 @@ mod tests {
             .boxed()
         };
 
-        let error = upload_streamed_content(
+        let error = upload_content_stream(
             &recording,
             &namespace_id,
             &session.upload_id,
@@ -2508,7 +2508,7 @@ mod tests {
         let (namespace_id, upload_id, _, _) = staged_session(&store, &setup).await;
         let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS);
 
-        let view = get_upload_status(&store, &namespace_id, &upload_id, None, expired.now_ms)
+        let view = load_upload_status(&store, &namespace_id, &upload_id, None, expired.now_ms)
             .await
             .expect("status of an expired session");
         assert!(matches!(
@@ -2538,7 +2538,7 @@ mod tests {
             session: open,
             evidence,
             ..
-        } = get_upload_status(&store, &namespace_id, &upload_id, None, 1_500)
+        } = load_upload_status(&store, &namespace_id, &upload_id, None, 1_500)
             .await
             .expect("status of an open session");
         assert!(matches!(open.status, UploadSessionStatus::Open { .. }));
@@ -2554,7 +2554,7 @@ mod tests {
             session: completed,
             evidence,
             ..
-        } = get_upload_status(&store, &namespace_id, &upload_id, None, 2_500)
+        } = load_upload_status(&store, &namespace_id, &upload_id, None, 2_500)
             .await
             .expect("status of a completed session");
         assert!(matches!(
@@ -2577,7 +2577,7 @@ mod tests {
             session: aborted,
             evidence,
             ..
-        } = get_upload_status(&store, &namespace_id, &begin.upload_id, None, 3_500)
+        } = load_upload_status(&store, &namespace_id, &begin.upload_id, None, 3_500)
             .await
             .expect("status of an aborted session");
         assert!(matches!(
@@ -2609,7 +2609,7 @@ mod tests {
             session: _,
             evidence,
             ..
-        } = get_upload_status(&store, &namespace_id, &upload_id, None, much_later)
+        } = load_upload_status(&store, &namespace_id, &upload_id, None, much_later)
             .await
             .expect("status inside the receipt window");
         assert_eq!(evidence.expect("still minting").content_ref(), &content_ref);
@@ -2619,7 +2619,7 @@ mod tests {
             session: status,
             evidence,
             ..
-        } = get_upload_status(&store, &namespace_id, &upload_id, None, past)
+        } = load_upload_status(&store, &namespace_id, &upload_id, None, past)
             .await
             .expect("status past the receipt window");
         let completed = match status.status {
@@ -2740,7 +2740,7 @@ mod tests {
             .expect("complete");
         delete_upload_namespace(&inner, &namespace_id).await;
         let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
-        let error = get_upload_status(&store, &namespace_id, &upload_id, None, 4_000)
+        let error = load_upload_status(&store, &namespace_id, &upload_id, None, 4_000)
             .await
             .expect_err("deleted namespace");
         assert!(matches!(error, CoreError::NamespaceDeleted { .. }));

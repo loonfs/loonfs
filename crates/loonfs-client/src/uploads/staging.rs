@@ -493,7 +493,7 @@ impl Client {
                 DirectPutBody::Streamed(source) => {
                     let (source, observation) =
                         observed_direct_put_source(source, checksum_algorithm);
-                    self.upload_streamed_via_presigned_url(&access, source)
+                    self.upload_stream_via_presigned_url(&access, source)
                         .await?;
                     let content = observation
                         .lock()

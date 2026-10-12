@@ -6,7 +6,7 @@
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use bytes::Bytes;
 use loonfs::{
-    CoreError, CreateNamespaceOptions, ErrorCode, LoonFs, Maintenance, MetadataMaintenanceOptions,
+    CoreError, CreateNamespaceOptions, ErrorCode, LoonFs, MaintainMetadataOptions, Maintenance,
     NamespaceId, PutFileOptions, SharedObjectStore, UndeleteDestination, UndeleteOptions,
 };
 use loonfs_grep::keyspace::{
@@ -118,7 +118,7 @@ async fn fold_wal_and_advance_retention(
     maintenance
         .maintain_metadata_with_options(
             namespace_id,
-            &MetadataMaintenanceOptions {
+            &MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
@@ -355,7 +355,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         loonfs_grep::GrepDisableOutcome::Disabled
     );
     worker
-        .garbage_collect_namespace(&namespace_id, u64::MAX)
+        .gc_namespace(&namespace_id, u64::MAX)
         .await
         .expect("collect disabled segments");
     assert!(
@@ -2531,7 +2531,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     let collector = worker(&store).await;
     recording.reset();
     let young = collector
-        .garbage_collect_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS)
+        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS)
         .await
         .expect("young pass");
     assert_eq!(
@@ -2545,7 +2545,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .expect("head")
         .is_none());
     let aged = collector
-        .garbage_collect_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1)
+        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1)
         .await
         .expect("aged pass");
     assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 0));
@@ -2573,7 +2573,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     assert!(matches!(
         worker(&failing_store)
             .await
-            .garbage_collect_namespace(&namespace_id, u64::MAX)
+            .gc_namespace(&namespace_id, u64::MAX)
             .await,
         Err(GrepError::StoreUnavailable { .. })
     ));
@@ -2592,9 +2592,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .expect("corrupt hint");
     recording.reset();
     assert!(matches!(
-        collector
-            .garbage_collect_namespace(&namespace_id, u64::MAX)
-            .await,
+        collector.gc_namespace(&namespace_id, u64::MAX).await,
         Err(GrepError::IndexCorrupt { .. })
     ));
     assert_eq!(recording.counts().deletes, 0);
@@ -2607,7 +2605,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .filter(|key| !key.starts_with(&grep_prefix(&namespace_id)))
         .collect();
     let reaped = collector
-        .garbage_collect_namespace(&namespace_id, u64::MAX)
+        .gc_namespace(&namespace_id, u64::MAX)
         .await
         .expect("reap tombstone");
     assert!(reaped.namespace_reaped);
@@ -2634,7 +2632,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     assert!(
         worker(&store)
             .await
-            .garbage_collect_namespace(&absent, u64::MAX)
+            .gc_namespace(&absent, u64::MAX)
             .await
             .expect("reap absent")
             .namespace_reaped
@@ -2712,7 +2710,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
         segment_key(&namespace_id, &superseded.segment_id),
     ];
     let young = collector
-        .garbage_collect_namespace(&namespace_id, now_ms)
+        .gc_namespace(&namespace_id, now_ms)
         .await
         .expect("young successor pass");
     assert_eq!(
@@ -2723,7 +2721,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
         assert!(store.head(key).await.expect("head").is_some(), "{key}");
     }
     let aged = collector
-        .garbage_collect_namespace(&namespace_id, now_ms + 1)
+        .gc_namespace(&namespace_id, now_ms + 1)
         .await
         .expect("aged successor pass");
     assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 1));

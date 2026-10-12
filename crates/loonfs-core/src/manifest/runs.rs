@@ -9,7 +9,7 @@ use loonfs_types::{ChangeSeq, RunNo};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 
-pub(super) use loonfs_types::format::sst_blocks::{
+pub(super) use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_ROWS,
     DEFAULT_MAX_COMPACTION_INPUT_RUNS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
@@ -46,7 +46,7 @@ pub(super) struct MetadataRunManifest {
 /// How folds and compactions shape runs, and the memory one of them may
 /// hold while it works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataLsmPolicy {
+pub struct MetadataRunPolicy {
     pub max_delta_runs: NonZeroUsize,
     /// Runs up to this stored-byte size may merge without a size ratio.
     pub small_run_bytes: NonZeroUsize,
@@ -63,15 +63,17 @@ pub struct MetadataLsmPolicy {
     pub max_decoded_input_bytes_per_step: NonZeroUsize,
 }
 
-impl Default for MetadataLsmPolicy {
+impl Default for MetadataRunPolicy {
     fn default() -> Self {
         Self {
             small_run_bytes: const { NonZeroUsize::new(8 * 1024 * 1024).unwrap() },
             max_delta_runs: const { NonZeroUsize::new(DEFAULT_MAX_DELTA_RUNS).unwrap() },
             max_rows_per_segment: const { NonZeroUsize::new(DEFAULT_MAX_ROWS_PER_SEGMENT).unwrap() },
             target_segment_bytes: const {
-                NonZeroUsize::new(loonfs_types::format::sst_blocks::DEFAULT_TARGET_SEGMENT_BYTES)
-                    .unwrap()
+                NonZeroUsize::new(
+                    loonfs_types::format::segment_blocks::DEFAULT_TARGET_SEGMENT_BYTES,
+                )
+                .unwrap()
             },
             max_input_runs_per_step: const {
                 NonZeroUsize::new(DEFAULT_MAX_COMPACTION_INPUT_RUNS).unwrap()

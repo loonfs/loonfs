@@ -140,7 +140,7 @@ impl Namespace<Writable> {
     ) -> Result<UploadSession> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
         Ok(self
             .engine()
             .upload_content(upload_id, self.core.subject.as_ref(), bytes)
@@ -176,7 +176,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine()
-            .upload_streamed_content(upload_id, self.core.subject.as_ref(), body)
+            .upload_content_stream(upload_id, self.core.subject.as_ref(), body)
             .await?)
     }
 
@@ -280,7 +280,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&tracing::Span::current());
         Ok(self
             .engine()
-            .get_upload_status(upload_id, self.core.subject.as_ref())
+            .load_upload_status(upload_id, self.core.subject.as_ref())
             .await?)
     }
 }

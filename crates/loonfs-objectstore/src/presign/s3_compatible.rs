@@ -100,10 +100,10 @@ impl S3CompatiblePresigner {
     /// [`DirectPutIssuer::presign_put`] runs.
     pub fn new(config: S3PresignerConfig, credentials: crate::AwsS3Credentials) -> Result<Self> {
         let source = aws_credentials_source(&credentials, &config.region)?;
-        Self::with_credentials(config, source)
+        Self::new_with_credentials(config, source)
     }
 
-    pub(crate) fn with_credentials(
+    pub(crate) fn new_with_credentials(
         mut config: S3PresignerConfig,
         credentials: SharedAwsCredentialsSource,
     ) -> Result<Self> {
@@ -678,7 +678,7 @@ mod tests {
     #[tokio::test]
     async fn presigner_supplies_the_requested_lifetime_to_the_shared_source() {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let signer = S3CompatiblePresigner::with_credentials(
+        let signer = S3CompatiblePresigner::new_with_credentials(
             presigner_config(),
             Arc::new(LifetimeAwareSource(now + Duration::from_secs(900))),
         )
@@ -701,7 +701,7 @@ mod tests {
     ) {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let expiry = now + Duration::from_secs(300);
-        let signer = S3CompatiblePresigner::with_credentials(
+        let signer = S3CompatiblePresigner::new_with_credentials(
             presigner_config(),
             Arc::new(ExpiringCredentialsSource(expiry)),
         )
@@ -868,7 +868,7 @@ mod tests {
     async fn one_rotating_source_serves_the_presigner_and_provider_bridge() {
         let source: SharedAwsCredentialsSource = Arc::new(RotatingCredentialsSource::default());
         let bridge = ObjectStoreAwsCredentialProvider::new(Arc::clone(&source));
-        let signer = S3CompatiblePresigner::with_credentials(presigner_config(), source)
+        let signer = S3CompatiblePresigner::new_with_credentials(presigner_config(), source)
             .expect("construct signer");
 
         let first_provider = bridge

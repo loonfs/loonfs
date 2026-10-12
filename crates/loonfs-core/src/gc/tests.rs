@@ -1713,7 +1713,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
 
     // Compaction merges the delta runs into fresh base segments; the
     // superseded run segments then age out on the next pass.
-    let merge_policy = crate::manifest::MetadataLsmPolicy {
+    let merge_policy = crate::manifest::MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         ..Default::default()
     };

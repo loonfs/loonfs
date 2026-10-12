@@ -15,16 +15,16 @@ use loonfs_types::NamespaceId;
 use std::sync::Arc;
 
 #[cfg(test)]
-pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
+pub(crate) async fn claim_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<AcquiredWriter> {
     let timer = Arc::new(crate::time::StdMonotonicTimer::default());
-    Ok(acquire_writer(store, namespace_id, context, timer).await?.0)
+    Ok(claim_writer(store, namespace_id, context, timer).await?.0)
 }
 
-pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
+pub(crate) async fn claim_writer<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -66,8 +66,8 @@ pub(crate) async fn acquire_writer<S: ObjectStore + ?Sized>(
                 return Ok((acquired, anchor));
             }
             Err(CoreError::WalPublish(
-                crate::commit::WalPublishError::NumberTaken
-                | crate::commit::WalPublishError::PublishBudgetExceeded { .. },
+                crate::wal::WalPublishError::NumberTaken
+                | crate::wal::WalPublishError::PublishBudgetExceeded { .. },
             )) => {}
             Err(error) => return Err(error),
         }

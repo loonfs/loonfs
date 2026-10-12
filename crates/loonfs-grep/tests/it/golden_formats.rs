@@ -26,7 +26,7 @@ use loonfs_grep::manifest::{
     GrepIndexState, GrepIndexStatus, GrepManifestState, GrepReorganizeState, GrepSegmentRef,
 };
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::format::sst_blocks::{
+use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, BlockHandle, BuiltSegmentBlocks, DecodedDataBlock,
     SegmentBlocksBuilder,
 };

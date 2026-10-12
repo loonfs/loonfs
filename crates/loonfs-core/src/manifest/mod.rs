@@ -3,7 +3,6 @@
 //! A namespace manifest references the immutable metadata segment runs for one
 //! namespace state. Folding, compaction, and retention publish manifests.
 
-mod block_fetch;
 mod block_load;
 mod build;
 pub(crate) mod cache;
@@ -14,6 +13,7 @@ mod compactor;
 mod data_block_load;
 mod error;
 mod fold;
+mod index_block_load;
 mod load;
 pub(crate) mod publish;
 mod retention;
@@ -40,7 +40,7 @@ pub use self::compaction_step::{CompactionStepOutcome, MetadataCompactionPolicy}
 pub use self::error::{ManifestLoadError, ManifestLoadFailureKind};
 pub use self::fold::{fold_wal_tail, next_run_no_after, FoldedWalTail};
 pub use self::retention::RetentionTarget;
-pub use self::runs::{MetadataFamilyGroup, MetadataLsmPolicy};
+pub use self::runs::{MetadataFamilyGroup, MetadataRunPolicy};
 pub use self::statistics::{
     load_checkpoint_statistics, load_namespace_statistics, NamespaceStatistics,
 };

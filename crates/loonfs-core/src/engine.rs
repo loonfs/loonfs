@@ -128,7 +128,7 @@ pub struct NamespaceEngine<S, M> {
     wall_clock: Arc<dyn crate::time::WallClock>,
     subject: Option<Subject>,
     authorization_head: Option<RuntimeReadContext>,
-    lsm_policy: crate::manifest::MetadataLsmPolicy,
+    run_policy: crate::manifest::MetadataRunPolicy,
     segment_cache: Option<Arc<MetadataSegmentCache>>,
     /// A narrowed per-step row budget, so a test can reach a frozen base
     /// without writing the hundred thousand rows the shipped budget admits.
@@ -162,13 +162,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Supplies the wall clock behind every timestamp this engine records.
-    pub fn with_wall_clock(mut self, wall_clock: Arc<dyn crate::time::WallClock>) -> Self {
+    pub fn wall_clock(mut self, wall_clock: Arc<dyn crate::time::WallClock>) -> Self {
         self.wall_clock = wall_clock;
         self
     }
 
     /// Sets the current head used to authorize historical reads.
-    pub fn with_authorization_head(mut self, head: RuntimeReadContext) -> Self {
+    pub fn authorization_head(mut self, head: RuntimeReadContext) -> Self {
         self.authorization_head = Some(head);
         self
     }
@@ -203,7 +203,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Refuses a reader with no subject on an ACL namespace, for callers
     /// that could otherwise answer before any per-subject read.
-    pub fn require_subject(&self, context: &RuntimeReadContext) -> Result<()> {
+    pub fn ensure_subject(&self, context: &RuntimeReadContext) -> Result<()> {
         Authorizer::for_request(
             &self.namespace_id,
             &context.head.access,
@@ -214,7 +214,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// The change feed and bare content reference reads and imports work for
     /// the token holder and for an administrator; any other subject is refused.
-    pub async fn require_administrator(&self, context: &RuntimeReadContext) -> Result<()> {
+    pub async fn ensure_administrator(&self, context: &RuntimeReadContext) -> Result<()> {
         let Some(subject) = &self.subject else {
             return Ok(());
         };
@@ -364,7 +364,7 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
-            lsm_policy: crate::manifest::MetadataLsmPolicy::default(),
+            run_policy: crate::manifest::MetadataRunPolicy::default(),
             segment_cache: None,
             #[cfg(any(test, feature = "test-support"))]
             compaction_row_budget: None,
@@ -390,7 +390,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
-            lsm_policy: crate::manifest::MetadataLsmPolicy::default(),
+            run_policy: crate::manifest::MetadataRunPolicy::default(),
             segment_cache: None,
             #[cfg(any(test, feature = "test-support"))]
             compaction_row_budget: None,
@@ -405,22 +405,22 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Sets the budgets this engine's WAL folds and compactions run under.
-    pub fn with_metadata_lsm_policy(mut self, policy: crate::manifest::MetadataLsmPolicy) -> Self {
-        self.lsm_policy = policy;
+    pub fn metadata_run_policy(mut self, policy: crate::manifest::MetadataRunPolicy) -> Self {
+        self.run_policy = policy;
         self
     }
 
     /// Uses the runtime's metadata cache for folds during pin creation.
-    pub fn with_metadata_segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
+    pub fn metadata_segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
         self.segment_cache = Some(segment_cache);
         self
     }
 
     /// The compaction budgets this engine plans and compacts under.
-    fn metadata_lsm_policy(&self) -> crate::manifest::MetadataLsmPolicy {
-        let policy = self.lsm_policy;
+    fn effective_run_policy(&self) -> crate::manifest::MetadataRunPolicy {
+        let policy = self.run_policy;
         #[cfg(any(test, feature = "test-support"))]
-        let policy = crate::manifest::MetadataLsmPolicy {
+        let policy = crate::manifest::MetadataRunPolicy {
             max_decoded_input_rows_per_step: self
                 .compaction_row_budget
                 .unwrap_or(policy.max_decoded_input_rows_per_step),
@@ -503,7 +503,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             snapshot_id,
             &self.mutation_context()?,
             Arc::new(crate::time::StdMonotonicTimer::default()),
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
         )
@@ -529,7 +529,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads file content against the pinned runtime read context.
-    pub async fn get_file(
+    pub async fn read_file(
         &self,
         path: impl AsRef<str>,
         context: &RuntimeReadContext,
@@ -544,7 +544,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Reads the current content of a visible file inode, wherever it is
     /// bound, with its entry.
-    pub async fn get_file_by_inode(
+    pub async fn read_file_by_inode(
         &self,
         inode_id: InodeId,
         context: &RuntimeReadContext,
@@ -580,7 +580,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Verifies at most 64 KiB of speculative content.
     /// These bytes alone do not establish current path visibility.
-    pub async fn get_speculative_file_content(
+    pub async fn read_speculative_file_content(
         &self,
         target: &ResolvedFileContent,
     ) -> Result<Vec<u8>> {
@@ -594,7 +594,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Fetches and verifies content after `resolve_file_content` authorizes it.
     /// A cached target must first be validated against the current view.
-    pub async fn get_resolved_file_content(&self, target: &ResolvedFileContent) -> Result<Vec<u8>> {
+    pub async fn read_resolved_file_content(
+        &self,
+        target: &ResolvedFileContent,
+    ) -> Result<Vec<u8>> {
         Ok(target
             .location
             .get_bytes(&self.store, &target.content_ref)
@@ -662,10 +665,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let view = self.load_read_view(context).await?;
         let content_ref = match revision_no {
             Some(revision_no) => {
-                view.authorized_revision_for_inode(inode_id, revision_no, &access)
+                view.authorized_revision_by_inode(inode_id, revision_no, &access)
                     .await?
             }
-            None => view.current_revision_for_inode(inode_id, &access).await?,
+            None => view.current_revision_by_inode(inode_id, &access).await?,
         }
         .content_ref;
         if start_offset > content_ref.size_bytes {
@@ -802,7 +805,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// All results use the same pinned snapshot and preserve input order. Missing
     /// inode IDs are returned as not visible because callers may hold IDs from an
     /// older listing. Requests above
-    /// [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES) fail before
+    /// [`MAX_CURRENT_FILES_PER_STAT`](crate::MAX_CURRENT_FILES_PER_STAT) fail before
     /// reading metadata.
     pub async fn resolve_current_files(
         &self,
@@ -852,7 +855,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         max_bytes: u64,
         context: &RuntimeReadContext,
     ) -> Result<Vec<u8>> {
-        self.require_administrator(context).await?;
+        self.ensure_administrator(context).await?;
         self.ensure_live_context(context)?;
         let view = self.load_read_view(context).await?;
         if !view
@@ -887,7 +890,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.
-    pub async fn list_file_revisions_for_inode_page(
+    pub async fn list_file_revisions_by_inode_page(
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
@@ -896,13 +899,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.list_file_revisions_for_inode_page(inode_id, request, &access)
+        view.list_file_revisions_by_inode_page(inode_id, request, &access)
             .await
     }
 
     /// Reads one revision's content by path against the pinned runtime
     /// read context.
-    pub async fn get_file_revision(
+    pub async fn read_file_revision(
         &self,
         path: impl AsRef<str>,
         revision_no: RevisionNo,
@@ -923,7 +926,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Reads one revision's content against the pinned runtime read context.
-    pub async fn get_file_revision_for_inode(
+    pub async fn read_file_revision_by_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -933,7 +936,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.get_file_revision_bytes_for_inode(
+        view.get_file_revision_bytes_by_inode(
             &self.store,
             inode_id,
             revision_no,
@@ -1081,7 +1084,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 
     /// Uploads content that arrives as a stream into an upload session,
     /// hashing it on the way through instead of holding it.
-    pub async fn upload_streamed_content(
+    pub async fn upload_content_stream(
         &self,
         upload_id: &UploadId,
         subject: Option<&Subject>,
@@ -1092,7 +1095,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .acquire()
             .await
             .expect("content write semaphore should remain open");
-        crate::protocol::upload_streamed_content(
+        crate::protocol::upload_content_stream(
             &self.store,
             &self.namespace_id,
             upload_id,
@@ -1294,12 +1297,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns an upload session. Completed uploads include new evidence so
     /// the caller can retry publication without uploading the content again.
-    pub async fn get_upload_status(
+    pub async fn load_upload_status(
         &self,
         upload_id: &UploadId,
         subject: Option<&Subject>,
     ) -> Result<UploadSessionView> {
-        crate::protocol::get_upload_status(
+        crate::protocol::load_upload_status(
             &self.store,
             &self.namespace_id,
             upload_id,
@@ -1330,7 +1333,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 expires_at_ms,
             },
             &context,
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
         )
@@ -1349,7 +1352,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 expires_at_ms,
             },
             &context,
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             self.segment_cache.as_deref(),
             &self.content_writes,
         )
@@ -1419,7 +1422,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             &crate::time::Deadline::start(Arc::new(crate::time::StdMonotonicTimer::default())),
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
             &self.content_writes,
         )
@@ -1441,7 +1444,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.store,
             &self.namespace_id,
             compactor_epoch,
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             compaction_policy,
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
         )
@@ -1460,7 +1463,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             &self.namespace_id,
             compactor_epoch,
             spec,
-            self.metadata_lsm_policy(),
+            self.effective_run_policy(),
             cancellation,
         )
         .await
@@ -1550,7 +1553,7 @@ mod tests {
             .list_changes_after(
                 ChangeSeq(0),
                 loonfs_types::PaginationPolicy::default()
-                    .resolve_limit(None)
+                    .effective_limit(None)
                     .expect("default limit"),
                 &context,
             )
@@ -1588,7 +1591,7 @@ mod tests {
             evidence,
             ..
         } = reader
-            .get_upload_status(&begun.upload_id, None)
+            .load_upload_status(&begun.upload_id, None)
             .await
             .expect("reader engine reads upload status");
 

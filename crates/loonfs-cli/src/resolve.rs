@@ -323,7 +323,7 @@ impl ResolvedTarget {
             // A CLI invocation is one solo mutation: holding the commit
             // window open would only add its full delay to every command.
             .min_publish_interval_ms(0)
-            .trace_store_kind(store_kind)
+            .store_kind(store_kind)
             .build()
             .await
             .map_err(CliError::from)?;
@@ -331,9 +331,9 @@ impl ResolvedTarget {
             WriterId::parse(format!("{writer_id}-maintenance"))
                 .map_err(|error| CliError::invalid_config(error.to_string()))?,
         );
-        let grep_block_cache = Arc::new(GrepBlockCache::new(
-            DecodedBlockCacheConfig::with_max_decoded_bytes(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
-        ));
+        let grep_block_cache = Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
+            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+        )));
         let grep_worker = GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),

@@ -1,7 +1,7 @@
 //! Inline writer preparation, publication, fallback, and maintenance contracts.
 
 use super::*;
-use crate::{InlineContentPolicy, MetadataCache, MetadataMaintenanceOptions, PutFileOptions};
+use crate::{InlineContentPolicy, MaintainMetadataOptions, MetadataCache, PutFileOptions};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
@@ -288,7 +288,7 @@ async fn writer_with_policy_and_byte_limit(
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("inline-writer")
         .inline_content(policy)
-        .publication_limits(crate::PublicationPolicy {
+        .publication_policy(crate::PublicationPolicy {
             max_estimated_bytes_per_namespace: NonZeroUsize::new(max_estimated_bytes_per_namespace)
                 .expect("namespace byte limit"),
             ..Default::default()
@@ -1223,7 +1223,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
         assert_eq!(usage.wal_tail_inline_bytes, 4);
         assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS);
         let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-        let options = MetadataMaintenanceOptions {
+        let options = MaintainMetadataOptions {
             inline_content_fold_at_bytes: NonZeroUsize::new(4).expect("threshold"),
             ..Default::default()
         };

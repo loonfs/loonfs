@@ -20,7 +20,7 @@ use super::publish_path_planning::{CompiledFilesystemOperation, PublishPathPlann
 use super::session::PublishPlanningSession;
 use crate::authorize::Authorizer;
 use crate::commit::{
-    validate_ops, AppendedContent, CandidateAllocation, CommitFingerprint, CommitNumbering,
+    validate_operations, AppendedContent, CandidateAllocation, CommitFingerprint, CommitNumbering,
     PublishValidationSession, ValidatedCommitPlan,
 };
 use crate::commit_engine::CommitCandidate;
@@ -88,7 +88,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
     allocation: &mut CandidateAllocation,
 ) -> Result<ValidatedCommitPlan> {
     let head = session.head();
-    let request = candidate.request();
+    let request = candidate.intent();
     let committed_seq = next_public_ordinal(head.seq.0)
         .map(ChangeSeq)
         .ok_or_else(|| {
@@ -135,7 +135,7 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             }
         }
         appended.extend(unit.appended);
-        let unit_deltas = validate_ops(
+        let unit_deltas = validate_operations(
             &unit.ops,
             &mut resolved,
             &mut numbering,

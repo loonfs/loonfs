@@ -8,7 +8,7 @@
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    LoonFs, MetadataMaintenanceOptions, Namespace, NamespaceId, PageRequest, PaginationPolicy,
+    LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, PageRequest, PaginationPolicy,
     PutFileOptions, SharedObjectStore, Writable,
 };
 use loonfs_types::AbsolutePath;
@@ -201,7 +201,7 @@ async fn warm_phase_request_accounting() {
             maintenance
                 .maintain_metadata_with_options(
                     &namespace_id,
-                    &MetadataMaintenanceOptions {
+                    &MaintainMetadataOptions {
                         max_wal_tail_objects: std::num::NonZeroU64::MIN,
                         ..Default::default()
                     },
@@ -230,7 +230,7 @@ async fn warm_phase_request_accounting() {
         .expect("build reader");
     let namespace = reader.namespace(&namespace_id);
     let limit = PaginationPolicy::default()
-        .resolve_limit(Some(1_000))
+        .effective_limit(Some(1_000))
         .expect("valid limit");
     let mut listed = 0usize;
     let mut cursor = None;

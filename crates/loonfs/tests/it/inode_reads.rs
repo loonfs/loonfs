@@ -14,7 +14,7 @@ use tempfile::tempdir;
 fn page_request() -> PageRequest<String> {
     PageRequest {
         limit: PaginationPolicy::default()
-            .resolve_limit(None)
+            .effective_limit(None)
             .expect("default page limit"),
         cursor: None,
     }

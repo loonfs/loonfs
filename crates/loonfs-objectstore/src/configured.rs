@@ -68,7 +68,7 @@ impl ConfiguredObjectStore {
     /// be created, or when `key_prefix` is invalid.
     pub fn local_fs(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
         Ok(Self {
-            inner: Arc::new(LocalFsStore::with_key_prefix(root, key_prefix)?),
+            inner: Arc::new(LocalFsStore::new_with_key_prefix(root, key_prefix)?),
             direct_transfers: None,
         })
     }

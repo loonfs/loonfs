@@ -44,7 +44,7 @@ impl MonotonicTimer for ExpiredAfterFirstRead {
 }
 
 fn deadline_client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-    let mut client = Client::with_transport(
+    let mut client = Client::new_with_transport(
         ClientConfig {
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,
@@ -171,7 +171,7 @@ where
         + 'static,
     S::Future: Send + 'static,
 {
-    Client::with_transport(
+    Client::new_with_transport(
         ClientConfig {
             server_url: "http://127.0.0.1".to_owned(),
             auth_token: Some("test-token".into()),

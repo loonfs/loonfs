@@ -5,7 +5,7 @@ use crate::args::CommandKind;
 use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
-use crate::render::{store_probe_verdict, StoreProbeRunOutcome};
+use crate::render::{store_probe_run_outcome, StoreProbeRunOutcome};
 use loonfs_types::api::v0::{
     DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, SnapshotSummary,
     StoreProbeResponse,
@@ -351,7 +351,7 @@ impl CommandData {
             // cannot be trusted.
             CommandData::StoreProbed(response) => {
                 matches!(
-                    store_probe_verdict(response),
+                    store_probe_run_outcome(response),
                     StoreProbeRunOutcome::Failed { .. }
                 )
             }

@@ -6,7 +6,7 @@
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
 use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::{
-    CommitId, DestinationBehavior, LoonFs, Maintenance, MetadataMaintenanceOptions, NamespaceId,
+    CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
     PutFileOptions, ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_grep::manifest::load_current_grep_manifest;
@@ -259,7 +259,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         .maintenance
         .maintain_metadata_with_options(
             &fixture.namespace_id,
-            &MetadataMaintenanceOptions {
+            &MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
@@ -339,7 +339,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         .maintenance
         .maintain_metadata_with_options(
             &fixture.namespace_id,
-            &MetadataMaintenanceOptions {
+            &MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
                 ..Default::default()
             },
