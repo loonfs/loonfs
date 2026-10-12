@@ -1,39 +1,45 @@
 # Metadata streaming compaction
 
-LoonFS stores metadata in immutable runs. WAL folds add delta runs, and compaction merges selected runs into a more efficient layout. An ordinary maintenance step limits its input by run count, decoded rows, and decoded bytes. A selected window that exceeds those limits runs as a streaming job instead.
+LoonFS stores metadata in immutable runs. WAL folds add delta runs, and compaction merges selected runs into a more efficient layout. An ordinary maintenance step limits its input by run count, decoded rows, and decoded bytes. If a selected window exceeds those limits, it runs as a streaming job instead.
 
-Both paths use the same merge and retention rules. A streaming job processes the selected window incrementally, writes segments as they fill, and publishes the completed output in one numbered manifest. Readers continue using the earlier file set until that publication succeeds.
+Both paths use the same merge and retention rules. A streaming job processes the selected window incrementally, writes each segment as it fills, and publishes the completed output in one numbered manifest. Readers keep using the earlier file set until that publication succeeds.
 
-The [storage format](../specs/format.md#10-retention-and-compaction) defines window placement, row retention, the compactor epoch, and the publication checks. This note explains planning, resource use, and the execution tradeoffs.
+[Retention and compaction](../specs/format.md#10-retention-and-compaction) in the storage format defines window placement, row retention, the compactor epoch, and the publication checks. This note explains planning, resource use, and the tradeoffs in how a job runs.
 
 ## Selecting a window
 
-Compaction works on family groups ([format Appendix A.6](../specs/format.md#a6-metadata-rows-and-row-keys) lists them). The planner ranks the groups that have delta rows by their delta row count and picks the first group with an eligible window. A group whose only run is a base is not selected; it is rewritten when it next receives a delta run.
+This section describes how the planner chooses which runs to merge.
 
-Within a group, the planner considers the base first and then delta runs from oldest to newest. It selects a contiguous window of at most eight runs and never steps over an unselected run in the middle of that window.
+Compaction works on family groups, which [Metadata rows and row keys](../specs/format.md#a6-metadata-rows-and-row-keys) lists. The planner ranks the groups that have delta rows by their delta row count, and it picks the first group that has an eligible window. A group whose only run is a base isn't selected. It's rewritten the next time it receives a delta run.
 
-Under the automatic size-tiered policy, a window is eligible when its oldest run is at most 8 MiB, or when the newer runs in that window total at least one quarter of the oldest run's stored bytes. The rule applies to both bases and large deltas. Stored bytes come from the manifest's block handles; decoded bytes separately bound execution within an ordinary step.
+Within a group, the planner considers the base first, and then the delta runs from oldest to newest. It selects a contiguous window of at most eight runs, and it never leaves out a run in the middle of that window.
 
-If an eligible prefix fits the step budgets, the bounded path executes it. Otherwise a streaming job processes the selected window.
+Under the automatic size-tiered policy, a window is eligible when its oldest run is at most 8 MiB, or when the newer runs in that window total at least a quarter of the oldest run's stored bytes. The rule applies to both bases and large deltas. Stored bytes come from the manifest's block handles. Decoded bytes are a separate limit on how much an ordinary step processes.
+
+If an eligible prefix fits within the step budgets, LoonFS runs it on the bounded path. Otherwise, a streaming job processes the selected window.
 
 | Policy or bound | Behavior |
 | --- | --- |
-| `SizeTiered` | Wait for enough newer data before rewriting a large oldest run. |
-| `CompactImmediately` | Bypass the size threshold for explicit compaction. |
+| `SizeTiered` | Waits for enough newer data before it rewrites a large oldest run. |
+| `CompactImmediately` | Bypasses the size threshold for explicit compaction. |
 | Eight-run limit | Applies to bounded and streaming execution, including explicit requests. |
 | Ordinary step budgets | At most 131,072 rows and 64 MiB of decoded data-block input. |
 
-A large backlog can require several publications. Explicit compaction performs one window per call, so a caller repeats it while it publishes. Automatic size-tiering reduces repeated base rewrites, but obsolete metadata can remain until enough newer data accumulates.
+A large backlog can need several publications. Explicit compaction merges one window per call, so a caller repeats the call for as long as it publishes. Automatic size tiering reduces repeated rewrites of the base, but obsolete metadata can stay until enough newer data builds up.
 
-A merge that starts at the group's oldest run produces a base run and can remove rows under the format's retention rules. A merge that starts above it produces a delta run and keeps every row, because an excluded older run may hold rows that a row in the window supersedes: an older binding version below an unbound one, or a listed deletion whose removal row is in the window. A lone oldest delta can be promoted to establish a base.
+A merge that starts at the group's oldest run produces a base run, and it can remove rows under the format's retention rules. A merge that starts above the oldest run produces a delta run, and it keeps every row. A lone oldest delta can be promoted to become the group's base.
+
+Why can't a merge above the oldest run remove rows? An excluded older run might contain rows that a row in the window supersedes, such as an older binding version below an unbound one, or a listed deletion whose removal row is in the window.
 
 ## Reading and writing incrementally
 
-The merge reads sorted iterators over the selected runs and produces rows in family key order. Each iterator advances through one run's segments sequentially. Input fan-in is bounded by eight runs rather than by total history.
+This section describes how a merge reads its input and writes its output incrementally.
 
-The output writer closes data blocks near 64 KiB decoded, and segments near 8 MiB decoded or 65,536 rows. A final row can exceed a byte target, and one oversized row is never split. Filters and indexes also consume memory, so these targets are not a fixed-memory guarantee independent of row size.
+The merge reads the selected runs through sorted iterators, and it produces rows in family key order. Each iterator reads one run's segments in order. The input fan-in is limited to eight runs, so it doesn't grow with the total history.
 
-Both paths bound decoded input buffering, concurrent fetches, cached blocks, and output buffers. Family-specific retention operators hold a fixed number of fields and at most one complete row. One inode's long attribute history, or one name's many binding versions, therefore need not be held in memory as a complete group.
+The output writer closes a data block at about 64 KiB decoded, and a segment at about 8 MiB decoded or 65,536 rows. A final row can exceed a byte target, and an oversized row is never split. Filters and indexes also use memory, so these targets don't guarantee a memory limit that's independent of row size.
+
+Both paths limit decoded input buffering, concurrent fetches, cached blocks, and output buffers. Each family's retention operator keeps a constant number of fields and at most one complete row in memory. As a result, one inode's long attribute history, or one name's many binding versions, doesn't have to be kept in memory as a complete group.
 
 ```text
 selected immutable runs
@@ -48,28 +54,43 @@ sorted iterators -> family retention -> completed segment objects
                                     publish next numbered manifest
 ```
 
-Output uses fresh IDs under `namespaces/{namespace_id}/segments/`. Published descriptors reference those objects in place. There is no copy from a staging prefix.
+Output segments are written with new IDs under `namespaces/{namespace_id}/segments/`, and the published descriptors reference those objects where they are. Nothing is copied from a staging prefix.
 
 ## Binding retention
 
-The slot and child indexes hold the same edge events in two orders, bound and unbound. An edge is a parent, a name, and a child. A compaction that includes the oldest run groups both indexes by edge. For each edge it keeps every version above the floor, and it keeps the newest version at or below the floor when that version is bound. An unbound version is a tombstone. Only this kind of compaction can remove it, together with the older versions it hides. A compaction above the oldest run keeps every row.
+This section describes which binding rows a compaction keeps.
 
-Within an edge, binding keys sort positions oldest first. The retention operator holds at most one floor version until its edge ends or a row above the floor arrives. It also carries the last edge it kept bound at the floor. In the slot index it refuses a second child bound in one slot at the floor, and in the child index it refuses a second parent bound for one child at the floor. Both execution paths read each index as a separate sorted stream and apply the same rule to each.
+The slot index and the child index contain the same edge events (both bound and unbound) in two different orders. An edge is a parent, a name, and a child. A compaction that includes the oldest run groups the rows of both indexes by edge. For each edge, it keeps every version above the floor, and it keeps the newest version at or below the floor if that version is bound.
+
+An unbound version is a tombstone. A compaction that includes the oldest run is the only kind that can remove it, and it removes the older versions that the tombstone hides at the same time. A compaction above the oldest run keeps every row.
+
+Within an edge, binding keys sort by position, oldest first. The retention operator keeps at most one floor version (the newest version at or below the floor) until its edge ends or a row above the floor arrives. It also tracks the last edge it kept bound at the floor. In the slot index, it refuses a second child bound in one slot at the floor, and in the child index, it refuses a second parent bound for one child at the floor. Both execution paths read each index as a separate sorted stream, and they apply the same rule to each one.
 
 ## Validating a merge
 
-Every metadata row key identifies one logical row. Input keys must be strictly increasing within the merged family stream. A duplicate is rejected even if retention would otherwise remove it, including a duplicate split across segments or runs.
+This section describes the checks a merge runs before it publishes.
 
-The parent-and-name binding output and the child-binding output must contain the same binding rows. The merge compares order-independent digests before publication. This check is separate from duplicate detection: the same duplicate in both families could leave their digests equal.
+Every metadata row key identifies one logical row. Input keys must be strictly increasing within the merged stream of each family. A merge rejects a duplicate even if retention would otherwise remove it, and even if the duplicate is split across segments or runs.
 
-The published manifest must also pass manifest validation ([format section 7.1](../specs/format.md#71-manifests-runs-and-segments)).
+The binding output keyed by parent and name, and the binding output keyed by child, must contain the same binding rows. Before publication, the merge compares order-independent digests of the two outputs. This check is separate from duplicate detection, because the same duplicate in both families could leave their digests equal.
+
+The published manifest must also pass the manifest validation in [Manifests, runs, and segments](../specs/format.md#71-manifests-runs-and-segments).
 
 ## Publication and restart
 
-A runtime claims the compactor epoch before its first eligible compaction, and a newer claim fences it ([format section 10.4](../specs/format.md#104-streaming-compaction)). Every writer session and `Maintenance` value of one runtime shares that claim, and so do concurrent family groups. A fenced runtime forgets its claim, and its next compaction claims the role again: a session's after its next fold, or a host sweep's on its next visit.
+This section describes how a compaction publishes its output, and what happens when a job is fenced, abandoned, or stopped.
 
-Before every output publication, the job reloads the current manifest and checks its epoch, its selected inputs, and its elapsed time. A streaming job makes up to four publication attempts while those checks still pass, and then returns `abandoned`. Two deadlines bound those attempts. The job starts its last attempt within `METADATA_COMPACTION_BUDGET_MS` of its own start, and a job past that bound returns `abandoned`. Every attempt of its finalization runs under one 15-minute metadata publication budget that starts when finalization starts, and an attempt past that budget fails with the publication budget error. Bounded merges use the ordinary 15-minute metadata publication budget and do not retry a lost put. Unreferenced output follows the same collection age rule whether the job failed, was cancelled, or was abandoned.
+A runtime claims the compactor epoch before its first eligible compaction, and a newer claim fences it (see [Streaming compaction](../specs/format.md#104-streaming-compaction)). Every writer session and `Maintenance` value in one runtime shares that claim, and so do concurrent family groups. A fenced runtime forgets its claim, and its next compaction claims the role again. A session's next compaction runs after its next fold, and a host sweep's runs on its next visit.
 
-A bounded pass reports `metadata_compaction_required` when streaming execution is needed, and `Maintenance::maintain_metadata_while_due` then runs the streaming job. Every merge, bounded or streaming, holds one of the compaction permits of the runtime's execution budget, two by default; an embedding application sets the limit with `ExecutionBudgetBuilder::max_concurrent_compactions` and can share one budget across runtimes.
+Before every publication of its output, a job reloads the current manifest and checks the manifest's epoch, the job's selected inputs, and the job's elapsed time. While those checks still pass, a streaming job makes up to four publication attempts, and then it returns `abandoned`. Two deadlines limit those attempts:
 
-Shutdown cancels a streaming job between rows and at finalization, so an in-flight fetch or write finishes first. A replacement process plans from the current manifest rather than resuming partial output. The repeated I/O is the cost of keeping compaction progress out of the durable format.
+- **Job deadline.** The job starts its last attempt within `METADATA_COMPACTION_BUDGET_MS` of its own start. A job past that bound returns `abandoned`.
+- **Publication deadline.** Every attempt of the job's finalization runs under one 15-minute metadata publication budget, which starts when finalization starts. An attempt past that budget fails with the publication budget error.
+
+Bounded merges use the ordinary 15-minute metadata publication budget, and they don't retry a lost put. Unreferenced output follows the same collection age rule whether the job failed, was cancelled, or was abandoned.
+
+When streaming execution is needed, a bounded pass reports `metadata_compaction_required`, and `Maintenance::maintain_metadata_while_due` then runs the streaming job. Every merge, bounded or streaming, uses one of the compaction permits in the runtime's execution budget (two by default) while it runs. An embedding application sets the limit with `ExecutionBudgetBuilder::max_concurrent_compactions`, and it can share one budget across runtimes.
+
+Shutdown cancels a streaming job between rows and at finalization, so a fetch or write that's in progress finishes first. A replacement process plans again from the current manifest, instead of resuming the partial output.
+
+Why doesn't a replacement process resume the partial output? Resuming would need a record of compaction progress in the durable format. Planning again keeps that progress out of the format, and the cost is the repeated I/O.

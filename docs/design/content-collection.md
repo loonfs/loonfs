@@ -1,40 +1,57 @@
 # Content collection
 
-Collection deletes a content object in an active namespace once no retained view names it and the object is older than the reclamation grace `T`. The ordinary collection pass does this, with its one fixed clock and no durable progress. The storage format defines the rule in [section 11.9](../specs/format.md#119-content-roots). This note explains its shape.
+Garbage collection deletes a content object in an active namespace once no retained view refers to it, and the object is older than the reclamation grace `T`. The ordinary collection pass does this, with one clock value for the whole pass and no durable progress. [Content roots](../specs/format.md#119-content-roots) in the storage format defines the rule, and this note explains its design.
 
 ## Why content needs a rule
 
-A base compaction keeps each file's revisions above the retention floor and its newest revision at or below it ([format section 10.3](../specs/format.md#103-row-retention-during-a-base-compaction)). The objects that the dropped revisions named stay in the store. No current view reads them, and nothing else would delete them.
+A base compaction keeps each file's revisions above the retention floor, and its newest revision at or below the floor (see [Row retention during a base compaction](../specs/format.md#103-row-retention-during-a-base-compaction)). The objects that the dropped revisions referred to stay in the store. No current view reads them, and nothing else would delete them.
 
 ## The rule
 
-A content object owned by namespace `N` stays while a layout names that object or a tail or session root names its chain:
+A content object owned by namespace `N` is kept while a layout refers to that object, or a tail or session root refers to its chain:
 
-1. An extent owned by `N` in a layout row of a rooted view: `N`'s current manifest, a pinned manifest, or a manifest whose immediate successor is younger than `T` by its listed modification time. A successor listed without a time counts as young. An absent successor does not make the older manifest a root. A view whose layout segments are already covered adds no scan.
-2. A revision delta in `N`'s unfolded WAL tail, or an extent owned by `N` in the tail row state's layouts.
-3. An upload session record in `N`, whatever its status.
+1. **Layout views.** An extent owned by `N`, in a layout row of a rooted view. A rooted view is `N`'s current manifest, a pinned manifest, or a manifest whose immediate successor is younger than `T`, according to the successor's modification time in the listing. A successor listed without a time counts as young. A missing successor doesn't make the older manifest a root. A view whose layout segments are already covered adds no scan.
+2. **WAL tail.** A revision delta in `N`'s unfolded WAL tail, or an extent owned by `N` in the layouts of the tail's row state.
+3. **Upload sessions.** An upload session record in `N`, whatever its status.
 
-The pass considers every other object under `namespaces/N/content/` for deletion once its provider age is at least `T`. It keeps younger objects, keys the layout does not recognize, and false positives from the shared base filter.
+The pass considers every other object under `namespaces/N/content/` for deletion once its provider age is at least `T`. It keeps objects that are younger than that, keys that don't parse as content object keys, and false positives from the shared base filter.
 
-One rule covers every way content becomes garbage. A completed session's cleanup removes only its record, after the content grace, and a later pass collects the object if nothing published it. An aborted session's cleanup deletes its object at once, and the pass collects anything a late write leaves after the record is gone. A retired namespace is the same rule with no roots and no age gate: the retirement sweep deletes its whole content prefix. A deleted namespace that has not retired keeps its content.
+The same rule covers every way that content becomes garbage:
 
-Within each shard, layout roots protect exact object keys. A layout can name a shared base in another id shard. A Bloom filter over shared object keys protects those bases throughout the pass. False positives retain unreferenced objects for that pass. Every inserted key remains protected. The pass's supplied `now_ms` seeds the filter, so a pass with a different clock uses a different seed. Tail and session ids protect both the whole object and every span of their chains. An old span that no layout, tail, or session names can be collected even while its chain remains live.
+- **Completed session.** Cleanup removes the session's record, but not its object, after the content grace. A later pass collects the object if nothing published it.
+- **Aborted session.** Cleanup deletes the session's object right away, and the pass collects anything that a late write leaves after the record is gone.
+- **Retired namespace.** The same rule applies with no roots and no age check, so the retirement sweep deletes the namespace's whole content prefix.
+
+A deleted namespace that hasn't been retired keeps its content.
+
+Within each shard, layout roots protect exact object keys. A layout can refer to a shared base in another ID shard, so a Bloom filter over shared object keys protects those bases for the whole pass. A false positive keeps an unreferenced object for that pass, and every inserted key stays protected. The `now_ms` supplied to the pass seeds the filter, so a pass with a different clock uses a different seed. Tail and session IDs protect both the whole object and every span of their chains. An old span that no layout, tail, or session refers to can be collected even while its chain is still live.
 
 ## Why the roots are enough
 
-A reader or writer works from a manifest that is current, pinned, or superseded for less than `T` ([format section 11.2](../specs/format.md#112-reference-roots)), together with the WAL tail. The first two roots therefore cover every view that a read or a copy can start from. The minimum grace also outlasts a direct download capability issued from such a view ([format section 11.4](../specs/format.md#114-clock-and-operation-assumptions)).
+A reader or writer works from a manifest that's current, pinned, or superseded for less than `T` (see [Reference roots](../specs/format.md#112-reference-roots)), together with the WAL tail. So the first two roots cover every view that a read or a copy can start from. The minimum grace is also longer than the lifetime of a direct download capability issued from such a view (see [Clock and operation assumptions](../specs/format.md#114-clock-and-operation-assumptions)).
 
-A fork's source pin roots its inherited revisions and layouts in the owner's namespace.
+A fork's source pin protects the fork's inherited revisions and layouts in the owner's namespace.
 
-The pass lists upload sessions before it reads the WAL tail and scans layout rows after loading the roots. A session record is removed only after any admission evidence it could issue has expired. A session the pass does not list was either created after the listing or removed before it. Content of a session created later is younger than `T`. Every commit that names content of a removed session landed before the tail was read, so the tail or a rooted manifest names that content. In the other order, a commit of an upload's content could land after the tail read, and a concurrent collector could then remove the session record before the listing.
+The pass lists upload sessions before it reads the WAL tail, and it scans layout rows after it loads the roots. A session record is removed only after any admission evidence it could issue has expired. A session that the pass doesn't list was either created after the listing or removed before it:
+
+- The content of a session created later is younger than `T`.
+- Every commit that refers to the content of a removed session succeeded before the tail was read, so the tail or a rooted manifest refers to that content.
+
+Why list sessions before reading the tail? In the other order, a commit that uses an upload's content could succeed after the pass reads the tail, and a concurrent collector could then remove the session record before the pass lists sessions.
 
 ## Costs
 
-- Two scans of the layout family per distinct layout view. The first inserts shared base object keys into the Bloom filter. The second scans disjoint id ranges, one shard at a time. A fork's scans also read inherited segments.
-- One content listing per shard. The current manifest's layout segment row counts and `content_shard_rows` determine the shard count. The hex prefix width is the smallest `k` from 0 through 4 for which `rows / 16^k <= content_shard_rows`. There are `16^k` shards, visited in order. The default target is 65,536 rows per shard. Uneven id distribution can put more rows in one shard.
-- One listing of upload sessions and one read of each record before the tail, besides the session sweep's own listing and reads.
-- No HEAD requests during the sweep. Discovery keeps its HEAD probe for the current manifest's successor. Candidate ages and successor ages come from listing timestamps. Missing timestamps retain objects.
-- Read working memory for one shard's exact object keys, the tail and session ids, and scan blocks. A set that exceeds that budget fails the pass. The shard set is released before the next shard.
-- A shared base Bloom filter with its own 64 MiB byte cap, separate from read working memory. It uses the same xxh64 double hashing and seven probes as layout compaction. Its initial expectation is the current manifest's layout row count, with a minimum of one. When an insertion would exceed a level's expectation, it adds a level with twice that expectation and a seed derived from the pass seed and the level index. A key is protected when any level matches. Each level is sized at ten bits per expected entry. A filter with `n` levels has roughly `n` times the single-level false-positive rate. The byte cap applies to the sum of all levels. If the initial level or a new level would exceed the cap, the pass logs the limit and skips the active namespace's content sweep. Other families still sweep. No content listing runs in that case. An initial allocation over the cap skips the shared base scan; growth over the cap stops it.
+Content roots add these costs to a collection pass:
 
-A deleted namespace pays none of these content-root costs.
+- Two scans of the layout family for each distinct layout view. The first scan inserts shared base object keys into the Bloom filter, and the second scans disjoint ID ranges, one shard at a time. A fork's scans also read inherited segments.
+- One content listing for each shard. The row counts of the current manifest's layout segments, and `content_shard_rows`, determine the shard count. The hex prefix width is the smallest `k` from 0 through 4 for which `rows / 16^k <= content_shard_rows`, and the pass visits the `16^k` shards in order. The default target is 65,536 rows per shard. An uneven distribution of IDs can put more rows in one shard.
+- One listing of upload sessions, and one read of each session record, before the tail is read. These are in addition to the session sweep's own listing and reads.
+- No HEAD requests during the sweep. (Discovery still sends its HEAD probe for the current manifest's successor.) Candidate ages and successor ages come from listing timestamps, and the pass keeps an object whose timestamp is missing.
+- Read working memory for one shard's exact object keys, the tail and session IDs, and scan blocks. If a set exceeds that budget, the pass fails. The pass releases a shard's set before it moves to the next shard.
+- A shared base Bloom filter, with its own 64 MiB byte cap that's separate from read working memory. The filter follows these rules:
+  - It uses the same xxh64 double hashing and seven probes as layout compaction.
+  - Its initial expectation is the current manifest's layout row count, with a minimum of one. When an insertion would exceed a level's expectation, the filter adds a level with twice that expectation and a seed derived from the pass seed and the level index. A key is protected when any level matches.
+  - Each level is sized at ten bits per expected entry. A filter with `n` levels has roughly `n` times the false-positive rate of one level.
+  - The byte cap applies to the sum of all levels. If the initial level or a new level would exceed the cap, the pass logs the limit and skips the active namespace's content sweep, and no content listing runs. (An initial allocation over the cap skips the shared base scan, and growth over the cap stops it.) Other families are still swept.
+
+A deleted namespace has none of these content-root costs.
