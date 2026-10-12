@@ -606,7 +606,9 @@ fn lock_config(path: &Path) -> Result<File, CliError> {
 
 fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> {
     // The caller's config lock already proved that this parent directory exists.
-    let parent = path.parent().expect("locked config path has a parent");
+    let parent = path
+        .parent()
+        .expect("a locked config path should have a parent directory");
     let mut temp_file = tempfile::Builder::new()
         .prefix(".loonfs-config-")
         .suffix(".tmp")

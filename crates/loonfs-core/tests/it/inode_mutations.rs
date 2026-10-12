@@ -3,7 +3,7 @@
 use crate::common::commit_split_support::*;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
-use loonfs_core::{Error as CoreError, ErrorCode};
+use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AttributeKey, AttributeValue, AttributesRevisionNo, BindingVersion,
@@ -1074,7 +1074,7 @@ async fn undelete_binds_under_a_parent_inode() {
         .await
         .expect_err("a destination is one path or one parent and name");
         match error {
-            CoreError::FailedOperation { source, .. } => match *source {
+            CoreError::FailedOperation { error: source, .. } => match *source {
                 CoreError::InvalidCommitField {
                     field: actual_field,
                     ..

@@ -922,7 +922,7 @@ fn remote_profile(
 fn parse_profile_actor_id(id: Option<&str>) -> Result<Option<ActorId>, CliError> {
     id.map(|id| {
         ActorId::parse(id).map_err(|error| {
-            CliError::invalid_request(format!("invalid --actor-id: {error}"))
+            CliError::invalid_request(format!("invalid `--actor-id`: {error}"))
                 .with_param("--actor-id")
         })
     })
@@ -932,7 +932,7 @@ fn parse_profile_actor_id(id: Option<&str>) -> Result<Option<ActorId>, CliError>
 fn parse_profile_subject_id(id: Option<&str>) -> Result<Option<SubjectId>, CliError> {
     id.map(|id| {
         SubjectId::parse(id).map_err(|error| {
-            CliError::invalid_request(format!("invalid --subject-id: {error}"))
+            CliError::invalid_request(format!("invalid `--subject-id`: {error}"))
                 .with_param("--subject-id")
         })
     })
@@ -945,7 +945,7 @@ fn parse_profile_principal_scope(
     principal_scope
         .map(|principal_scope| {
             PrincipalScope::parse(principal_scope).map_err(|error| {
-                CliError::invalid_request(format!("invalid --principal-scope: {error}"))
+                CliError::invalid_request(format!("invalid `--principal-scope`: {error}"))
                     .with_param("--principal-scope")
             })
         })
@@ -961,7 +961,7 @@ fn parse_profile_principals(
                 .split(',')
                 .map(|principal| {
                     PrincipalId::parse(principal).map_err(|error| {
-                        CliError::invalid_request(format!("invalid --principals: {error}"))
+                        CliError::invalid_request(format!("invalid `--principals`: {error}"))
                             .with_param("--principals")
                     })
                 })
@@ -976,11 +976,11 @@ fn validate_profile_subject_fields(
 ) -> Result<(), CliError> {
     match (principal_scope, principals) {
         (None, Some(_)) => Err(CliError::invalid_request(
-            "--principal-scope is required with --principals",
+            "`--principal-scope` is required with `--principals`",
         )
         .with_param("--principal-scope")),
         (Some(_), None) => Err(CliError::invalid_request(
-            "--principal-scope requires --principals",
+            "`--principal-scope` requires `--principals`",
         )
         .with_param("--principals")),
         (Some(_), Some(_)) | (None, None) => Ok(()),
@@ -1370,7 +1370,7 @@ mod tests {
         CreateActorSpec, CreateProfileSpec, CreateProviderSpec, ProfileCreateLocalSpec,
         ProfileCreateR2Spec, ProfileCreateRemoteSpec, ProfileCreateS3Spec, ProfileUpdateSpec,
     };
-    use crate::args::{Cli, Command, ProfileCommand, RuntimeBehavior};
+    use crate::args::{Cli, Command, ProfileCommand, RuntimeBehavior, TopLevelCommand};
     use crate::config::{ProfileConfig, StoreConfig};
     use clap::Parser;
     use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
@@ -1514,9 +1514,9 @@ mod tests {
                     .chain(flags.iter().copied()),
             )
             .expect("parse s3 update flags");
-            let Command::Profile {
+            let TopLevelCommand::Configured(Command::Profile {
                 command: ProfileCommand::Update { provider },
-            } = cli.command
+            }) = cli.command
             else {
                 panic!("expected profile update, got {:?}", cli.command);
             };

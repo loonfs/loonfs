@@ -42,7 +42,8 @@ impl fmt::Display for CommitOperand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum CommitValidationError {
     #[error("{operand} inode `{inode_id}` is missing")]
     InodeMissing {

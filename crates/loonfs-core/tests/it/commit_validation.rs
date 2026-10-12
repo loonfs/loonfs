@@ -13,7 +13,7 @@ use loonfs_core::content::{
 use loonfs_core::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::time::Deadline;
-use loonfs_core::{Error as CoreError, ErrorCode, ResolvedUploadCompletion};
+use loonfs_core::{CoreError, ErrorCode, ResolvedUploadCompletion};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;

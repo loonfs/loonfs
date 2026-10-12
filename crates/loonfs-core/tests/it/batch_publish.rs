@@ -13,7 +13,7 @@ use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
-use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -1323,7 +1323,7 @@ async fn fresh_delete_path_expected_inode_precondition_still_matches_or_rejects(
     .expect_err("mismatching precondition must fail planning");
     let CoreError::FailedOperation {
         operation_index: 0,
-        source,
+        error: source,
     } = error
     else {
         panic!("expected failed operation, got {error:?}");

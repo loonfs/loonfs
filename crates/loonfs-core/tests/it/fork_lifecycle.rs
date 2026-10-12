@@ -12,7 +12,7 @@ use bytes::Bytes;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_read_state;
 use loonfs_core::publish::FilesystemOperation;
-use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};

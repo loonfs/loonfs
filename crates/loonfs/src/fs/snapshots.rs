@@ -104,11 +104,11 @@ impl<M> Namespace<M> {
         loop {
             let remaining = requested - snapshots.len();
             let limit = NonZeroU32::new(u32::try_from(remaining).map_err(|error| {
-                Error::Core(loonfs_core::Error::Internal(format!(
+                Error::Core(loonfs_core::CoreError::Internal(format!(
                     "snapshot page limit does not fit u32: {error}"
                 )))
             })?)
-            .expect("a snapshot page with room remaining has a nonzero limit");
+            .expect("a snapshot page with room remaining should have a nonzero limit");
             let page = engine
                 .list_checkpoints_page(PageRequest {
                     limit: loonfs_types::EffectiveLimit::new(limit),
@@ -224,7 +224,7 @@ impl Namespace<Writable> {
                 .filter(|snapshot| snapshot.is_live(now_ms))
                 .count();
             if live > max_live {
-                return Err(Error::Core(loonfs_core::Error::SnapshotQuotaExceeded {
+                return Err(Error::Core(loonfs_core::CoreError::SnapshotQuotaExceeded {
                     namespace_id: self.namespace_id.clone(),
                     max_live,
                 }));
@@ -267,7 +267,7 @@ impl Namespace<Writable> {
             .map_err(Error::from)
             .and_then(|checkpoint| {
                 SnapshotSummary::from_checkpoint(checkpoint).ok_or_else(|| {
-                    Error::Core(loonfs_core::Error::Internal(
+                    Error::Core(loonfs_core::CoreError::Internal(
                         "snapshot extension returned a non-snapshot checkpoint".to_owned(),
                     ))
                 })

@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Describes why bytes cannot be decoded from the durable lowercase hexadecimal form.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum HexDecodeError {
     /// Reports an input that ends after the high nibble of its final byte.
     #[error("odd hex length {length}")]

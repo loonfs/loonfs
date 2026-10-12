@@ -45,7 +45,10 @@ pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
         let envelope =
             decode_wal_object_envelope_zstd(&bytes).map_err(|error| WalTailLoadError::Replay {
                 object_key: object_key.clone(),
-                error: WalObjectError::Codec(error.to_string()),
+                error: WalObjectError::Codec {
+                    object_key: object_key.clone(),
+                    message: error.to_string(),
+                },
             })?;
         if envelope.payload().wal_no != wal_no {
             return Err(WalTailLoadError::NumberMismatch {
@@ -206,9 +209,9 @@ pub(crate) fn replay_discovered_tail(
     tail: &ValidatedWalTail,
 ) -> Result<ReplayedWalTail, MetadataProjectionLoadError> {
     let _span = tracing::debug_span!("loonfs.phase", phase = "project_metadata_state").entered();
-    Ok(project_validated_wal_tail(
+    project_validated_wal_tail(
         base_head,
         super::ProjectedWalTail::from_rows(base_metadata_state.clone()),
         tail,
-    )?)
+    )
 }

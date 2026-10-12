@@ -101,7 +101,7 @@ pub(crate) fn resolve_subject(
                 .split(',')
                 .map(|value| {
                     PrincipalId::parse(value).map_err(|error| {
-                        named_cli_input_error(name, format!("invalid {name}: {error}"))
+                        named_cli_input_error(name, format!("invalid `{name}`: {error}"))
                     })
                 })
                 .collect::<Result<BTreeSet<_>, _>>()?,
@@ -116,7 +116,7 @@ pub(crate) fn resolve_subject(
         ),
     };
     let principals = PrincipalSet::new(principals)
-        .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))?;
+        .map_err(|error| named_cli_input_error(name, format!("invalid `{name}`: {error}")))?;
     let environment_principal_scope = non_empty_env(PRINCIPAL_SCOPE_ENV);
     let (scope_name, principal_scope) = if let Some(value) = explicit_principal_scope {
         ("--principal-scope", Some(value))
@@ -127,7 +127,7 @@ pub(crate) fn resolve_subject(
     };
     let principal_scope = match principal_scope {
         Some(value) => Some(PrincipalScope::parse(value).map_err(|error| {
-            named_cli_input_error(scope_name, format!("invalid {scope_name}: {error}"))
+            named_cli_input_error(scope_name, format!("invalid `{scope_name}`: {error}"))
         })?),
         None => profile.principal_scope(),
     };
@@ -140,7 +140,7 @@ pub(crate) fn resolve_subject(
             };
             return Err(named_cli_input_error(
                 required,
-                format!("{required} is required with {scope_name}"),
+                format!("`{required}` is required with `{scope_name}`"),
             ));
         }
         (None, false) => {
@@ -151,7 +151,7 @@ pub(crate) fn resolve_subject(
             };
             return Err(named_cli_input_error(
                 required,
-                format!("{required} is required with {name}"),
+                format!("`{required}` is required with `{name}`"),
             ));
         }
         (Some(principal_scope), false) => principal_scope,
@@ -165,7 +165,7 @@ pub(crate) fn resolve_subject(
     };
     let subject_id = match subject_id {
         Some(value) => SubjectId::parse(value)
-            .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))?,
+            .map_err(|error| named_cli_input_error(name, format!("invalid `{name}`: {error}")))?,
         None => match profile.subject_id() {
             Some(subject_id) => subject_id,
             None => SubjectId::parse(actor_id.as_str()).map_err(|error| {
@@ -182,7 +182,7 @@ pub(crate) fn resolve_subject(
 
 fn parse_actor_id(name: &str, value: &str) -> Result<ActorId, CliError> {
     ActorId::parse(value)
-        .map_err(|error| named_cli_input_error(name, format!("invalid {name}: {error}")))
+        .map_err(|error| named_cli_input_error(name, format!("invalid `{name}`: {error}")))
 }
 
 fn named_cli_input_error(name: &str, message: String) -> CliError {

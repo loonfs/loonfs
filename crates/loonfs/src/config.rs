@@ -34,10 +34,10 @@ pub struct PublicationPolicy {
 impl Default for PublicationPolicy {
     fn default() -> Self {
         Self {
-            max_requests_per_namespace: std::num::NonZeroUsize::new(1024)
-                .expect("nonzero namespace request limit"),
-            max_estimated_bytes_per_namespace: std::num::NonZeroUsize::new(8 * 1024 * 1024)
-                .expect("nonzero namespace byte limit"),
+            max_requests_per_namespace: const { std::num::NonZeroUsize::new(1024).unwrap() },
+            max_estimated_bytes_per_namespace: const {
+                std::num::NonZeroUsize::new(8 * 1024 * 1024).unwrap()
+            },
         }
     }
 }

@@ -387,6 +387,7 @@ impl<'de> Deserialize<'de> for AccessGrants {
 
 /// Why a grant map was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum AccessGrantsError {
     /// A principal appeared more than once.
     #[error("access grants name principal `{principal_id}` more than once")]
@@ -465,6 +466,7 @@ impl TryFrom<BTreeSet<PrincipalId>> for PrincipalSet {
 
 /// Why a request's principal set was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum PrincipalSetError {
     /// More identities than one request may act as.
     #[error("principal set names {principals} principals, which exceeds the maximum of {MAX_SUBJECT_PRINCIPALS}")]

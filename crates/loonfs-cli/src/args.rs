@@ -99,7 +99,7 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) no_progress: bool,
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub(crate) command: TopLevelCommand,
 }
 
 pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
@@ -126,7 +126,7 @@ pub(crate) fn validate_cli(cli: &Cli) -> Result<(), clap::Error> {
     if cli.json && pagination.all {
         let mut error = Cli::command().error(
             clap::error::ErrorKind::ArgumentConflict,
-            "--all cannot be used with --json; use --json --limit <n> for a bounded document or --jsonl to stream all results",
+            "`--all` cannot be used with `--json`; use `--json --limit <n>` for a bounded document or `--jsonl` to stream all results",
         );
         error.insert(
             clap::error::ContextKind::InvalidArg,
@@ -147,6 +147,43 @@ fn selector_not_accepted(selector: &str) -> clap::Error {
         clap::error::ContextValue::String(selector.to_owned()),
     );
     error
+}
+
+/// A top-level command, split by whether it runs before the config file's
+/// location is resolved.
+#[derive(Debug, Subcommand)]
+pub(crate) enum TopLevelCommand {
+    #[command(flatten)]
+    Configured(Command),
+    /// Check the selected deployment without writing to it.
+    Doctor(DoctorArgs),
+    /// Print a shell completion script to stdout.
+    Completion(CompletionArgs),
+}
+
+impl TopLevelCommand {
+    fn accepts_profile_selector(&self) -> bool {
+        match self {
+            Self::Configured(command) => command.accepts_profile_selector(),
+            Self::Doctor(_) => true,
+            Self::Completion(_) => false,
+        }
+    }
+
+    fn accepts_namespace_selector(&self) -> bool {
+        match self {
+            Self::Configured(command) => command.accepts_namespace_selector(),
+            Self::Doctor(_) => true,
+            Self::Completion(_) => false,
+        }
+    }
+
+    fn pagination(&self) -> Option<&PageLimitArgs> {
+        match self {
+            Self::Configured(command) => command.pagination(),
+            Self::Doctor(_) | Self::Completion(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -216,8 +253,6 @@ pub(crate) enum Command {
     Changes(ChangesArgs),
     /// Show the selected deployment's protocol capabilities.
     Capabilities(CapabilitiesArgs),
-    /// Check the selected deployment without writing to it.
-    Doctor(DoctorArgs),
     /// Maintenance operations: metadata, checkpoints, retention, GC, indexes, and the store.
     Maintenance {
         #[command(subcommand)]
@@ -228,8 +263,6 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Print a shell completion script to stdout.
-    Completion(CompletionArgs),
     /// Print version and build metadata.
     Version,
 }
@@ -238,11 +271,7 @@ impl Command {
     fn accepts_profile_selector(&self) -> bool {
         !matches!(
             self,
-            Self::Init
-                | Self::Profile { .. }
-                | Self::Config { .. }
-                | Self::Completion(_)
-                | Self::Version
+            Self::Init | Self::Profile { .. } | Self::Config { .. } | Self::Version
         )
     }
 
@@ -269,7 +298,6 @@ impl Command {
                 | Self::Cp(_)
                 | Self::Trash(_)
                 | Self::Changes(_)
-                | Self::Doctor(_)
                 | Self::Maintenance {
                     command: MaintenanceCommand::Checkpoint { .. }
                         | MaintenanceCommand::Index { .. }
@@ -1582,7 +1610,16 @@ impl CommandKind {
 impl Cli {
     pub(crate) fn kind(&self) -> CommandKind {
         match &self.command {
-            Command::Completion(_) => CommandKind::Completion,
+            TopLevelCommand::Configured(command) => command.kind(),
+            TopLevelCommand::Doctor(_) => CommandKind::Doctor,
+            TopLevelCommand::Completion(_) => CommandKind::Completion,
+        }
+    }
+}
+
+impl Command {
+    fn kind(&self) -> CommandKind {
+        match self {
             Command::Init => CommandKind::Init,
             Command::Profile { command } => match command {
                 ProfileCommand::Create { .. } => CommandKind::ProfileCreate,
@@ -1627,7 +1664,6 @@ impl Cli {
             Command::Cp(_) => CommandKind::FilesystemCp,
             Command::Changes(_) => CommandKind::Changes,
             Command::Capabilities(_) => CommandKind::Capabilities,
-            Command::Doctor(_) => CommandKind::Doctor,
             Command::Maintenance { command } => match command {
                 MaintenanceCommand::RecoverAdministrator(_) => {
                     CommandKind::MaintenanceRecoverAdministrator
@@ -1779,13 +1815,13 @@ mod tests {
         assert_eq!(cli.profile.as_deref(), Some(profile));
         assert_eq!(cli.namespace.as_deref(), Some(namespace));
         let target = match &cli.command {
-            Command::Ls(args) => Some(&args.target),
-            Command::Maintenance {
+            TopLevelCommand::Configured(Command::Ls(args)) => Some(&args.target),
+            TopLevelCommand::Configured(Command::Maintenance {
                 command:
                     MaintenanceCommand::Checkpoint {
                         command: MaintenanceCheckpointCommand::List(args),
                     },
-            } => Some(&args.target),
+            }) => Some(&args.target),
             _ => None,
         }
         .expect("test command should accept profile and namespace selectors");
@@ -1929,7 +1965,7 @@ mod tests {
             let cli = Cli::try_parse_from(*arguments).expect("arguments parse");
             let error = validate_cli(&cli).expect_err("--json --all must fail");
             assert!(error.to_string().contains(
-                "--all cannot be used with --json; use --json --limit <n> for a bounded document or --jsonl to stream all results"
+                "`--all` cannot be used with `--json`; use `--json --limit <n>` for a bounded document or `--jsonl` to stream all results"
             ));
         }
     }

@@ -303,7 +303,7 @@ impl LoonFsBuilder<Writable> {
         writer.inline_content.validate()?;
         let writer_id = writer
             .writer_id
-            .ok_or_else(|| Error::Config("writer_id is required".to_owned()))?;
+            .ok_or_else(|| Error::Config("`writer_id` is required".to_owned()))?;
         let identity = WriterIdentity::new(writer_id)?;
         let runtime = owning_runtime()?;
         let core = self.core.open()?;

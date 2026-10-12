@@ -944,7 +944,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
             // per row.
             let opened = {
                 let iterator = &iterators[next];
-                let (row_key, _) = iterator.head().expect("the selected iterator has a row");
+                let (row_key, _) = iterator
+                    .head()
+                    .expect("the selected iterator should have a row");
                 let family = *iterator.sort_key();
                 self.refuse_a_repeated_input_key(family, row_key)?;
                 let row_locality = locality_of(family, row_key, cluster.locality);
@@ -1042,7 +1044,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupMerge<'a, S> {
         self.result.rows_written += 1;
         let writer = writers
             .get_mut(&family)
-            .expect("a cluster writes only the families it merges");
+            .expect("a cluster should write only the families it merges");
         match index_pair(self.group) {
             Some((canonical, _)) if family == canonical => {
                 writer.push(row, &mut |encoded| self.canonical_digest.fold(encoded))?;

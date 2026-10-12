@@ -81,7 +81,7 @@ pub(crate) fn pin_key_ids(
     let namespace = parsed.owner_namespace_id();
     let identifier = parsed
         .identifier()
-        .expect("pin keys carry a pin identifier");
+        .expect("a pin key should contain a pin ID");
     let namespace_id =
         NamespaceId::parse(namespace).map_err(|error| ControlObjectLoadError::KeyLayout {
             object_key: object_key.to_owned(),

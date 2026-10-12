@@ -12,7 +12,7 @@ use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
 };
 use loonfs_core::time::Deadline;
-use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
@@ -41,7 +41,7 @@ fn path(value: &str) -> AbsolutePath {
 
 fn assert_invalid_commit_request(error: &CoreError, label: &str) {
     assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
             if matches!(source.as_ref(), CoreError::InvalidCommitRequest(_) | CoreError::InvalidCommitField { .. })),
         "for `{label}`: {error:?}"
     );

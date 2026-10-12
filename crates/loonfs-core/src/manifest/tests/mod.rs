@@ -219,7 +219,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loonfs_types::NamespaceMetadata, crate::error::CoreError> {
+) -> crate::error::Result<loonfs_types::NamespaceMetadata> {
     let summary = create(store, namespace_id, context).await?;
     claim_writer_epoch(store, namespace_id, context)
         .await
@@ -539,7 +539,7 @@ async fn current_manifest_key<S: ObjectStore + ?Sized>(
 pub(crate) async fn load_current_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<CurrentProjection, CoreError> {
+) -> crate::error::Result<CurrentProjection> {
     let (head, metadata_state) =
         load_manifest_projection_metadata_state(store, namespace_id).await?;
     let manifest = load_current_manifest(store, namespace_id)
@@ -907,7 +907,7 @@ fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     payload: NamespaceManifestPayload,
-) -> Result<NamespaceManifestEnvelope, CoreError> {
+) -> crate::error::Result<NamespaceManifestEnvelope> {
     let key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
     let (envelope, bytes) = encode_namespace_manifest_json(payload)
         .expect("fixture envelope")
@@ -922,7 +922,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
 async fn publish_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
-) -> Result<ManifestPublicationOutcome, CoreError> {
+) -> crate::error::Result<ManifestPublicationOutcome> {
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     super::publish::publish_manifest(store, manifest, &deadline).await
 }

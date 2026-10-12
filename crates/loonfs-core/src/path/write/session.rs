@@ -526,7 +526,7 @@ mod tests {
         let error = results[1].as_ref().expect_err("duplicate create rejected");
         assert_eq!(error.code(), ErrorCode::PathConflict);
         assert!(
-            matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+            matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
             if matches!(source.as_ref(), CoreError::DestinationExists { .. }))
         );
     }

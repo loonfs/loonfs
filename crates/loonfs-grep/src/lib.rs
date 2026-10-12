@@ -31,7 +31,6 @@ pub use cache::{
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 pub use config::{GrepWorkerConfig, GrepWorkerConfigError};
-pub use error::GrepError as Error;
 pub use error::{GrepError, Result};
 pub use reads::NamespaceReads;
 pub use service::{GrepService, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES};

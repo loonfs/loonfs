@@ -124,7 +124,7 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
     let provider_task = tokio::spawn(async move {
         axum::serve(provider_listener, provider_router)
             .await
-            .expect("serve conformance transfers");
+            .expect("the conformance transfer server should serve until it is aborted");
     });
     let issuer = Arc::new(LoopbackIssuer {
         base_url: format!("http://{provider_address}"),
@@ -153,7 +153,7 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
     let server_task = tokio::spawn(async move {
         axum::serve(api_listener, api_router)
             .await
-            .expect("serve conformance API");
+            .expect("the conformance API server should serve until it is aborted");
     });
 
     health_check(api_address)

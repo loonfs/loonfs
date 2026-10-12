@@ -124,7 +124,7 @@ fn run_profile_update(
             apply_update_interactive(&name, existing)?
         } else {
             return Err(CliError::non_interactive_input_required(
-                "update flags (e.g. --root, --bucket)",
+                "update flags (e.g. `--root`, `--bucket`)",
             ));
         };
 

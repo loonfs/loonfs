@@ -358,7 +358,7 @@ async fn commit_as(
     context: &MutationContext,
     subject: loonfs_types::Subject,
     operation: FilesystemOperation,
-) -> Result<loonfs_types::Commit, loonfs_core::Error> {
+) -> Result<loonfs_types::Commit, loonfs_core::CoreError> {
     submit_commit(
         store,
         namespace_id,
@@ -823,7 +823,7 @@ async fn a_replay_from_another_principal_scope_is_refused() {
     .expect_err("wrong-scope replay");
     assert!(matches!(
         error,
-        loonfs_core::Error::PrincipalScopeMismatch {
+        loonfs_core::CoreError::PrincipalScopeMismatch {
             expected_principal_scope,
             actual_principal_scope,
         } if expected_principal_scope.as_str() == "org_demo"
@@ -876,7 +876,7 @@ async fn submit_operation(
     commit_id: CommitId,
     operation: FilesystemOperation,
     context: &MutationContext,
-) -> Result<loonfs_types::Commit, loonfs_core::Error> {
+) -> Result<loonfs_types::Commit, loonfs_core::CoreError> {
     submit_commit(
         store,
         namespace_id,
@@ -909,7 +909,7 @@ async fn resolve_path(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     path: &str,
-) -> Result<loonfs_types::PathEntry, loonfs_core::Error> {
+) -> Result<loonfs_types::PathEntry, loonfs_core::CoreError> {
     read_engine(store, namespace_id, "prn_root")
         .resolve_path(
             path,
@@ -1341,7 +1341,10 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
         .await
         .expect_err("subject required");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    assert!(matches!(error, loonfs_core::Error::SubjectRequired { .. }));
+    assert!(matches!(
+        error,
+        loonfs_core::CoreError::SubjectRequired { .. }
+    ));
 }
 
 #[tokio::test]

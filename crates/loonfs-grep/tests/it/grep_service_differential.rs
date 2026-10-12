@@ -509,7 +509,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
             &scan_off,
             &GrepError::QueryUnindexable(
                 "the pattern has no run of at least 3 literal bytes for the trigram index; set \
-                 allow_scan to search without it"
+                 `allow_scan` to search without it"
                     .to_owned(),
             ),
         )

@@ -66,12 +66,15 @@ impl SharedSimTrace {
     pub fn push(&self, event: SimTraceEvent) {
         self.inner
             .lock()
-            .expect("sim trace lock poisoned")
+            .expect("the sim trace lock should not be poisoned")
             .events
             .push(event);
     }
 
     pub fn snapshot(&self) -> SimTrace {
-        self.inner.lock().expect("sim trace lock poisoned").clone()
+        self.inner
+            .lock()
+            .expect("the sim trace lock should not be poisoned")
+            .clone()
     }
 }

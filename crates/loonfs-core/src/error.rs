@@ -1,9 +1,9 @@
 //! Core error types and their wire-code classification.
 //!
-//! Core errors must support `Clone` and serialization. Errors from the object
-//! store, codecs, and I/O are therefore stored as messages with the relevant
-//! object key instead of as `#[source]` chains. The server and CLI use source
-//! chains where these constraints do not apply.
+//! Core errors must support `Clone`. Errors from the object store, codecs, and
+//! I/O are therefore stored as messages with the relevant object key instead
+//! of as `#[source]` chains. The server and CLI use source chains where this
+//! constraint does not apply.
 
 use crate::commit::CommitValidationError;
 use crate::commit_engine::ContentPreparationError;
@@ -20,15 +20,8 @@ use loonfs_types::{
 };
 use thiserror::Error;
 
-/// Public error type returned by `loonfs-core`.
-///
-/// Use [`Error::kind`] for broad caller action and [`Error::code`] for a stable
-/// machine-readable reason.
-pub use self::CoreError as Error;
-
-/// Internal result alias used by core entry points. Public signatures still
-/// expose this as `std::result::Result<T, Error>`.
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+/// Result type returned by `loonfs-core`.
+pub type Result<T> = std::result::Result<T, CoreError>;
 
 use loonfs_objectstore::ObjectStoreErrorKind;
 pub use loonfs_types::{ErrorCode, ErrorKind};
@@ -257,10 +250,11 @@ pub enum CoreError {
         actual: ChangeSeq,
         precondition_index: Option<u32>,
     },
-    #[error("{source}")]
+    // The message is the failed operation's own, and `details()` reports the index.
+    #[error("{error}")]
     FailedOperation {
         operation_index: u32,
-        source: Box<CoreError>,
+        error: Box<CoreError>,
     },
 }
 
@@ -270,6 +264,7 @@ pub enum CoreError {
 /// caller action we expect. Normal reads and publishes must return these
 /// errors instead of falling back to a whole-namespace rebuild.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum MetadataViewError {
     #[error("metadata view for namespace `{namespace_id}` requires maintenance: {reason}")]
     MaintenanceRequired {
@@ -291,6 +286,7 @@ impl MetadataViewError {
 /// These variants name durable/control failure cases without implying that a
 /// full namespace state was reconstructed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum MetadataProjectionLoadError {
     #[error(transparent)]
     LoadHead(#[from] ControlObjectLoadError),
@@ -300,8 +296,11 @@ pub enum MetadataProjectionLoadError {
     WalTailLoad(#[from] WalTailLoadError),
     #[error(transparent)]
     ManifestLoad(#[from] ManifestLoadError),
-    #[error("WAL replay failed: {0}")]
-    WalReplay(#[from] WalObjectError),
+    #[error("WAL object `{object_key}` failed replay: {error}")]
+    WalReplay {
+        object_key: String,
+        error: WalObjectError,
+    },
 }
 
 impl MetadataProjectionLoadError {
@@ -310,7 +309,7 @@ impl MetadataProjectionLoadError {
             Self::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             Self::LoadHead(error) => error.code(),
             Self::WalTailLoad(error) => error.code(),
-            Self::WalReplay(_) => ErrorCode::NamespaceCorrupt,
+            Self::WalReplay { .. } => ErrorCode::NamespaceCorrupt,
             Self::ManifestLoad(error) => match error.kind() {
                 crate::manifest::ManifestLoadFailureKind::Corrupt => ErrorCode::NamespaceCorrupt,
                 crate::manifest::ManifestLoadFailureKind::Store => ErrorCode::ServerError,
@@ -343,7 +342,8 @@ impl From<ImmutableWriteError> for CoreError {
     }
 }
 
-pub(crate) fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
+/// Returns the wire code for a failed object-store operation of this kind.
+pub fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
     match kind {
         ObjectStoreErrorKind::PermissionDenied => ErrorCode::StoragePermissionDenied,
         ObjectStoreErrorKind::NotFound
@@ -355,6 +355,7 @@ pub(crate) fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
         | ObjectStoreErrorKind::Configuration
         | ObjectStoreErrorKind::RetryableTransport
         | ObjectStoreErrorKind::Other => ErrorCode::ServerError,
+        _ => ErrorCode::ServerError,
     }
 }
 
@@ -448,7 +449,7 @@ impl CoreError {
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
             // Naming which operation stopped a batch says nothing new about
             // what went wrong, so the code stays the failure's own.
-            CoreError::FailedOperation { source, .. } => source.code(),
+            CoreError::FailedOperation { error, .. } => error.code(),
         }
     }
 
@@ -458,7 +459,7 @@ impl CoreError {
         };
         Self::FailedOperation {
             operation_index,
-            source: Box::new(self),
+            error: Box::new(self),
         }
     }
 
@@ -480,7 +481,7 @@ impl CoreError {
             CoreError::WalWrite { kind, .. } | CoreError::Store { kind, .. } => {
                 Some(kind.public_message())
             }
-            CoreError::FailedOperation { source, .. } => source.object_store_public_message(),
+            CoreError::FailedOperation { error, .. } => error.object_store_public_message(),
             CoreError::DurableContent(
                 DurableContentValidationError::InvalidContentRef(_)
                 | DurableContentValidationError::MissingContentObject { .. }
@@ -618,10 +619,10 @@ impl CoreError {
             CoreError::CommitValidation(error) => error.details(),
             CoreError::FailedOperation {
                 operation_index,
-                source,
+                error,
             } => Some(ErrorDetails {
                 operation_index: Some(*operation_index),
-                ..source.details().unwrap_or_default()
+                ..error.details().unwrap_or_default()
             }),
             _ => None,
         }

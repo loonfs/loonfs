@@ -156,7 +156,9 @@ impl UploadJournal {
         options: &PutFileOptions,
         subject: Option<&loonfs_types::Subject>,
     ) -> io::Result<Self> {
-        let parent = path.parent().expect("journal has a directory");
+        let parent = path
+            .parent()
+            .expect("a journal path should have a parent directory");
         std::fs::create_dir_all(parent).map_err(|error| journal_error(&path, error))?;
         let ownership = OpenOptions::new()
             .read(true)
@@ -187,7 +189,7 @@ impl UploadJournal {
                 if recorded.source != source {
                     return Err(journal_error(
                         &path,
-                        "source file changed; use a new --commit-id or remove this journal to start another attempt",
+                        "source file changed; use a new `--commit-id` or remove this journal to start another attempt",
                     ));
                 }
                 let commit_id = recorded
@@ -202,7 +204,7 @@ impl UploadJournal {
                     || actor_id != &recorded.actor_id
                     || subject != recorded.subject.as_ref()
                 {
-                    return Err(journal_error(&path, "PUT options changed; resume with the original options or use a new --commit-id for another attempt"));
+                    return Err(journal_error(&path, "PUT options changed; resume with the original options or use a new `--commit-id` for another attempt"));
                 }
                 if let UploadProgress::Prepared {
                     request,
@@ -328,7 +330,10 @@ impl UploadJournal {
 
     fn flush(&self, state: &UploadState) -> io::Result<()> {
         let write = || -> io::Result<()> {
-            let parent = self.path.parent().expect("journal has a directory");
+            let parent = self
+                .path
+                .parent()
+                .expect("a journal path should have a parent directory");
             let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
             serde_json::to_writer(&mut temporary, state)?;
             temporary.flush()?;
@@ -341,7 +346,12 @@ impl UploadJournal {
 
     fn sync_directory(&self) -> io::Result<()> {
         #[cfg(unix)]
-        File::open(self.path.parent().expect("journal has a directory"))?.sync_all()?;
+        File::open(
+            self.path
+                .parent()
+                .expect("a journal path should have a parent directory"),
+        )?
+        .sync_all()?;
         Ok(())
     }
 

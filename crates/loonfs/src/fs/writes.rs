@@ -922,7 +922,7 @@ impl Namespace<Writable> {
             &options.commit,
             FilesystemOperation::UpdateAccess {
                 path: loonfs_types::AbsolutePath::parse(absolute_path)
-                    .map_err(|error| loonfs_core::Error::InvalidPath(error.to_string()))?,
+                    .map_err(|error| loonfs_core::CoreError::InvalidPath(error.to_string()))?,
                 boundary: access.boundary,
                 grants: access.grants,
                 expected_inode_id: options.expected_inode_id,

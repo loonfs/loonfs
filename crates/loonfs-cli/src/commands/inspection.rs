@@ -233,7 +233,7 @@ pub(crate) async fn run_doctor(
     if remote {
         let result = target
             .as_ref()
-            .expect("remote provider validation constructs a target")
+            .expect("remote provider validation should construct a target")
             .remote_connectivity()
             .await;
         checks.push(check_from_backend_result(
@@ -252,7 +252,7 @@ pub(crate) async fn run_doctor(
     if remote {
         let result = target
             .as_ref()
-            .expect("remote provider validation constructs a target")
+            .expect("remote provider validation should construct a target")
             .client
             .get_capabilities()
             .await
@@ -275,7 +275,7 @@ pub(crate) async fn run_doctor(
     if remote {
         let result = target
             .as_ref()
-            .expect("remote provider validation constructs a target")
+            .expect("remote provider validation should construct a target")
             .remote_health()
             .await;
         checks.push(check_from_backend_result(
@@ -300,7 +300,7 @@ pub(crate) async fn run_doctor(
     }
 
     let capability_result = if remote {
-        remote_capabilities.expect("remote auth check records its capability result")
+        remote_capabilities.expect("the remote auth check should record its capability result")
     } else if let Some(target) = &target {
         target
             .client

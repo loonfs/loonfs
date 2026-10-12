@@ -338,7 +338,7 @@ pub fn generated_id(prefix: &'static str) -> String {
 /// Generated ids hex-encode these bytes.
 fn random_128() -> [u8; 16] {
     let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes).expect("the system random generator must be available");
+    getrandom::fill(&mut bytes).expect("the system random generator should be available");
     bytes
 }
 
@@ -441,7 +441,7 @@ fn validate_id_grammar(value: &str) -> Result<(), String> {
     let mut chars = value.chars();
     let first = chars
         .next()
-        .expect("empty id returned before char validation");
+        .expect("an ID that passed the empty check should have a first character");
     if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
         return Err("must start with a lowercase ASCII letter or digit".to_owned());
     }

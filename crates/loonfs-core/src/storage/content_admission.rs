@@ -176,6 +176,7 @@ struct ContentTokenPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ContentTokenError {
     #[error("content token is malformed")]
     Malformed,

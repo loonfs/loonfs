@@ -155,7 +155,8 @@ impl ReadView {
         if Some(requested) != self.snapshot_id() {
             return Err(Error::InvalidRequest {
                 message: format!(
-                    "snapshot_id `{requested}` names a different snapshot than this read view"
+                    "`snapshot_id` {:?} refers to a different snapshot than this read view",
+                    requested.as_str()
                 ),
                 param: "snapshot_id",
             });

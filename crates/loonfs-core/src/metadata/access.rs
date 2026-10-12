@@ -3,7 +3,7 @@
 //! the nearest boundary.
 
 use super::visibility::MetadataVisibilityReads;
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use loonfs_types::format::manifest::{AccessRevisionRecord, TombstoneRowAction};
 use loonfs_types::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID};
 use std::collections::BTreeSet;
@@ -44,7 +44,7 @@ impl AccessChain {
 pub(crate) async fn access_chain<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
-) -> Result<AccessChain, CoreError>
+) -> Result<AccessChain>
 where
     CoreError: From<R::Error>,
 {
@@ -84,7 +84,7 @@ where
 pub(crate) async fn is_administrator<R: MetadataVisibilityReads>(
     reads: &mut R,
     principals: &PrincipalSet,
-) -> Result<bool, R::Error> {
+) -> std::result::Result<bool, R::Error> {
     Ok(reads
         .find_access_row(ROOT_INODE_ID)
         .await?
@@ -101,7 +101,7 @@ pub(crate) async fn effective_rights<R: MetadataVisibilityReads>(
     reads: &mut R,
     principals: &PrincipalSet,
     inode_id: InodeId,
-) -> Result<AccessRights, CoreError>
+) -> Result<AccessRights>
 where
     CoreError: From<R::Error>,
 {

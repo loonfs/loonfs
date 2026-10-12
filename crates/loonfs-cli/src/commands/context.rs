@@ -82,7 +82,7 @@ pub(crate) fn parse_public_ordinal_arg<T>(
     constructor(value).map_err(|error| {
         CliError::new(
             ErrorCode::InvalidRequest.as_str(),
-            format!("invalid {argument} `{value}`: {error}"),
+            format!("invalid `{argument}` {value:?}: {error}"),
         )
         .with_param(argument)
     })
@@ -91,7 +91,7 @@ pub(crate) fn parse_public_ordinal_arg<T>(
 pub(crate) fn parse_snapshot_id_arg(argument: &str, value: &str) -> Result<PinId, CliError> {
     PinId::parse(value).map_err(|error| {
         CliError::invalid_request(format!(
-            "invalid {argument}: invalid snapshot_id {value:?}: {}",
+            "invalid `{argument}`: invalid snapshot_id {value:?}: {}",
             error.reason()
         ))
         .with_param(argument)

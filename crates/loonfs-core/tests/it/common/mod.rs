@@ -62,7 +62,7 @@ pub(crate) mod commit_split_support {
     use loonfs_core::publish::{
         CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine,
     };
-    use loonfs_core::{CreateNamespaceOptions, Error as CoreError, MutationContext};
+    use loonfs_core::{CoreError, CreateNamespaceOptions, MutationContext};
 
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};

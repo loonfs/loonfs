@@ -490,7 +490,7 @@ pub(super) async fn create_snapshot(
                 .with_invalid_request_param("/name")
         })?;
     Ok(Json(SnapshotSummary::from_checkpoint(checkpoint).expect(
-        "snapshot creation returns a snapshot-owned checkpoint",
+        "snapshot creation should return a snapshot-owned checkpoint",
     )))
 }
 

@@ -53,7 +53,7 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
     commit_id
         .map(|value| {
             CommitId::parse(value).map_err(|error| {
-                CliError::invalid_request(format!("invalid --commit-id: {error}"))
+                CliError::invalid_request(format!("invalid `--commit-id`: {error}"))
                     .with_param("--commit-id")
             })
         })
@@ -216,7 +216,7 @@ pub(crate) async fn run_filesystem_stat(
             let path = args
                 .path
                 .as_deref()
-                .expect("clap requires either path or --inode");
+                .expect("clap should require either a path or `--inode`");
             let allow_root = true;
             let spec = namespace_path(context.namespace(), "path", path, allow_root)
                 .map_err(|error| context.fail(kind, error))?;
@@ -237,21 +237,21 @@ pub(crate) async fn run_filesystem_stat(
 fn parse_attribute_assignment(argument: &str) -> Result<(AttributeKey, AttributeValue), CliError> {
     let Some((key, value)) = argument.split_once('=') else {
         return Err(CliError::invalid_request(format!(
-            "invalid --set `{argument}`: expected key=value"
+            "invalid `--set` {argument:?}: expected `key=value`"
         ))
         .with_param("--set"));
     };
     Ok((
         parse_attribute_key_arg("--set", key)?,
         AttributeValue::parse(value).map_err(|error| {
-            CliError::invalid_request(format!("invalid --set value: {error}")).with_param("--set")
+            CliError::invalid_request(format!("invalid `--set` value: {error}")).with_param("--set")
         })?,
     ))
 }
 
 fn parse_attribute_key_arg(flag: &str, key: &str) -> Result<AttributeKey, CliError> {
     AttributeKey::parse(key).map_err(|error| {
-        CliError::invalid_request(format!("invalid {flag} key: {error}")).with_param(flag)
+        CliError::invalid_request(format!("invalid `{flag}` key: {error}")).with_param(flag)
     })
 }
 
@@ -273,7 +273,7 @@ fn attribute_update(
         Some(document) => {
             let update: AttributeUpdateJson = serde_json::from_str(document).map_err(|error| {
                 CliError::invalid_request(format!(
-                    "invalid --attributes-json attribute update: {error}"
+                    "invalid `--attributes-json` attribute update: {error}"
                 ))
                 .with_param("--attributes-json")
             })?;
@@ -500,7 +500,7 @@ pub(crate) async fn run_filesystem_get(
         if args.revision.is_some() {
             return Err(context.fail(
                 kind,
-                CliError::invalid_request("--revision applies to one file, not a tree")
+                CliError::invalid_request("`--revision` applies to one file, not a tree")
                     .with_param("--revision"),
             ));
         }
@@ -880,7 +880,7 @@ pub(crate) async fn run_filesystem_put(
             return Err(context.fail(
                 kind,
                 CliError::invalid_request(
-                    "--commit-id names one commit; a recursive upload makes one commit per file",
+                    "`--commit-id` names one commit; a recursive upload makes one commit per file",
                 )
                 .with_param("--commit-id"),
             ));
@@ -1583,7 +1583,7 @@ async fn run_filesystem_transfer(
                 return Err(context.fail(
                     kind,
                     CliError::invalid_request(
-                        "--commit-id names one commit; a recursive copy makes one commit per item",
+                        "`--commit-id` names one commit; a recursive copy makes one commit per item",
                     )
                     .with_param("--commit-id"),
                 ));

@@ -79,5 +79,3 @@ pub enum GrepManifestError {
     #[error("grep manifest publication conflict for `{object_key}`")]
     Conflict { object_key: String },
 }
-
-pub(super) type Result<T> = std::result::Result<T, GrepManifestError>;

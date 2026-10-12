@@ -3,7 +3,7 @@
 use super::super::{CommitOperation, CommitValidationError, ResolvedBinding};
 use super::error::CommitOperand;
 use super::session::PublishValidationSession;
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition};
@@ -20,7 +20,7 @@ pub(crate) struct CommitNumbering {
 }
 
 impl CommitNumbering {
-    fn reserve_op_index(&mut self) -> Result<u32, CommitValidationError> {
+    fn reserve_op_index(&mut self) -> std::result::Result<u32, CommitValidationError> {
         let op_index = self.next_op_index;
         self.next_op_index = self
             .next_op_index
@@ -29,7 +29,7 @@ impl CommitNumbering {
         Ok(op_index)
     }
 
-    fn reserve_delta_index(&mut self) -> Result<u32, CommitValidationError> {
+    fn reserve_delta_index(&mut self) -> std::result::Result<u32, CommitValidationError> {
         let delta_index = self.next_delta_index;
         self.next_delta_index = self
             .next_delta_index
@@ -47,7 +47,7 @@ pub(crate) async fn validate_operations<S: ObjectStore + ?Sized>(
     actor: &ActorId,
     committed_at_ms: u64,
     revision_layout: impl Fn(&ContentRef) -> Option<loonfs_types::ContentLayout>,
-) -> Result<Vec<WalCommitDelta>, CoreError> {
+) -> Result<Vec<WalCommitDelta>> {
     let mut deltas = Vec::new();
 
     for op in ops {
@@ -216,7 +216,7 @@ async fn validate_create_directory<S: ObjectStore + ?Sized>(
     parent_inode_id: InodeId,
     display_name: &DisplayName,
     (created_by, created_at_ms): (&ActorId, u64),
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     let name_key = validate_name_absent(
         view,
         parent_inode_id,
@@ -254,7 +254,7 @@ async fn validate_create_file<S: ObjectStore + ?Sized>(
     display_name: &DisplayName,
     content_ref: &ContentRef,
     (created_by, created_at_ms): (&ActorId, u64),
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     let name_key = validate_name_absent(
         view,
         parent_inode_id,
@@ -297,7 +297,7 @@ async fn validate_replace_file<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     base_revision_no: RevisionNo,
     content_ref: &ContentRef,
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     validate_file_base_revision_is(
         view,
         inode_id,
@@ -328,7 +328,7 @@ async fn validate_restore_revision<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     source_revision_no: RevisionNo,
     base_revision_no: RevisionNo,
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     validate_file_base_revision_is(
         view,
         inode_id,
@@ -360,7 +360,7 @@ async fn validate_delete_file<S: ObjectStore + ?Sized>(
     numbering: &mut CommitNumbering,
     inode_id: InodeId,
     source_binding: &ResolvedBinding,
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     validate_source_binding(view, source_binding).await?;
     let inode =
         validate_inode_kind(view, inode_id, InodeKind::File, CommitOperand::DeleteTarget).await?;
@@ -375,7 +375,7 @@ async fn validate_rename<S: ObjectStore + ?Sized>(
     source_binding: &ResolvedBinding,
     new_parent_inode_id: InodeId,
     new_display_name: &DisplayName,
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     validate_source_binding(view, source_binding).await?;
     let inode =
         view.view()
@@ -419,7 +419,7 @@ async fn validate_delete_subtree<S: ObjectStore + ?Sized>(
     root_inode_id: InodeId,
     source_binding: &ResolvedBinding,
     require_empty: bool,
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     validate_source_binding(view, source_binding).await?;
     let operand = if require_empty {
         CommitOperand::EmptyDirectoryTarget
@@ -444,7 +444,7 @@ async fn validate_undelete<S: ObjectStore + ?Sized>(
     deletion_seq: ChangeSeq,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     let (inode, active) = validate_undelete_target(view, inode_id, deletion_seq).await?;
     let name_key = validate_name_absent(
         view,
@@ -481,7 +481,7 @@ async fn validate_update_attributes<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     base_attributes_revision_no: AttributesRevisionNo,
     attributes: &Attributes,
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     validate_target_visible(view, inode_id, CommitOperand::AttributeTarget).await?;
     validate_inode_attributes_revision_is(view, inode_id, base_attributes_revision_no).await?;
     let attributes_revision_no =
@@ -501,7 +501,7 @@ async fn validate_update_access<S: ObjectStore + ?Sized>(
     base_access_revision_no: AccessRevisionNo,
     boundary: bool,
     grants: &AccessGrants,
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     validate_target_visible(view, inode_id, CommitOperand::AccessTarget).await?;
     validate_inode_access_revision_is(view, inode_id, base_access_revision_no).await?;
     let access_revision_no = next_access_revision_no(inode_id, base_access_revision_no)?;
@@ -518,7 +518,7 @@ fn unbind_delta(
     numbering: &mut CommitNumbering,
     binding: &ResolvedBinding,
     inode: &InodeRecord,
-) -> Result<WalDelta, CommitValidationError> {
+) -> std::result::Result<WalDelta, CommitValidationError> {
     Ok(WalDelta::UnbindDirentry {
         delta_index: numbering.reserve_delta_index()?,
         parent_inode_id: binding.parent_inode_id,
@@ -536,7 +536,7 @@ fn delete_deltas(
     numbering: &mut CommitNumbering,
     inode: &InodeRecord,
     binding: &ResolvedBinding,
-) -> Result<Vec<WalDelta>, CoreError> {
+) -> Result<Vec<WalDelta>> {
     Ok(vec![
         unbind_delta(numbering, binding, inode)?,
         WalDelta::TombstoneSubtree {
@@ -554,7 +554,7 @@ fn delete_deltas(
 fn next_access_revision_no(
     inode_id: InodeId,
     base_access_revision_no: AccessRevisionNo,
-) -> Result<AccessRevisionNo, CommitValidationError> {
+) -> std::result::Result<AccessRevisionNo, CommitValidationError> {
     next_public_ordinal(base_access_revision_no.0)
         .map(AccessRevisionNo)
         .ok_or(CommitValidationError::UpdateAccessRevisionOverflow {
@@ -567,7 +567,7 @@ fn next_revision_no(
     inode_id: InodeId,
     base_revision_no: RevisionNo,
     overflow: impl FnOnce(InodeId, RevisionNo) -> CommitValidationError,
-) -> Result<RevisionNo, CommitValidationError> {
+) -> std::result::Result<RevisionNo, CommitValidationError> {
     next_public_ordinal(base_revision_no.0)
         .map(RevisionNo)
         .ok_or_else(|| overflow(inode_id, base_revision_no))
@@ -576,7 +576,7 @@ fn next_revision_no(
 fn next_attributes_revision_no(
     inode_id: InodeId,
     base_attributes_revision_no: AttributesRevisionNo,
-) -> Result<AttributesRevisionNo, CommitValidationError> {
+) -> std::result::Result<AttributesRevisionNo, CommitValidationError> {
     next_public_ordinal(base_attributes_revision_no.0)
         .map(AttributesRevisionNo)
         .ok_or(CommitValidationError::UpdateAttributesRevisionOverflow {
@@ -589,7 +589,7 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     deletion_seq: ChangeSeq,
-) -> Result<(InodeRecord, SubtreeTombstoneRecord), CoreError> {
+) -> Result<(InodeRecord, SubtreeTombstoneRecord)> {
     let committed_seq = view.committed_seq();
     let inode =
         view.view()
@@ -625,7 +625,7 @@ async fn validate_target_visible<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     operand: CommitOperand,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     if view.view().visible_inode(inode_id).await?.is_none() {
         return Err(CommitValidationError::InodeMissing { operand, inode_id }.into());
     }
@@ -636,7 +636,7 @@ async fn validate_inode_attributes_revision_is<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     expected: AttributesRevisionNo,
-) -> Result<Attributes, CoreError> {
+) -> Result<Attributes> {
     let (actual, attributes) = view.view().attributes_at_visible_seq(inode_id).await?;
     if actual != expected {
         return Err(
@@ -656,7 +656,7 @@ async fn validate_inode_access_revision_is<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     expected: AccessRevisionNo,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     let actual = view
         .view()
         .latest_access_revision(inode_id)
@@ -679,7 +679,7 @@ async fn validate_inode_kind<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     expected: InodeKind,
     operand: CommitOperand,
-) -> Result<InodeRecord, CoreError> {
+) -> Result<InodeRecord> {
     let inode = view
         .view()
         .inode_at_seq(inode_id)
@@ -701,7 +701,7 @@ async fn validate_not_covered_by_tombstone<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     operand: CommitOperand,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     if let Some(tombstone) = view.view().covering_subtree_tombstone(inode_id).await? {
         return Err(CommitValidationError::TargetUnderSubtreeTombstone {
             operand,
@@ -720,7 +720,7 @@ async fn validate_name_absent<S: ObjectStore + ?Sized>(
     display_name: &DisplayName,
     rebinding_inode_id: Option<InodeId>,
     operand: CommitOperand,
-) -> Result<NameKey, CoreError> {
+) -> Result<NameKey> {
     validate_inode_kind(view, parent_inode_id, InodeKind::Directory, operand).await?;
 
     let name_key = NameKey::for_display_name(view.view().naming(), display_name);
@@ -748,7 +748,7 @@ async fn validate_child_unbound<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     child_inode_id: InodeId,
     unbinding: Option<DeltaPosition>,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     match view
         .view()
         .current_parent_binding_for_child(child_inode_id)
@@ -768,7 +768,7 @@ async fn validate_child_unbound<S: ObjectStore + ?Sized>(
 async fn validate_source_binding<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     expected: &ResolvedBinding,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     let Some(existing) = view
         .view()
         .visible_child(expected.parent_inode_id, &expected.name_key)
@@ -804,7 +804,7 @@ async fn validate_file_base_revision_is<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
     operand: CommitOperand,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     validate_inode_kind(view, inode_id, InodeKind::File, operand).await?;
     let actual = view
         .view()
@@ -827,7 +827,7 @@ async fn validate_restore_source_revision<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode_id: InodeId,
     source_revision_no: RevisionNo,
-) -> Result<RevisionRecord, CoreError> {
+) -> Result<RevisionRecord> {
     Ok(view
         .view()
         .revision_at_head(inode_id, source_revision_no)
@@ -844,7 +844,7 @@ async fn validate_rename_does_not_cycle<S: ObjectStore + ?Sized>(
     view: &PublishValidationSession<'_, S>,
     inode: &InodeRecord,
     new_parent_inode_id: InodeId,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     if inode.inode_kind == InodeKind::Directory
         && view
             .view()

@@ -182,7 +182,7 @@ impl DirectPutObservation {
         self.size_bytes += bytes.len() as u64;
         self.checksum
             .as_mut()
-            .expect("direct PUT checksum is unfinished")
+            .expect("the direct PUT checksum should be unfinished")
             .update(bytes);
     }
 
@@ -192,7 +192,7 @@ impl DirectPutObservation {
             checksum: self
                 .checksum
                 .take()
-                .expect("direct PUT checksum is finished once")
+                .expect("the direct PUT checksum should be finished only once")
                 .finish(),
         }
     }
@@ -210,7 +210,7 @@ fn observed_direct_put_source(
                 if let Ok(bytes) = &chunk {
                     stream_observation
                         .lock()
-                        .expect("direct PUT observation lock")
+                        .expect("the direct PUT observation lock should not be poisoned")
                         .update(bytes);
                 }
                 chunk
@@ -501,7 +501,7 @@ impl Client {
             } = begin.status
             else {
                 return Err(ClientError::Protocol(
-                    "direct_put session is not open or lacks `checksum_algorithm` or `access`"
+                    "`direct_put` session is not open or lacks `checksum_algorithm` or `access`"
                         .to_owned(),
                 ));
             };
@@ -520,7 +520,7 @@ impl Client {
                         .await?;
                     let content = observation
                         .lock()
-                        .expect("direct PUT observation lock")
+                        .expect("the direct PUT observation lock should not be poisoned")
                         .finish();
                     content
                 }
@@ -572,7 +572,7 @@ impl Client {
                     ..
                 } = begin.status
                 else {
-                    return Err(ClientError::Protocol("direct_multipart session is not open or lacks `part_size_bytes` or `checksum_algorithm`".to_owned()));
+                    return Err(ClientError::Protocol("`direct_multipart` session is not open or lacks `part_size_bytes` or `checksum_algorithm`".to_owned()));
                 };
                 let upload_id = begin.upload_id;
                 if let Some(journal) = continuity.journal {

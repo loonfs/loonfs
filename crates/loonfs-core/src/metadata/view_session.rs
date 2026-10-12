@@ -11,7 +11,7 @@ use super::{
     AccessRevisionRecord, AttributesProjection, DirentryBindingRecord, InodeRecord, MetadataView,
     RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
@@ -22,10 +22,10 @@ use std::future::Future;
 async fn preload_inode_groups<T, Lookup, LookupFuture>(
     inode_ids: &[InodeId],
     lookup: Lookup,
-) -> Result<Vec<(InodeId, T)>, CoreError>
+) -> Result<Vec<(InodeId, T)>>
 where
     Lookup: Fn(InodeId) -> LookupFuture,
-    LookupFuture: Future<Output = Result<T, CoreError>>,
+    LookupFuture: Future<Output = Result<T>>,
 {
     // Adjacent inode ids often share a read. Separate ranges let each
     // group start in a different part of the page's segments.
@@ -240,7 +240,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         parent_inode_id: InodeId,
         start_after_name_key: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<VisibleChildEntry>, CoreError> {
+    ) -> Result<Vec<VisibleChildEntry>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -300,7 +300,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         parent_inode_id: InodeId,
         start_after_name_key: Option<&str>,
         group_limit: usize,
-    ) -> Result<Vec<DirentryBindingNameGroup>, CoreError> {
+    ) -> Result<Vec<DirentryBindingNameGroup>> {
         let mut groups: Vec<DirentryBindingNameGroup> = Vec::new();
         loop {
             if stream.manifest_candidates.is_empty() && !stream.manifest_exhausted {
@@ -389,7 +389,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &mut self,
         parent_inode_id: InodeId,
         groups: &[DirentryBindingNameGroup],
-    ) -> Result<(), CoreError> {
+    ) -> Result<()> {
         let visible_seq = self.base.visible_seq();
         let mut child_inode_ids = Vec::with_capacity(groups.len());
         for group in groups {
@@ -425,10 +425,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(())
     }
 
-    pub(crate) async fn preload_visibility(
-        &mut self,
-        inode_ids: &[InodeId],
-    ) -> Result<(), CoreError> {
+    pub(crate) async fn preload_visibility(&mut self, inode_ids: &[InodeId]) -> Result<()> {
         let mut pending: Vec<InodeId> = inode_ids
             .iter()
             .copied()
@@ -481,7 +478,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &mut self,
         absolute_path: &AbsolutePath,
         preload_leaf_revision: LeafRevisionPreload,
-    ) -> Result<ResolvedVisiblePath, CoreError> {
+    ) -> Result<ResolvedVisiblePath> {
         self.preload_path_walk(absolute_path, preload_leaf_revision)
             .await?;
         let naming = self.base.naming();
@@ -492,7 +489,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &mut self,
         absolute_path: &AbsolutePath,
         preload_leaf_revision: LeafRevisionPreload,
-    ) -> Result<(), CoreError> {
+    ) -> Result<()> {
         let naming = self.base.naming();
         let component_name_keys: Vec<NameKey> = absolute_path
             .components()
@@ -587,10 +584,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     }
 
     /// Returns the inode when it is visible in this session's snapshot.
-    pub(crate) async fn visible_inode(
-        &mut self,
-        inode_id: InodeId,
-    ) -> Result<Option<InodeRecord>, CoreError> {
+    pub(crate) async fn visible_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>> {
         self.counters.visible_inode_calls = self.counters.visible_inode_calls.saturating_add(1);
         if let Some(cached) = self.visible_inode_cache.get(&inode_id).cloned() {
             return Ok(cached);
@@ -601,10 +595,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(visible)
     }
 
-    pub(crate) async fn inode_at_seq(
-        &mut self,
-        inode_id: InodeId,
-    ) -> Result<Option<InodeRecord>, CoreError> {
+    pub(crate) async fn inode_at_seq(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>> {
         if let Some(cached) = self.cached_inode_at_seq(inode_id) {
             return Ok(cached);
         }
@@ -622,7 +613,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn latest_revision_head_of_visible(
         &mut self,
         inode_id: InodeId,
-    ) -> Result<Option<RevisionRecord>, CoreError> {
+    ) -> Result<Option<RevisionRecord>> {
         self.counters.latest_revision_calls = self.counters.latest_revision_calls.saturating_add(1);
         if let Some(cached) = self.cached_latest_revision_head_of_visible(inode_id) {
             return Ok(cached);
@@ -636,7 +627,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn preload_revision_heads(
         &mut self,
         children: &[VisibleChildEntry],
-    ) -> Result<(), CoreError> {
+    ) -> Result<()> {
         let mut pending: Vec<_> = children
             .iter()
             .filter(|child| child.binding.child_kind == InodeKind::File)
@@ -656,7 +647,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn preload_access_rows(
         &mut self,
         children: &[VisibleChildEntry],
-    ) -> Result<(), CoreError> {
+    ) -> Result<()> {
         let mut pending: Vec<_> = children
             .iter()
             .map(|child| child.binding.child_inode_id)
@@ -675,7 +666,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn access_row(
         &mut self,
         inode_id: InodeId,
-    ) -> Result<Option<AccessRevisionRecord>, CoreError> {
+    ) -> Result<Option<AccessRevisionRecord>> {
         self.counters.access_row_calls = self.counters.access_row_calls.saturating_add(1);
         if let Some(cached) = self.access_row_cache.get(&inode_id).cloned() {
             return Ok(cached);
@@ -697,7 +688,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn attributes_of_visible(
         &mut self,
         inode_id: InodeId,
-    ) -> Result<AttributesProjection, CoreError> {
+    ) -> Result<AttributesProjection> {
         self.counters.latest_attributes_calls =
             self.counters.latest_attributes_calls.saturating_add(1);
         if let Some(cached) = self.attributes_cache.get(&inode_id).cloned() {
@@ -718,10 +709,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     /// is a thousand serialized round trips on a full page. The preload
     /// decides nothing: seeded values are what the per-entry lookup would
     /// have fetched, so an entry built with or without it is identical.
-    pub(crate) async fn preload_attributes(
-        &mut self,
-        inode_ids: &[InodeId],
-    ) -> Result<(), CoreError> {
+    pub(crate) async fn preload_attributes(&mut self, inode_ids: &[InodeId]) -> Result<()> {
         let mut pending: Vec<InodeId> = inode_ids
             .iter()
             .copied()
@@ -751,7 +739,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         inode_id: InodeId,
         start_after: Option<manifest_index::RevisionPagePosition>,
         limit: usize,
-    ) -> Result<Vec<RevisionRecord>, CoreError> {
+    ) -> Result<Vec<RevisionRecord>> {
         self.counters.scan_range_page_calls = self.counters.scan_range_page_calls.saturating_add(1);
         self.base
             .revisions_by_inode_page_desc(inode_id, start_after, limit)
@@ -762,7 +750,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn current_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>> {
         self.counters.current_parent_binding_calls =
             self.counters.current_parent_binding_calls.saturating_add(1);
         visibility::current_parent_binding_for_child(self, child_inode_id).await
@@ -771,7 +759,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     async fn latest_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>> {
         if let Some(cached) = self.cached_latest_parent_binding_for_child(child_inode_id) {
             return Ok(cached);
         }
@@ -790,7 +778,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn covering_subtree_tombstone(
         &mut self,
         inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
+    ) -> Result<Option<SubtreeTombstoneRecord>> {
         self.counters.covering_tombstone_calls =
             self.counters.covering_tombstone_calls.saturating_add(1);
         if let Some(cached) = self.covering_tombstone_cache.get(&inode_id).cloned() {
@@ -809,7 +797,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &mut self,
         start_after: Option<(ChangeSeq, InodeId)>,
         limit: usize,
-    ) -> Result<Vec<RecoverableDeletion>, CoreError> {
+    ) -> Result<Vec<RecoverableDeletion>> {
         self.counters.scan_range_page_calls = self.counters.scan_range_page_calls.saturating_add(1);
         self.base.active_deletions_page(start_after, limit).await
     }
@@ -817,7 +805,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn active_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, CoreError> {
+    ) -> Result<Option<SubtreeTombstoneRecord>> {
         if let Some(cached) = self.cached_active_subtree_tombstone(root_inode_id) {
             return Ok(cached);
         }
@@ -832,7 +820,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindingRecord>, CoreError> {
+    ) -> Result<Option<DirentryBindingRecord>> {
         let cache_key = ParentNameCacheKey {
             parent_inode_id,
             name_key: name_key.clone(),
@@ -856,7 +844,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_, '_, S> {
     type Error = CoreError;
 
-    async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {
+    async fn find_inode(
+        &mut self,
+        inode_id: InodeId,
+    ) -> std::result::Result<Option<InodeRecord>, Self::Error> {
         self.inode_at_seq(inode_id).await
     }
 
@@ -864,49 +855,49 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
         &mut self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
+    ) -> std::result::Result<Option<DirentryBindingRecord>, Self::Error> {
         self.bound_child(parent_inode_id, name_key).await
     }
 
     async fn find_latest_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
+    ) -> std::result::Result<Option<DirentryBindingRecord>, Self::Error> {
         self.latest_parent_binding_for_child(child_inode_id).await
     }
 
     async fn find_active_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+    ) -> std::result::Result<Option<SubtreeTombstoneRecord>, Self::Error> {
         self.active_subtree_tombstone(root_inode_id).await
     }
 
     async fn find_access_row(
         &mut self,
         inode_id: InodeId,
-    ) -> Result<Option<AccessRevisionRecord>, Self::Error> {
+    ) -> std::result::Result<Option<AccessRevisionRecord>, Self::Error> {
         self.access_row(inode_id).await
     }
 
     async fn current_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
-    ) -> Result<Option<DirentryBindingRecord>, Self::Error> {
+    ) -> std::result::Result<Option<DirentryBindingRecord>, Self::Error> {
         MetadataViewSession::current_parent_binding_for_child(self, child_inode_id).await
     }
 
     async fn covering_subtree_tombstone(
         &mut self,
         inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error> {
+    ) -> std::result::Result<Option<SubtreeTombstoneRecord>, Self::Error> {
         MetadataViewSession::covering_subtree_tombstone(self, inode_id).await
     }
 
     async fn visible_inode(
         &mut self,
         inode_id: InodeId,
-    ) -> Result<Option<InodeRecord>, Self::Error> {
+    ) -> std::result::Result<Option<InodeRecord>, Self::Error> {
         MetadataViewSession::visible_inode(self, inode_id).await
     }
 }

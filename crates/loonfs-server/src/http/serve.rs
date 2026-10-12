@@ -378,6 +378,8 @@ pub enum ServeError {
     },
     #[error("failed to load the configured TLS identity: {0}")]
     Tls(#[source] TlsConfigError),
+    #[error("failed to install the shutdown signal handlers: {0}")]
+    Signal(#[source] std::io::Error),
     #[error("server failed while serving requests: {0}")]
     Serve(#[source] std::io::Error),
     #[error("runtime or maintenance shutdown did not settle: {0}")]
@@ -433,7 +435,8 @@ pub async fn probe_store(config: &ServerConfig) -> Result<StoreProbeReport, Serv
 /// closes while the listener remains available to reads and probes. After
 /// active requests drain, the listener closes and accepted work settles.
 pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
-    serve_with_shutdown(config, shutdown_signal()).await
+    let shutdown = shutdown_signal().map_err(ServeError::Signal)?;
+    serve_with_shutdown(config, shutdown).await
 }
 
 /// [`serve`] with a caller-supplied shutdown trigger instead of process
@@ -616,25 +619,27 @@ where
     }
 }
 
-/// Resolves on ctrl-c or, on unix, SIGTERM — the stop signal container
-/// orchestrators send before a kill.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("ctrl-c handler should install");
-    };
+/// Installs the handlers for ctrl-c and, on unix, SIGTERM (the stop signal
+/// container orchestrators send before a kill), and returns a future that
+/// resolves when either signal arrives.
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
     #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("SIGTERM handler should install")
-            .recv()
-            .await;
-    };
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        Ok(async move {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
+        })
+    }
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = ctrl_c => {}
-        _ = terminate => {}
+    {
+        let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+        Ok(async move {
+            ctrl_c.recv().await;
+        })
     }
 }

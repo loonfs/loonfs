@@ -182,7 +182,8 @@ pub use engine::{
     Writable,
 };
 pub use error::{
-    Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, WriterFence,
+    classify_store_failure, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,
+    MetadataViewError, Result, WriterFence,
 };
 pub use gc::{gc_namespace, grace_age, GcOptions, GraceAge};
 pub use manifest::{

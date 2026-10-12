@@ -114,7 +114,7 @@ impl GcsV4Presigner {
         })?;
         if key.client_email.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
-                "service account key must name a client_email".to_owned(),
+                "service account key must include a `client_email`".to_owned(),
             ));
         }
 

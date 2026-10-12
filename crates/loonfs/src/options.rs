@@ -57,7 +57,7 @@ impl MaintainMetadataOptions {
         };
         let Some(max_wal_tail_objects) = NonZeroU64::new(threshold) else {
             return Err(Error::InvalidRequest {
-                message: "max_wal_tail_objects must be greater than zero".to_owned(),
+                message: "`max_wal_tail_objects` must be greater than zero".to_owned(),
                 param: "/max_wal_tail_objects",
             });
         };
@@ -65,7 +65,7 @@ impl MaintainMetadataOptions {
         if max_wal_tail_objects.get() > reject_writes_at_wal_objects {
             return Err(Error::InvalidRequest {
                 message: format!(
-                    "max_wal_tail_objects may not exceed the write-rejection threshold \
+                    "`max_wal_tail_objects` may not exceed the write-rejection threshold \
                  ({reject_writes_at_wal_objects})"
                 ),
                 param: "/max_wal_tail_objects",

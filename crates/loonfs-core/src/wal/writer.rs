@@ -6,6 +6,10 @@ use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{encode_wal_object_envelope_zstd, WalObjectPayload};
 use loonfs_types::{NamespaceId, WriterEpoch};
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "WAL assembly reports an encode failure against the numbered object key"
+)]
 pub(crate) fn prepare_wal_object(
     namespace_id: NamespaceId,
     writer_epoch: WriterEpoch,
@@ -39,8 +43,12 @@ pub(crate) fn prepare_wal_object(
         }),
         records: payload_records,
     };
-    let object = encode_wal_object_envelope_zstd(payload)
-        .map_err(|error| WalObjectError::Codec(error.to_string()))?;
+    let object_key = loonfs_objectstore::keys::wal_object(&payload.namespace_id, &payload.wal_no);
+    let object =
+        encode_wal_object_envelope_zstd(payload).map_err(|error| WalObjectError::Codec {
+            object_key,
+            message: error.to_string(),
+        })?;
     super::replay::validate_wal_object_for_replay(head.seq, object.envelope())?;
     Ok(object)
 }

@@ -699,7 +699,7 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "invalid wal inline content in commit `{expected_seq}` for `content_id` `{expected_content_id}`: {expected_reason}"
+                    "invalid WAL inline content in commit `{expected_seq}` for `content_id` `{expected_content_id}`: {expected_reason}"
                 ),
             );
             match error {

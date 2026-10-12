@@ -120,7 +120,7 @@ fn namespace_access(args: &NamespaceCreateArgs) -> Result<NamespaceAccess, CliEr
         NamespaceAccessArg::Acl => {
             let principal_scope =
                 PrincipalScope::parse(args.principal_scope.as_deref().ok_or_else(|| {
-                    CliError::invalid_request("--principal-scope is required with --access acl")
+                    CliError::invalid_request("`--principal-scope` is required with `--access acl`")
                         .with_param("--principal-scope")
                 })?)
                 .map_err(|error| {
@@ -183,7 +183,7 @@ async fn run_namespace_delete(
             return Err(context.fail(
                 kind,
                 CliError::non_interactive_input_required(
-                    "deleting a namespace requires confirmation: pass --yes, or run \
+                    "deleting a namespace requires confirmation: pass `--yes`, or run \
                      interactively to confirm at the prompt",
                 ),
             ));

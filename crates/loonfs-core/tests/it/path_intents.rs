@@ -9,7 +9,7 @@ use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::time::Deadline;
-use loonfs_core::{CreateNamespaceOptions, Error as CoreError, ErrorCode, MutationContext};
+use loonfs_core::{CoreError, CreateNamespaceOptions, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
@@ -1574,7 +1574,7 @@ async fn put_precondition_matrix_covers_identity_aba_and_valid_combinations() {
     .expect_err("the old identity must reject the recreated file");
     let CoreError::FailedOperation {
         operation_index: 0,
-        source,
+        error: source,
     } = error
     else {
         panic!("expected failed operation, got {error:?}");
@@ -1701,7 +1701,7 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
     .expect_err("non-recursive delete should reject non-empty dir");
     assert!(matches!(
         &error,
-        CoreError::FailedOperation { operation_index: 0, source }
+        CoreError::FailedOperation { operation_index: 0, error: source }
             if matches!(source.as_ref(), CoreError::CommitValidation(
                 CommitValidationError::DirectoryNotEmpty { inode_id: InodeId(2) }
             ))
@@ -2002,7 +2002,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     .await
     .expect_err("no-replace move onto an occupied name fails");
     assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
         if matches!(*source, CoreError::DestinationExists { .. }))
     );
 
@@ -2079,7 +2079,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     .await
     .expect_err("replace move onto a directory fails");
     assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
         if matches!(*source, CoreError::ExpectedFile { .. }))
     );
 
@@ -2102,7 +2102,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     .await
     .expect_err("replace move onto itself fails");
     assert!(
-        matches!(error, CoreError::FailedOperation { operation_index: 0, source }
+        matches!(error, CoreError::FailedOperation { operation_index: 0, error: source }
         if matches!(*source, CoreError::DestinationExists { .. }))
     );
 }
@@ -2413,7 +2413,7 @@ async fn copy_path_precondition_matrix_covers_identity_aba_and_valid_combination
     .expect_err("the old copy destination identity must reject the recreated file");
     let CoreError::FailedOperation {
         operation_index: 0,
-        source,
+        error: source,
     } = error
     else {
         panic!("expected failed operation, got {error:?}");

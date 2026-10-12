@@ -2,10 +2,10 @@
 
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::NamespaceId;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ControlObjectLoadError {
     #[error("missing control object `{object_key}`")]
     MissingObject { object_key: String },
@@ -46,8 +46,6 @@ pub enum ControlObjectLoadError {
     Store {
         object_key: String,
         message: String,
-        // The serialized field name `class` is frozen.
-        #[serde(rename = "class")]
         kind: ObjectStoreErrorKind,
     },
 }

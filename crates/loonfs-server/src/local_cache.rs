@@ -442,7 +442,10 @@ fn read_geometry(directory: &Path) -> Result<Option<DiskGeometry>, ServerConfigE
 fn write_geometry(directory: &Path, geometry: DiskGeometry) -> Result<(), ServerConfigError> {
     let path = directory.join(GEOMETRY_MARKER);
     let bytes = serde_json::to_vec(&geometry).map_err(|error| {
-        invalid_local_cache(format!("failed to encode `{geometry:?}`: {error}"))
+        invalid_local_cache(format!(
+            "failed to encode the cache geometry with `block_bytes` {} and `blocks` {}: {error}",
+            geometry.block_bytes, geometry.blocks
+        ))
     })?;
     std::fs::write(&path, bytes).map_err(|error| {
         invalid_local_cache(format!(

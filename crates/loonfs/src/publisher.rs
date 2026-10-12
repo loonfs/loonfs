@@ -1227,7 +1227,7 @@ impl NamespacePublisher {
                 .into_iter()
                 .map(|result| {
                     result
-                        .expect("each candidate received a publication result")
+                        .expect("each candidate should receive a publication result")
                         .map_err(Error::Core)
                 })
                 .collect::<Vec<_>>();

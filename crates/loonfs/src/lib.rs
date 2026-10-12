@@ -75,11 +75,12 @@ pub use loonfs_core::limits::{
 };
 pub use loonfs_core::time::{current_time_ms, WallClock};
 pub use loonfs_core::{
-    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
-    CreateNamespaceOptions, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
-    ErrorCode, ErrorKind, FileContentStream, GcOptions, ListCheckpointFilesOptions,
-    MetadataCompactionJobOutcome, MetadataCompactionPolicy, MetadataViewError, RetentionTarget,
-    WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
+    classify_store_failure, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
+    CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFileState,
+    DeleteNamespaceOptions, ErrorCode, ErrorKind, FileContentStream, GcOptions,
+    ListCheckpointFilesOptions, MetadataCompactionJobOutcome, MetadataCompactionPolicy,
+    MetadataViewError, RetentionTarget, WriterFence, CONTENT_READ_CHUNK_BYTES,
+    MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::api::v0::{
     Commit, CompleteMultipartUploadRequest, CompleteUploadBody, CreateUploadBody, FilesystemChange,
@@ -315,8 +316,8 @@ impl Error {
             Self::Core(CoreError::SubjectRequired { .. }) => Some("Loonfs-Principals".to_owned()),
             Self::Core(CoreError::FailedOperation {
                 operation_index,
-                source,
-            }) => match source.as_ref() {
+                error,
+            }) => match error.as_ref() {
                 CoreError::InvalidCommitField { field, .. } => {
                     Some(format!("/operations/{operation_index}/{field}"))
                 }

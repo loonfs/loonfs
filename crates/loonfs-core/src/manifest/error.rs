@@ -15,7 +15,8 @@ pub enum ManifestLoadFailureKind {
     Store,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ManifestLoadError {
     #[error("missing namespace manifest `{object_key}`")]
     MissingManifest { object_key: String },
@@ -23,8 +24,6 @@ pub enum ManifestLoadError {
     ReadManifest {
         object_key: String,
         message: String,
-        // The serialized field name `class` is frozen.
-        #[serde(rename = "class")]
         kind: loonfs_objectstore::ObjectStoreErrorKind,
     },
     #[error("namespace manifest codec error for `{object_key}`: {message}")]
@@ -60,7 +59,11 @@ pub enum ManifestLoadError {
     #[error("missing metadata segment `{object_key}`")]
     MissingSegment { object_key: String },
     #[error("failed to read metadata segment `{object_key}`: {message}")]
-    ReadSegment { object_key: String, message: String },
+    ReadSegment {
+        object_key: String,
+        message: String,
+        kind: loonfs_objectstore::ObjectStoreErrorKind,
+    },
     #[error("metadata segment codec error for `{object_key}`: {message}")]
     SegmentCodec { object_key: String, message: String },
     #[error("metadata segment descriptor mismatch for `{object_key}`: {message}")]

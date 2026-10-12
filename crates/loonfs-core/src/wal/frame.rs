@@ -4,13 +4,13 @@
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{WalObjectEnvelope, WalObjectPayload};
 use loonfs_types::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub(crate) type PreparedWalObject =
     loonfs_types::format::envelope::EncodedEnvelope<WalObjectPayload>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum WalObjectError {
     #[error("WAL object namespace mismatch: expected `{expected}`, actual `{actual}`")]
     NamespaceMismatch {
@@ -22,8 +22,8 @@ pub enum WalObjectError {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
-    #[error("WAL codec error: {0}")]
-    Codec(String),
+    #[error("WAL codec error for `{object_key}`: {message}")]
+    Codec { object_key: String, message: String },
     #[error("sequence number cannot exceed 9007199254740991")]
     SeqOverflow,
     #[error("activity counter cannot exceed 9007199254740991")]
@@ -111,14 +111,13 @@ impl ValidatedWalTail {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum WalTailLoadError {
     #[error("failed to read WAL object `{object_key}`: {message}")]
     ReadWal {
         object_key: String,
         message: String,
-        // The serialized field name `class` is frozen.
-        #[serde(rename = "class")]
         kind: loonfs_objectstore::ObjectStoreErrorKind,
     },
     #[error("missing WAL object `{object_key}`")]
@@ -143,11 +142,7 @@ pub enum WalTailLoadError {
 impl WalTailLoadError {
     pub fn code(&self) -> loonfs_types::ErrorCode {
         match self {
-            Self::ReadWal {
-                kind: loonfs_objectstore::ObjectStoreErrorKind::PermissionDenied,
-                ..
-            } => loonfs_types::ErrorCode::StoragePermissionDenied,
-            Self::ReadWal { .. } => loonfs_types::ErrorCode::ServerError,
+            Self::ReadWal { kind, .. } => crate::error::classify_store_failure(*kind),
             _ => loonfs_types::ErrorCode::NamespaceCorrupt,
         }
     }

@@ -229,7 +229,7 @@ const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
 /// The commit id every namespace's sequence zero carries, before any commit
 /// has landed.
 pub fn genesis_commit_id() -> CommitId {
-    CommitId::parse(GENESIS_COMMIT_ID).expect("genesis commit id is valid")
+    CommitId::parse(GENESIS_COMMIT_ID).expect("the genesis commit ID should parse")
 }
 
 /// Staging progress for a service-proxied upload.

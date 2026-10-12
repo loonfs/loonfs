@@ -150,6 +150,7 @@ impl Checksum {
 
 /// Describes why a checksum is not in its canonical wire form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[non_exhaustive]
 pub enum ChecksumValidationError {
     /// The checksum value does not have the exact width for its algorithm.
     #[error(
@@ -282,10 +283,11 @@ impl fmt::Debug for Crc32c {
 
 /// Describes why a content reference cannot be part of a durable commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[non_exhaustive]
 pub enum ContentRefValidationError {
     /// The checksum is not in the algorithm's canonical form.
     #[error("invalid content ref checksum: {0}")]
-    InvalidChecksum(ChecksumValidationError),
+    InvalidChecksum(#[from] ChecksumValidationError),
 }
 
 /// Identifies a chain prefix by its owner, content id, size, and checksum.
@@ -332,9 +334,7 @@ impl ContentRef {
     /// This is a shape check on the reference itself; proving that the
     /// object exists and matches is the storage layer's job.
     pub fn validate(&self) -> Result<(), ContentRefValidationError> {
-        self.checksum
-            .validate()
-            .map_err(ContentRefValidationError::InvalidChecksum)?;
+        self.checksum.validate()?;
         Ok(())
     }
 }

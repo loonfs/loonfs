@@ -69,7 +69,6 @@ pub use reads::{
 };
 use transport::{SendPolicy, StdMonotonicTimer, TransportRetryPolicy, WireRequest, DEFAULT};
 pub use transport_error::TransportError;
-pub use ClientError as Error;
 
 /// Per-operation options, defined once in `loonfs-types` and shared with the
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
@@ -202,7 +201,7 @@ impl Client {
         Ok(self
             .capabilities
             .get()
-            .expect("capability cache was just filled")
+            .expect("the capability cache should be filled after a fetch")
             .clone())
     }
 

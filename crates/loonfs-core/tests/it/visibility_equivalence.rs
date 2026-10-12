@@ -8,8 +8,8 @@ use crate::common::read_context;
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::{
-    CompactionStepOutcome, CreateNamespaceOptions, Error as CoreError, ErrorCode,
-    NamespaceWriterEngine, RuntimeReadContext,
+    CompactionStepOutcome, CoreError, CreateNamespaceOptions, ErrorCode, NamespaceWriterEngine,
+    RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::api::v0::Commit;

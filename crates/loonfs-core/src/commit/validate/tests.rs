@@ -10,7 +10,7 @@ use super::checks::{validate_operations, CommitNumbering};
 use super::error::CommitOperand;
 use super::session::PublishValidationSession;
 use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationError, InodeAllocator};
-use crate::error::{CoreError, ErrorCode};
+use crate::error::{CoreError, ErrorCode, Result};
 use crate::metadata::{InMemoryMetadataView, MetadataState};
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::control::{NamespaceStatus, WriterBlock};
@@ -242,7 +242,7 @@ async fn validate_planned_ops(
     ops: &[CommitOperation],
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
-) -> Result<Vec<WalCommitDelta>, CoreError> {
+) -> Result<Vec<WalCommitDelta>> {
     let accepted_rows = MetadataState::default();
     let base = crate::wal::ProjectedWalTail::from_rows(context.metadata_state.clone());
     let mut metadata_state = PublishValidationSession::new(
@@ -266,7 +266,7 @@ async fn build_commit_plan(
     ops: &[CommitOperation],
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
-) -> Result<CommitPlan, CommitValidationError> {
+) -> std::result::Result<CommitPlan, CommitValidationError> {
     let mut allocator = InodeAllocator::new(context.head.next_inode_id);
     let mut allocation = allocator.begin_candidate();
     for op in ops {

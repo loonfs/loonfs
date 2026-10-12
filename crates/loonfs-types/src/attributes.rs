@@ -197,6 +197,7 @@ fn logical_bytes_of(entries: &BTreeMap<AttributeKey, AttributeValue>) -> usize {
 
 /// Describes which attribute-map limit an input broke.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum AttributesError {
     /// The map holds more entries than the limit allows.
     #[error("attribute map holds {entries} entries, which exceeds the maximum of {MAX_ATTRIBUTE_ENTRIES}")]

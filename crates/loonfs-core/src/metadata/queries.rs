@@ -13,7 +13,6 @@ use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::{
     AbsolutePath, ActorId, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey, NamespaceNaming,
 };
-use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
 
@@ -29,7 +28,8 @@ pub struct ResolvedVisiblePath {
     pub binding_version: Option<DeltaPosition>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum VisiblePathError {
     #[error("canonical root inode is missing")]
     RootMissing,

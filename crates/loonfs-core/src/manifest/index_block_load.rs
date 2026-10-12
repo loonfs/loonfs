@@ -154,6 +154,7 @@ pub(super) async fn load_section_bytes<S: ObjectStore + ?Sized>(
         .map_err(|err| ManifestLoadError::ReadSegment {
             object_key: object_key.to_owned(),
             message: err.public_message().into_owned(),
+            kind: loonfs_objectstore::ObjectStoreErrorKind::of(&err),
         })?
     else {
         return Err(ManifestLoadError::MissingSegment {
@@ -167,6 +168,7 @@ pub(super) async fn load_section_bytes<S: ObjectStore + ?Sized>(
                 "ranged read returned {} bytes, expected {size_bytes}",
                 bytes.len()
             ),
+            kind: loonfs_objectstore::ObjectStoreErrorKind::Other,
         });
     }
     Ok(bytes.to_vec())

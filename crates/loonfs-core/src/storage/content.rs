@@ -2,7 +2,7 @@
 //! validating references, and verified read-back.
 
 pub(crate) use super::content_location::ContentLocation;
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 #[cfg(any(test, feature = "test-support"))]
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 #[cfg(any(test, feature = "test-support"))]
@@ -15,7 +15,6 @@ use loonfs_types::{
     Checksum, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentRefValidationError,
     ErrorCode, NamespaceId, PathEntry, StreamingChecksum,
 };
-use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
@@ -48,10 +47,11 @@ impl StoredContent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum DurableContentValidationError {
     #[error("invalid content reference: {0}")]
-    InvalidContentRef(ContentRefValidationError),
+    InvalidContentRef(#[from] ContentRefValidationError),
     #[error("missing content object `{object_key}`")]
     MissingContentObject { object_key: String },
     #[error("content length mismatch for `{object_key}`: expected {expected}, actual {actual}")]
@@ -88,7 +88,7 @@ impl DurableContentValidationError {
 pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
     content_ref: &ContentRef,
-) -> Result<(), DurableContentValidationError> {
+) -> std::result::Result<(), DurableContentValidationError> {
     ContentLocation::whole(content_ref)?
         .read_bytes(store, content_ref)
         .await
@@ -100,7 +100,7 @@ pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
     store: S,
     location: ContentLocation,
     content_ref: &ContentRef,
-) -> Result<ByteStream, DurableContentValidationError> {
+) -> std::result::Result<ByteStream, DurableContentValidationError> {
     let stream_key = location.object_key().to_owned();
     let mut source = FileContentStream::open_inner(
         store,
@@ -152,7 +152,7 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     _catalog: &VerifiedNamespaceCatalogEntry,
     content_ref: ContentRef,
-) -> Result<PreparedContent, DurableContentValidationError> {
+) -> std::result::Result<PreparedContent, DurableContentValidationError> {
     validate_durable_content_reference(store, &content_ref).await?;
     Ok(PreparedContent::for_durable_content_write(content_ref))
 }
@@ -160,7 +160,7 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
 pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
     store: &S,
     content_ref: &ContentRef,
-) -> Result<(), DurableContentValidationError> {
+) -> std::result::Result<(), DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_ref)?;
     let stored = match store.head(&object_key).await {
         Ok(Some(stored)) => stored,
@@ -287,7 +287,7 @@ pub struct FileContentStream<S> {
     /// Expected checksum.
     expected: Checksum,
     /// Cached result because the checksum can only be finalized once.
-    completion: Option<Result<(), DurableContentValidationError>>,
+    completion: Option<std::result::Result<(), DurableContentValidationError>>,
 }
 
 impl<S: ObjectStore> FileContentStream<S> {
@@ -298,7 +298,7 @@ impl<S: ObjectStore> FileContentStream<S> {
         content_ref: ContentRef,
         chunk_bytes: NonZeroU64,
         start_offset: u64,
-    ) -> Result<Self, DurableContentValidationError> {
+    ) -> std::result::Result<Self, DurableContentValidationError> {
         if location.is_resident() {
             let bytes = location
                 .read_range(&store, 0, content_ref.size_bytes)
@@ -326,7 +326,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     ///
     /// Bytes must be supplied in order before fetching new chunks. Incorrect
     /// bytes cause checksum verification to fail at the end of the stream.
-    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), CoreError> {
+    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<()> {
         if self.completion.is_some() {
             return Err(CoreError::Internal(format!(
                 "content stream for `{}` was handed a resumed prefix after its read had \
@@ -378,7 +378,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     ///
     /// A resumed stream must receive its complete prefix before this method is
     /// called.
-    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, CoreError> {
+    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
         if self.prefix_folded != self.resumed_from {
             return Err(CoreError::ResumePrefixIncomplete {
                 start_offset: self.resumed_from,
@@ -390,7 +390,7 @@ impl<S: ObjectStore> FileContentStream<S> {
 
     pub(super) async fn next_verified_chunk(
         &mut self,
-    ) -> Result<Option<Bytes>, DurableContentValidationError> {
+    ) -> std::result::Result<Option<Bytes>, DurableContentValidationError> {
         if self.next_offset == self.content_ref.size_bytes {
             return self.completion().map(|()| None);
         }
@@ -425,7 +425,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// exactly `size_bytes` — the resumed head start, which the first
     /// [`Self::next_chunk`] refuses to start without, plus everything
     /// fetched from it to the end.
-    fn completion(&mut self) -> Result<(), DurableContentValidationError> {
+    fn completion(&mut self) -> std::result::Result<(), DurableContentValidationError> {
         let verdict = match self.completion.take() {
             Some(verdict) => verdict,
             None => self.verify_complete(),
@@ -435,7 +435,7 @@ impl<S: ObjectStore> FileContentStream<S> {
     }
 
     /// Closes the digest over everything read and holds it to the reference.
-    fn verify_complete(&mut self) -> Result<(), DurableContentValidationError> {
+    fn verify_complete(&mut self) -> std::result::Result<(), DurableContentValidationError> {
         // Closing consumes the digest, which is why this runs exactly once.
         let digest = std::mem::replace(
             &mut self.digest,
@@ -469,7 +469,7 @@ pub(crate) async fn get_speculative_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     location: &ContentLocation,
     content_ref: &ContentRef,
-) -> Result<Vec<u8>, CoreError> {
+) -> Result<Vec<u8>> {
     crate::path::read::ensure_within_read_limit(
         content_ref.size_bytes,
         Some(MAX_SPECULATIVE_CONTENT_BYTES),
@@ -479,10 +479,8 @@ pub(crate) async fn get_speculative_content_bytes<S: ObjectStore + ?Sized>(
 
 pub(crate) fn content_object_key_for_ref(
     content_ref: &ContentRef,
-) -> Result<String, DurableContentValidationError> {
-    content_ref
-        .validate()
-        .map_err(DurableContentValidationError::InvalidContentRef)?;
+) -> std::result::Result<String, DurableContentValidationError> {
+    content_ref.validate()?;
     Ok(content_blob(
         &content_ref.owner_namespace_id,
         &content_ref.content_id,
@@ -497,7 +495,7 @@ pub(crate) fn validate_loaded_content_bytes(
     object_key: String,
     content_ref: &ContentRef,
     bytes: &[u8],
-) -> Result<(), DurableContentValidationError> {
+) -> std::result::Result<(), DurableContentValidationError> {
     let actual_size = bytes.len() as u64;
     if actual_size != content_ref.size_bytes {
         return Err(DurableContentValidationError::ContentLengthMismatch {
@@ -537,7 +535,7 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     store: &S,
     owner_namespace_id: &NamespaceId,
     bytes: &[u8],
-) -> Result<StoredContent, CoreError> {
+) -> Result<StoredContent> {
     load_namespace_catalog_entry(store, owner_namespace_id).await?;
     stage_bytes_under_content_id(
         store,
@@ -574,8 +572,8 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     content_id: ContentId,
     body: ByteStream,
     payload_kind: StreamedPayloadKind,
-    check_ownership: impl Future<Output = Result<(), CoreError>>,
-) -> Result<StagedStream, CoreError> {
+    check_ownership: impl Future<Output = Result<()>>,
+) -> Result<StagedStream> {
     let object_key = content_blob(&owner_namespace_id, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::new(store.checksum_algorithm())));
     let (request_check, check_requested) = oneshot::channel();
@@ -661,7 +659,7 @@ pub(crate) async fn identify_streamed_payload(
     content_id: ContentId,
     mut body: ByteStream,
     algorithm: ChecksumAlgorithm,
-) -> Result<ContentRef, CoreError> {
+) -> Result<ContentRef> {
     let mut observed = StreamedPayload::new(algorithm);
     while let Some(chunk) = body.next().await {
         let chunk = chunk.map_err(|err| CoreError::store("upload body", &err))?;
@@ -711,7 +709,7 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     owner_namespace_id: NamespaceId,
     content_id: ContentId,
     bytes: &[u8],
-) -> Result<StoredContent, CoreError> {
+) -> Result<StoredContent> {
     let content_ref = ContentRef::blob_v1(
         owner_namespace_id,
         content_id,
@@ -749,7 +747,7 @@ mod tests {
     async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
         store: &S,
         content_ref: &ContentRef,
-    ) -> Result<Vec<u8>, DurableContentValidationError> {
+    ) -> std::result::Result<Vec<u8>, DurableContentValidationError> {
         ContentLocation::whole(content_ref)?
             .read_bytes(store, content_ref)
             .await
@@ -1071,7 +1069,7 @@ mod tests {
     async fn open_stream<S: ObjectStore>(
         store: S,
         content_ref: &ContentRef,
-    ) -> Result<FileContentStream<S>, DurableContentValidationError> {
+    ) -> std::result::Result<FileContentStream<S>, DurableContentValidationError> {
         open_stream_at(store, content_ref, 0).await
     }
 
@@ -1079,7 +1077,7 @@ mod tests {
         store: S,
         content_ref: &ContentRef,
         start_offset: u64,
-    ) -> Result<FileContentStream<S>, DurableContentValidationError> {
+    ) -> std::result::Result<FileContentStream<S>, DurableContentValidationError> {
         FileContentStream::open_inner(
             store,
             super::ContentLocation::whole(content_ref)?,

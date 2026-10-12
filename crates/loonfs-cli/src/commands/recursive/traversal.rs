@@ -66,7 +66,7 @@ impl Iterator for LocalTree {
                     ));
                 }
                 None => {
-                    let frame = self.stack.pop().expect("a frame is open");
+                    let frame = self.stack.pop().expect("a directory frame should be open");
                     if !frame.has_children {
                         return Some(TreeEntry::Directory(frame.relative_remote));
                     }
@@ -79,7 +79,7 @@ impl Iterator for LocalTree {
             // directory. This also bounds handles by the API's path depth.
             let relative = path
                 .strip_prefix(&self.root)
-                .expect("a descendant of the root");
+                .expect("a walked path should be a descendant of the root");
             let relative_remote = match relative_remote(relative).and_then(|relative| {
                 loonfs_types::AbsolutePath::parse(joined_remote(&self.remote_root, &relative))
                     .map_err(|error| {

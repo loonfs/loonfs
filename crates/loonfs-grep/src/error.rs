@@ -120,10 +120,7 @@ impl GrepError {
             Self::InvalidQuery(_) => ErrorCode::InvalidRequest,
             Self::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
             Self::IndexLagging { .. } => ErrorCode::IndexLagging,
-            Self::StoreUnavailable { kind, .. } => match kind {
-                ObjectStoreErrorKind::PermissionDenied => ErrorCode::StoragePermissionDenied,
-                _ => ErrorCode::ServerError,
-            },
+            Self::StoreUnavailable { kind, .. } => loonfs::classify_store_failure(*kind),
             Self::IndexCorrupt { .. } => ErrorCode::IndexCorrupt,
             Self::PublicationConflict { .. } => ErrorCode::StaleHead,
             Self::Runtime(error) => error.code(),

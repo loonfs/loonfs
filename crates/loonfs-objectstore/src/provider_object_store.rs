@@ -703,7 +703,7 @@ impl MultipartWrite<'_> {
 
         let parts = part_ids
             .into_iter()
-            .map(|part_id| part_id.expect("every part completed before the window drained"))
+            .map(|part_id| part_id.expect("every part should complete before the window drains"))
             .collect();
         self.multipart
             .complete_multipart(self.path, upload_id, parts)

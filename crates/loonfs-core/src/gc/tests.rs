@@ -209,7 +209,7 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
         .await
         .expect_err("zero shard target");
     assert!(
-        matches!(error, CoreError::InvalidGcOptions(message) if message == "content_shard_rows must be at least 1")
+        matches!(error, CoreError::InvalidGcOptions(message) if message == "`content_shard_rows` must be at least 1")
     );
 }
 

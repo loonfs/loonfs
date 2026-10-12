@@ -414,7 +414,7 @@ fn json_all_is_invalid_usage_even_with_a_limit() {
         assert!(error["message"]
             .as_str()
             .expect("error message")
-            .contains("--all cannot be used with --json"));
+            .contains("`--all` cannot be used with `--json`"));
     }
 }
 
@@ -737,7 +737,7 @@ fn ls_limit_bounds_the_whole_listing_and_json_rejects_all() {
     let all = harness.run(&["--json", "ls", "--all"]);
     assert_failure(&all);
     assert_eq!(all.status.code(), Some(2));
-    assert!(stderr_string(&all).contains("--all cannot be used with --json"));
+    assert!(stderr_string(&all).contains("`--all` cannot be used with `--json`"));
 
     // A bound stops at exactly that many entries and returns a cursor.
     let first = harness.run(&["--json", "ls", "--limit", "2"]);

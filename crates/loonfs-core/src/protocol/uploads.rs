@@ -211,7 +211,7 @@ fn multipart_part_size(requested: Option<u64>) -> Result<NonZeroU64> {
         .filter(|size| (MIN_MULTIPART_PART_BYTES..=MAX_MULTIPART_PART_BYTES).contains(&size.get()))
         .ok_or_else(|| {
             CoreError::InvalidUploadContent(format!(
-                "part_size_bytes must be between {MIN_MULTIPART_PART_BYTES} and \
+                "`part_size_bytes` must be between {MIN_MULTIPART_PART_BYTES} and \
                  {MAX_MULTIPART_PART_BYTES} bytes"
             ))
         })

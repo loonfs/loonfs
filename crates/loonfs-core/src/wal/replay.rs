@@ -4,6 +4,7 @@ pub(crate) use super::frame::WalObjectError;
 use super::ProjectedWalTail;
 use super::{ReplayedWalTail, ValidatedWalTail};
 use crate::commit::next_inode_after;
+use crate::error::MetadataProjectionLoadError;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{WalCommitDelta, WalDelta, WalObjectEnvelope};
 use loonfs_types::{ChangeSeq, InodeId};
@@ -12,18 +13,23 @@ pub(crate) fn project_validated_wal_tail(
     base_head: &NamespaceReadState,
     mut tail: ProjectedWalTail,
     wal_tail: &ValidatedWalTail,
-) -> Result<ReplayedWalTail, WalObjectError> {
+) -> Result<ReplayedWalTail, MetadataProjectionLoadError> {
     let mut head = base_head.clone();
     for object in wal_tail.objects() {
         let payload = object.envelope().payload();
+        let replay_error = |error| MetadataProjectionLoadError::WalReplay {
+            object_key: object.object_key().to_owned(),
+            error,
+        };
         for record in &payload.records {
             head.seq = record.committed_seq;
             head.next_inode_id =
                 replay_next_inode_id_from_commit_deltas(head.next_inode_id, &record.deltas);
         }
-        tail.push_object(&payload.namespace_id, &payload.records)?;
+        tail.push_object(&payload.namespace_id, &payload.records)
+            .map_err(replay_error)?;
         if head.next_inode_id != payload.next_inode_id {
-            return Err(WalObjectError::SummaryMismatch);
+            return Err(replay_error(WalObjectError::SummaryMismatch));
         }
         head = head.after_wal_object(payload);
     }

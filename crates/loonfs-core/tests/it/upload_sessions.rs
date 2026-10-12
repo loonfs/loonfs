@@ -7,7 +7,7 @@ use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_core::{
-    DirectPutUploadTarget, Error as CoreError, ErrorCode, MutationContext, ResolvedUploadCompletion,
+    CoreError, DirectPutUploadTarget, ErrorCode, MutationContext, ResolvedUploadCompletion,
 };
 use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::local_fs_store::LocalFsStore;

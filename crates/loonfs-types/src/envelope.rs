@@ -57,7 +57,7 @@ pub enum EnvelopeCodecError {
     },
     /// Reports inline content that violates the WAL format rules.
     #[error(
-        "invalid wal inline content in commit `{seq}` for `content_id` `{content_id}`: {reason}"
+        "invalid WAL inline content in commit `{seq}` for `content_id` `{content_id}`: {reason}"
     )]
     InvalidWalInlineContent {
         /// Commit containing the rejected entry.
@@ -69,7 +69,7 @@ pub enum EnvelopeCodecError {
     },
     /// Reports a layout that does not cover its revision's reference.
     #[error(
-        "invalid wal revision layout in commit `{seq}` for `content_id` `{content_id}`: {reason}"
+        "invalid WAL revision layout in commit `{seq}` for `content_id` `{content_id}`: {reason}"
     )]
     InvalidWalRevisionLayout {
         /// Commit containing the rejected delta.

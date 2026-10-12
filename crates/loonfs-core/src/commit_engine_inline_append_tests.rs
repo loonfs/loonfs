@@ -438,7 +438,7 @@ async fn empty_and_oversized_appends_are_refused_before_planning() {
     match publish(&mut engine, &store, &context, empty).await {
         Err(CoreError::FailedOperation {
             operation_index: 0,
-            source,
+            error: source,
         }) if matches!(
             *source,
             CoreError::InvalidCommitField {
@@ -890,8 +890,10 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
     )
     .await
     .expect_err("missing base bytes");
-    assert!(matches!(error, CoreError::FailedOperation { source, .. }
+    assert!(
+        matches!(error, CoreError::FailedOperation { error: source, .. }
         if matches!(*source, CoreError::NamespaceCorrupt(ref message)
-            if message.contains(value.content_ref().content_id.as_str()) && message.contains("offset 3"))));
+            if message.contains(value.content_ref().content_id.as_str()) && message.contains("offset 3")))
+    );
     assert_no_writes(&store);
 }

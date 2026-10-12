@@ -519,12 +519,12 @@ pub fn decode_filter_block(
     let n_hashes = u32::from_le_bytes(
         payload[0..4]
             .try_into()
-            .expect("header length should be checked above"),
+            .expect("the filter header length check should leave four bytes for the hash count"),
     );
     let bit_len = u64::from_le_bytes(
         payload[4..12]
             .try_into()
-            .expect("header length should be checked above"),
+            .expect("the filter header length check should leave eight bytes for the bit length"),
     );
     if n_hashes != FILTER_HASH_COUNT {
         return Err(SegmentBlockCodecError::Malformed(
