@@ -673,6 +673,8 @@ GET routes identify resources, so their paths use nouns such as `entry`, `entrie
 
 Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance`, and `delete_checkpoint`. Operation IDs are identifiers in the wire registry, and they don't determine SDK names. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, and every operation MUST appear in that table or be explicitly excluded from it.
 
+The examples in the following sections are representative, not exhaustive. Responses might gain fields within v0, and clients MUST ignore JSON fields they don't recognize. An optional response field that has no value is left out, and it's never encoded as `null`.
+
 ### Authentication and transport
 
 If a deployment sets a token, the server authenticates every request with an HTTP bearer credential:
@@ -682,6 +684,8 @@ Authorization: Bearer <auth_token>
 ```
 
 After request admission, a request without the token, or with the wrong value, receives 401 `unauthorized`. The server checks authorization before it parses the rest of the request, so a malformed body from an unauthenticated caller still receives 401, not 400.
+
+Why check authorization first? A validation error could reveal information to a caller that isn't authorized, so the server reports `unauthorized` before it reports anything about the request itself.
 
 Two routes, `GET /health` and `GET /readiness`, don't require the token and always respond to unauthenticated requests, because load balancers probe them. Every other route requires the token, including `GET /v0/capabilities`. The generated `openapi.json` describes this as a global `bearer_auth` requirement, which those two operations override.
 
@@ -696,6 +700,8 @@ The exception is `ContentRef` and `Checksum`, which are closed shapes in both re
 The server also rejects unknown query parameters. For example, `DELETE /v0/namespaces/{ns}?expected_head_sq=418` (a misspelling of `expected_head_seq`) returns 400 `invalid_request`, instead of deleting the namespace without the intended precondition. A route that declares no query parameters rejects every query parameter. `GET /health`, `GET /readiness`, and `GET /metrics` are exceptions, because probes and scrapers might append their own parameters.
 
 The token is a bearer credential, and so is everything the upload routes return. For example, a presigned direct-upload URL is a capability to write to the deployment's bucket, and it's returned in an ordinary response body. Anyone who can read the connection can read both. So a deployment that's reachable beyond localhost needs to serve `https`, terminated either by the server itself or by a proxy in front of it.
+
+### Operations and retry classes
 
 Every operation includes an `x-loonfs-retry` value for generated SDKs. The value is one of three retry classes:
 
@@ -751,6 +757,12 @@ The following table lists every v0 operation, with its retry class and represent
 | Test object storage | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe` with body `{}` |
 | Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#614-get-metrics).) |
 
+### Maintenance runs
+
+This section describes the grep index routes, and the jobs that `run_maintenance` runs.
+
+#### Grep index
+
 Grep index garbage collection runs through `run_maintenance`, with the request body `{"kind":"grep_gc"}`. Each call reads the durable roots and completes one pass over the namespace's grep manifests and segments. The response includes `namespace_id`, `deleted_segments`, `deleted_other_objects`, `namespace_reaped`, and `retained_candidates`. If a root is unreadable or invalid, the call fails before it deletes anything. For a tombstoned or absent namespace, the pass reaps the namespace's aged grep prefix. [Grep extension format](format.md#appendix-d-grep-extension-format) defines the retention and age rules.
 
 The status, enable, and disable routes all return the same flat grep index object. It contains `namespace_id`, the lifecycle fields for its `status`, `next_run_no`, and `reorganize_pending`. No two lifecycle statuses share a sequence field:
@@ -772,6 +784,8 @@ For example:
 ```
 
 So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `next_run_no` is the run number that the index allocates next, and `reorganize_pending` reports whether a partitioned segment reorganization is in progress. A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of chasing a head that keeps moving.
+
+#### Jobs and outcomes
 
 A maintenance run request body identifies exactly one job with `kind`:
 
@@ -830,12 +844,18 @@ The `cancelled`, `abandoned`, and `fenced` outcomes publish no manifest.
 
 In a `metadata` run, `max_wal_tail_objects` overrides the fold threshold. A value of zero, or a value above the write-rejection threshold, returns `invalid_request`. A WAL tail below the threshold is still folded once it goes idle, which means that its newest commit is as old as the server's configured idle period (15 minutes by default), measured on the server's clock (see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is kept unless the request uses `kind: "retention"`.
 
+#### Retention runs
+
 In a `retention` run, the floor moves to the folded manifest head, unless the request includes one target:
 
 - `to_seq` moves the floor to that sequence, or to the folded manifest head if the sequence is above it.
 - `cutoff_at_ms` is a Unix time in milliseconds, and it moves the floor to the last commit committed at or before that time. The server reads commits upward from the current floor, and it stops at the first commit whose `committed_at_ms` is later than the cutoff, because commit times come from writers' clocks and aren't guaranteed to increase with sequence.
 
 A request that includes both targets returns `invalid_request`. A target at or below the current floor changes nothing, and the response reports the current floor (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)).
+
+The retention floor limits incremental replay and file revision history. Above the floor, a file's revision history is complete. At or below the floor, each file keeps its newest revision. Once the floor advances, a base compaction removes the older revisions, so a revision listing ends at that newest revision, and reading or restoring a removed revision returns `revision_not_found`. A deleted file keeps its newest revision, so an undelete still restores its content. Recoverable deletions in the trash are never pruned. They stay until the namespace is deleted and retired. GC reclaims the content object of a removed revision once no retained view references it and it's older than the grace window (see [Content roots](format.md#119-content-roots)).
+
+#### Garbage collection runs
 
 In a `gc` run, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions still keep their leases, and completed content still keeps its derived reclamation grace (see [Upload-session cleanup](format.md#116-upload-session-cleanup)).
 
@@ -880,9 +900,7 @@ Each pass counts the candidates that it examined and kept, not the objects in th
 
 [Candidate and age rules](format.md#113-candidate-and-age-rules) defines which objects are candidates for deletion, and when each one is old enough to delete.
 
-The retention floor limits incremental replay and file revision history. Above the floor, a file's revision history is complete. At or below the floor, each file keeps its newest revision. Once the floor advances, a base compaction removes the older revisions, so a revision listing ends at that newest revision, and reading or restoring a removed revision returns `revision_not_found`. A deleted file keeps its newest revision, so an undelete still restores its content. Recoverable deletions in the trash are never pruned. They stay until the namespace is deleted and retired. GC reclaims the content object of a removed revision once no retained view references it and it's older than the grace window (see [Content roots](format.md#119-content-roots)).
-
-#### Checkpoint inventory
+### Checkpoint inventory
 
 A checkpoint's name is a label, not a key. Every create call writes a new record, so several checkpoints can have the same name. Creating a checkpoint first folds any WAL tail after the current manifest, and then pins the resulting manifest.
 
@@ -916,7 +934,7 @@ The checkpoint listing is live, not a point-in-time view. Checkpoints that are c
 
 An expired user pin stays listed and readable until GC deletes it, after its expiry plus the grace window. A user pin without an expiry, on a live namespace, stays until it's explicitly deleted. [Records and owners](format.md#81-records-and-owners) defines reads and removal for each pin owner.
 
-#### Snapshots
+### Snapshots
 
 A snapshot is a time-bounded view of a namespace. Its `snapshot_id` is its pin ID, and its `captured_seq` is the namespace sequence it captured. A create request requires `name` and `ttl_ms`, and the TTL can't exceed `snapshot.max_ttl_ms` or `snapshot.max_lifetime_ms`.
 
@@ -942,7 +960,7 @@ An embedded caller can also open a read view of a checkpoint. A directory cursor
 
 A snapshot read requires a live snapshot. A read of a missing snapshot, including one that was deleted, returns `snapshot_not_found`. A read of an expired snapshot returns `snapshot_gone` while its pin still exists. In neither case does the read fall back to the current namespace state.
 
-#### Store contract probe
+### Store contract probe
 
 The store probe tests whether the configured object store meets the provider contract that the storage format depends on (see [Object-storage requirements](format.md#3-object-storage-requirements)), and it reports the result of each check. The contract covers create-if-absent, compare-and-swap, read-after-write visibility, prefix listing, and ranged reads. A probe writes and deletes objects, so LoonFS doesn't run one at startup or on a schedule. A probe runs only when an operator requests one.
 
@@ -964,7 +982,7 @@ Why does a probe with failed checks return 200? The operator asked whether the s
 
 Why doesn't a passing probe make a deployment trusted for direct uploads? A probe exercises the server's own request path, and never a presigned capability that's issued to a client.
 
-#### Deleting, retaining, and reclaiming
+### Deleting, retaining, and reclaiming
 
 An ordinary operation that finds that its namespace was deleted returns `namespace_deleted`. Cached readers follow the rules in [Deleting a namespace](format.md#94-deleting-a-namespace). Collection is asynchronous. It has no set completion time, and it doesn't guarantee physical erasure.
 
@@ -1001,6 +1019,10 @@ When the server shuts down, its sweep doesn't start any new visits, and a stream
 A deployment needs to keep the provider's lifecycle rule for incomplete multipart uploads. Provider upload state can exist outside object listings, so deleting a namespace's content objects doesn't replace session abort and provider cleanup. Deleting a key also doesn't erase physical versions that bucket versioning or retention locks keep.
 
 The `retained` counts in a GC response show what a pass kept. To find the checkpoints that block reclamation, an operator lists them with `GET /v0/maintenance/namespaces/{ns}/checkpoints`.
+
+### Uploads
+
+This section describes the three upload modes.
 
 #### Service-proxied upload
 
@@ -1156,6 +1178,8 @@ If the provider upload of an `open` session no longer exists (for example, becau
 
 The session record includes the provider's upload ID. So when a session is aborted, either by the client or by upload garbage collection after its lease passes, the abort also abandons the provider's upload and the object it was writing. Aborting an upload that has already assembled its object is safe on every supported provider. The abort succeeds and leaves the object alone.
 
+### Content references and tokens
+
 A content reference contains `kind`, `owner_namespace_id`, `content_id`, `size_bytes`, and `checksum`. The owner is the namespace that originally wrote the bytes, and it doesn't change when the namespace is forked or the revision is restored (see [File contents and ownership](format.md#15-file-contents-and-ownership)). Clients send the complete reference back unchanged.
 
 A server can return a short-lived `content_token` for completed content. Clients treat the token as opaque, and they can copy it directly into a commit request. Reading a completed session returns a new token while its token-issuing window is still open, and the session's `content_ref` stays available after that.
@@ -1196,6 +1220,8 @@ For example, this commit request puts the uploaded content at `/docs/report.pdf`
 
 Long-running transfers can also expose session resources. Implementations can expose workflow helper resources too, but those helpers aren't part of the core semantics. Once a multi-request interaction begins, the identifier that the server issued identifies that interaction for as long as it's in progress.
 
+### Creating and forking namespaces
+
 Creating a namespace uses the namespace ID directly. In v0, there are no namespace aliases or separate display names. A representative create request looks like this:
 
 `Loonfs-Actor: usr_8f3c`
@@ -1229,8 +1255,6 @@ Create and fork install the hint and then manifest 1. The conditional put of man
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
 If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a fork, because the fork's source pin is unique. For a plain create, matching bytes don't prove which caller created the namespace, so the result is `namespace_exists`, or the existing summary if the caller allows an existing namespace.
-
-The examples in the following sections are representative, not exhaustive. Responses might gain fields within v0, and clients MUST ignore JSON fields they don't recognize. An optional response field that has no value is left out, and it's never encoded as `null`.
 
 ### 6.1 `GET /v0/capabilities`
 
