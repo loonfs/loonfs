@@ -1,63 +1,285 @@
 # LoonFS glossary
 
-| Term | Meaning |
-| --- | --- |
-| **Namespace** | A directory tree with its own ordered metadata history, manifests, WAL, and retention policy. Its id names one lifetime; deletion is terminal and a create or fork into that id returns `namespace_deleted` ([format section 1.1](format.md#11-namespaces-and-identity)). Forks can share stored objects across namespaces. |
-| **Head** | The current logical position and state derived from the current manifest and later WAL objects; not a separate durable object. |
-| **Sequence (`seq`)** | A namespace-local position assigned to one committed mutation request. |
-| **Commit** | One successfully published mutation request whose operations share a sequence. |
-| **Commit ID** | A caller-supplied identifier used to recognize retries while the corresponding receipt remains retained. |
-| **Commit receipt** | A durable row that maps a commit ID to its committed sequence. The commit row at that sequence stores the semantic fingerprint. |
-| **Semantic fingerprint** | A digest of the canonical logical request, used to detect conflicting reuse of a commit ID. |
-| **WAL** | The ordered log of immutable, consecutively numbered WAL objects. |
-| **Fence** | A zero-record WAL object used to establish a writer epoch in WAL order without creating a logical commit. |
-| **Content publication** | Permanent metadata evidence that a content ID was committed. A read by content reference checks it. |
-| **Fold** | Materializing committed WAL into metadata segments and publishing a manifest so later readers replay less history. |
-| **Inode** | The identity and creation metadata of a filesystem item. Its ID remains unchanged when the item is renamed or moved within a namespace. |
-| **Directory binding / direntry** | A parent inode, name, and child inode association that places an item in the tree. |
-| **Binding version** | The sequence and delta position of a particular bind. The API represents this pair as an opaque token. |
-| **Path** | An absolute name resolved by following visible directory bindings from the root. |
-| **Display name** | The stored spelling of a directory entry's name. |
-| **Name key** | The value used for sibling-name comparison and lookup. The namespace's naming mode derives it from a display name: normalized, and also case-folded in a `case_insensitive` namespace ([format section 1.4](format.md#14-names-and-paths)). |
-| **Naming mode** | A namespace's fixed choice of how sibling names compare: `case_insensitive` (the default) or `case_sensitive`. |
-| **Revision** | One committed content state of a file, ordered by a revision number scoped to that inode. |
-| **Content object** | The bytes of one content ID, stored under `namespaces/{owner_namespace_id}/content/{content_id}`. An append extends it and never changes the bytes it already holds ([format section 1.5](format.md#15-file-contents-and-ownership)). |
-| **Content reference** | A `blob_v1` record containing the original owner namespace, content ID, the size of the prefix of the content object it names, and the checksum of that prefix. It identifies content; it does not prove that the content object holds those bytes yet. |
-| **Content root** | A record that keeps an active namespace's content object: a revision row in a manifest the GC pass roots, a revision in the unfolded WAL tail, or an upload session record ([format section 11.9](format.md#119-content-roots)). |
-| **Temporary object** | An object that an object extension writes and deletes under `namespaces/{namespace_id}/temporary/`. Nothing references it, and collection deletes one that is older than the reclamation grace. |
-| **Inline content** | File bytes carried in the WAL commit that references them. A fold writes them to a content object before the WAL object can be collected ([format section 1.5](format.md#15-file-contents-and-ownership)). |
-| **Upload session** | A durable record for one upload, with a fixed identity and mode and an open, completed, or aborted status. Completion alone does not commit a file. |
-| **Admission evidence** | The in-process proof or the signed content token that admits an externally supplied content reference to publication ([format section 5.5](format.md#55-admission-proofs)). It is bound to the namespace and the complete reference. It is valid while the clock reads before its expiry. |
-| **Metadata segment** | An immutable, sorted set of rows in one metadata family, stored in independently readable blocks. |
-| **Run** | The metadata segments produced together, identified by a manifest-allocated run number. |
-| **Namespace manifest** | A numbered immutable record of namespace identity, lifecycle, authority, materialized file set, and retention floors. |
-| **Hint** | A mutable starting point for forward manifest discovery. Its number can lag publication and is not freshness evidence. |
-| **Metadata basis** | The verified file set in the reading namespace’s current manifest. A fork’s own manifest lists its inherited runs. |
-| **Checkpoint** | A durable pin retaining one numbered manifest for a user, snapshot, or fork dependency. |
-| **Read view** | The namespace state that one read, or a group of related reads in one request, sees. It is held in memory and retains nothing in the store. |
-| **Snapshot** | A retained read view represented by a snapshot-owned pin; reads require an unexpired record. |
-| **Fork** | A new namespace initialized from a retained source view, sharing stored objects with independent subsequent metadata history. |
-| **Tombstone** | A committed deletion event that hides an inode or subtree while preserving the information needed for undelete. It is a row in a namespace's history. The manifest that a namespace deletion publishes is a different object, the namespace tombstone. |
-| **Namespace tombstone** | A deleted namespace's final manifest ([format section 9.4](format.md#94-deleting-a-namespace)). It stays the current manifest forever and is the last manifest of its chain. It is not a file or subtree tombstone. |
-| **Retention floor** | The lower bound for guaranteed incremental replay and retained metadata views. It limits superseded metadata, file revision history, and receipt retention. File history above the retention floor is complete; at or below the floor each file keeps its newest revision. |
-| **Namespace retirement** | Eligibility to reclaim a deleted namespace's content prefix and source pin under [format section 9.5](format.md#95-retirement). |
-| **Change feed** | Committed filesystem events ordered by namespace sequence and operation position. |
-| **Cursor** | A position used to resume a paginated read or bounded index build under its consistency rules. Core and grep GC complete one pass without a cursor. |
-| **Precondition** | A requirement checked against the applicable metadata state before a new mutation is accepted. |
-| **Writer epoch** | A namespace-local fencing counter. A writer session cannot publish once another session's fence for a newer epoch has landed. |
-| **Epoch claim** | A manifest publication that raises the writer or compactor epoch by one. A writer's claim is followed by a fence; until the fence lands, the previous writer can still commit ([format section 6.1](format.md#61-writer-ownership)). |
-| **Compare-and-swap (CAS)** | A conditional update that succeeds only if the object's compare token still matches the version previously read. |
-| **Control object** | A structured durable record for discovery, retained views, or upload state. Its kind determines its update rules. |
-| **Family group** | Related metadata row families that compaction processes together, such as the two bind indexes and unbinds. |
-| **Bounded compaction** | One compaction step that merges a contiguous window of runs in one family group within the step's row and byte budgets and publishes the result at once ([format section 10.2](format.md#102-compaction-windows)). A window over those budgets runs as streaming compaction instead: a background job that merges the window without holding every row in memory and publishes once at the end ([format section 10.4](format.md#104-streaming-compaction)). |
-| **Compactor epoch** | A namespace-wide counter in the manifest that fences compaction publications from older runtime claims. |
-| **GC pass** | One complete collection call with freshly loaded roots, an in-memory live set, and a fixed call clock. |
-| **Publication budget** | The longest monotonic time from the observation a publisher planned against to the start of its numbered put. A put that returns after its budget has an unknown outcome ([format Appendix C.1](format.md#c1-publication-and-collection-timing)). |
-| **Reclamation grace** | The configured age `T` that a collectable manifest, WAL object, content object, or temporary object must reach before collection deletes it. It is at least `GC_MIN_GRACE_WINDOW_MS`: the longer of the longest publication budget and the revalidation bound plus a direct transfer capability's lifetime, plus the provider request bound and the clock allowance ([format section 11.3](format.md#113-candidate-and-age-rules)). |
-| **Revalidation bound** | `READ_REVALIDATION_BOUND_MS`, the longest time a reader trusts an absent manifest successor after the probe it confirms ([format section 4.2](format.md#42-replaying-the-visible-wal)). |
-| **API group** | A conformance unit, such as `filesystem/v0`, advertised only when all its required operations are implemented. |
-| **Feature** | An optional capability within an API group, such as `filesystem.uploads.direct_put`. |
-| **Capability document** | The deployment's advertised protocol version, API groups, features, and advisory limits. |
-| **Extension** | A derived subsystem with its own objects and collection rules under `namespaces/{namespace_id}/extensions/{name}/`. |
+This glossary defines the terms used in the LoonFS specs, grouped by topic. The [format specification](format.md) defines how each kind of durable data is stored, and the [API specification](api.md) defines requests, responses, and cursors.
 
-The [format](format.md) defines stored representations and lifecycle rules. The [API](api.md) defines request, response, and cursor behavior.
+## Namespaces and history
+
+### Namespace
+
+A directory tree with its own history, stored under its own prefix in object storage (`namespaces/{namespace_id}/`). Each namespace has its own manifests, WAL, and retention floor, and a fork can share stored objects with the namespace it was forked from. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+
+### Manifest
+
+A numbered, immutable object that describes a namespace: its identity and status (active or deleted), which writer can commit, the metadata segments that make up its files and directories, and how much history it keeps (its [retention floor](#retention-floor)). The highest-numbered manifest is the current one. Commits made after it was published are in the WAL objects that follow it. See [Manifests, runs, and segments](format.md#71-manifests-runs-and-segments).
+
+### Hint
+
+A small object that records the number of a recent manifest, so readers know where to start looking for the current one. The hint is best effort. LoonFS updates it after it publishes a manifest, but the update can lag, so the hint is a safe starting point but not an authoritative pointer to the current manifest. Readers load the hinted manifest and then check for newer ones. See [The current manifest and WAL tip](format.md#24-the-current-manifest-and-wal-tip).
+
+### WAL
+
+The write-ahead log: a namespace's sequence of numbered, immutable WAL objects. Each WAL object contains one or more commits, or a single [fence](#fence). Successfully writing the next WAL object to object storage commits every record contained in that WAL object. See [Publishing a commit](format.md#6-publishing-a-commit).
+
+### WAL tip
+
+The highest-numbered WAL object. A reader or writer finds it by reading WAL numbers upward until one is missing. A writer commits by creating the WAL object one number above the tip.
+
+### WAL tail
+
+The WAL objects after the current manifest's folded boundary (`folded_wal_no`). Their commits aren't in any metadata segment yet, so readers replay them on top of the manifest. A [fold](#fold) moves them into segments.
+
+### Commit
+
+One successfully published mutation request. A request can contain several operations, and they all commit together at one sequence number.
+
+### Sequence (`seq`)
+
+A number that orders the commits in one namespace. Each commit is assigned the next sequence number. One WAL object can contain several commits, so sequence numbers and WAL numbers are separate counters. For example, WAL object 10 might contain three commits at sequences 41, 42, and 43.
+
+### Head
+
+The namespace's latest committed state, identified by the sequence number of its newest commit (`head_seq`). The head isn't a stored object. A reader finds it by reading the current manifest and replaying the WAL tail. For example, if the current manifest includes commits through sequence 40 and the WAL tail contains commits 41 to 43, the head is at sequence 43.
+
+### Commit ID
+
+An identifier for a commit, chosen by the client, that makes retries safe. It's usually a random ID (the Rust client generates one when the caller doesn't provide it). When a retry uses the same commit ID and the same request, LoonFS returns the original commit's result instead of committing again, for as long as the commit receipt is kept. See [Commit identity and retries](format.md#65-commit-identity-and-retries).
+
+### Commit receipt
+
+A stored row that maps a commit ID to the sequence it committed at. LoonFS uses receipts to recognize retries. Compaction can remove receipts below the retention floor, and after that, a reused commit ID is treated as a new commit.
+
+### Semantic fingerprint
+
+A digest of a commit's logical request: the actor, the operations, the preconditions, and the message, but not details like the writer epoch or the timestamp. When a request reuses a commit ID, LoonFS compares fingerprints to tell whether it's a retry of the original request or a different request (which fails with `commit_id_reuse_conflict`).
+
+### Change feed
+
+The namespace's committed filesystem events, in sequence order (and in operation order within a commit). Clients read the change feed to follow changes to a namespace. It includes commits above the retention floor.
+
+### Precondition
+
+A condition on the namespace's current state that has to be true for a mutation to be accepted (for example, that a file's current revision is the one the client last read).
+
+## Files and directories
+
+### Inode
+
+The identity of a file or directory, along with its kind and creation metadata. An inode's ID doesn't change when the item is renamed or moved within its namespace. Deleting a file and creating a new one at the same path creates a new inode.
+
+### Directory binding (direntry)
+
+The link between a parent directory, a name, and a child inode, which places an item in the tree. Renaming or moving an item removes one binding and adds another. See [Directory bindings](format.md#13-directory-bindings).
+
+### Binding version
+
+An opaque token that identifies an item's current directory binding. Moving, renaming, or undeleting an item produces a new binding version. Clients pass it as a precondition on moves and deletes, so the change fails if the item was moved or renamed after the client read it.
+
+### Path
+
+An absolute name, like `/reports/final.txt`, that LoonFS resolves by following directory bindings from the root.
+
+### Display name
+
+A directory entry's name, stored exactly as the caller provided it. LoonFS compares names by their name key instead, so in a `case_insensitive` namespace, Report.txt and report.txt count as the same name, but the display name keeps the capitalization the caller used.
+
+### Name key
+
+The value LoonFS uses to compare and look up sibling names. It's derived from the display name using the namespace's naming mode: normalized, and also case-folded in a `case_insensitive` namespace. See [Names and paths](format.md#14-names-and-paths).
+
+### Naming mode
+
+A namespace setting that controls how names are compared, either `case_insensitive` (the default) or `case_sensitive`. For example, Report.txt and report.txt are the same name in a `case_insensitive` namespace and different names in a `case_sensitive` one. The mode is set when the namespace is created (a fork uses its source's mode) and can't be changed.
+
+### Revision
+
+One committed version of a file's contents. Each file revision is assigned a monotonically increasing number that's scoped to its file, so revision numbers are unrelated to the namespace's sequence numbers.
+
+### Tombstone
+
+A committed deletion record. Deleting an item removes its name from its parent directory and records a tombstone. The item's revisions, and everything below it, stay in place, and the tombstone hides them like a filter applied on top of the metadata. An undelete revokes the tombstone and restores the item's name, so the whole subtree reappears unchanged. (A deleted namespace's final manifest is a different record, the namespace tombstone.)
+
+### Namespace tombstone
+
+A deleted namespace's final manifest, which records that the namespace was deleted and when. See [Deleting a namespace](format.md#94-deleting-a-namespace).
+
+## Content
+
+### Content object
+
+An immutable object that stores file bytes, under the owner namespace's prefix (`namespaces/{owner_namespace_id}/content/`). A file's bytes can be stored in one content object or spread across several. See [File contents and ownership](format.md#15-file-contents-and-ownership).
+
+### Content reference
+
+The record in a file revision that identifies its bytes: the owner namespace, a content ID, a size, and a checksum. A content reference identifies content, but it doesn't prove that a content object contains those bytes yet (they may still be stored in the WAL).
+
+### Chain
+
+The bytes stored under one content ID. A chain grows when a file is appended to, and each content reference identifies a prefix of the chain. For example, a log file's first revision might refer to the first 100 bytes of chain A. After two appends, revisions 2 and 3 might refer to the first 200 and the first 210 bytes of the same chain.
+
+### Extent
+
+A byte range of one content object that stores part of a chain. Content objects are immutable, so the bytes appended to a chain are written to new content objects, and a chain's bytes usually end up spread across several objects. Each extent records which content object it's in, the offset in that object, and the length.
+
+Most extents are "own extents", which store bytes written for the chain itself. A "shared base extent" stores bytes of an earlier chain that this chain was started from. For example, a fork inherits `/log.txt`, whose bytes are in a content object owned by the source namespace. The fork doesn't own that chain, so when it appends 10 bytes to the file, it starts a new chain. The new chain's layout lists the source's object as a shared base extent, followed by an own extent that stores the 10 new bytes. A fold never merges a shared base extent with other extents, so the shared bytes are never copied.
+
+### Layout
+
+The ordered list of extents that together make up a chain's bytes. LoonFS stores each chain's layout as a metadata row, and a reader uses it to find which content objects to read for a range of bytes.
+
+### Span object
+
+A content object that stores one byte range of a chain. The content object at a chain's own key (`content/{content_id}`) is called the "whole object". Every other content object of the chain is a span object, and its key is the chain's key followed by the start and end offsets of its range (`{content_id}-{start:020}-{end:020}`).
+
+### Piece
+
+A range of file bytes stored inside a WAL object. A piece contains a whole small value, or the bytes an append adds. Before a fold publishes a manifest that covers that WAL object, it writes the pieces to content objects as extents.
+
+### Inline content
+
+File bytes that are committed inside a WAL object, as pieces, instead of being uploaded first. A fold writes them to a content object before the WAL object can be deleted. See [File contents and ownership](format.md#15-file-contents-and-ownership).
+
+### Assembly
+
+An object-store operation that creates one new immutable object from ranges of existing objects followed by new bytes. A fold uses an assembly to write each chain's new extent. Where the provider supports it, an assembly copies parts inside the provider (S3 and R2) or composes objects (GCS), so the bytes don't pass through the LoonFS server. Otherwise, it reads the sources and writes the result itself. See [Immutable writes and retries](format.md#32-immutable-writes-and-retries).
+
+### Temporary object
+
+An object that an assembly writes for intermediate results (for example, when GCS composes more than 32 sources) and deletes when it finishes. Temporary objects are stored under `namespaces/{namespace_id}/temporary/`. Nothing references them, so garbage collection deletes any that are older than the reclamation grace (for example, after a crash).
+
+### Upload session
+
+A stored record for one upload. It has a content ID that's assigned when the session is created, a transfer mode, and a status (`open`, `completed`, or `aborted`). Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
+
+### Admission evidence
+
+Proof that a content reference's bytes were verified in a completed upload. A commit needs it before it can reference uploaded content, so a commit can't reference bytes that were never verified. The proof is tied to the namespace and the complete content reference, and it expires. The HTTP server represents it as a signed content token. See [Admission proofs](format.md#55-admission-proofs).
+
+### Content root
+
+A reference that keeps a namespace's content objects from being deleted. There are three kinds: the layouts in a manifest that garbage collection protects, the WAL tail, and upload session records. See [Content roots](format.md#119-content-roots).
+
+## Metadata storage
+
+### Metadata segment
+
+An immutable object that stores sorted metadata rows from one row family (for example, directory bindings), in blocks that can be read independently.
+
+### Run
+
+The set of metadata segments written together by one fold or compaction, identified by a run number. A manifest lists the runs that make up the namespace.
+
+### Family group
+
+A set of related metadata row families that compaction always processes together, so that they stay consistent. For example, the two directory binding indexes form one group, and commits and commit receipts form another.
+
+### Fold
+
+The process that moves committed records from the WAL tail into new metadata segments and publishes a manifest that lists them, so later readers replay less of the WAL. A fold doesn't change the namespace's visible history, and any process can run one. See [Materializing metadata](format.md#7-materializing-metadata).
+
+### Compaction
+
+The process that merges a namespace's metadata runs into fewer runs, and drops rows that are no longer needed, without changing any retained view. A "bounded compaction" merges a window of runs in one step, within a row and byte budget. A window that's too large for one step runs as a "streaming compaction" instead, a background job that merges the window without keeping every row in memory and publishes once at the end. See [Retention and compaction](format.md#10-retention-and-compaction).
+
+### Retention floor
+
+The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each file keeps at least its newest revision, and compaction can remove older rows (superseded bindings, old revisions, and commit receipts). A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+
+### Control object
+
+A small, mutable object used for discovery, retained views, or upload state: the hint, pins, and upload sessions. Each kind has its own update rules (for example, the hint only changes by compare-and-swap).
+
+## Reads and retained views
+
+### Read view
+
+The namespace state that one read sees (or a group of related reads in one request). A read view exists only in memory, and it doesn't protect anything from garbage collection.
+
+### Metadata basis
+
+The verified set of metadata runs, from the current manifest, that a read starts from. A fork's manifest lists the runs it inherited from its source. See [Resolving the metadata basis](format.md#41-resolving-the-metadata-basis).
+
+### Pin
+
+A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published. Checkpoints, snapshots, and forks are all pins, with different owners and rules. See [Pins](format.md#8-pins).
+
+### Checkpoint
+
+A pin that an operator manages through the maintenance API to keep one version of a namespace. A checkpoint can have an expiry time, or none, and it stays readable for as long as it exists, even after its expiry time. The API also calls any pin's ID a `checkpoint_id`.
+
+### Snapshot
+
+A pin that applications use to read a namespace as it was at one point in time. The regular read endpoints accept a `snapshot_id`, and a snapshot can be read until it expires. Unlike a checkpoint, every snapshot has a required expiry time with a maximum lifetime, and each namespace has a limit on live snapshots. Those limits let applications use snapshots without keeping old data around indefinitely. A snapshot's expiry time can be extended, up to its maximum lifetime.
+
+### Fork
+
+A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. After the fork, commits to one namespace never appear in the other. See [Forking a namespace](format.md#92-forking-a-namespace).
+
+### Revalidation bound
+
+The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). After that, the reader checks again before it serves a read. This bound is what tells garbage collection how long a superseded manifest might still be in use. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+
+### Cursor
+
+A position that a paginated read, or a bounded index build, resumes from.
+
+## Writers
+
+### Writer session
+
+A process's claim on the right to commit to a namespace, identified by its writer epoch. A writer session starts with a new writer epoch before its first commit, and it keeps using that epoch until a newer writer session takes over. LoonFS coordinates writers through object-storage writes (an epoch claim followed by a fence), so a change of writer takes about 200 ms. Because of that, most applications use one long-lived writer session in a server that many clients share. See [Writer ownership](format.md#61-writer-ownership).
+
+### Writer epoch
+
+A counter in the manifest that increases each time a new writer session takes over. A writer session with an older epoch can't commit once the newer session's fence is written.
+
+### Epoch claim
+
+A manifest publication that increases the writer epoch or the compactor epoch by one. A writer's claim is followed by a fence, and until the fence is written, the previous writer can still commit.
+
+### Fence
+
+A WAL object with no commits. A new writer session publishes a fence as part of starting up, so that it can begin committing with its writer epoch. Once the fence is written, a writer session with an older epoch can't commit.
+
+### Compactor epoch
+
+A counter in the manifest, like the writer epoch, that stops a compaction from publishing its result if a newer compactor has claimed the namespace since the compaction started.
+
+### Compare-and-swap (CAS)
+
+A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap for its control objects.
+
+### Publication budget
+
+The longest time allowed between the state a publisher planned against and the start of its numbered put. A put that returns after its budget has an unknown outcome. Garbage collection relies on these budgets to choose a safe reclamation grace. See [Publication and collection timing](format.md#c1-publication-and-collection-timing).
+
+## Deletion and garbage collection
+
+### Garbage collection pass
+
+One complete garbage collection call. A pass loads fresh roots (everything that's still referenced), builds the set of live objects in memory, and deletes the candidates that are old enough. It stores no progress, so after a failure the next pass starts over.
+
+### Reclamation grace
+
+How old an unreferenced manifest, WAL object, content object, or temporary object has to be before garbage collection deletes it. The grace is configurable (one hour by default), but it can't be lower than `GC_MIN_GRACE_WINDOW_MS`. That minimum makes sure every write planned against an older state has finished or failed before garbage collection deletes an object the write might reference. See [Candidate and age rules](format.md#113-candidate-and-age-rules).
+
+### Namespace retirement
+
+The point at which a deleted namespace's own content, and its pin on its source if it's a fork, can be deleted. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
+
+## API
+
+### API group
+
+A set of API operations that a deployment advertises only when it implements all of them, such as `filesystem/v0`.
+
+### Feature
+
+An optional capability within an API group, such as `filesystem.uploads.direct_put`.
+
+### Capability document
+
+The document a deployment returns from `GET /v0/capabilities`. It lists the deployment's protocol version, API groups, features, and advisory limits. Clients typically use it to find out which features are enabled on a deployment before they use them.
+
+### Extension
+
+A subsystem built on top of core LoonFS, such as grep, with its own objects and garbage collection rules under `namespaces/{namespace_id}/extensions/{name}/`. Core garbage collection never deletes extension objects.

@@ -1,31 +1,37 @@
 # LoonFS architecture
 
-LoonFS stores file bytes and filesystem metadata in object storage. The metadata describes directory bindings, file revisions, retained views, and committed changes. A reader can recover the filesystem without the process that originally wrote it.
+This document describes how LoonFS stores a filesystem in object storage, and how reads, writes, forks, and maintenance fit together. The [format specification](format.md) defines the exact rules, and the [glossary](glossary.md) defines each term.
 
-A namespace id names one lifetime; deletion is terminal and a create or fork into that id returns `namespace_deleted` ([format section 1.1](format.md#11-namespaces-and-identity)).
+LoonFS stores everything in object storage. File bytes are stored in content objects, and every change to the directory tree is recorded in a numbered write-ahead log (WAL). LoonFS uses five object-store operations: put-if-absent, compare-and-swap on small objects, reads, listings, and deletes. It doesn't use transactions across objects, so every change to a namespace becomes durable through a single object write.
 
-`loonfs-http` is the LoonFS HTTP API as a library. `loonfs-server` hosts it.
+Each "namespace" is one directory tree with its own history, stored under `namespaces/{namespace_id}/`.
 
-## Stored state
+An application can use LoonFS as an embedded Rust library (`loonfs`) or through the HTTP API, which `loonfs-http` implements and `loonfs-server` runs as a standalone server. LoonFS coordinates writers through object-storage writes, so a change of writer takes about 200 ms. Because of that, most applications are better served by one long-lived writer in a server that many clients share.
 
-The main objects have separate roles:
+## Stored objects
 
-| Object | Role |
+Each namespace is stored as six main kinds of objects:
+
+| Object | What it stores |
 | --- | --- |
-| Numbered namespace manifest | Records namespace identity, lifecycle, writer authority, materialized metadata runs, and the retention floor. |
-| Numbered WAL object | Publishes logical commits or a writer fence after the materialized boundary. |
-| Hint | Records a starting point for forward discovery of manifests. |
-| Pin record | Retains one manifest for a user, snapshot, or fork. |
-| Metadata segment | Stores sorted rows in independently readable blocks. |
-| Content object | Stores the complete bytes of a file revision. |
+| Manifest | The namespace's identity and status, the current writer, the metadata runs that make up its files and directories, and its retention floor. Manifests are numbered. |
+| WAL object | Commits made after the most recent manifest, or a writer fence. WAL objects are numbered. |
+| Hint | The number of a recent manifest, where readers start looking for the current one. |
+| Pin | A reference to one manifest that keeps it, and everything it lists, from being deleted. Checkpoints, snapshots, and forks use pins. |
+| Metadata segment | Sorted metadata rows, in blocks that can be read independently. |
+| Content object | File bytes. Content objects are immutable, and a file's bytes can span several of them. |
 
-Creating the next numbered WAL object commits its records. Creating the next numbered manifest publishes a new materialized file set or control-state change. Each publication uses put-if-absent, so competing attempts at one number cannot both succeed.
+Manifests and WAL objects are numbered 1, 2, 3, and so on, with a separate counter for each. LoonFS creates every numbered object with put-if-absent, so when two processes try to write the same number, exactly one of them succeeds. Successfully writing the next WAL object commits every record in it. Writing the next manifest publishes a new set of metadata segments or a change to the namespace's state (for example, a new writer or a deletion).
 
-The hint may lag manifest publication. Readers load the hinted manifest and probe forward; they do not treat the hint as the current state. The [format specification](format.md#2-objects-and-references) defines the complete layout and stored fields.
+The hint is a best-effort pointer to a recent manifest. It's a safe place to start, but not an authoritative pointer to the current manifest, so readers load the hinted manifest and then check for newer ones. The [format specification](format.md#2-objects-and-references) defines the complete layout and the stored fields.
+
+Why have a hint at all? Without it, a reader would have to list the namespace's manifests to find a place to start. Why is it best effort? Updating the hint is a separate write from publishing a manifest, and keeping the two in step would need a transaction across two objects, which object storage doesn't offer.
 
 ## Writing a file
 
-File content takes one of two paths. Uploaded content is stored and verified before the commit that references it:
+A file change is committed in two parts. First the file's bytes become durable, and then a commit records the change in the WAL. File content can be published via one of two paths.
+
+Uploaded content is written and verified before the commit that references it:
 
 ```text
 create upload session -> transfer bytes -> verify and complete upload
@@ -39,9 +45,9 @@ create upload session -> transfer bytes -> verify and complete upload
                                              file committed
 ```
 
-Completing an upload does not change a file. The later WAL put commits the mutation.
+Completing an upload doesn't automatically update a file in a LoonFS namespace. The file changes only when the WAL object that commits the change is written. (If the upload is never committed, garbage collection deletes it later.)
 
-A small file can carry its bytes inline in the commit. One WAL put makes the bytes durable and the file visible. A later fold writes the bytes to a content object before it publishes the manifest that lets collection delete that WAL object:
+A small file's bytes can be included in the commit itself, as "inline" content. One WAL write then makes the bytes durable and the file visible. Later, a fold writes the bytes to a content object before it publishes the manifest that allows garbage collection to delete that WAL object. Appends use the same path, and the WAL object includes only the appended bytes.
 
 ```text
 validate metadata -> create next numbered WAL object with the bytes
@@ -52,15 +58,24 @@ validate metadata -> create next numbered WAL object with the bytes
                  fold writes the content object, then the manifest
 ```
 
-[Format section 1.5](format.md#15-file-contents-and-ownership) defines both paths. Several requests can share one WAL object, but each accepted request has its own sequence and commit ID.
+[File contents and ownership](format.md#15-file-contents-and-ownership) defines both paths. Several requests can share one WAL object, but each accepted request still has its own sequence number and commit ID.
 
-A writer acquires an epoch through a manifest publication, then writes a zero-record WAL fence. Another session can acquire a newer epoch; the earlier session must stop once fenced. Writer authority uses epochs and conditional writes, without a writer lease.
+Only one writer session can commit to a namespace at a time. A new writer session takes over in two steps:
 
-A lost response can hide a successful commit. Clients reconcile an uncertain outcome with the original commit ID and request. Re-uploading first creates a different content identity and can turn an otherwise valid retry into conflicting commit-ID reuse.
+1. It publishes the next manifest with a higher writer epoch.
+2. It writes an empty WAL object (a "fence") with that epoch at the next WAL number.
+
+Between the two steps, the previous writer can still commit, and those commits are valid. Once the fence is written, the previous writer can't commit anymore. Its next WAL write collides with an object that already exists, and when it reloads the namespace, it finds the higher epoch and stops with `writer_fenced`.
+
+A lost response can hide a successful commit. To find out what happened, a client retries with the same commit ID and the same request. If the original commit succeeded, LoonFS returns its result instead of committing again.
+
+Warning: when a client retries a commit, it shouldn't retry the upload too. If the upload is retried, it's assigned a different content ID, so the retried commit is no longer the same request. If the original commit succeeded, the retry would fail with `commit_id_reuse_conflict` instead of returning the original result.
+
+Why use epochs instead of a writer lease? With a lease, a new writer would have to wait for the old lease to expire, and safety would depend on clocks. With epochs, a new writer can take over at any time, and safety depends only on put-if-absent.
 
 ## Reading a file
 
-A reader discovers the current manifest and WAL tip. It reads the manifest's runs and replays the required WAL objects after the folded boundary. A new namespace's manifest represents the built-in root directory; a fork's own manifest lists its inherited runs from installation.
+To read a namespace, a reader finds the current manifest and the last WAL object (the "WAL tip"). It reads the metadata runs that the manifest lists, then replays the WAL objects written after the manifest's folded boundary. The result is a view of the namespace at one sequence number.
 
 ```text
 current manifest -> listed metadata runs --+
@@ -70,31 +85,43 @@ later numbered WAL -> committed changes ---+            |
                                         path -> inode -> revision -> content
 ```
 
-A path is resolved through directory bindings. A file revision contains the original owner namespace, content ID, size, and checksum. The owner namespace and content ID determine its object key. Inherited content can therefore be read without fetching its owner's manifest or walking the fork ancestry. Content committed inline is read from the replayed WAL until a fold writes its object.
+A new namespace's first manifest describes only the root directory. A fork's first manifest lists the metadata runs it inherited from its source.
 
-Directory listings use committed metadata for names and file sizes. They do not download every file. Content reads verify the complete size and checksum. Missing or corrupt required recovery objects fail the read; an available earlier file set is not a substitute.
+LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records the namespace that owns the content, a content ID, a size, and a checksum. The owner and content ID determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
 
-Warm readers probe the next WAL number and periodically check for a successor manifest. The default manifest interval is one second, so a cached active view can remain usable until that check observes a namespace deletion. Local caches affect read cost and freshness within the defined interval; they are not durable recovery state.
+Directory listings use committed metadata for names and file sizes, so listing a directory doesn't download any files. Reading a file verifies its complete size and checksum. If an object needed to recover the namespace is missing or corrupt, the read fails.
+
+A reader with a cached view checks the next WAL number for new commits, and it checks for a newer manifest about once a second by default. Local caches affect only read cost and freshness. They aren't needed for recovery.
+
+Why fail instead of reading an older version of the files? A fallback would return files from an earlier point in history, and the caller would have no way to tell.
 
 ## Forks and retained views
 
-A fork creates and verifies a source pin, then installs its own manifest 1 with the pinned run references. It shares the source's existing content and metadata objects without copying the filesystem. Forking the current head may first fold the source's outstanding WAL tail, which writes that tail's inline content to content objects. The fork's later commits belong to independent history.
+A "fork" is a new namespace that starts as a copy of another namespace at one point in its history. To create one, LoonFS writes and verifies a [pin](glossary.md#pin) on the source's manifest, and then writes the fork's manifest 1, which lists the source's metadata runs. The fork shares the source's content and metadata objects, so nothing is copied (and the cost of a fork doesn't depend on how much data the source stores). Forking the source's current head may first fold the source's WAL tail, which writes its inline content to content objects. After the fork, commits to one namespace never appear in the other.
 
-The target can continue referencing ancestor-owned content and segments. A target-owned manifest does not mean those dependencies have been copied locally. The source pin remains until the target has retired and released it.
+A fork can keep reading objects owned by its source and the source's ancestors. When the fork publishes its own manifests, those objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
 
-User checkpoints and snapshots use the same pin representation with different owner rules. Every creation writes a new pin with a fresh id; a name is a label, not a key. Snapshot reads require an unexpired record; a user pin remains readable while it exists, including after its expiry. Explicit deletion removes the record. Collection retains every manifest named by its complete pin listing, including expired records that have not yet been collected ([format section 8](format.md#8-pins)).
+User checkpoints and snapshots are pins too, with different rules for reading and removal. Operators manage checkpoints through the maintenance API, and a checkpoint can be kept without an expiry time. Snapshots are for applications. The read endpoints accept a `snapshot_id`, and every snapshot has a required expiry time and counts against a per-namespace limit, so applications can't keep old data around indefinitely. Each create call writes a new pin with a new ID, so a checkpoint's name is a label, not a key (two checkpoints can have the same name).
+
+| Pin | Readable | Removed |
+| --- | --- | --- |
+| Checkpoint | While the pin exists, even after its expiry time | When it's deleted, or by garbage collection after its expiry time (if it has one) |
+| Snapshot | Only before it expires | When it's deleted, or by garbage collection after it expires |
+| Fork | Not read directly | By garbage collection, after the fork no longer depends on it |
+
+An expired pin still protects its manifest until garbage collection deletes the pin (see [Pins](format.md#8-pins)).
 
 ## Maintenance and deletion
 
-| Operation | Effect |
+| Operation | What it does |
 | --- | --- |
-| Fold | Materializes the WAL tail into segments and publishes the next manifest. |
-| Compaction | Merges selected runs and applies eligible row-retention rules while preserving retained views. |
-| Retention advance | Explicitly advances the sequence floor after verifying the materialized basis. |
-| Garbage collection | Completes one pass over eligible objects using fresh roots and an in-memory live set. |
+| Fold | Moves committed records from the WAL into new metadata segments, and publishes the next manifest. |
+| Compaction | Merges metadata runs and drops rows that are no longer needed, without changing any retained view. |
+| Retention advance | Moves the [retention floor](glossary.md#retention-floor) forward, after checking that the current manifest's segments exist. Compaction can then remove history at or below the floor. |
+| Garbage collection | Deletes objects that nothing references anymore, once they're old enough. Each pass starts from a fresh list of what's still referenced. |
 
-A file deletion records a recoverable subtree tombstone. A namespace deletion publishes terminal deleted status in its next manifest. Neither immediately removes shared content.
+Deleting a file records a subtree tombstone, which can be undone. Deleting a namespace publishes a final manifest with a deleted status. Neither one deletes shared content right away.
 
-Retirement follows [format section 9.5](format.md#95-retirement). An eligible pass reclaims the namespace’s own content and releases its source pin under [section 11.8](format.md#118-sweeping-a-retired-owners-content).
+A deleted namespace's own content is deleted when the namespace is retired, which happens once a grace period has passed and no pins on the namespace remain (see [Retirement](format.md#95-retirement)). Retirement also deletes a fork's pin on its source (see [Sweeping a retired owner's content](format.md#118-sweeping-a-retired-owners-content)).
 
-Hosts choose when maintenance runs and which namespaces it covers. The storage protocols determine what each operation can publish or delete. Derived extensions such as grep have separate manifests and collection rules; core collection never sweeps their objects.
+Hosts decide when maintenance runs and which namespaces it covers. The format defines what each operation can publish or delete. Extensions such as grep have their own manifests and garbage collection rules, and core garbage collection never deletes their objects.
