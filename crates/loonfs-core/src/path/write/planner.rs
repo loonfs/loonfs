@@ -25,7 +25,7 @@ use crate::commit::{
 };
 use crate::commit_engine::CommitCandidate;
 use crate::error::{CoreError, Result};
-use crate::metadata::{MetadataState, MetadataView};
+use crate::metadata::MetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
 use loonfs_types::{
@@ -124,9 +124,8 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
                 access: &head.access,
                 authorizer: &authorizer,
                 view: &resolution_view,
-                pieces: Some(&pieces),
             };
-            plan_operation(store, content_writes, operation, &view, allocation)
+            plan_operation(store, content_writes, operation, &view, &pieces, allocation)
                 .await
                 .map_err(|error| error.at_operation(index))?
         };
@@ -173,12 +172,11 @@ pub(crate) async fn prepare_commit_against_publish_view<S: ObjectStore + ?Sized>
             .flat_map(|value| value.pieces)
             .collect(),
     };
-    let empty = MetadataState::default();
     carry_revision_layouts(
         store,
         content_writes,
         &resolved.view(),
-        &base_view.with_overlay(&empty, session.accepted_rows(), head.seq),
+        &base_view.with_overlay(None, session.accepted_rows(), head.seq),
         &pieces,
         candidate,
         &mut plan,
@@ -266,6 +264,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
     content_writes: &tokio::sync::Semaphore,
     operation: &FilesystemOperation,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
+    pieces: &CommitPieces<'_>,
     allocation: &mut CandidateAllocation,
 ) -> Result<CompiledFilesystemOperation> {
     match operation {
@@ -351,6 +350,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 store,
                 content_writes,
                 view,
+                pieces,
             )
             .await
         }
@@ -366,6 +366,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
                 store,
                 content_writes,
                 view,
+                pieces,
             )
             .await
         }

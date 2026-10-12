@@ -194,7 +194,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 
     pub(crate) fn with_overlay<'view>(
         &'view self,
-        overlay: &'view MetadataState,
+        overlay: Option<&'view MetadataState>,
         batch_accepted: &'view MetadataState,
         visible_seq: ChangeSeq,
     ) -> MetadataView<'view, 'store, S> {
@@ -202,7 +202,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             visible_seq,
             naming: self.naming,
             sources: MetadataSourceStack {
-                overlay: Some(overlay),
+                overlay,
                 batch_accepted: Some(batch_accepted),
                 wal_tail: self.sources.wal_tail,
                 manifest: self.sources.manifest,

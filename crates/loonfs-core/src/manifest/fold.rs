@@ -62,27 +62,6 @@ pub(crate) enum TryFoldWal {
     RaceLost(CurrentManifest),
 }
 
-#[async_trait::async_trait]
-impl<S: ObjectStore + ?Sized> crate::storage::content_location::LayoutLookup
-    for ManifestProjection<'_, S>
-{
-    async fn content_layout(
-        &self,
-        content_id: &ContentId,
-    ) -> Result<Option<loonfs_types::format::manifest::ContentLayoutRecord>> {
-        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state)
-            .content_layout(content_id)
-            .await
-    }
-
-    fn content_has_other_size(&self, content_ref: &loonfs_types::ContentRef) -> bool {
-        self.tail_state.revisions().any(|revision| {
-            revision.content_ref.content_id == content_ref.content_id
-                && revision.content_ref.size_bytes != content_ref.size_bytes
-        })
-    }
-}
-
 /// Folds the visible WAL tail into segments and publishes the next manifest.
 #[cfg(test)]
 pub(crate) async fn fold_wal<S: ObjectStore + ?Sized>(
@@ -352,6 +331,7 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
             Ok((content, pieces))
         })
         .collect::<Result<Vec<_>>>()?;
+    let view = projection.metadata_view();
     let layouts = Mutex::new(HashMap::new());
     // In a live namespace, failed folds leave committed content for the next fold.
     stream::iter(assembled.into_iter().map(Ok))
@@ -359,7 +339,7 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
             let layouts = &layouts;
             async move {
                 let layout =
-                    write_tail_content(store, projection, &content, pieces, content_writes).await?;
+                    write_tail_content(store, &view, &content, pieces, content_writes).await?;
                 {
                     layouts
                         .lock()
@@ -455,10 +435,13 @@ pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
+    pub(super) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
+        MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state)
+    }
+
     pub(super) async fn tail_with_deletion_inodes(&self) -> Result<MetadataState> {
         let mut tail = self.tail_state.merged_rows();
-        let view =
-            MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state);
+        let view = self.metadata_view();
         for tombstone in self.tail_state.subtree_tombstones() {
             if tail
                 .inode_at_seq(tombstone.root_inode_id, self.head.seq)

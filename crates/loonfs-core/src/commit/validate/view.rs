@@ -34,7 +34,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishValidationView<'a, S> {
     /// what its predecessors did.
     pub(crate) fn view(&self) -> MetadataView<'_, 'a, S> {
         self.base_view
-            .with_overlay(&self.overlay, self.batch_accepted, self.committed_seq)
+            .with_overlay(Some(&self.overlay), self.batch_accepted, self.committed_seq)
     }
 }
 

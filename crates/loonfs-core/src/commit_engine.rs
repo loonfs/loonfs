@@ -615,7 +615,7 @@ pub enum WriterSessionState {
 /// Shared handle to one namespace's [`WriterSessionState`].
 pub type SharedWriterSessionState = Arc<Mutex<WriterSessionState>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct NamespaceCommitEngine {
     content_writes: Arc<tokio::sync::Semaphore>,
     namespace_id: NamespaceId,

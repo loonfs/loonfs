@@ -65,7 +65,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 /// What a commit engine keeps between publication units. The WAL tail
 /// itself lives in the head-state cache, under the key this basis and head
 /// name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PublishTailPosition {
     basis: MetadataBasis,
     pub(crate) head: NamespaceReadState,
@@ -81,7 +81,7 @@ pub(crate) struct PublishTailProjection {
     pub(crate) tail_state: Arc<ProjectedWalTail>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct FoldInProgress {
     /// The head the fold was taken at: its `wal_no` is the boundary the
     /// published manifest will fold through.
