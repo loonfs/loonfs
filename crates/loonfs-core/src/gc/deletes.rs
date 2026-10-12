@@ -2,7 +2,7 @@
 
 use super::sweep::Decision;
 use crate::error::{CoreError, Result};
-use crate::store_waves::STORE_WRITE_WAVE;
+use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use futures::{future, FutureExt, Stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::GcResponse;
@@ -10,7 +10,7 @@ use std::pin::pin;
 
 pub(super) type DeletedCounter = fn(&mut GcResponse) -> &mut u64;
 
-/// Runs the decisions with at most `STORE_WRITE_WAVE` deletes in flight and
+/// Runs the decisions with at most `STORE_WRITES_IN_FLIGHT` deletes in flight and
 /// records each outcome in `report`. A `Delete` reaches `record` only after
 /// its delete succeeded.
 pub(super) async fn apply_decisions<S: ObjectStore + ?Sized>(
@@ -30,7 +30,7 @@ pub(super) async fn apply_decisions<S: ObjectStore + ?Sized>(
             .left_future(),
             decision => future::ready(Ok(decision)).right_future(),
         })
-        .try_buffer_unordered(STORE_WRITE_WAVE));
+        .try_buffer_unordered(STORE_WRITES_IN_FLIGHT));
     while let Some(decision) = outcomes.try_next().await? {
         record(decision, report);
     }

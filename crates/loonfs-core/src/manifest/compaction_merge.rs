@@ -6,7 +6,7 @@ use super::index_block_load::load_segment_index_for_compaction;
 use super::streaming_compaction::manifest_load_failure;
 use super::validate::validate_manifest_row_seq_range;
 use crate::error::Result;
-use crate::store_waves::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
@@ -334,7 +334,7 @@ where
         .iter_mut()
         .filter(|iterator| iterator.needs_fill())
         .collect();
-    for wave in hungry.chunks_mut(STORE_READ_WAVE) {
+    for wave in hungry.chunks_mut(STORE_READS_IN_FLIGHT) {
         futures::future::try_join_all(
             wave.iter_mut()
                 .map(|iterator| Box::pin(iterator.fill(loader, max_decoded_bytes))),

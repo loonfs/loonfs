@@ -75,7 +75,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
 
     assert_eq!(repeated, revisions);
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "a warm wide scan should be served entirely from the cache"
     );
@@ -120,7 +120,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         .expect("repeated scan range page");
     assert_eq!(repeated_page, page);
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "a warm range scan should be served entirely from the cache"
     );
@@ -173,7 +173,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
         .scan_prefix(ApiMetadataRowFamily::Revisions, "revision-")
         .await
         .expect("solo scan");
-    let solo_fetches = store.count(OperationClass::Read);
+    let solo_fetches = store.count(OperationSelector::Read);
     assert!(solo.len() >= 8);
     assert!(solo_fetches >= 8, "solo scan should fetch every segment");
 
@@ -201,7 +201,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
         first_segments.scan_prefix(ApiMetadataRowFamily::Revisions, "revision-"),
         second_segments.scan_prefix(ApiMetadataRowFamily::Revisions, "revision-"),
     );
-    let paired_fetches = store.count(OperationClass::Read);
+    let paired_fetches = store.count(OperationSelector::Read);
     assert_eq!(first.expect("first scan"), second.expect("second scan"));
     assert_eq!(
         paired_fetches, solo_fetches,
@@ -500,7 +500,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
         .await
         .expect("first lookup")
         .is_some());
-    let first_lookup_gets = store.count(OperationClass::Read);
+    let first_lookup_gets = store.count(OperationSelector::Read);
     assert!(first_lookup_gets > 0, "a cold lookup fetches blocks");
 
     assert!(segments
@@ -515,7 +515,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
         .expect("second-key lookup")
         .is_some());
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         first_lookup_gets,
         "later lookups through the same view should reuse decoded blocks"
     );
@@ -576,14 +576,14 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
             .await
             .expect("first lookup")
             .is_some());
-        let first_lookup_reads = store.count(OperationClass::Read);
+        let first_lookup_reads = store.count(OperationSelector::Read);
         assert!(segments
             .get_for_lookup(ApiMetadataRowFamily::Inodes, key, key)
             .await
             .expect("repeated lookup")
             .is_some());
         assert!(
-            store.count(OperationClass::Read) > first_lookup_reads,
+            store.count(OperationSelector::Read) > first_lookup_reads,
             "a zero memo should keep no data block for the repeated lookup"
         );
     }
@@ -673,7 +673,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         .expect("point lookup");
     assert_eq!(rows.len(), 1, "exactly one bind row for the probed name");
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         1,
         "inline filters reject the other runs without fetches, and the one \
          admitted small segment loads whole with a single ranged GET"
@@ -718,7 +718,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         .expect("point lookup without inline filters");
     assert_eq!(stripped_rows, rows);
     assert!(
-        store.count(OperationClass::Read) > 1,
+        store.count(OperationSelector::Read) > 1,
         "without inline copies the ruled-out runs pay filter fetches"
     );
 }
@@ -901,7 +901,7 @@ async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
         "a filter load probes the local cache before it asks the store"
     );
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         1,
         "a cold filter load pays exactly one fetch"
     );
@@ -911,7 +911,7 @@ async fn a_cold_local_block_cache_takes_every_section_one_fetch_produced() {
     let index = index_block_load::load_segment_index(&store, Some(&cache), &memo, &descriptor)
         .await
         .expect("load index");
-    assert_eq!(store.count(OperationClass::Read), 1);
+    assert_eq!(store.count(OperationSelector::Read), 1);
     assert!(!index.is_empty(), "a segment holds at least one data block");
 
     let offered: Vec<_> = blocks
@@ -963,7 +963,7 @@ async fn warm_block_caches_reuse_only_the_same_owner_and_segment() {
 
     assert_eq!(warm_index, cold_index);
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "a warm index and filter should read no segment bytes"
     );
@@ -1013,7 +1013,7 @@ async fn warm_block_caches_reuse_only_the_same_owner_and_segment() {
                 hit: false,
             }));
     }
-    assert_eq!(store.count(OperationClass::Read), 2);
+    assert_eq!(store.count(OperationSelector::Read), 2);
 }
 
 #[tokio::test]
@@ -1037,7 +1037,7 @@ async fn a_local_block_cache_entry_that_does_not_decode_is_dropped_and_refetched
 
     assert_eq!(repaired, cold_index);
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         1,
         "the bad entry costs one refetch and no retry loop"
     );
@@ -1071,7 +1071,7 @@ async fn a_closed_local_block_cache_reads_as_a_miss() {
         .expect("a closed local cache must not fail the read");
 
     assert_eq!(index, cold_index);
-    assert_eq!(store.count(OperationClass::Read), 1);
+    assert_eq!(store.count(OperationSelector::Read), 1);
     assert_eq!(
         blocks.call_count(),
         calls_before,
@@ -1265,7 +1265,7 @@ async fn wide_read(
         data_block_load::load_segment_data_block_span(store, cache, Some(&memo), descriptor, index)
             .await
             .expect("wide read");
-    (blocks, store.count(OperationClass::Read))
+    (blocks, store.count(OperationSelector::Read))
 }
 
 #[tokio::test]
@@ -1304,7 +1304,7 @@ async fn a_warm_span_remembers_shared_hits_in_its_bounded_memo() {
         after_first.hits,
         "memo avoids repeated shared-cache access"
     );
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
     for (first, repeated) in first.iter().zip(&repeated) {
         assert!(
             Arc::ptr_eq(first, repeated),
@@ -1324,7 +1324,7 @@ async fn a_warm_span_remembers_shared_hits_in_its_bounded_memo() {
     .expect("span without memo");
     assert_eq!(without_memo, expected);
     assert_eq!(cache.stats().hits - after_first.hits, index.len());
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 }
 
 #[tokio::test]
@@ -1351,7 +1351,7 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
     .expect("cold data block load");
 
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         1,
         "a cold data block costs exactly one fetch"
     );
@@ -1384,7 +1384,7 @@ async fn a_narrow_data_block_load_fills_the_local_cache_and_then_reads_from_it()
 
     assert_eq!(warm, cold);
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "a warm data block reads no segment bytes"
     );
@@ -1479,7 +1479,7 @@ async fn deferred_lookup_reads_never_read_or_write_local_data_blocks() {
             .expect("lookup rows");
             assert_eq!(loaded.rows().collect::<Vec<_>>(), vec![row]);
         }
-        assert_eq!(store.count(OperationClass::Read), 1);
+        assert_eq!(store.count(OperationSelector::Read), 1);
         assert_eq!(
             &blocks.calls()[calls_before..],
             &[
@@ -1538,7 +1538,7 @@ async fn a_corrupt_local_entry_on_a_narrow_load_is_dropped_and_refetched() {
 
     assert_eq!(read.as_ref(), &expected);
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         1,
         "the bad entry costs one point fetch and no retry loop"
     );
@@ -1603,7 +1603,7 @@ async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
         .expect("create delta checkpoint");
 
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "delta checkpoint update should use the WAL tail and copy existing metadata file refs"
     );
@@ -1683,7 +1683,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             .expect("first reread"),
         expected
     );
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
     store.reset();
     assert_eq!(
         second
@@ -1692,7 +1692,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             .expect("second reread"),
         expected
     );
-    assert!(store.count(OperationClass::Read) > 0);
+    assert!(store.count(OperationSelector::Read) > 0);
     drop(first);
     assert_eq!(pool.in_use(), 0);
     second
@@ -1705,7 +1705,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
         .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
         .await
         .expect("retained reread");
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
     drop(second);
     assert_eq!(pool.in_use(), 0);
 }

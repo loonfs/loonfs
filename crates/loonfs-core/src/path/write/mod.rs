@@ -17,28 +17,6 @@ mod preconditions;
 mod publish_path_planning;
 mod session;
 
-use crate::error::CoreError;
-
 pub use intent::{CommitIntent, FilesystemOperation};
 pub(crate) use planner::commit_fingerprint;
 pub(crate) use session::PublishPlanningSession;
-
-impl From<loonfs_types::DestinationPreconditionError> for CoreError {
-    fn from(error: loonfs_types::DestinationPreconditionError) -> Self {
-        let field = match error {
-            loonfs_types::DestinationPreconditionError::PreconditionsRequireReplace { field } => {
-                field
-            }
-            loonfs_types::DestinationPreconditionError::RevisionRequiresInode {
-                revision_field,
-                ..
-            } => revision_field,
-            _ => return Self::InvalidCommitRequest(error.to_string()),
-        };
-        Self::InvalidCommitField {
-            field,
-            message: error.to_string(),
-            precondition_index: None,
-        }
-    }
-}

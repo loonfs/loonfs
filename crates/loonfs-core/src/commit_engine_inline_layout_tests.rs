@@ -183,7 +183,7 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
         .expect("location");
     store.reset();
     assert_eq!(
-        location.get_bytes(&store, &reference).await.expect("read"),
+        location.read_bytes(&store, &reference).await.expect("read"),
         bytes
     );
     assert_eq!(store.counts().gets, 3);
@@ -200,14 +200,14 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
         .expect("prefix location");
     store.reset();
     assert_eq!(
-        older.get_bytes(&store, &prefix).await.expect("prefix"),
+        older.read_bytes(&store, &prefix).await.expect("prefix"),
         bytes[..105]
     );
     assert_eq!(store.counts().gets, 2);
     let missing = content_span(&namespace_id, &original.content_id, 100, 110);
     store.delete(&missing).await.expect("delete span");
     assert!(
-        matches!(location.get_bytes(&store, &reference).await, Err(DurableContentValidationError::MissingContentObject { object_key }) if object_key == missing)
+        matches!(location.read_bytes(&store, &reference).await, Err(DurableContentValidationError::MissingContentObject { object_key }) if object_key == missing)
     );
 }
 
@@ -1000,7 +1000,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         let blocked = loonfs_test_support::stores::BlockingStore::new(
             store.clone(),
             KeyPredicate::content_blob(),
-            loonfs_test_support::stores::OperationClass::Put,
+            loonfs_test_support::stores::OperationSelector::Put,
         );
         let view = load_current_metadata_view(&blocked, &namespace_id)
             .await
@@ -1065,7 +1065,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
 
 #[tokio::test]
 async fn two_chains_in_one_fold_share_one_write_permit() {
-    use loonfs_test_support::stores::{BlockingStore, ConcurrencyWatchStore, OperationClass};
+    use loonfs_test_support::stores::{BlockingStore, ConcurrencyWatchStore, OperationSelector};
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace_id.clone();
     let values = vec![
@@ -1079,7 +1079,7 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
         BlockingStore::new(
             store.clone(),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
         ),
         KeyPredicate::content_blob(),
     );
@@ -1198,7 +1198,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
             .await
             .expect("view");
         let read = view
-            .get_file_revision_bytes(
+            .read_file_revision_bytes(
                 &store,
                 "/target-0",
                 RevisionNo(2),
@@ -1480,7 +1480,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 .await
                 .expect("view");
             let bytes = view
-                .get_file_revision_bytes(
+                .read_file_revision_bytes(
                     &store,
                     if restore { "/file-0" } else { "/target-0" },
                     RevisionNo(if restore { 4 } else { 2 }),

@@ -58,10 +58,10 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .expect("maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("fresh-worker"));
     let disabled = MaintainMetadataOptions {
-        idle_fold_after_ms: 0,
+        idle_fold_timeout_ms: 0,
         ..MaintainMetadataOptions::default()
     };
-    let idle_ms = MaintainMetadataOptions::default().idle_fold_after_ms;
+    let idle_ms = MaintainMetadataOptions::default().idle_fold_timeout_ms;
 
     clock
         .0

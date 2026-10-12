@@ -36,6 +36,14 @@ One successfully published mutation request. A request can contain several opera
 
 A number that orders the commits in one namespace. Each commit is assigned the next sequence number. One WAL object can contain several commits, so sequence numbers and WAL numbers are separate counters. For example, WAL object 10 might contain three commits at sequences 41, 42, and 43.
 
+### Number (`_no`)
+
+The position of one object in a numbered series, such as a manifest number (`manifest_no`), a WAL number (`wal_no`), or a revision number (`revision_no`). In code, `_no` is the short form of "number" for these positions. Each series is counted separately, so manifest 41 and WAL object 41 are unrelated, and revision numbers are counted per file (see [Revision](#revision)).
+
+### Garbage collection (`gc`)
+
+The process that deletes stored objects that nothing references anymore, such as superseded manifests, folded WAL objects, and unused content objects. Code uses the short form `gc` in names, as in `gc_namespace`. Each call runs one [garbage collection pass](#garbage-collection-pass).
+
 ### Head
 
 The namespace's latest committed state, identified by the sequence number of its newest commit (`head_seq`). The head isn't a stored object. A reader finds it by reading the current manifest and replaying the WAL tail. For example, if the current manifest includes commits through sequence 40 and the WAL tail contains commits 41 to 43, the head is at sequence 43.

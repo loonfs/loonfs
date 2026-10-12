@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 const TEST_PART_BYTES: u64 = 1024 * 1024;
 /// Payload just above the streaming threshold, split into eight full parts
 /// and one partial part.
-const TEST_PAYLOAD_BYTES: usize = STREAMING_PUT_MIN_BYTES as usize + 1_000;
+const TEST_PAYLOAD_BYTES: usize = MIN_STREAMING_PUT_BYTES as usize + 1_000;
 /// Parts [`TEST_PAYLOAD_BYTES`] is cut into at [`TEST_PART_BYTES`].
 const TEST_PAYLOAD_PARTS: u32 = 9;
 
@@ -453,7 +453,7 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     first.push(Outcome::TransportFailure);
     let transport = scripted_transport::script(first);
     let interrupted = client_without_retry(&transport)
-        .put_file_stream_resumable(
+        .put_file_stream_with_options(
             &spec(),
             PayloadSource::stream(
                 futures::stream::once({
@@ -463,9 +463,11 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
                 .boxed(),
             ),
             &loonfs_test_support::test_actor(),
-            &PutFileOptions::default(),
-            &journal,
-            None,
+            &PutFileStreamOptions {
+                options: PutFileOptions::default(),
+                journal: Some(&journal),
+                resume: None,
+            },
         )
         .await;
     assert!(interrupted.is_err(), "the third wave never got signed");
@@ -483,13 +485,15 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
     let transport = scripted_transport::script(resumed_script(&missing, uploaded));
     let resumed_journal = RecordingJournal::default();
     client(&transport)
-        .put_file_stream_resumable(
+        .put_file_stream_with_options(
             &spec(),
             source,
             &loonfs_test_support::test_actor(),
-            &PutFileOptions::default(),
-            &resumed_journal,
-            Some(&resume),
+            &PutFileStreamOptions {
+                options: PutFileOptions::default(),
+                journal: Some(&resumed_journal),
+                resume: Some(&resume),
+            },
         )
         .await
         .expect("a resumed multipart put should land");
@@ -531,13 +535,15 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
     let journal = RecordingJournal::default();
 
     client(&transport)
-        .put_file_stream_resumable(
+        .put_file_stream_with_options(
             &spec(),
             source,
             &loonfs_test_support::test_actor(),
-            &PutFileOptions::default(),
-            &journal,
-            Some(&resume),
+            &PutFileStreamOptions {
+                options: PutFileOptions::default(),
+                journal: Some(&journal),
+                resume: Some(&resume),
+            },
         )
         .await
         .expect("the resumed multipart put should land");
@@ -974,15 +980,17 @@ async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() 
         let transport = scripted_transport::script(script);
         let bytes = vec![0; TEST_PART_BYTES as usize * 5];
         let error = client_without_retry(&transport)
-            .put_file_stream_resumable(
+            .put_file_stream_with_options(
                 &spec(),
                 PayloadSource::stream(
                     futures::stream::once(async move { Ok(Bytes::from(bytes)) }).boxed(),
                 ),
                 &loonfs_test_support::test_actor(),
-                &PutFileOptions::default(),
-                &FailingJournal { fail_at_begin },
-                None,
+                &PutFileStreamOptions {
+                    options: PutFileOptions::default(),
+                    journal: Some(&FailingJournal { fail_at_begin }),
+                    resume: None,
+                },
             )
             .await
             .expect_err("journal error");
@@ -1077,13 +1085,15 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
     options.expected_inode_id = Some(loonfs_types::InodeId(7));
     options.expected_revision_no = Some(loonfs_types::RevisionNo(9));
     client_without_retry(&transport)
-        .put_file_stream_resumable(
+        .put_file_stream_with_options(
             &spec(),
             source,
             &loonfs_test_support::test_actor(),
-            &options,
-            &journal,
-            None,
+            &PutFileStreamOptions {
+                options: options.clone(),
+                journal: Some(&journal),
+                resume: None,
+            },
         )
         .await
         .expect_err("lost acknowledgement");
@@ -1187,15 +1197,17 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
             .expect("publish");
         let journal = RecordingJournal::default();
         client
-            .put_file_stream_resumable(
+            .put_file_stream_with_options(
                 &spec(),
                 PayloadSource::stream(
                     futures::stream::iter([Ok(Bytes::copy_from_slice(bytes))]).boxed(),
                 ),
                 &loonfs_test_support::test_actor(),
-                &options,
-                &journal,
-                None,
+                &PutFileStreamOptions {
+                    options: options.clone(),
+                    journal: Some(&journal),
+                    resume: None,
+                },
             )
             .await
             .expect("stream");

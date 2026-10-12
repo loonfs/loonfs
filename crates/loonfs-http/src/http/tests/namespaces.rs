@@ -181,7 +181,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::hint(&namespace_id),
-        OperationClass::Read,
+        OperationSelector::Read,
     ));
     let (router, state) = test_app(
         test_options(directory.path(), "close-during-open-host"),
@@ -323,7 +323,7 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     ));
     let mut options = test_options(directory.path(), "ending-host");
     options.binding.inline_content.inline_content_fold_at_bytes = 1;
@@ -468,7 +468,7 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
         let store = Arc::new(BlockingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::manifest(&namespace_id),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
         ));
         let mut options = test_options(directory.path(), "closing-host");
         options.binding.inline_content.inline_content_fold_at_bytes = 1;

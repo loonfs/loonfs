@@ -600,7 +600,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<Vec<u8>> {
         Ok(target
             .location
-            .get_bytes(&self.store, &target.content_ref)
+            .read_bytes(&self.store, &target.content_ref)
             .await?)
     }
 
@@ -807,16 +807,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// older listing. Requests above
     /// [`MAX_CURRENT_FILES_PER_STAT`](crate::MAX_CURRENT_FILES_PER_STAT) fail before
     /// reading metadata.
-    pub async fn resolve_current_files(
+    pub async fn stat_current_files_by_inode(
         &self,
         inode_ids: &[InodeId],
         context: &RuntimeReadContext,
     ) -> Result<Vec<CurrentFileState>> {
-        crate::path::read::ensure_resolve_batch_within_cap(inode_ids.len())?;
+        crate::path::read::ensure_stat_batch_within_cap(inode_ids.len())?;
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        crate::path::read::resolve_current_files(&view, inode_ids, &access).await
+        crate::path::read::stat_current_files_by_inode(&view, inode_ids, &access).await
     }
 
     /// Resolves an import source, including an unpublished upload.
@@ -868,7 +868,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
         let location = view.resolve_content_location(content_ref).await?;
         location
-            .get_bytes(&self.store, content_ref)
+            .read_bytes(&self.store, content_ref)
             .await
             .map_err(|error| match error {
                 DurableContentValidationError::MissingContentObject { .. } => {
@@ -915,7 +915,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.get_file_revision_bytes(
+        view.read_file_revision_bytes(
             &self.store,
             path.as_ref(),
             revision_no,
@@ -936,7 +936,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let head_view = self.authorization_head_view().await?;
         let access = self.read_access(context, head_view.as_ref())?;
         let view = self.load_read_view(context).await?;
-        view.get_file_revision_bytes_by_inode(
+        view.read_file_revision_bytes_by_inode(
             &self.store,
             inode_id,
             revision_no,

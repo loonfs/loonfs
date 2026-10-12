@@ -8,14 +8,14 @@ use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, DestinationBehavior, ErrorCode, LoonFs, NamespaceId, SharedObjectStore,
 };
-use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
+use loonfs_grep::codec::MAX_INDEX_GRAMS_FILE_BYTES;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{
-    ConcurrencyWatchStore, KeyPredicate, OperationClass, RecordingStore,
+    ConcurrencyWatchStore, KeyPredicate, OperationSelector, RecordingStore,
 };
 use loonfs_types::api::v0::GrepIndexLifecycle;
 use loonfs_types::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
@@ -328,7 +328,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         after_second, put_seqs[3],
         "the byte budget must stop after one inline file"
     );
-    assert_eq!(raw_store.count(OperationClass::Get), 0);
+    assert_eq!(raw_store.count(OperationSelector::Get), 0);
 
     drive_worker_step(&host.worker, &namespace_id, byte_policy).await;
     assert_eq!(
@@ -727,13 +727,13 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
-    let before_first = raw_store.count(OperationClass::Read);
+    let before_first = raw_store.count(OperationSelector::Read);
     let first = host
         .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect("first grep");
     assert_eq!(first.matches.len(), 1);
-    let after_first = raw_store.count(OperationClass::Read);
+    let after_first = raw_store.count(OperationSelector::Read);
     assert_eq!(
         after_first - before_first,
         1,
@@ -745,7 +745,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         .await
         .expect("second grep");
     assert_eq!(second.matches, first.matches);
-    let after_second = raw_store.count(OperationClass::Read);
+    let after_second = raw_store.count(OperationSelector::Read);
     assert_eq!(
         after_second, after_first,
         "an identical grep through the same service must serve every \
@@ -907,8 +907,8 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 
     // Oversized and full of matches: were it ever fetched and scanned, it
     // would flood the results instead of being skipped.
-    let oversized_bytes = b"needle\n".repeat(INDEX_GRAMS_MAX_FILE_BYTES as usize / 7 + 1);
-    assert!(oversized_bytes.len() as u64 > INDEX_GRAMS_MAX_FILE_BYTES);
+    let oversized_bytes = b"needle\n".repeat(MAX_INDEX_GRAMS_FILE_BYTES as usize / 7 + 1);
+    assert!(oversized_bytes.len() as u64 > MAX_INDEX_GRAMS_FILE_BYTES);
     let blobs_before_bravo = content_blob_keys(&store).await;
     namespace
         .put_file(
@@ -1037,7 +1037,7 @@ async fn reorganization_does_not_warm_the_query_cache() {
         max_decoded_input_rows_per_step: nonzero_usize(1),
         ..GramIndexBuildPolicy::default()
     };
-    let gets_before_reorganization = raw_store.count(OperationClass::Read);
+    let gets_before_reorganization = raw_store.count(OperationSelector::Read);
     let stats_before_reorganization = host.block_cache.stats();
     let reorganization = host
         .worker
@@ -1052,20 +1052,20 @@ async fn reorganization_does_not_warm_the_query_cache() {
         }
     ));
     assert!(
-        raw_store.count(OperationClass::Read) > gets_before_reorganization,
+        raw_store.count(OperationSelector::Read) > gets_before_reorganization,
         "the worker must load its snapshot's segment blocks"
     );
     let stats_after_reorganization = host.block_cache.stats();
     assert_eq!(stats_after_reorganization, stats_before_reorganization);
 
-    let gets_before_query = raw_store.count(OperationClass::Read);
+    let gets_before_query = raw_store.count(OperationSelector::Read);
     let result = host
         .grep(&namespace_id, &request("needle"), default_page_limit())
         .await
         .expect("grep after reorganization");
     assert_eq!(result.matches.len(), 8);
     assert!(
-        raw_store.count(OperationClass::Read) > gets_before_query,
+        raw_store.count(OperationSelector::Read) > gets_before_query,
         "the query must load its segment blocks"
     );
     assert!(

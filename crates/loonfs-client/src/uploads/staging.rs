@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 /// This matches the provider multipart part size. Smaller payloads would use
 /// one part and gain nothing from multipart overhead. Payloads of unknown size
 /// also use the streaming path.
-pub const STREAMING_PUT_MIN_BYTES: u64 = 8 * 1024 * 1024;
+pub const MIN_STREAMING_PUT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Maximum number of multipart payloads held in memory at once.
 const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
@@ -63,6 +63,29 @@ pub trait PutFileJournal: Send + Sync {
         actor_id: &loonfs_types::ActorId,
         upload_id: Option<&UploadId>,
     ) -> std::io::Result<()>;
+}
+
+/// Optional inputs for [`Client::put_file_stream_with_options`].
+#[derive(Clone, Default)]
+pub struct PutFileStreamOptions<'a> {
+    /// Destination behavior, commit settings, and expected file state.
+    pub options: PutFileOptions,
+    /// Records the attempt so a later process can resume or replay it.
+    pub journal: Option<&'a dyn PutFileJournal>,
+    /// Multipart state from an interrupted attempt, so its completed parts
+    /// aren't uploaded again.
+    pub resume: Option<&'a MultipartUploadResume>,
+}
+
+impl std::fmt::Debug for PutFileStreamOptions<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PutFileStreamOptions")
+            .field("options", &self.options)
+            .field("journal", &self.journal.map(|_| "configured"))
+            .field("resume", &self.resume)
+            .finish()
+    }
 }
 
 /// Optional multipart resume state and a journal for the complete PUT attempt.
@@ -406,7 +429,7 @@ impl Client {
     ) -> std::result::Result<UploadTransport, NoTransportFits> {
         // Small known payloads do not benefit from multipart. Unknown sizes
         // remain eligible because they may exceed one part.
-        let worth_cutting = size_bytes.is_none_or(|size| size >= STREAMING_PUT_MIN_BYTES);
+        let worth_cutting = size_bytes.is_none_or(|size| size >= MIN_STREAMING_PUT_BYTES);
         if worth_cutting && capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART) {
             return Ok(UploadTransport::Multipart);
         }

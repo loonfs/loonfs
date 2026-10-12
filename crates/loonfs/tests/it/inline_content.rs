@@ -14,7 +14,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
-    KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, ContentRef,
@@ -125,7 +125,7 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
                 .remove(0)
                 .object_key
         };
-        assert_eq!(recording.count(OperationClass::Put), 1);
+        assert_eq!(recording.count(OperationSelector::Put), 1);
 
         assert_eq!(
             object_key,
@@ -293,8 +293,8 @@ async fn same_namespace_imports_read_inline_bytes_without_a_content_request() {
         )
         .await
         .expect("import before folding");
-    assert_eq!(recording.count(OperationClass::Head), 0);
-    assert_eq!(recording.count(OperationClass::Read), 0);
+    assert_eq!(recording.count(OperationSelector::Head), 0);
+    assert_eq!(recording.count(OperationSelector::Read), 0);
     let file = namespace.read_file("/file").await.expect("imported bytes");
     assert_eq!(file.bytes, b"inline content");
     assert_eq!(file.entry.revision_no(), Some(RevisionNo(2)));

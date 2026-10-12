@@ -53,7 +53,9 @@ use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::claim_writer_epoch;
-use crate::path::read::{load_current_metadata_view, resolve_current_files, CurrentFileState};
+use crate::path::read::{
+    load_current_metadata_view, stat_current_files_by_inode, CurrentFileState,
+};
 use crate::pin::record::load_pin;
 use crate::protocol::list_changes_after;
 use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, NamespaceCommitEngine};
@@ -76,7 +78,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
 use loonfs_types::format::manifest::{
     encode_namespace_manifest_json, lookup_keys, MetadataRow,
@@ -413,7 +415,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     let view = load_current_metadata_view(store, namespace_id)
         .await
         .expect("load the read view");
-    resolve_current_files(
+    stat_current_files_by_inode(
         &view,
         &inode_ids,
         &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),

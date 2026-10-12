@@ -303,7 +303,7 @@ test("direct downloads request a window of ranges while the current one is read"
             { start_offset: 8, length: 1, range: "bytes=6-6", content: "9" },
         ],
     };
-    const rangeWindow = 4;
+    const rangeResponsesInFlight = 4;
     const requests: string[] = [];
     const objects = () => requests.filter((path) => path.startsWith("/object"));
     const stream = await new LoonFSClient({
@@ -315,7 +315,7 @@ test("direct downloads request a window of ranges while the current one is read"
     const text = async () => new TextDecoder().decode((await reader.read()).value);
 
     assert.equal(await text(), "12");
-    assert.deepEqual(objects(), fixture.object_requests.slice(0, rangeWindow));
+    assert.deepEqual(objects(), fixture.object_requests.slice(0, rangeResponsesInFlight));
     assert.equal(await text(), "34");
     assert.deepEqual(objects(), fixture.object_requests);
     assert.equal(await text(), "56");

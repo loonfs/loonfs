@@ -8,7 +8,7 @@ use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder, Metri
 use crate::{LoonFs, NamespaceId, ReadOnly, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -34,7 +34,7 @@ async fn pin_fold_reads(
         loonfs_test_support::stores::BlockingStore::new(
             LocalFsStore::new(root.path()).expect("store"),
             KeyPredicate::metadata_segment(),
-            OperationClass::Put,
+            OperationSelector::Put,
         ),
     ));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -140,7 +140,7 @@ async fn pin_fold_reads(
         ),
         0
     );
-    let reads = store.count(OperationClass::Read);
+    let reads = store.count(OperationSelector::Read);
     assert_eq!(
         loonfs_core::cache::load_namespace_diagnostics(store.as_ref(), &demo())
             .await
@@ -377,12 +377,12 @@ async fn read_policy_stays_with_each_binding() {
         assert_reads(runtime, b"first").await;
     }
     assert_eq!(
-        every_read_store.count(OperationClass::Head),
+        every_read_store.count(OperationSelector::Head),
         2,
         "a zero interval probes for a successor manifest on every read"
     );
     assert_eq!(
-        never_store.count(OperationClass::Head),
+        never_store.count(OperationSelector::Head),
         0,
         "the other binding never probes"
     );
@@ -406,10 +406,10 @@ async fn read_policy_stays_with_each_binding() {
             .expect("stat the folded file");
     }
     assert!(
-        no_memo_store.count(OperationClass::Get) > memo_store.count(OperationClass::Get),
+        no_memo_store.count(OperationSelector::Get) > memo_store.count(OperationSelector::Get),
         "a zero block memo rereads blocks the default memo keeps: {} against {}",
-        no_memo_store.count(OperationClass::Get),
-        memo_store.count(OperationClass::Get)
+        no_memo_store.count(OperationSelector::Get),
+        memo_store.count(OperationSelector::Get)
     );
 }
 
@@ -517,7 +517,7 @@ async fn reads_on_two_runtimes_share_read_working_memory_and_release_it() {
         let store = Arc::new(BlockingStore::new(
             RecordingStore::metadata_segments(LocalFsStore::new(root.path()).expect("store")),
             KeyPredicate::content_blob(),
-            OperationClass::Read,
+            OperationSelector::Read,
         ));
         let runtime = LoonFs::builder_with_store(store.clone())
             .read_only()
@@ -567,8 +567,8 @@ async fn reads_on_two_runtimes_share_read_working_memory_and_release_it() {
     }
     assert_eq!(budget.stats().read_working_bytes, working_bytes);
     assert!(
-        second_store.inner().count(OperationClass::Read)
-            > first_store.inner().count(OperationClass::Read)
+        second_store.inner().count(OperationSelector::Read)
+            > first_store.inner().count(OperationSelector::Read)
     );
     assert!(
         gauge(

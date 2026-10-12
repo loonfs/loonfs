@@ -33,7 +33,7 @@ This section compares the providers feature by feature. The paragraphs after the
 
 Items marked *live* are documented behavior that only a run against the provider confirms. The ignored tests in `crates/loonfs-objectstore/tests/it/objectstore_conformance.rs` exercise them.
 
-For an object that hasn't changed, the modification time in a listing and the modification time a HEAD request returns differ by less than one second. R2 and GCS listings keep fractional seconds, while HEAD reports whole seconds. The garbage collector uses listing times, without a HEAD request for each object. Its `GC_SAFETY_MARGIN_MS` is 180,000 milliseconds, and that allowance includes timestamp precision.
+For an object that hasn't changed, the modification time in a listing and the modification time a HEAD request returns differ by less than one second. R2 and GCS listings keep fractional seconds, while HEAD reports whole seconds. The garbage collector uses listing times, without a HEAD request for each object. Its `GC_SAFETY_WINDOW_MS` is 180,000 milliseconds, and that allowance includes timestamp precision.
 
 AWS S3 credentials with `kind = "ambient"` use the standard AWS SDK credential chain. The chain checks environment variables, shared config and credentials files, credential processes, SSO, web identity, ECS task credentials, and EC2 instance metadata. `AWS_PROFILE` selects a profile by its name.
 

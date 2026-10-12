@@ -7,9 +7,11 @@ use super::options::GcOptions;
 use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
+use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::limits::{
-    CONTENT_RECLAMATION_GRACE_MS, GC_MIN_GRACE_WINDOW_MS, NAMESPACE_RETIREMENT_GRACE_MS,
-    UNREFERENCED_SEGMENT_MIN_AGE_MS, UPLOAD_SESSION_LEASE_MS,
+    CONTENT_RECLAMATION_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
+    NAMESPACE_RETIREMENT_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
+    UPLOAD_SESSION_LEASE_MS,
 };
 use crate::manifest::tests::{
     compact_a_family_group, create_checkpoint, mutation_context, write_test_file,
@@ -18,7 +20,6 @@ use crate::manifest::MetadataCompactionPolicy;
 use crate::manifest::{advance_retention_floor, RetentionTarget};
 use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::pin::record::delete_pin;
-use crate::store_waves::STORE_WRITE_WAVE;
 use crate::test_support::ops::create;
 use crate::time::{Deadline, StdMonotonicTimer};
 use futures::StreamExt;
@@ -47,7 +48,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
-    OperationClass, OperationContext, OperationKind, RecordingStore,
+    OperationContext, OperationKind, OperationSelector, RecordingStore,
 };
 use loonfs_types::AttributeInclusion;
 use tempfile::tempdir;
@@ -75,7 +76,7 @@ fn context(now_ms: u64) -> MutationContext {
 
 /// How long after its deletion a namespace retires under `options()`.
 fn retirement_ms() -> u64 {
-    GRACE_MS.max(NAMESPACE_RETIREMENT_GRACE_MS)
+    GRACE_MS.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
 }
 
 async fn pin_exists<S: ObjectStore + ?Sized>(
@@ -104,7 +105,7 @@ async fn now_after_newest_object<S: ObjectStore>(
             .await
             .expect("head object")
             .expect("object exists")
-            .last_modified_ms
+            .last_modified_at_ms
             .expect("local fs provides timestamps");
         newest = newest.max(modified);
     }
@@ -352,7 +353,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests > 0);
     assert_eq!(report.deleted_checkpoints_by_owner.user, 1);
-    let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_MIN_AGE_MS);
+    let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS);
     store.reset();
     let report = gc_namespace(&store, None, &namespace_id, &options(), &reaped)
         .await
@@ -616,7 +617,7 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::content_blob(),
-        OperationClass::Delete,
+        OperationSelector::Delete,
         InjectedError::Transport("content delete timed out".to_owned()),
     );
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -688,7 +689,7 @@ async fn a_pass_reports_the_soonest_deadline_it_retained() {
         .expect("gc pass over the completed session");
     assert_eq!(
         report.next_reclamation_at_ms,
-        Some(completed_at.now_ms + CONTENT_RECLAMATION_GRACE_MS),
+        Some(completed_at.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS),
         "a completed session's content is protected by the derived grace, not the configured one"
     );
 }
@@ -1083,7 +1084,7 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
         &content_ref.content_id,
     );
 
-    let inside = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS - 1);
+    let inside = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS - 1);
     let report = gc_namespace(&store, None, &namespace_id, &options(), &inside)
         .await
         .expect("gc pass inside the content grace");
@@ -1114,7 +1115,12 @@ async fn an_unpublished_completed_upload_loses_its_record_then_its_object() {
     );
 
     let past = context(
-        now_after_newest_object(&store, &namespace_id, CONTENT_RECLAMATION_GRACE_MS + 1).await,
+        now_after_newest_object(
+            &store,
+            &namespace_id,
+            CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1,
+        )
+        .await,
     );
     let report = gc_namespace(&store, None, &namespace_id, &options(), &past)
         .await
@@ -1439,7 +1445,12 @@ async fn published_compaction_segments_are_referenced_and_kept() {
 
     // Far past every window this collector knows, including the staging one.
     let long_after = context(
-        now_after_newest_object(&store, &namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS * 4).await,
+        now_after_newest_object(
+            &store,
+            &namespace_id,
+            UNREFERENCED_SEGMENT_GRACE_WINDOW_MS * 4,
+        )
+        .await,
     );
     let report = gc_namespace(&store, None, &namespace_id, &options(), &long_after)
         .await
@@ -1496,7 +1507,7 @@ async fn a_publication_during_a_pass_never_costs_the_job_its_segments() {
     let gated = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
-        OperationClass::List,
+        OperationSelector::List,
     );
     gated.block_next();
     let pass_options = options();
@@ -1736,7 +1747,12 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         }
     }
     let aged = context(
-        now_after_newest_object(&store, &namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1).await,
+        now_after_newest_object(
+            &store,
+            &namespace_id,
+            UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
+        )
+        .await,
     );
     let after_merge = gc_namespace(&store, None, &namespace_id, &options(), &aged)
         .await
@@ -1986,7 +2002,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         FailStore::new(
             store,
             KeyPredicate::exact(&pin_key),
-            OperationClass::Delete,
+            OperationSelector::Delete,
             InjectedError::Transport("source pin delete failed".to_owned()),
         ),
         KeyPredicate::exact(&pin_key),
@@ -2037,7 +2053,7 @@ async fn a_corrupt_fork_target_manifest_fails_the_pass_and_an_unreadable_hint_re
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::exact(hint(&clone)),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("target hint timed out".to_owned()),
     );
     let setup = context(1_000);
@@ -2245,7 +2261,7 @@ async fn a_corrupt_pin_and_an_unreadable_one_both_fail_the_pass() {
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(pin_prefix(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("pin read timed out".to_owned()),
     );
     let setup = context(1_000);
@@ -2311,7 +2327,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_pass() {
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("manifest read timed out".to_owned()),
     );
     let setup = context(1_000);
@@ -2438,7 +2454,7 @@ async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTr
 
 #[tokio::test]
 async fn provider_age_reserves_the_clock_margin_before_deletion() {
-    use crate::limits::GC_SAFETY_MARGIN_MS;
+    use crate::limits::GC_SAFETY_WINDOW_MS;
 
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("clock-margin").expect("namespace");
@@ -2451,7 +2467,7 @@ async fn provider_age_reserves_the_clock_margin_before_deletion() {
     let provider_stamp = 1_000_000;
     let store = RecordingStore::new(
         MetadataMapStore::new(inner, KeyPredicate::exact(&key), move |mut metadata| {
-            metadata.last_modified_ms = Some(provider_stamp);
+            metadata.last_modified_at_ms = Some(provider_stamp);
             metadata
         }),
         KeyPredicate::exact(&key),
@@ -2465,8 +2481,8 @@ async fn provider_age_reserves_the_clock_margin_before_deletion() {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
         ..Default::default()
     };
-    let publication_bound = GC_MIN_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
-    let now_ms = provider_stamp + publication_bound - 1 + GC_SAFETY_MARGIN_MS;
+    let publication_bound = GC_MIN_GRACE_WINDOW_MS - GC_SAFETY_WINDOW_MS;
+    let now_ms = provider_stamp + publication_bound - 1 + GC_SAFETY_WINDOW_MS;
     let retained = gc_namespace(&store, None, &namespace_id, &options, &context(now_ms))
         .await
         .expect("pass before cutoff");
@@ -2717,10 +2733,10 @@ async fn concurrent_collectors_keep_pinned_and_current_roots_and_young_objects()
     let store = BlockingStore::new(
         MetadataMapStore::aged(inner, KeyPredicate::exact(&old)),
         KeyPredicate::exact(&old),
-        OperationClass::Delete,
+        OperationSelector::Delete,
     );
     store.block_next();
-    let clock = context(UNREFERENCED_SEGMENT_MIN_AGE_MS + 1);
+    let clock = context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1);
     let gc_options = options();
     let (first, second) = tokio::join!(
         gc_namespace(&store, None, &namespace_id, &gc_options, &clock),
@@ -2767,7 +2783,7 @@ async fn unreferenced_segments_are_deleted_concurrently_within_the_write_wave() 
         .list_prefix(&metadata_segment_prefix(&namespace_id))
         .await
         .expect("segments");
-    let orphans: BTreeSet<_> = (1..=2 * STORE_WRITE_WAVE + 1)
+    let orphans: BTreeSet<_> = (1..=2 * STORE_WRITES_IN_FLIGHT + 1)
         .map(|number| {
             metadata_segment(
                 &namespace_id,
@@ -2792,13 +2808,13 @@ async fn unreferenced_segments_are_deleted_concurrently_within_the_write_wave() 
         None,
         &namespace_id,
         &options(),
-        &context(UNREFERENCED_SEGMENT_MIN_AGE_MS + 1),
+        &context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
     )
     .await
     .expect("gc pass");
     let deletes = store.deletes();
     assert!(deletes.peak_in_flight > 1);
-    assert!(deletes.peak_in_flight <= STORE_WRITE_WAVE);
+    assert!(deletes.peak_in_flight <= STORE_WRITES_IN_FLIGHT);
     assert_eq!(deletes.total, orphans.len());
     assert_eq!(report.deleted.metadata_segments, orphans.len() as u64);
     for key in &orphans {
@@ -2822,7 +2838,7 @@ async fn retired_owner_calls_restart_retry_deletes_and_collect_late_writes() {
         FailStore::new(
             inner,
             KeyPredicate::exact(&keys[0]),
-            OperationClass::Delete,
+            OperationSelector::Delete,
             InjectedError::Transport("delete failed".to_owned()),
         ),
         KeyPredicate::any(),

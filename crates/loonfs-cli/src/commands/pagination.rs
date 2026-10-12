@@ -23,7 +23,7 @@ pub(super) enum PagedListing<P> {
 pub(super) async fn visit_pages<P, F, Fut, V>(
     mut plan: PagePlan,
     mut cursor: Option<P::Cursor>,
-    mut fetch: F,
+    mut load_page: F,
     mut visit: V,
 ) -> Result<(), CliError>
 where
@@ -33,7 +33,7 @@ where
     V: FnMut(P) -> Result<(), CliError>,
 {
     loop {
-        let page = fetch(cursor, plan.request_size()).await?;
+        let page = load_page(cursor, plan.request_size()).await?;
         plan.record(page.items().len());
         cursor = page.next_cursor();
         visit(page)?;
@@ -47,7 +47,7 @@ where
 pub(super) async fn collect_pages<P, F, Fut, O>(
     plan: PagePlan,
     cursor: Option<P::Cursor>,
-    fetch: F,
+    load_page: F,
     mut observe: O,
 ) -> Result<P, CliError>
 where
@@ -57,7 +57,7 @@ where
     O: FnMut(&P),
 {
     let mut collected: Option<P> = None;
-    visit_pages(plan, cursor, fetch, |page| {
+    visit_pages(plan, cursor, load_page, |page| {
         observe(&page);
         match &mut collected {
             Some(collected) => collected.absorb(page),
@@ -75,7 +75,7 @@ pub(super) async fn collect_or_stream_pages<P, F, Fut, O>(
     plan: PagePlan,
     cursor: Option<P::Cursor>,
     jsonl: bool,
-    fetch: F,
+    load_page: F,
     mut observe: O,
 ) -> Result<PagedListing<P>, CliError>
 where
@@ -86,13 +86,13 @@ where
     O: FnMut(&P),
 {
     if !jsonl {
-        return collect_pages(plan, cursor, fetch, observe)
+        return collect_pages(plan, cursor, load_page, observe)
             .await
             .map(PagedListing::Collected);
     }
     let stdout = io::stdout();
     let mut stdout = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
-    visit_pages(plan, cursor, fetch, |page| {
+    visit_pages(plan, cursor, load_page, |page| {
         observe(&page);
         write_jsonl_page(&mut stdout, page.items()).map_err(CliError::io)
     })

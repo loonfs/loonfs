@@ -41,7 +41,7 @@ pub const DEFAULT_MAX_COMPACTION_INPUT_ROWS: usize = 131_072;
 /// Maximum decoded input size for one build or compaction step.
 pub const DEFAULT_MAX_COMPACTION_INPUT_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum stored filter size embedded in a segment descriptor.
-pub const DEFAULT_INLINE_FILTER_MAX_BYTES: u32 = 1024;
+pub const DEFAULT_MAX_INLINE_FILTER_BYTES: u32 = 1024;
 /// Entries between restart points inside a data block.
 pub const RESTART_INTERVAL: usize = 16;
 /// Bloom filter sizing: bits reserved per inserted filter key.
@@ -100,7 +100,7 @@ pub struct BuiltSegmentBlocks {
 impl BuiltSegmentBlocks {
     /// Encodes a small stored filter for an inline segment descriptor.
     pub fn inline_filter_hex(&self) -> Option<String> {
-        (self.filter.stored_bytes <= DEFAULT_INLINE_FILTER_MAX_BYTES).then(|| {
+        (self.filter.stored_bytes <= DEFAULT_MAX_INLINE_FILTER_BYTES).then(|| {
             let start = self.filter.offset as usize;
             crate::format::hex::hex_encode_bytes(
                 &self.bytes[start..start + self.filter.stored_bytes as usize],

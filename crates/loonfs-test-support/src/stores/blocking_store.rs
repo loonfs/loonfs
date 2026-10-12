@@ -1,7 +1,7 @@
 //! An async gate for selected object-store operations.
 
 use super::{
-    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationClass, OperationContext,
+    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationContext, OperationSelector,
 };
 use async_trait::async_trait;
 use std::fmt;
@@ -75,7 +75,7 @@ pub type BlockingStore<S> = InterceptStore<S, BlockingInterceptor>;
 
 impl<S> InterceptStore<S, BlockingInterceptor> {
     /// Selects operations by key predicate and operation class.
-    pub fn new(inner: S, keys: KeyPredicate, operation: OperationClass) -> Self {
+    pub fn new(inner: S, keys: KeyPredicate, operation: OperationSelector) -> Self {
         Self::matching(inner, move |context| {
             keys.matches(context.key()) && operation.matches(context.kind())
         })
@@ -86,7 +86,7 @@ impl<S> InterceptStore<S, BlockingInterceptor> {
         inner: S,
         predicate: impl for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync + 'static,
     ) -> Self {
-        Self::with_interceptor(
+        Self::new_with_interceptor(
             inner,
             BlockingInterceptor {
                 predicate: Arc::new(predicate),
@@ -156,7 +156,7 @@ mod tests {
         let store = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::exact("parked"),
-            OperationClass::Put,
+            OperationSelector::Put,
         ));
 
         store.block_next();

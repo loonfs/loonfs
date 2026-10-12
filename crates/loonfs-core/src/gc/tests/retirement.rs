@@ -169,7 +169,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
 
 #[tokio::test]
 async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup() {
-    use crate::limits::{DIRECT_TRANSFER_URL_TTL_MS, NAMESPACE_RETIREMENT_GRACE_MS};
+    use crate::limits::{DIRECT_TRANSFER_URL_TTL_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
     use loonfs_test_support::{clock::ManualClock, stores::FakeMultipartStore};
 
     let directory = tempdir().expect("directory");
@@ -235,7 +235,10 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     .await
     .expect("retire");
     let deadline = report.reclaimable_at_ms.expect("deadline");
-    assert_eq!(deadline, clock.now_ms() + NAMESPACE_RETIREMENT_GRACE_MS);
+    assert_eq!(
+        deadline,
+        clock.now_ms() + NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
+    );
     assert!(deadline > expires_at_ms);
     clock.advance_ms(deadline - clock.now_ms() - 1);
     let before = gc_namespace(

@@ -39,7 +39,7 @@ const SWEEP_PASS_SECONDS_BOUNDARIES: &[f64] =
 /// index, collection, or close. Quiet sessions cost no store requests.
 /// Metadata that remains unfinished waits `maintenance_interval_ms` before
 /// retrying. Collection requires a moved seq and `gc_interval_ms` elapsed.
-/// Quiet sessions close after `idle_session_close_after_ms` without an open,
+/// Quiet sessions close after `idle_session_timeout_ms` without an open,
 /// when no caller holds a handle. An open during close waits for its drain.
 ///
 /// The daily listing pass runs at start and every `full_sweep_interval_ms`,
@@ -61,10 +61,10 @@ struct SweepInner {
     namespaces: Arc<Namespaces>,
     max_concurrent_visits: usize,
     tick_interval: Duration,
-    metadata_retry_ms: u64,
+    metadata_retry_interval_ms: u64,
     collection_interval_ms: u64,
     full_interval: Duration,
-    idle_session_close_after_ms: u64,
+    idle_session_timeout_ms: u64,
     visiting: Mutex<HashSet<NamespaceId>>,
     slots: Semaphore,
     page_limit: EffectiveLimit,
@@ -130,17 +130,17 @@ impl Sweep {
                 store,
                 maintenance,
                 metadata: MaintainMetadataOptions {
-                    idle_fold_after_ms: config.idle_fold_after_ms,
+                    idle_fold_timeout_ms: config.idle_fold_timeout_ms,
                     ..MaintainMetadataOptions::default()
                 },
                 grep,
                 namespaces,
                 max_concurrent_visits: config.max_concurrent_maintenance,
                 tick_interval: Duration::from_millis(config.tick_interval_ms),
-                metadata_retry_ms: config.maintenance_interval_ms,
+                metadata_retry_interval_ms: config.maintenance_interval_ms,
                 collection_interval_ms: config.gc_interval_ms,
                 full_interval: Duration::from_millis(config.full_sweep_interval_ms),
-                idle_session_close_after_ms: config.idle_session_close_after_ms,
+                idle_session_timeout_ms: config.idle_session_timeout_ms,
                 visiting: Mutex::default(),
                 slots: Semaphore::new(config.max_concurrent_maintenance),
                 page_limit: EffectiveLimit::new(
@@ -300,20 +300,20 @@ impl Sweep {
         let inner = &self.inner;
         let mut held = lock(entry);
         held.handle.record_metadata_maintenance(seq, caught_up);
-        held.metadata_retry_after_ms = if caught_up {
+        held.metadata_retry_at_ms = if caught_up {
             0
         } else {
             inner
                 .namespaces
                 .now_ms()
-                .saturating_add(inner.metadata_retry_ms)
+                .saturating_add(inner.metadata_retry_interval_ms)
         };
     }
 
     fn record_collection(&self, entry: &Mutex<HeldNamespace>, seq: Option<ChangeSeq>) {
         let mut held = lock(entry);
         held.collected_seq = seq;
-        held.collected_ms = self.inner.namespaces.now_ms();
+        held.collected_at_ms = self.inner.namespaces.now_ms();
     }
 
     async fn maintain_index(

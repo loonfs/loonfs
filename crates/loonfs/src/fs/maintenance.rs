@@ -211,7 +211,7 @@ impl Maintenance {
 
     /// Folds the WAL tail at the WAL object threshold, at the inline byte
     /// threshold when the writer knows the count, or once the tail's newest
-    /// commit is `idle_fold_after_ms` old on this handle's wall clock. Then
+    /// commit is `idle_fold_timeout_ms` old on this handle's wall clock. Then
     /// runs one bounded compaction step. A fold waits for a fold permit from
     /// the runtime's execution budget, and a step that finds work waits for
     /// a compaction permit from it.
@@ -255,7 +255,7 @@ impl Maintenance {
         let wal_caught_up = match response.wal_fold {
             WalFoldStepOutcome::Folded { .. } => true,
             WalFoldStepOutcome::NotNeeded => {
-                options.idle_fold_after_ms == 0 || status.wal_tail_newest_commit_at_ms.is_none()
+                options.idle_fold_timeout_ms == 0 || status.wal_tail_newest_commit_at_ms.is_none()
             }
             WalFoldStepOutcome::AlreadyPublished { .. }
             | WalFoldStepOutcome::RetriesExhausted { .. } => false,
@@ -332,7 +332,7 @@ impl Maintenance {
                 CompactionStepOutcome::ManifestAdvanced {} => false,
                 CompactionStepOutcome::MetadataCompactionRequired {} => {
                     match self
-                        .compact_metadata(namespace_id, cancellation)
+                        .run_compaction_unit(namespace_id, cancellation)
                         .await?
                         .compaction
                     {
@@ -566,6 +566,16 @@ impl Maintenance {
         )
     )]
     pub async fn compact_metadata(
+        &self,
+        namespace_id: &NamespaceId,
+        cancellation: &MaintenanceCancellation,
+    ) -> Result<MetadataCompactionResponse> {
+        self.run_compaction_unit(namespace_id, cancellation).await
+    }
+
+    /// Runs one compaction unit for [`Self::compact_metadata`] and
+    /// [`Self::maintain_metadata_while_due_with_options`].
+    async fn run_compaction_unit(
         &self,
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,

@@ -109,7 +109,7 @@ impl ObjectStore for MemoryStore {
             etag: Some(objects.version.to_string()),
             version: None,
             size_bytes: bytes.len() as u64,
-            last_modified_ms: Some(0),
+            last_modified_at_ms: Some(0),
             checksum: Some(Checksum::compute(self.algorithm, &bytes)),
         };
         objects.entries.insert(
@@ -148,7 +148,7 @@ impl ObjectStore for MemoryStore {
             .map(|(key, object)| {
                 Ok(ListedObject {
                     key: key.clone(),
-                    last_modified_ms: object.metadata.last_modified_ms,
+                    last_modified_at_ms: object.metadata.last_modified_at_ms,
                 })
             })
             .collect();

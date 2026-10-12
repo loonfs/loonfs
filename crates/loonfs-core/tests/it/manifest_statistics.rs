@@ -14,7 +14,7 @@ use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::manifest::{ActivityCounter, ManifestActivity, MetadataRowFamily};
 use loonfs_types::{
@@ -230,7 +230,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     let unavailable_wal = FailStore::new(
         LocalFsStore::new(dir.path()).expect("statistics store"),
         KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&parent)),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::PermissionDenied("WAL unavailable".to_owned()),
     );
     unavailable_wal.fail_all();
@@ -439,7 +439,7 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
     let store = FailStore::new(
         LocalFsStore::new(dir.path()).expect("store"),
         KeyPredicate::metadata_segment(),
-        OperationClass::Put,
+        OperationSelector::Put,
         InjectedError::PermissionDenied("fold unavailable".to_owned()),
     );
     let ns = namespace_id("activity");
@@ -514,7 +514,7 @@ async fn failed_and_unacknowledged_fold_publications_do_not_double_count() {
         let store = FailStore::new(
             inner,
             KeyPredicate::manifest(&ns),
-            OperationClass::Put,
+            OperationSelector::Put,
             if applied {
                 InjectedError::Transport("acknowledgment lost".to_owned())
             } else {

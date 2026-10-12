@@ -188,7 +188,7 @@ pub(super) fn segment_codec_error(
 /// publishes every section to the memo and shared cache. Sized to catch
 /// delta-run segments (one or two data blocks) while leaving base segments
 /// on the per-section path.
-const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 256 * 1024;
+const MAX_WHOLE_SEGMENT_LOAD_BYTES: u64 = 256 * 1024;
 
 /// A segment object's total stored length: the index block is the last
 /// section, so it ends the object.
@@ -209,7 +209,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     let filter_handle = descriptor.filter_block;
     let index_handle = descriptor.index_block;
     let object_bytes = segment_object_bytes(descriptor);
-    let fetch_whole_object = object_bytes <= WHOLE_SEGMENT_LOAD_MAX_BYTES;
+    let fetch_whole_object = object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES;
     let fetch_offset = match want {
         SegmentBlockKind::Data | SegmentBlockKind::Manifest => {
             return Err(segment_codec_error(

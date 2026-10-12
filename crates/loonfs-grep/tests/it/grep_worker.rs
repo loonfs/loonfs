@@ -26,8 +26,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
-    OperationContext, OperationKind, RecordedOperation, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationContext,
+    OperationKind, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::{
@@ -160,7 +160,7 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
     let blocking = Arc::new(BlockingStore::new(
         base.clone(),
         KeyPredicate::exact(hint_key(&namespace_id)),
-        OperationClass::GetWithMetadata,
+        OperationSelector::GetWithMetadata,
     ));
     let query_store: SharedObjectStore = blocking.clone();
     let query_host = GrepHost::new(&query_store, "stale-reader").await;
@@ -228,7 +228,7 @@ async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query()
     let blocking = Arc::new(BlockingStore::new(
         base.clone(),
         KeyPredicate::exact(hint_key(&namespace_id)),
-        OperationClass::GetWithMetadata,
+        OperationSelector::GetWithMetadata,
     ));
     let query_store: SharedObjectStore = blocking.clone();
     blocking.block_next();
@@ -2451,7 +2451,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
 
 #[tokio::test]
 async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
-    use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
     use loonfs_grep::manifest::encode_grep_manifest;
     use loonfs_types::ManifestNo;
     let directory = tempdir().expect("directory");
@@ -2465,8 +2465,8 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         aged,
         KeyPredicate::exact(manifest_key(&namespace_id, &ManifestNo(2))),
         |mut metadata| {
-            metadata.last_modified_ms =
-                Some(UNREFERENCED_SEGMENT_MIN_AGE_MS - GREP_GC_GRACE_WINDOW_MS + 1);
+            metadata.last_modified_at_ms =
+                Some(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GREP_GC_GRACE_WINDOW_MS + 1);
             metadata
         },
     );
@@ -2531,7 +2531,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     let collector = worker(&store).await;
     recording.reset();
     let young = collector
-        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS)
+        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS)
         .await
         .expect("young pass");
     assert_eq!(
@@ -2545,7 +2545,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .expect("head")
         .is_none());
     let aged = collector
-        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_MIN_AGE_MS + 1)
+        .gc_namespace(&namespace_id, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1)
         .await
         .expect("aged pass");
     assert_eq!((aged.deleted_segments, aged.deleted_other_objects), (1, 0));
@@ -2564,7 +2564,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     let failing = Arc::new(FailStore::new(
         store.clone(),
         KeyPredicate::exact(hint_key(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("unreadable hint".to_owned()),
     ));
     failing.fail_all();
@@ -2642,19 +2642,19 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
 
 #[tokio::test]
 async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_young() {
-    use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
     use loonfs_grep::manifest::encode_grep_manifest;
     use loonfs_types::ManifestNo;
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("superseded-gc").expect("namespace");
-    let now_ms = UNREFERENCED_SEGMENT_MIN_AGE_MS + 1;
+    let now_ms = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1;
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let aged = MetadataMapStore::aged(base, KeyPredicate::prefix(grep_prefix(&namespace_id)));
     let store: SharedObjectStore = Arc::new(MetadataMapStore::new(
         aged,
         KeyPredicate::exact(manifest_key(&namespace_id, &ManifestNo(2))),
         move |mut metadata| {
-            metadata.last_modified_ms = Some(now_ms - GREP_GC_GRACE_WINDOW_MS + 1);
+            metadata.last_modified_at_ms = Some(now_ms - GREP_GC_GRACE_WINDOW_MS + 1);
             metadata
         },
     ));

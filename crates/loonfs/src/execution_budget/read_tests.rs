@@ -10,7 +10,7 @@ use crate::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::EffectiveLimit;
 use std::future::Future;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -92,7 +92,7 @@ impl Fixture {
                 KeyPredicate::any(),
             ),
             keys,
-            OperationClass::Read,
+            OperationSelector::Read,
         ));
         let recorder = Arc::new(ReadRecorder::default());
         let budget = ExecutionBudget::builder()

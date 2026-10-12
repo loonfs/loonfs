@@ -70,6 +70,7 @@ mod engine;
 mod error;
 mod gc;
 mod heap_bytes;
+mod in_flight;
 mod manifest;
 mod namespace;
 mod options;
@@ -78,7 +79,6 @@ mod protocol;
 mod read_working_memory;
 mod recency;
 mod storage;
-mod store_waves;
 mod wal;
 mod write_waves;
 

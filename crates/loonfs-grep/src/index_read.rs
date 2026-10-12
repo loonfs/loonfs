@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// Below this, one GET costs less than separate ranged reads of the filter,
 /// index, and data blocks; 128 KiB covers a segment of one or two 64 KiB data
 /// blocks.
-const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 128 * 1024;
+const MAX_WHOLE_SEGMENT_LOAD_BYTES: u64 = 128 * 1024;
 // Matches the private metadata span limit in manifest/data_block_load.rs.
 const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -165,7 +165,7 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     let decoded = cache
         .get_or_load(&key, || async {
             let object_bytes = segment_object_bytes(object_key, descriptor)?;
-            if object_bytes <= WHOLE_SEGMENT_LOAD_MAX_BYTES {
+            if object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES {
                 let whole = load_and_publish_segment_sections(
                     store,
                     cache,
@@ -216,7 +216,7 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     let load = || async {
         if let Some(cache) = cache {
             let object_bytes = segment_object_bytes(object_key, descriptor)?;
-            if object_bytes <= WHOLE_SEGMENT_LOAD_MAX_BYTES {
+            if object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES {
                 let whole = load_and_publish_segment_sections(
                     store,
                     cache,

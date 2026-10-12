@@ -5,7 +5,7 @@ use crate::test_support::ops::create;
 use loonfs_objectstore::keys::hint;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::{AbsolutePath, WriterId};
 use tempfile::tempdir;
 
@@ -26,7 +26,7 @@ async fn deletion_budget_includes_writer_acquisition() {
             KeyPredicate::any(),
         ),
         KeyPredicate::exact(hint(&namespace_id)),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
     );
     let context = context();
     create(&store, &namespace_id, &context)
@@ -72,7 +72,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     create(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let mut stale = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
+    let mut stale = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone());
     stale
         .publish_batch(
             &store,

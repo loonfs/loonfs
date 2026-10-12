@@ -16,7 +16,7 @@ use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore,
-    OperationClass, RecordingStore,
+    OperationSelector, RecordingStore,
 };
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
 use loonfs_types::{
@@ -194,7 +194,7 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
 
 #[tokio::test]
 async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
-    use loonfs_test_support::stores::{BlockingStore, OperationClass};
+    use loonfs_test_support::stores::{BlockingStore, OperationSelector};
     let directory = tempfile::tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("fold-race").expect("namespace");
     let store = BlockingStore::new(
@@ -203,7 +203,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
             &namespace_id,
             &loonfs_types::ManifestNo(3),
         )),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup).await.expect("create");
@@ -234,7 +234,7 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(hint(&namespace_id)),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup).await.expect("create");
@@ -301,7 +301,7 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
             },
         ),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::PreconditionFailed,
     );
     let setup = context(1_000);
@@ -378,7 +378,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     blocked.block_next();
     let (loser, winner) = futures::join!(publish(&mut first, &blocked, "left"), async {
@@ -424,7 +424,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
     create(&store, &namespace_id, &context(1_000))
         .await
         .expect("create");
-    let mut stale = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
+    let mut stale = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone());
     publish(&mut stale, &store, "old")
         .await
         .expect("old writer");
@@ -532,7 +532,7 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix(wal_object(&namespace_id, &WalNo(6))),
-        OperationClass::Get,
+        OperationSelector::Get,
     );
     create(&store, &namespace_id, &context(1_000))
         .await
@@ -565,7 +565,7 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
 #[tokio::test]
 async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
     use super::reader::{load_wal_object, load_wal_tail, WalWalk};
-    use crate::store_waves::STORE_READ_WAVE;
+    use crate::in_flight::STORE_READS_IN_FLIGHT;
 
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
@@ -613,7 +613,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
 
     assert_eq!(watched.reads().total, 20);
     assert!(watched.reads().peak_in_flight > 1);
-    assert!(watched.reads().peak_in_flight <= STORE_READ_WAVE);
+    assert!(watched.reads().peak_in_flight <= STORE_READS_IN_FLIGHT);
     assert_eq!(tail, super::ValidatedWalTail::new(sequential));
 }
 
@@ -681,14 +681,14 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
                 .is_some_and(|number| number >= ManifestNo(3))
         }),
         move |mut metadata| {
-            metadata.last_modified_ms = Some(grace + 1);
+            metadata.last_modified_at_ms = Some(grace + 1);
             metadata
         },
     );
     let store = BlockingStore::new(
         store,
         KeyPredicate::exact(wal_object(&namespace_id, &WalNo(1))),
-        OperationClass::Read,
+        OperationSelector::Read,
     );
     create(&store, &namespace_id, &context(1_000))
         .await
@@ -927,7 +927,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
     let blocked = BlockingStore::new(
         store,
         KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     blocked.block_next();
     let batch = Deadline::start(timer_a.clone());

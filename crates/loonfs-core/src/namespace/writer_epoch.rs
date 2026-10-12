@@ -10,7 +10,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
 use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{AcquiredWriter, WriterBlock};
+use loonfs_types::format::control::{ClaimedWriter, WriterBlock};
 use loonfs_types::NamespaceId;
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ pub(crate) async fn claim_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<AcquiredWriter> {
+) -> Result<ClaimedWriter> {
     let timer = Arc::new(crate::time::StdMonotonicTimer::default());
     Ok(claim_writer(store, namespace_id, context, timer).await?.0)
 }
@@ -29,7 +29,7 @@ pub(crate) async fn claim_writer<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
     timer: Arc<dyn MonotonicTimer>,
-) -> Result<(AcquiredWriter, NamespaceReadAnchor)> {
+) -> Result<(ClaimedWriter, NamespaceReadAnchor)> {
     let deadline = Deadline::start(timer);
     let (acquired, manifest, hint) =
         update_manifest(store, namespace_id, &deadline, |mut payload| async move {
@@ -42,7 +42,7 @@ pub(crate) async fn claim_writer<S: ObjectStore + ?Sized>(
                 writer_id: context.writer_id.clone(),
                 acquired_at_ms: context.now_ms,
             });
-            let acquired = AcquiredWriter {
+            let acquired = ClaimedWriter {
                 writer_id: context.writer_id.clone(),
                 writer_epoch: payload.writer_epoch,
             };
@@ -79,7 +79,7 @@ pub(crate) async fn claim_writer<S: ObjectStore + ?Sized>(
 
 pub(crate) fn ensure_writer_not_fenced(
     head: &NamespaceReadState,
-    acquired_writer: &AcquiredWriter,
+    acquired_writer: &ClaimedWriter,
 ) -> Result<()> {
     if head.writer_epoch == acquired_writer.writer_epoch {
         return Ok(());

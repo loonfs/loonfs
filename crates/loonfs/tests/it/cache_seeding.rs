@@ -16,7 +16,7 @@ use loonfs_core::test_support::{
 use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -463,7 +463,7 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
     hints.reset();
     stat_every_root().await;
     assert_eq!(
-        hints.count(OperationClass::Read),
+        hints.count(OperationSelector::Read),
         0,
         "no namespace's head was dropped and loaded again"
     );
@@ -656,7 +656,7 @@ fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_read
         .expect("list materialized docs");
 
     assert_eq!(latest_metadata_view_reads(&recorder), 2);
-    assert_eq!(raw_store.count(OperationClass::Read), 0);
+    assert_eq!(raw_store.count(OperationSelector::Read), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

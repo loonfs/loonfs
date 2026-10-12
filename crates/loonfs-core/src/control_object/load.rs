@@ -149,7 +149,7 @@ mod tests {
     use loonfs_objectstore::ObjectStore;
     use loonfs_objectstore::ObjectStoreErrorKind;
     use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
     };
     use loonfs_types::format::control::HintPayload;
     use loonfs_types::NamespaceId;
@@ -219,7 +219,7 @@ mod tests {
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key.clone()),
-            OperationClass::GetWithMetadata,
+            OperationSelector::GetWithMetadata,
             InjectedError::PermissionDenied("read forbidden".to_owned()),
         );
         store.fail_next(1);
@@ -245,7 +245,7 @@ mod tests {
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key.clone()),
-            OperationClass::GetWithMetadata,
+            OperationSelector::GetWithMetadata,
             InjectedError::Transport("read timed out".to_owned()),
         );
         store.fail_next(1);

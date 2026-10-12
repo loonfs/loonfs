@@ -314,10 +314,10 @@ async fn ranges_up_to_the_window_are_requested_while_the_current_one_is_read() {
     assert_eq!(transport.attempts(), 1);
     let first = download.next_chunk().await.expect("first range");
     assert_eq!(first.as_deref(), Some(&payload[..10]));
-    assert_eq!(transport.attempts(), RANGE_WINDOW);
+    assert_eq!(transport.attempts(), RANGE_RESPONSES_IN_FLIGHT);
     let second = download.next_chunk().await.expect("second range");
     assert_eq!(second.as_deref(), Some(&payload[10..20]));
-    assert_eq!(transport.attempts(), RANGE_WINDOW + 1);
+    assert_eq!(transport.attempts(), RANGE_RESPONSES_IN_FLIGHT + 1);
     let mut rest = Vec::new();
     while let Some(chunk) = download.next_chunk().await.expect("verified download") {
         rest.extend_from_slice(&chunk);

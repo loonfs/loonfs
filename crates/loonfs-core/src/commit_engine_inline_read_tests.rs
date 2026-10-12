@@ -595,7 +595,7 @@ async fn inline_checksum_failures_match_object_validation() {
         .expect("bad object");
     let expected = ContentLocation::whole(&corrupt_ref)
         .expect("object location")
-        .get_bytes(&store, &corrupt_ref)
+        .read_bytes(&store, &corrupt_ref)
         .await
         .expect_err("object mismatch");
     assert!(matches!(

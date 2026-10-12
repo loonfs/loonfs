@@ -13,7 +13,7 @@ use loonfs::{
     RevisionNo, SharedObjectStore, StoreConfig,
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
-use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -577,7 +577,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
 }
 
 #[tokio::test]
-async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
+async fn stat_current_files_by_inode_answers_the_whole_matrix_in_input_order() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "resolve-current-files-test").await;
     let namespace_id = namespace_id("demo");
@@ -754,7 +754,7 @@ fn gone(inode_id: InodeId) -> CurrentFileState {
 }
 
 #[tokio::test]
-async fn resolve_current_files_refuses_a_batch_over_the_cap() {
+async fn stat_current_files_by_inode_refuses_a_batch_over_the_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "resolve-current-files-cap-test").await;
     let namespace_id = namespace_id("demo");
@@ -842,7 +842,7 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
         .expect("read content by reference");
     assert_eq!(bytes, b"alpha bytes");
     assert_eq!(
-        counting.count(OperationClass::Read),
+        counting.count(OperationSelector::Read),
         1,
         "one reference read is one content-object read"
     );
@@ -854,7 +854,7 @@ async fn read_content_ref_answers_bytes_and_refuses_over_budget_before_fetching(
         .expect_err("a reference larger than the budget is refused");
     assert_eq!(error.code(), ErrorCode::ContentTooLarge);
     assert_eq!(
-        counting.count(OperationClass::Read),
+        counting.count(OperationSelector::Read),
         0,
         "the budget is checked against the reference, before any fetch"
     );

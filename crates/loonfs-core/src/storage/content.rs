@@ -90,7 +90,7 @@ pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     content_ref: &ContentRef,
 ) -> Result<(), DurableContentValidationError> {
     ContentLocation::whole(content_ref)?
-        .get_bytes(store, content_ref)
+        .read_bytes(store, content_ref)
         .await
         .map(drop)
 }
@@ -474,7 +474,7 @@ pub(crate) async fn get_speculative_content_bytes<S: ObjectStore + ?Sized>(
         content_ref.size_bytes,
         Some(MAX_SPECULATIVE_CONTENT_BYTES),
     )?;
-    Ok(location.get_bytes(store, content_ref).await?)
+    Ok(location.read_bytes(store, content_ref).await?)
 }
 
 pub(crate) fn content_object_key_for_ref(
@@ -742,7 +742,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::ids::content_ref;
-    use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
     use loonfs_types::{Checksum, ContentId, ContentRef, ContentRefKind, PathEntry};
     use tempfile::tempdir;
 
@@ -751,7 +751,7 @@ mod tests {
         content_ref: &ContentRef,
     ) -> Result<Vec<u8>, DurableContentValidationError> {
         ContentLocation::whole(content_ref)?
-            .get_bytes(store, content_ref)
+            .read_bytes(store, content_ref)
             .await
     }
 
@@ -779,7 +779,7 @@ mod tests {
         validate_durable_content_reference(&store, &content_ref)
             .await
             .expect("validate content ref");
-        assert_eq!(store.count(OperationClass::Read), 1);
+        assert_eq!(store.count(OperationSelector::Read), 1);
     }
 
     #[tokio::test]
@@ -928,7 +928,7 @@ mod tests {
             .await
             .expect("verify content ref");
         assert_eq!(
-            store.count(OperationClass::Read),
+            store.count(OperationSelector::Read),
             0,
             "verification reads provider metadata, never the payload"
         );
@@ -1155,7 +1155,7 @@ mod tests {
             "a resumed read hands back only what it fetched"
         );
         assert_eq!(
-            store.count(OperationClass::Read),
+            store.count(OperationSelector::Read),
             1,
             "one chunk was left to fetch, so one ranged read happened"
         );
@@ -1186,7 +1186,7 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(
-            store.count(OperationClass::Read),
+            store.count(OperationSelector::Read),
             0,
             "nothing is fetched until the stream has what it skipped"
         );
@@ -1267,7 +1267,11 @@ mod tests {
             ),
             "unexpected error: {err}"
         );
-        assert_eq!(store.count(OperationClass::Read), 0, "nothing was fetched");
+        assert_eq!(
+            store.count(OperationSelector::Read),
+            0,
+            "nothing was fetched"
+        );
     }
 
     #[tokio::test]
@@ -1324,7 +1328,7 @@ mod tests {
             .expect("open stream");
         assert!(stream.next_chunk().await.expect("verified end").is_none());
         assert_eq!(
-            store.count(OperationClass::Read),
+            store.count(OperationSelector::Read),
             0,
             "an empty object needs no ranged read"
         );
@@ -1416,7 +1420,7 @@ mod tests {
         }
         assert_eq!(fetched, bytes[held..]);
         assert_eq!(
-            store.count(OperationClass::Read),
+            store.count(OperationSelector::Read),
             1,
             "one chunk was left to fetch, so one ranged read happened"
         );

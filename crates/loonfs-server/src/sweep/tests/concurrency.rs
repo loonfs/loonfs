@@ -4,7 +4,7 @@ use super::{sweep_config, SweepServer};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_test_support::test_actor;
 use std::sync::Arc;
@@ -20,10 +20,10 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
             KeyPredicate::any(),
         ),
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
-        OperationClass::Any,
+        OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = 0;
+    config.idle_fold_timeout_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -85,10 +85,10 @@ async fn a_publish_during_metadata_maintenance_stays_due() {
             KeyPredicate::any(),
         ),
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
-        OperationClass::Any,
+        OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = 0;
+    config.idle_fold_timeout_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -141,11 +141,11 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
                 KeyPredicate::any(),
             ),
             KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
-            OperationClass::Any,
+            OperationSelector::Any,
         ));
         let mut config = sweep_config(None);
         config.max_concurrent_maintenance = slots;
-        config.idle_fold_after_ms = 0;
+        config.idle_fold_timeout_ms = 0;
         let server = SweepServer::start(store.clone(), &config, 0).await;
         server
             .runtime
@@ -211,7 +211,7 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
                 KeyPredicate::any(),
             ),
             KeyPredicate::prefix(loonfs_grep::keyspace::grep_prefix(&namespace_id)),
-            OperationClass::Any,
+            OperationSelector::Any,
         ));
         let config = sweep_config(Some(loonfs_grep::GrepWorkerConfig::default()));
         let server = SweepServer::start(store.clone(), &config, 0).await;
@@ -263,10 +263,10 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
             KeyPredicate::any(),
         ),
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
-        OperationClass::Any,
+        OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = 0;
+    config.idle_fold_timeout_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime

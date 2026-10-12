@@ -26,8 +26,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
-    delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
-    OperationContext, OperationKind, RecordingStore,
+    delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate, OperationContext,
+    OperationKind, OperationSelector, RecordingStore,
 };
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
@@ -558,7 +558,7 @@ fn try_admit_prepared_candidate(
     candidate: PreparedCandidate,
 ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
     let commit_id = candidate.candidate.commit_id().clone();
-    drop(publisher.ensure_admission(&publisher.lock_state())?);
+    drop(publisher.admitted_session(&publisher.lock_state())?);
     let permit = publisher
         .admission
         .acquire_candidate(namespace_id, &candidate)?;
@@ -642,7 +642,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
             );
         }
         assert_eq!(
-            store.count(OperationClass::PutCreateIfAbsent),
+            store.count(OperationSelector::PutCreateIfAbsent),
             expected_batches.len()
         );
         publisher.wait_for_worker().await;
@@ -730,7 +730,7 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
             );
         }
         assert_eq!(
-            store.count(OperationClass::PutCreateIfAbsent),
+            store.count(OperationSelector::PutCreateIfAbsent),
             expected_batches
         );
         publisher.wait_for_worker().await;
@@ -1061,7 +1061,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
                 .await
         })
     };
-    for _ in 0..CONTENTION_RETRY_LIMIT {
+    for _ in 0..MAX_CONTENTION_ATTEMPTS {
         wait_for_commit_waiters(&publisher, &commit_id, 1).await;
         let waiter = publisher_state(&publisher)
             .in_flight
@@ -2278,7 +2278,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         value.bytes().len() as u64
     );
     assert_eq!(folded.activity.file_revisions.get(), 1);
-    assert_eq!(store.count(OperationClass::Put), 1);
+    assert_eq!(store.count(OperationSelector::Put), 1);
     let reader = crate::LoonFs::builder_with_store(store.clone())
         .read_only()
         .build()
@@ -2293,7 +2293,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
             .bytes,
         value.bytes().as_ref()
     );
-    assert!(store.count(OperationClass::Read) > 0);
+    assert!(store.count(OperationSelector::Read) > 0);
     let input = namespace_writer
         .session()
         .publisher
@@ -2315,7 +2315,7 @@ async fn a_runtime_fold_materializes_inline_content_and_reanchors_to_an_empty_ta
         .commit_candidate(candidate)
         .await
         .expect("folded receipt");
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     assert_eq!(
         loonfs_core::control::load_namespace_statistics(store.as_ref(), &namespace_id)
             .await
@@ -2583,7 +2583,7 @@ async fn a_late_fold_does_not_republish_an_already_folded_tail() {
         .await
         .expect("late fold settles");
     assert_eq!(
-        recording.count(OperationClass::Put),
+        recording.count(OperationSelector::Put),
         1,
         "the late fold must not write a second manifest"
     );

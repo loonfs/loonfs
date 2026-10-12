@@ -15,7 +15,7 @@ use crate::{
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -50,7 +50,7 @@ async fn gated_runtime(
                 )
             })
         }),
-        OperationClass::Put,
+        OperationSelector::Put,
     ));
     let runtime = configure(LoonFs::builder_with_store(store.clone()).writer_id("budget-writer"))
         .build()
@@ -678,7 +678,7 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
         BlockingStore::new(
             LocalFsStore::new(root.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
         ),
         KeyPredicate::content_blob(),
     ));

@@ -383,7 +383,7 @@ impl ReadView {
         self.read(async {
             Ok(self
                 .engine
-                .resolve_current_files(inode_ids, &self.context)
+                .stat_current_files_by_inode(inode_ids, &self.context)
                 .await?)
         })
         .await
@@ -1331,11 +1331,11 @@ impl<M> Namespace<M> {
     /// returns `invalid_request` before reading metadata.
     #[tracing::instrument(
         level = "debug",
-        name = "loonfs.resolve_current_files",
+        name = "loonfs.stat_current_files_by_inode",
         err(level = "debug"),
         skip_all,
         fields(
-            operation = "resolve_current_files",
+            operation = "stat_current_files_by_inode",
             namespace_id = %self.namespace_id,
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
@@ -1350,7 +1350,7 @@ impl<M> Namespace<M> {
         self.core
             .read(&self.namespace_id, |engine, read_context| async move {
                 let states = engine
-                    .resolve_current_files(inode_ids, &read_context)
+                    .stat_current_files_by_inode(inode_ids, &read_context)
                     .await?;
                 Ok(states)
             })

@@ -5,10 +5,10 @@ use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::{update_manifest, ManifestChange};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, load_current_manifest};
 use crate::namespace::state::NamespaceReadState;
-use crate::store_waves::STORE_READ_WAVE;
 use crate::time::{Deadline, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -52,7 +52,7 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
         .into_iter()
         .collect::<Vec<_>>();
 
-    for chunk in object_keys.chunks(STORE_READ_WAVE) {
+    for chunk in object_keys.chunks(STORE_READS_IN_FLIGHT) {
         futures::future::try_join_all(chunk.iter().map(|object_key| async move {
             match store
                 .head(object_key)

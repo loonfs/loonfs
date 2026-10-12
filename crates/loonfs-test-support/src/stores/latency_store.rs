@@ -1,7 +1,7 @@
 //! A fixed delay for selected store reads.
 
 use super::{
-    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationClass, OperationContext,
+    Intercept, InterceptStore, Interceptor, KeyPredicate, OperationContext, OperationSelector,
 };
 use async_trait::async_trait;
 use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -21,7 +21,7 @@ pub type LatencyStore<S> = InterceptStore<S, LatencyInterceptor>;
 
 impl<S> InterceptStore<S, LatencyInterceptor> {
     pub fn new(inner: S, keys: KeyPredicate, latency: Duration) -> Self {
-        Self::with_interceptor(
+        Self::new_with_interceptor(
             inner,
             LatencyInterceptor {
                 keys,
@@ -48,7 +48,7 @@ impl Interceptor for LatencyInterceptor {
         reason = "the test store delay models provider latency without changing protocol time"
     )]
     async fn before(&self, context: &OperationContext<'_>) -> Intercept {
-        if self.keys.matches(context.key()) && OperationClass::Read.matches(context.kind()) {
+        if self.keys.matches(context.key()) && OperationSelector::Read.matches(context.kind()) {
             self.read_starts_ms
                 .lock()
                 .expect("read timeline lock should not be poisoned")

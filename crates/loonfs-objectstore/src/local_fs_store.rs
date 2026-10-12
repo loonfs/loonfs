@@ -194,7 +194,7 @@ impl LocalFsStore {
             etag: Some(etag(&checksum)),
             version: None,
             size_bytes: metadata.len(),
-            last_modified_ms: last_modified_ms(metadata),
+            last_modified_at_ms: last_modified_at_ms(metadata),
             checksum: Some(checksum),
         })
     }
@@ -885,7 +885,7 @@ async fn collect_keys(
                 {
                     keys.push(ListedObject {
                         key,
-                        last_modified_ms: last_modified_ms(&metadata),
+                        last_modified_at_ms: last_modified_at_ms(&metadata),
                     });
                 }
             }
@@ -896,7 +896,7 @@ async fn collect_keys(
     Ok(keys)
 }
 
-fn last_modified_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+fn last_modified_at_ms(metadata: &std::fs::Metadata) -> Option<u64> {
     metadata
         .modified()
         .ok()

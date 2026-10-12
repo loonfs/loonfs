@@ -11,7 +11,7 @@ use crate::{GrepError, GrepWorker, Result};
 use futures::StreamExt as _;
 use loonfs::engine::{
     grace_age, GraceAge, Observation, METADATA_PUBLICATION_BUDGET_MS,
-    UNREFERENCED_SEGMENT_MIN_AGE_MS,
+    UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
 };
 use loonfs::{GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS};
 use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -23,7 +23,7 @@ use std::sync::Arc;
 pub const GREP_GC_GRACE_WINDOW_MS: u64 = GC_DEFAULT_GRACE_WINDOW_MS;
 const _: () = assert!(GREP_GC_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 const _: () = assert!(
-    METADATA_PUBLICATION_BUDGET_MS + GC_MIN_GRACE_WINDOW_MS <= UNREFERENCED_SEGMENT_MIN_AGE_MS
+    METADATA_PUBLICATION_BUDGET_MS + GC_MIN_GRACE_WINDOW_MS <= UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
 );
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -157,7 +157,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             collect_candidate(
                 self.store(),
                 &entry,
-                UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
+                UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
                 now_ms,
                 &mut report,
             )
@@ -175,7 +175,7 @@ async fn collect_candidate<S: ObjectStore + ?Sized>(
     report: &mut GrepGcReport,
 ) -> Result<()> {
     let key = &entry.key;
-    let age = GraceAge::of(entry.last_modified_ms, minimum_age_ms, now_ms);
+    let age = GraceAge::of(entry.last_modified_at_ms, minimum_age_ms, now_ms);
     match age {
         GraceAge::Aged => {
             store

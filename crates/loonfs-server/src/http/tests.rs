@@ -19,7 +19,7 @@ use loonfs_client::{Client, ClientConfig};
 use loonfs_http::HttpMetrics;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
 use loonfs_types::{CapabilityDocument, API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0};
 use std::path::Path;
@@ -361,7 +361,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
         BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::metadata_segment(),
-            OperationClass::Put,
+            OperationSelector::Put,
         ),
         KeyPredicate::any(),
     ));
@@ -432,7 +432,7 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::pin_prefix(&namespace_id)),
-        OperationClass::List,
+        OperationSelector::List,
     ));
     let shutdown_deadline_ms = 25;
     let mut config = test_config(temp_dir.path(), "parked-sweep-server");
@@ -845,11 +845,11 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         maintenance_interval_ms: 300_000,
         gc_interval_ms: 3_600_000,
         full_sweep_interval_ms: 86_400_000,
-        idle_session_close_after_ms: 1_800_000,
+        idle_session_timeout_ms: 1_800_000,
         max_merge_input_bytes: None,
         manifest_revalidation_interval_ms: None,
         max_read_working_bytes: None,
-        idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
+        idle_fold_timeout_ms: loonfs::MaintainMetadataOptions::default().idle_fold_timeout_ms,
         allow_unauthenticated_remote: false,
         allow_remote_without_tls: false,
         tls: None,

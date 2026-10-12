@@ -15,13 +15,13 @@ use super::super::streaming_compaction::{
     MetadataCompactionSpec, MetadataMergeReport,
 };
 use super::*;
-use crate::store_waves::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::time::Deadline;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
 use loonfs_objectstore::ListedObject;
 use loonfs_test_support::stores::{
-    BlockingStore, ConcurrencyWatchStore, KeyPredicate, OperationClass,
+    BlockingStore, ConcurrencyWatchStore, KeyPredicate, OperationSelector,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -2025,7 +2025,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
     let expected_gets = input_bytes.div_ceil(ITERATOR_FETCH_TARGET_BYTES);
     assert!((expected_gets..=expected_gets + indexes.len()).contains(&data_gets));
     assert!(data_gets * 8 < old_gets);
-    assert!((2..=STORE_READ_WAVE).contains(&store.reads().peak_in_flight));
+    assert!((2..=STORE_READS_IN_FLIGHT).contains(&store.reads().peak_in_flight));
 
     let local = store.inner().inner();
     let mut actual = Vec::new();
@@ -2085,7 +2085,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
     assert_eq!(data_gets, iterators.len());
     assert!(decoded_bytes <= max_decoded_input_bytes);
     assert!(decoded_bytes > max_decoded_input_bytes / 2);
-    assert!(store.reads().peak_in_flight <= STORE_READ_WAVE);
+    assert!(store.reads().peak_in_flight <= STORE_READS_IN_FLIGHT);
 }
 
 #[tokio::test]
@@ -2123,7 +2123,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
 
     let reads = store.reads();
     assert!(
-        reads.peak_in_flight <= STORE_READ_WAVE,
+        reads.peak_in_flight <= STORE_READS_IN_FLIGHT,
         "the job overlapped {} reads at once",
         reads.peak_in_flight
     );
@@ -2182,7 +2182,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     .await
     .expect("merge the window inside a step");
     assert!(
-        store.reads().peak_in_flight <= STORE_READ_WAVE,
+        store.reads().peak_in_flight <= STORE_READS_IN_FLIGHT,
         "the step's merge overlapped {} reads at once",
         store.reads().peak_in_flight
     );
@@ -2851,7 +2851,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
     let blocked = BlockingStore::new(
         recorded.clone(),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::Put,
+        OperationSelector::Put,
     );
     blocked.block_next();
     let (finalization, ()) = futures::join!(
@@ -3156,7 +3156,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
             &namespace,
             &before.successor().expect("next number"),
         )),
-        OperationClass::Put,
+        OperationSelector::Put,
     );
     store.block_next();
     let (first_outcome, second_outcome) = tokio::join!(
@@ -3205,7 +3205,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
 
 #[tokio::test]
 async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
-    use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+    use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
     use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, RecordingStore};
 
     let directory = tempdir().expect("tempdir");
@@ -3278,7 +3278,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
             &namespace,
         )),
-        OperationClass::Put,
+        OperationSelector::Put,
         InjectedError::PermissionDenied("publication stopped".to_owned()),
     );
     failing.fail_next(1);
@@ -3306,8 +3306,8 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         ..Default::default()
     };
     for age_ms in [
-        UNREFERENCED_SEGMENT_MIN_AGE_MS,
-        UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
+        UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
+        UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     ] {
         crate::gc::gc_namespace(
             &store,
@@ -3321,7 +3321,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         for key in &orphans {
             assert_eq!(
                 store.head(key).await.expect("head").is_some(),
-                age_ms == UNREFERENCED_SEGMENT_MIN_AGE_MS
+                age_ms == UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
             );
         }
         for key in &current_keys {

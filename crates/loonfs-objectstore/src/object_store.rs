@@ -26,7 +26,7 @@ pub struct ListedObject {
     /// Object key relative to the store's configured prefix.
     pub key: String,
     /// Provider modification time, when the listing reports one.
-    pub last_modified_ms: Option<u64>,
+    pub last_modified_at_ms: Option<u64>,
 }
 
 /// Metadata returned by a successful `head`, full-object `get`, or `put` call.
@@ -45,7 +45,7 @@ pub struct ObjectMetadata {
     ///
     /// Advisory: garbage collection uses it for grace/reap age checks and
     /// treats an absent value as "young" (retain). Never a validity input.
-    pub last_modified_ms: Option<u64>,
+    pub last_modified_at_ms: Option<u64>,
     /// The provider's stored full-object checksum in its declared algorithm.
     pub checksum: Option<Checksum>,
 }
@@ -983,7 +983,7 @@ mod tests {
             self.resume_reached.store(true, Ordering::SeqCst);
             Box::pin(stream::iter([Ok(ListedObject {
                 key: "resumed".to_owned(),
-                last_modified_ms: None,
+                last_modified_at_ms: None,
             })]))
         }
 

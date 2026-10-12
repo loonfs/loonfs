@@ -421,7 +421,7 @@ impl MultipartController for S3RequestSigner {
             etag: Some(etag),
             version: None,
             size_bytes,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum: Some(crc),
         })
     }
@@ -474,7 +474,7 @@ impl S3RequestSigner {
                         provider_upload_id: upload_id,
                         part_number,
                         checksum: &checksum,
-                        expires_in: MULTIPART_CONTROL_TTL,
+                        ttl: MULTIPART_CONTROL_TTL,
                     },
                     Self::signing_time(),
                 )
@@ -551,7 +551,7 @@ impl S3RequestSigner {
                 PresignedGetRequest {
                     object_key: key,
                     range: range.clone(),
-                    expires_in: MULTIPART_CONTROL_TTL,
+                    ttl: MULTIPART_CONTROL_TTL,
                 },
                 Self::signing_time(),
             )

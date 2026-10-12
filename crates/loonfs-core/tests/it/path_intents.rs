@@ -14,7 +14,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
-use loonfs_test_support::stores::OperationClass;
+use loonfs_test_support::stores::OperationSelector;
 use loonfs_types::{
     api::v0::FilesystemChange,
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
@@ -355,7 +355,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     assert_eq!(stat.inode_kind(), EntryInodeKind::File);
     assert_eq!(stat.size_bytes(), Some("file-1-bytes".len() as u64));
     assert!(stat.content_ref().is_some());
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 
     store.reset();
     let entries = list_path(&store, &namespace_id, "/docs")
@@ -367,14 +367,14 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
         assert_eq!(entry.size_bytes(), Some("file-0-bytes".len() as u64));
         assert!(entry.content_ref().is_some());
     }
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 
     store.reset();
     let read = read_file_bytes(&store, &namespace_id, "/docs/file-1.txt")
         .await
         .expect("read file");
     assert_eq!(read.bytes, b"file-1-bytes");
-    assert_eq!(store.count(OperationClass::Read), 1);
+    assert_eq!(store.count(OperationSelector::Read), 1);
 }
 
 #[tokio::test]
@@ -498,7 +498,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     assert_eq!(actual_casefold_stat, expected_stat);
     assert_eq!(actual_list, expected_list);
     assert_eq!(actual_file_list, expected_file_list);
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 
     assert!(resolve_path_latest(&store, &namespace_id, "/docs/a.txt")
         .await

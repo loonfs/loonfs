@@ -202,7 +202,7 @@ impl ContentLocation {
         })
     }
 
-    pub(crate) async fn get_bytes<S: ObjectStore + ?Sized>(
+    pub(crate) async fn read_bytes<S: ObjectStore + ?Sized>(
         &self,
         store: &S,
         content_ref: &ContentRef,

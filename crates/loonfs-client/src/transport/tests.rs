@@ -153,7 +153,7 @@ async fn content_transfer_retries_are_exempt_from_the_operation_deadline() {
         .call(
             &client.get("http://example.invalid/content"),
             None,
-            SendPolicy::RetryUnbounded,
+            SendPolicy::RetryWithoutDeadline,
         )
         .await
         .expect("the count-bounded content retry succeeds");

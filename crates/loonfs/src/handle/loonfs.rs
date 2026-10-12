@@ -276,7 +276,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::namespace_id;
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, OperationClass, RecordingStore,
+        BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
     };
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -366,7 +366,7 @@ mod tests {
             "the reader reads through the cache given before the conversion"
         );
         assert!(
-            recording.count(OperationClass::Head) > 0,
+            recording.count(OperationSelector::Head) > 0,
             "the zero interval given before the conversion probes on every read"
         );
     }
@@ -381,7 +381,7 @@ mod tests {
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir).expect("create local-fs store"),
             KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(namespace_id)),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
         ));
         let runtime = LoonFs::builder_with_store(blocking.clone())
             .writer_id(writer_id)

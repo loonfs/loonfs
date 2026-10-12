@@ -23,7 +23,7 @@ import (
 
 const defaultTransferTimeout = 60 * time.Second
 const transferChunkBytes = 64 * 1024
-const rangeWindow = 4
+const rangeResponsesInFlight = 4
 
 type DownloadStream struct {
 	Content     io.ReadCloser
@@ -294,7 +294,7 @@ func newDownloadRangeReader(ctx context.Context, client core.HTTPClient, ranges 
 }
 
 func (r *downloadRangeReader) fill() {
-	for len(r.pending) < rangeWindow-1 && len(r.ranges) > 0 {
+	for len(r.pending) < rangeResponsesInFlight-1 && len(r.ranges) > 0 {
 		part := r.ranges[0]
 		r.ranges = r.ranges[1:]
 		opened := make(chan openedRange, 1)

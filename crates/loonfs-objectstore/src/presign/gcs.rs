@@ -141,10 +141,10 @@ impl GcsV4Presigner {
     pub(crate) fn presign_head(
         &self,
         object_key: &str,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
-        self.presign("HEAD", object_key, BTreeMap::new(), expires_in, now)
+        self.presign("HEAD", object_key, BTreeMap::new(), ttl, now)
     }
 
     fn presign(
@@ -152,7 +152,7 @@ impl GcsV4Presigner {
         method: &str,
         object_key: &str,
         required_headers: BTreeMap<String, String>,
-        expires_in: Duration,
+        ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
         let scoped_key = scope_object_key(self.key_prefix.as_deref(), object_key)?;
@@ -183,7 +183,7 @@ impl GcsV4Presigner {
                 operation_query: BTreeMap::new(),
                 required_headers,
             },
-            expires_in,
+            ttl,
             now,
             |message| self.sign(object_key, message),
         )
@@ -229,7 +229,7 @@ impl DirectPutIssuer for GcsV4Presigner {
             "PUT",
             request.object_key,
             required_headers,
-            request.expires_in,
+            request.ttl,
             now,
         )
     }
@@ -246,7 +246,7 @@ impl DirectGetIssuer for GcsV4Presigner {
             "GET",
             request.object_key,
             request.signed_headers(),
-            request.expires_in,
+            request.ttl,
             now,
         )
     }
@@ -327,7 +327,7 @@ mod tests {
     /// 2023-11-14T22:13:20Z, the instant every expected signature below was
     /// produced at.
     const SIGNING_EPOCH_SECS: u64 = 1_700_000_000;
-    const EXPIRES_IN: Duration = Duration::from_secs(900);
+    const TTL: Duration = Duration::from_secs(900);
     /// CRC-32C of `b"hello"`, in the lowercase hex this format stores and in
     /// the big-endian base64 GCS reads.
     const HELLO_CRC32C_HEX: &str = "9a71bb4c";
@@ -366,7 +366,7 @@ mod tests {
             .presign_put(
                 PresignedPutRequest {
                     object_key: CONTENT_KEY,
-                    expires_in: EXPIRES_IN,
+                    ttl: TTL,
                 },
                 signing_time(),
             )
@@ -397,7 +397,7 @@ mod tests {
         );
         assert_eq!(
             signed.expires_at_ms,
-            SIGNING_EPOCH_SECS * 1_000 + EXPIRES_IN.as_millis() as u64
+            SIGNING_EPOCH_SECS * 1_000 + TTL.as_millis() as u64
         );
     }
 
@@ -408,7 +408,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: EXPIRES_IN,
+                    ttl: TTL,
                 },
                 signing_time(),
             )
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn presigned_head_reads_the_object_back_with_host_signed_alone() {
         let signed = presigner(Some("tenant-a"))
-            .presign_head(CONTENT_KEY, EXPIRES_IN, signing_time())
+            .presign_head(CONTENT_KEY, TTL, signing_time())
             .expect("presign head");
 
         assert_eq!(signed.method, "HEAD");
@@ -472,7 +472,7 @@ mod tests {
                     PresignedGetRequest {
                         object_key: CONTENT_KEY,
                         range: GRANT,
-                        expires_in: EXPIRES_IN,
+                        ttl: TTL,
                     },
                     signing_time(),
                 )
@@ -521,7 +521,7 @@ mod tests {
                     object_key:
                         "namespaces/a b/c+d/e~f/content/con_0123456789abcdef0123456789abcdef",
                     range: GRANT,
-                    expires_in: EXPIRES_IN,
+                    ttl: TTL,
                 },
                 signing_time(),
             )
@@ -547,7 +547,7 @@ mod tests {
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
-                    expires_in: EXPIRES_IN,
+                    ttl: TTL,
                 },
                 signing_time(),
             )
@@ -568,13 +568,13 @@ mod tests {
     #[tokio::test]
     async fn expiry_outside_googles_documented_window_is_a_configuration_error() {
         let signer = presigner(None);
-        for expires_in in [Duration::ZERO, Duration::from_secs(7 * 24 * 60 * 60 + 1)] {
+        for ttl in [Duration::ZERO, Duration::from_secs(7 * 24 * 60 * 60 + 1)] {
             let result = signer
                 .presign_get(
                     PresignedGetRequest {
                         object_key: CONTENT_KEY,
                         range: GRANT,
-                        expires_in,
+                        ttl,
                     },
                     signing_time(),
                 )

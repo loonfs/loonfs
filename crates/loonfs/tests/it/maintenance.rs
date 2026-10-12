@@ -14,7 +14,7 @@ use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::format::manifest::decode_namespace_manifest_json;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -56,7 +56,7 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
     assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
     assert_eq!(status.wal_tail_objects, 2);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
-    assert_eq!(store.count(OperationClass::List), 1);
+    assert_eq!(store.count(OperationSelector::List), 1);
 }
 
 #[test]
@@ -287,7 +287,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         (FoldWalOutcome::AlreadyCurrent, ManifestNo(1)),
         "the wrapper folds a tail; it does not publish a manifest for a namespace with none"
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
 
     fs.put_file_blocking(
         &namespace_id,
@@ -587,7 +587,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
         KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
             &namespace_id,
         )),
-        OperationClass::Get,
+        OperationSelector::Get,
     ));
     let first = open_runtime_async(blocked.clone(), "first").await;
     let second = open_runtime_async(shared.clone(), "second").await;
@@ -740,7 +740,7 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     let blocked = Arc::new(BlockingStore::new(
         raw_store.clone(),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::Put,
+        OperationSelector::Put,
     ));
     let fs = open_runtime_async(blocked.clone(), "step-race-test").await;
     let winner = open_runtime_async(raw_store, "competing-fold").await;

@@ -30,7 +30,7 @@ pub struct MaintainMetadataOptions {
     /// Fold a WAL tail of any size once its newest commit is this old on
     /// the runtime's wall clock; defaults to 15 minutes. Zero
     /// turns this off.
-    pub idle_fold_after_ms: u64,
+    pub idle_fold_timeout_ms: u64,
     /// Whether run sizes must justify the rewrite before maintenance merges them.
     pub compaction_policy: MetadataCompactionPolicy,
 }
@@ -43,7 +43,7 @@ impl Default for MaintainMetadataOptions {
                 crate::InlineContentPolicy::default().inline_content_fold_at_bytes,
             )
             .expect("default inline fold threshold should be nonzero"),
-            idle_fold_after_ms: 15 * 60 * 1_000,
+            idle_fold_timeout_ms: 15 * 60 * 1_000,
             compaction_policy: MetadataCompactionPolicy::SizeTiered,
         }
     }
@@ -84,7 +84,7 @@ impl MaintainMetadataOptions {
     }
 
     /// Returns whether a WAL tail has gone idle: it holds a commit, and the
-    /// newest one is at least `idle_fold_after_ms` old at `now_ms`. A commit
+    /// newest one is at least `idle_fold_timeout_ms` old at `now_ms`. A commit
     /// stamped after `now_ms` counts as zero milliseconds old.
     pub(crate) fn idle_fold_is_due(
         &self,
@@ -92,8 +92,8 @@ impl MaintainMetadataOptions {
         now_ms: u64,
     ) -> bool {
         wal_tail_newest_commit_at_ms.is_some_and(|committed_at_ms| {
-            self.idle_fold_after_ms > 0
-                && now_ms.saturating_sub(committed_at_ms) >= self.idle_fold_after_ms
+            self.idle_fold_timeout_ms > 0
+                && now_ms.saturating_sub(committed_at_ms) >= self.idle_fold_timeout_ms
         })
     }
 }

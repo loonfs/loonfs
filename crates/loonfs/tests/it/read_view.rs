@@ -17,7 +17,7 @@ async fn read_during_compaction_and_collection(
 ) -> (loonfs::Result<loonfs::PathEntry>, LoonFs<loonfs::ReadOnly>) {
     use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, MetadataMapStore, OperationClass,
+        BlockingStore, KeyPredicate, MetadataMapStore, OperationSelector,
     };
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
@@ -39,7 +39,7 @@ async fn read_during_compaction_and_collection(
             }),
         ),
         KeyPredicate::metadata_segment(),
-        OperationClass::Get,
+        OperationSelector::Get,
     ));
     let runtime = open_runtime_async(store.clone(), "reader-gc-probe").await;
     let runtime_namespace = runtime.reader.namespace(&namespace);
@@ -249,7 +249,7 @@ async fn ordinary_read_returns_current_data_after_compaction_and_collection() {
 async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manifest_advance() {
     use loonfs_core::control::load_namespace_current_manifest;
     use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
-    use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
     use loonfs_types::format::manifest::MetadataRowFamily;
     use std::sync::Arc;
 
@@ -336,8 +336,8 @@ async fn checkpoint_and_snapshot_views_keep_missing_segments_corrupt_after_manif
     for view in [snapshot_view, checkpoint_view] {
         store.reset();
         assert_core_error_kind(view.stat("/file").await, ErrorCode::NamespaceCorrupt);
-        assert_eq!(store.count(OperationClass::Put), 0);
-        assert_eq!(store.count(OperationClass::Delete), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
+        assert_eq!(store.count(OperationSelector::Delete), 0);
     }
     runtime.writer.shutdown().await.expect("shutdown");
 }
@@ -1156,7 +1156,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
 async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_propagate() {
     use loonfs_objectstore::{keys, local_fs_store::LocalFsStore, ObjectStore};
     use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+        FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
     };
     use std::sync::Arc;
 
@@ -1165,7 +1165,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
     let failures = Arc::new(FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::Get,
+        OperationSelector::Get,
         InjectedError::Transport("manifest read failed".to_owned()),
     ));
     let store = Arc::new(RecordingStore::new(failures.clone(), KeyPredicate::any()));
@@ -1212,14 +1212,14 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
             .count(),
         2
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
-    assert_eq!(store.count(OperationClass::Delete), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
+    assert_eq!(store.count(OperationSelector::Delete), 0);
 
     failures.fail_all();
     store.reset();
     assert_core_error_kind(view.stat("/file").await, ErrorCode::ServerError);
     assert_eq!(failures.attempts(), 1);
-    assert_eq!(store.count(OperationClass::Put), 0);
-    assert_eq!(store.count(OperationClass::Delete), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
+    assert_eq!(store.count(OperationSelector::Delete), 0);
     runtime.writer.shutdown().await.expect("shutdown");
 }

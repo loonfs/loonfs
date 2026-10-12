@@ -288,7 +288,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
         RecordedOperation, RecordingStore,
     };
     use loonfs_types::ManifestNo;
@@ -348,7 +348,7 @@ mod tests {
                 metadata
             }),
             KeyPredicate::hint(&namespace_id),
-            OperationClass::CompareAndSwap,
+            OperationSelector::CompareAndSwap,
             InjectedError::PreconditionFailed,
         );
         store.fail_all();

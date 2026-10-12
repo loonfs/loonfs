@@ -115,7 +115,7 @@ impl Client {
         // provider takes the last write, and the checksum rides the
         // signature either way.
         let response = self
-            .call(&request, Some(&bytes), SendPolicy::RetryUnbounded)
+            .call(&request, Some(&bytes), SendPolicy::RetryWithoutDeadline)
             .await?;
         let etag = response
             .get(http::header::ETAG)
@@ -180,7 +180,7 @@ impl Client {
             .call(
                 &request,
                 Some(&Bytes::copy_from_slice(bytes)),
-                SendPolicy::RetryUnbounded,
+                SendPolicy::RetryWithoutDeadline,
             )
             .await?;
         serde_json::from_slice(&response.bytes).map_err(|err| ClientError::Json(err.to_string()))

@@ -41,7 +41,7 @@ async fn setup() -> (
     create(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id);
+    let mut engine = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id);
     engine
         .session_writer_epoch(&store, &context)
         .await
@@ -210,7 +210,7 @@ async fn read_file(
     load_current_metadata_view(store, namespace_id)
         .await
         .expect("view")
-        .get_file_revision_bytes(
+        .read_file_revision_bytes(
             store,
             "/file-0",
             revision_no,

@@ -265,7 +265,7 @@ impl VisibilityHarness {
             .collect();
         let states = self
             .engine
-            .resolve_current_files(&inode_ids, context)
+            .stat_current_files_by_inode(&inode_ids, context)
             .await
             .expect("resolve current state for the tracked inodes");
         assert_eq!(

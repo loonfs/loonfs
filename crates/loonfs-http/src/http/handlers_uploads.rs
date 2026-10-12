@@ -215,7 +215,7 @@ async fn fill_direct_put_access(
             .presign_put(
                 PresignedPutRequest {
                     object_key,
-                    expires_in: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
+                    ttl: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
                 },
                 presign_time(),
             )
@@ -351,7 +351,7 @@ async fn sign_parts(
                     provider_upload_id: &targets.provider_upload_id,
                     part_number: part.part_number,
                     checksum: &part.checksum,
-                    expires_in: MULTIPART_PART_URL_TTL,
+                    ttl: MULTIPART_PART_URL_TTL,
                 },
                 signing_time,
             )

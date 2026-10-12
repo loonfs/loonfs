@@ -258,7 +258,7 @@ async fn presigned_ranges(
                         start_inclusive: range.object_start,
                         end_exclusive: range.object_start + range.length,
                     },
-                    expires_in: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
+                    ttl: Duration::from_millis(loonfs::DIRECT_TRANSFER_URL_TTL_MS),
                 },
                 presign_time(),
             )

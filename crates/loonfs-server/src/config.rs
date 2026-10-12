@@ -266,8 +266,8 @@ pub struct ServerConfig {
     pub full_sweep_interval_ms: u64,
     /// Idle milliseconds before a caught-up session with no request handle
     /// closes. A later write opens a new session. Defaults to 30 minutes.
-    #[serde(default = "default_idle_session_close_after_ms")]
-    pub idle_session_close_after_ms: u64,
+    #[serde(default = "default_idle_session_timeout_ms")]
+    pub idle_session_timeout_ms: u64,
     /// Decoded metadata bytes one maintenance step may merge. A step merges
     /// inline only the runs that fit; a larger window runs as a streaming
     /// compaction that holds at most this much at once. Derived when sized.
@@ -283,8 +283,8 @@ pub struct ServerConfig {
     /// a tail that is below the fold thresholds, in milliseconds. The
     /// maintenance sweep and explicit `metadata` requests use the same
     /// period. Zero turns the rule off. Defaults to 15 minutes.
-    #[serde(default = "default_idle_fold_after_ms")]
-    pub idle_fold_after_ms: u64,
+    #[serde(default = "default_idle_fold_timeout_ms")]
+    pub idle_fold_timeout_ms: u64,
     /// Allows serving on a non-loopback address with `auth_token` unset.
     /// Off by default: exposing every endpoint unauthenticated is almost
     /// always a misconfiguration, so validation rejects it unless this is
@@ -404,7 +404,7 @@ fn default_full_sweep_interval_ms() -> u64 {
     86_400_000
 }
 
-fn default_idle_session_close_after_ms() -> u64 {
+fn default_idle_session_timeout_ms() -> u64 {
     1_800_000
 }
 
@@ -412,8 +412,8 @@ fn default_max_merge_input_bytes() -> usize {
     loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES
 }
 
-fn default_idle_fold_after_ms() -> u64 {
-    loonfs::MaintainMetadataOptions::default().idle_fold_after_ms
+fn default_idle_fold_timeout_ms() -> u64 {
+    loonfs::MaintainMetadataOptions::default().idle_fold_timeout_ms
 }
 
 /// The server's `[local_cache]` table: where the node-local cache of encoded
@@ -712,10 +712,7 @@ impl ServerConfig {
             ("maintenance_interval_ms", self.maintenance_interval_ms),
             ("gc_interval_ms", self.gc_interval_ms),
             ("full_sweep_interval_ms", self.full_sweep_interval_ms),
-            (
-                "idle_session_close_after_ms",
-                self.idle_session_close_after_ms,
-            ),
+            ("idle_session_timeout_ms", self.idle_session_timeout_ms),
         ] {
             validate_positive(
                 field,
@@ -2002,7 +1999,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.maintenance_interval_ms, 300_000);
         assert_eq!(config.gc_interval_ms, 3_600_000);
         assert_eq!(config.full_sweep_interval_ms, 86_400_000);
-        assert_eq!(config.idle_session_close_after_ms, 1_800_000);
+        assert_eq!(config.idle_session_timeout_ms, 1_800_000);
 
         for field in [
             "max_download_bytes",
@@ -2018,7 +2015,7 @@ root = "/tmp/loonfs-server"
             "maintenance_interval_ms",
             "gc_interval_ms",
             "full_sweep_interval_ms",
-            "idle_session_close_after_ms",
+            "idle_session_timeout_ms",
             "max_merge_input_bytes",
         ] {
             let path = write_config(&format!(
@@ -2060,8 +2057,8 @@ root = "/tmp/loonfs-server"
     fn idle_fold_period_defaults_to_fifteen_minutes_and_accepts_zero() {
         for (setting, expected) in [
             ("", 900_000),
-            ("idle_fold_after_ms = 60000", 60_000),
-            ("idle_fold_after_ms = 0", 0),
+            ("idle_fold_timeout_ms = 60000", 60_000),
+            ("idle_fold_timeout_ms = 0", 0),
         ] {
             let path = write_config(&format!(
                 r#"
@@ -2076,7 +2073,7 @@ root = "/tmp/loonfs-server"
 "#
             ));
             let config = load_server_config(&path).expect("valid config");
-            assert_eq!(config.idle_fold_after_ms, expected, "{setting:?}");
+            assert_eq!(config.idle_fold_timeout_ms, expected, "{setting:?}");
         }
     }
 

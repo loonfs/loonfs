@@ -131,8 +131,8 @@ impl Namespace<Writable> {
     }
 
     /// Reads the last publication time on the runtime's monotonic clock.
-    pub fn last_published_ms(&self) -> Option<u64> {
-        self.session().last_published_ms()
+    pub fn last_published_at_ms(&self) -> Option<u64> {
+        self.session().last_published_at_ms()
     }
 
     /// Reads whether metadata maintenance found nothing left due for this session.

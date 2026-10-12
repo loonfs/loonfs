@@ -170,7 +170,7 @@ async fn park_a_session_compaction() -> ParkedCompaction {
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::metadata_segment(),
-        OperationClass::Put,
+        OperationSelector::Put,
     ));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = crate::LoonFs::builder_with_store(store.clone())
@@ -440,7 +440,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_merge() {
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::metadata_segment(),
-        OperationClass::Put,
+        OperationSelector::Put,
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id("writer-a")

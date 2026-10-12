@@ -15,7 +15,7 @@ use loonfs::{ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, TraceMode};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_server::{app, AppConfig, MaintenanceMode};
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationSelector};
 use std::convert::Infallible;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -379,7 +379,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
         KeyPredicate::hint(
             &loonfs_types::NamespaceId::parse("faulty").expect("valid namespace id"),
         ),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("injected WAL-head read failure".to_owned()),
     ));
     let store: SharedObjectStore = failing.clone();

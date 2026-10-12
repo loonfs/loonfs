@@ -4,7 +4,7 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::{gc_namespace, GcOptions};
 use crate::storage::content::content_object_key_for_ref;
-use loonfs_test_support::stores::{BlockingStore, MetadataMapStore, OperationClass};
+use loonfs_test_support::stores::{BlockingStore, MetadataMapStore, OperationSelector};
 
 async fn collect_aged_wal(
     store: &Arc<RecordingStore<LocalFsStore>>,
@@ -81,7 +81,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::exact(&key),
-        OperationClass::Put,
+        OperationSelector::Put,
     );
     blocked.block_next();
     let timer = Arc::new(StdMonotonicTimer::default());
@@ -144,7 +144,7 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::content_blob(),
-        OperationClass::Put,
+        OperationSelector::Put,
     );
     blocked.block_next();
     let timer = Arc::new(StdMonotonicTimer::default());

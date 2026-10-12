@@ -29,7 +29,7 @@ mod traversal;
 use traversal::{local_tree, remote_tree, TreeEntry};
 
 /// Maximum number of concurrent file operations.
-const TREE_TRANSFER_CONCURRENCY: usize = 8;
+const TREE_TRANSFERS_IN_FLIGHT: usize = 8;
 
 /// One file in a recursive transfer.
 struct FileJob {
@@ -163,7 +163,7 @@ where
             Some((path, result)) = pending.next(), if !pending.is_empty() => {
                 tally.record_file(path, result, runtime, verb)?;
             }
-            entry = entries.next(), if !finished_discovery && pending.len() < TREE_TRANSFER_CONCURRENCY => {
+            entry = entries.next(), if !finished_discovery && pending.len() < TREE_TRANSFERS_IN_FLIGHT => {
                 match entry {
                     Some(TreeEntry::File(job)) => {
                         discovered_files += 1;
@@ -698,7 +698,7 @@ mod tests {
         let entries = futures::stream::iter((0..100).map(|index| {
             discovered.set(discovered.get() + 1);
             assert!(
-                discovered.get() - completed.get() <= TREE_TRANSFER_CONCURRENCY,
+                discovered.get() - completed.get() <= TREE_TRANSFERS_IN_FLIGHT,
                 "discovery outran the transfer slots"
             );
             TreeEntry::File(FileJob {
@@ -717,7 +717,7 @@ mod tests {
                     futures::future::poll_fn(|cx| {
                         // Hold the first batch until all slots are occupied. This
                         // tests both backpressure and real concurrent scheduling.
-                        if started.get() < TREE_TRANSFER_CONCURRENCY {
+                        if started.get() < TREE_TRANSFERS_IN_FLIGHT {
                             cx.waker().wake_by_ref();
                             return Poll::Pending;
                         }

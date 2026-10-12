@@ -4,8 +4,8 @@
 use super::row::{manifest_rows_for_family, manifest_rows_for_family_after_seq, with_layouts};
 use super::runs::{MetadataFamilySegments, MetadataRunPolicy, MANIFEST_ROW_FAMILIES};
 use crate::error::{CoreError, Result};
+use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::metadata::MetadataState;
-use crate::store_waves::STORE_WRITE_WAVE;
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -15,14 +15,14 @@ use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
 };
 #[cfg(test)]
-pub(super) use loonfs_types::format::segment_blocks::DEFAULT_INLINE_FILTER_MAX_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
+pub(super) use loonfs_types::format::segment_blocks::DEFAULT_MAX_INLINE_FILTER_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_types::format::segment_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
 use loonfs_types::{ChangeSeq, ContentId, MetadataSegmentId, NamespaceId};
 use std::collections::HashMap;
 use std::future::Future;
 
 /// Most encoded segment bytes one fold or compaction holds while their puts
-/// run. The `STORE_WRITE_WAVE` count alone allows 128 MiB of 8 MiB segments;
+/// run. The `STORE_WRITES_IN_FLIGHT` count alone allows 128 MiB of 8 MiB segments;
 /// 32 MiB is about four such segments and still admits a fold's usual seven
 /// small segments at once.
 const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
@@ -167,7 +167,7 @@ fn prepare_manifest_segment(
 }
 
 /// The segment puts in flight for one fold or compaction, bounded by
-/// `STORE_WRITE_WAVE` puts and `MAX_PENDING_SEGMENT_BYTES` of bodies.
+/// `STORE_WRITES_IN_FLIGHT` puts and `MAX_PENDING_SEGMENT_BYTES` of bodies.
 pub(super) struct MetadataSegmentPuts<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
     pending: FuturesUnordered<BoxFuture<'a, Result<usize>>>,
@@ -185,7 +185,7 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
 
     async fn wait_for_capacity(&mut self, bytes: usize) -> Result<()> {
         while !self.pending.is_empty()
-            && (self.pending.len() >= STORE_WRITE_WAVE
+            && (self.pending.len() >= STORE_WRITES_IN_FLIGHT
                 || self.pending_bytes.saturating_add(bytes) > MAX_PENDING_SEGMENT_BYTES)
         {
             self.wait_for_put().await?;
@@ -327,7 +327,7 @@ mod tests {
     use super::*;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::stores::{
-        BlockingStore, BufferWatchStore, ConcurrencyWatchStore, KeyPredicate, OperationClass,
+        BlockingStore, BufferWatchStore, ConcurrencyWatchStore, KeyPredicate, OperationSelector,
     };
     use tempfile::tempdir;
 
@@ -350,14 +350,14 @@ mod tests {
             (vec![budget - 1], 2),
             (vec![1], budget + 1),
             (vec![budget + 1], 1),
-            (vec![1; STORE_WRITE_WAVE], 1),
+            (vec![1; STORE_WRITES_IN_FLIGHT], 1),
         ] {
             let directory = tempdir().expect("tempdir");
             let namespace_id = NamespaceId::parse("segment-byte-budget").expect("namespace id");
             let blocked = BlockingStore::new(
                 LocalFsStore::new(directory.path()).expect("store"),
                 KeyPredicate::metadata_segment(),
-                OperationClass::Put,
+                OperationSelector::Put,
             );
             let concurrency =
                 ConcurrencyWatchStore::new(&blocked, KeyPredicate::metadata_segment());
@@ -393,7 +393,7 @@ mod tests {
             next.await.expect("put after capacity is available");
             puts.finish().await.expect("verified puts");
             assert_eq!(concurrency.puts().total, initial_sizes.len() + 1);
-            assert!(concurrency.puts().peak_in_flight <= STORE_WRITE_WAVE);
+            assert!(concurrency.puts().peak_in_flight <= STORE_WRITES_IN_FLIGHT);
             assert!(
                 store.peaks().peak_live_bytes <= budget.max(next_size).max(initial_sizes[0]) as u64
             );

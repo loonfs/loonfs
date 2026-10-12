@@ -240,7 +240,7 @@ pub async fn app(
         inline_content: config.inline_content.effective_policy(),
         content_token_secret: config.content_token_secret.clone(),
         request_deadline_ms: config.request_deadline_ms,
-        idle_fold_after_ms: config.idle_fold_after_ms,
+        idle_fold_timeout_ms: config.idle_fold_timeout_ms,
         store_kind: config.store.kind(),
         auth_policy: config
             .auth_token

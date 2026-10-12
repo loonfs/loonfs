@@ -349,7 +349,7 @@ fn gcs_object(key: &str, body: &[u8]) -> Result<ObjectMetadata> {
         size_bytes: object.size.parse().map_err(|_| unreadable())?,
         etag: Some(object.generation.clone()),
         version: Some(object.generation),
-        last_modified_ms: None,
+        last_modified_at_ms: None,
         checksum: crc32c,
     };
     Ok(metadata)

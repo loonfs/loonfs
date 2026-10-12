@@ -58,7 +58,7 @@ async fn revision_bytes(
     load_current_metadata_view(store, namespace_id)
         .await
         .expect("view")
-        .get_file_revision_bytes(
+        .read_file_revision_bytes(
             store,
             path,
             RevisionNo(revision_no),

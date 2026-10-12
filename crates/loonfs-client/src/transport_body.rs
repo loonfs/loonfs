@@ -17,19 +17,19 @@ use tokio::time::{Instant, Sleep};
 #[derive(Debug)]
 pub(crate) struct RequestActivity {
     timer: Arc<dyn MonotonicTimer>,
-    last_activity_ms: AtomicU64,
+    last_activity_at_ms: AtomicU64,
 }
 
 impl RequestActivity {
     pub(crate) fn new(timer: Arc<dyn MonotonicTimer>) -> Self {
         Self {
-            last_activity_ms: AtomicU64::new(timer.monotonic_now_ms()),
+            last_activity_at_ms: AtomicU64::new(timer.monotonic_now_ms()),
             timer,
         }
     }
 
     pub(crate) fn touch(&self) {
-        self.last_activity_ms
+        self.last_activity_at_ms
             .fetch_max(self.timer.monotonic_now_ms(), Ordering::Relaxed);
     }
 
@@ -39,7 +39,7 @@ impl RequestActivity {
             let elapsed = Duration::from_millis(
                 self.timer
                     .monotonic_now_ms()
-                    .saturating_sub(self.last_activity_ms.load(Ordering::Relaxed)),
+                    .saturating_sub(self.last_activity_at_ms.load(Ordering::Relaxed)),
             );
             let remaining = IO_INACTIVITY_TIMEOUT.saturating_sub(elapsed);
             if remaining.is_zero() {

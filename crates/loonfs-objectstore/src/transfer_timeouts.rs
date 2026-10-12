@@ -189,7 +189,7 @@ impl Body for IdleDeadlineBody {
 mod tests {
     use super::*;
     use crate::provider_object_store::{
-        PROVIDER_TRANSFER_ATTEMPT_TIMEOUT, PROVIDER_TRANSFER_BODY_MIN_BYTES,
+        PROVIDER_MIN_TRANSFER_BODY_BYTES, PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
     };
     use http::Response;
     use std::collections::VecDeque;
@@ -300,7 +300,7 @@ mod tests {
         async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
             assert_eq!(req.method(), http::Method::PUT);
             assert_eq!(req.headers()[http::header::IF_NONE_MATCH], "*");
-            assert!(req.body().content_length() as u64 >= PROVIDER_TRANSFER_BODY_MIN_BYTES);
+            assert!(req.body().content_length() as u64 >= PROVIDER_MIN_TRANSFER_BODY_BYTES);
             let status = self
                 .statuses
                 .lock()
@@ -321,7 +321,8 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     async fn a_conditional_payload_put_is_one_request() {
         use crate::provider_object_store::{
-            provider_retry_config, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_PUBLICATION_REQUEST_BOUND,
+            provider_retry_config, PROVIDER_MAX_RETRY_BACKOFF,
+            PROVIDER_PUBLICATION_REQUEST_DEADLINE,
         };
         use object_store::ObjectStore;
 
@@ -347,7 +348,7 @@ mod tests {
         store
             .put_opts(
                 &object_store::path::Path::from("wal/0000000001"),
-                vec![0u8; PROVIDER_TRANSFER_BODY_MIN_BYTES as usize].into(),
+                vec![0u8; PROVIDER_MIN_TRANSFER_BODY_BYTES as usize].into(),
                 object_store::PutOptions {
                     mode: object_store::PutMode::Create,
                     ..Default::default()
@@ -360,7 +361,7 @@ mod tests {
         // send the conditional put again.
         assert!(started.elapsed() >= Duration::from_secs(115));
         assert!(started.elapsed() < Duration::from_secs(230));
-        assert!(started.elapsed() <= PROVIDER_PUBLICATION_REQUEST_BOUND);
+        assert!(started.elapsed() <= PROVIDER_PUBLICATION_REQUEST_DEADLINE);
     }
 
     #[tokio::test(start_paused = true)]
@@ -416,7 +417,7 @@ mod tests {
         let error = service
             .call(request_with_body(vec![
                 0u8;
-                (PROVIDER_TRANSFER_BODY_MIN_BYTES - 1)
+                (PROVIDER_MIN_TRANSFER_BODY_BYTES - 1)
                     as usize
             ]))
             .await

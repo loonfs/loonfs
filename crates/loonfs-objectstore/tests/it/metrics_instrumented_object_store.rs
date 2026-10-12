@@ -473,7 +473,7 @@ impl DelegatingWriteStore {
             etag: Some(format!("{call}-etag")),
             version: None,
             size_bytes: 0,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum: None,
         }
     }

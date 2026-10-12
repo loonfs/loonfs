@@ -12,7 +12,7 @@ use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, OperationKind,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationKind, OperationSelector,
     RecordingStore,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -88,7 +88,7 @@ async fn snapshot_create_recovers_an_ambiguously_landed_record_write() {
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::prefix(pin_prefix(&namespace_id)),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost checkpoint write acknowledgement".to_owned()),
         )
         .apply_then_fail(),
@@ -129,7 +129,7 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::prefix(pin_key_prefix),
-            OperationClass::CompareAndSwap,
+            OperationSelector::CompareAndSwap,
             InjectedError::Transport("lost snapshot extension acknowledgement".to_owned()),
         )
         .apply_then_fail(),
@@ -173,7 +173,7 @@ async fn snapshot_delete_reports_an_uncertain_delete_without_recreating_the_pin(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::prefix(pin_prefix(&namespace_id)),
-            OperationClass::Delete,
+            OperationSelector::Delete,
             InjectedError::Transport("lost snapshot delete acknowledgement".to_owned()),
         )
         .apply_then_fail(),

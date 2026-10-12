@@ -1,7 +1,7 @@
 //! Retained namespace views across metadata maintenance and collection.
 
 use crate::common::*;
-use loonfs::engine::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
@@ -287,7 +287,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 // every age gate. The checkpoint and fork pins are the only
                 // roots for the pre-rebuild file set.
                 let now_ms = current_time_ms().expect("wall clock")
-                    + UNREFERENCED_SEGMENT_MIN_AGE_MS
+                    + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
                     + GC_DEFAULT_GRACE_WINDOW_MS
                     + 1;
                 let collected = loonfs_core::gc_namespace(

@@ -9,7 +9,7 @@ use loonfs::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ async fn a_takeover_during_a_paused_publish_fences_the_old_node() {
     let failing = Arc::new(FailStore::new(
         blocking,
         KeyPredicate::any(),
-        OperationClass::Any,
+        OperationSelector::Any,
         InjectedError::PermissionDenied("store access after fencing".to_owned()),
     ));
     let store: SharedObjectStore = failing.clone();

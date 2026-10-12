@@ -87,7 +87,8 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 pub use downloads::{DirectDownloadStream, DownloadOptions};
 pub use namespace_path::NamespacePath;
 pub use uploads::staging::{
-    MultipartUploadResume, PreparedContent, PutFileJournal, STREAMING_PUT_MIN_BYTES,
+    MultipartUploadResume, PreparedContent, PutFileJournal, PutFileStreamOptions,
+    MIN_STREAMING_PUT_BYTES,
 };
 
 /// Async HTTP client for LoonFS.

@@ -12,7 +12,7 @@ use thiserror::Error;
 /// Bytes per gram. Fixed by the frozen durable format.
 pub(crate) const GRAM_LEN: usize = 3;
 /// Largest content the version-1 eligibility rule admits, in bytes.
-pub const INDEX_GRAMS_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_INDEX_GRAMS_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One tokenizer gram: three content bytes, ASCII-case-folded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

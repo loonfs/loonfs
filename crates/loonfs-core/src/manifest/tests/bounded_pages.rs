@@ -229,7 +229,7 @@ async fn bounded_pages_open_and_refill_segments_in_concurrent_waves() {
             BlockingStore::new(
                 LocalFsStore::new(temp.path()).expect("store"),
                 KeyPredicate::any(),
-                OperationClass::Read,
+                OperationSelector::Read,
             ),
             KeyPredicate::any(),
         );
@@ -347,7 +347,7 @@ async fn bounded_pages_preserve_readahead_without_reading_the_entire_range() {
     .await
     .expect("next page");
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "next page uses read-ahead"
     );
@@ -488,7 +488,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 assert_eq!(loaded.rows().collect::<Vec<_>>(), vec![&expected[position]]);
             }
             assert_eq!(
-                store.count(OperationClass::Read),
+                store.count(OperationSelector::Read),
                 if count == 16 { 1 } else { 2 }
             );
         }
@@ -535,20 +535,20 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         index_reservation > index_bytes,
         "the index and memo containers are charged"
     );
-    assert_eq!(store.count(OperationClass::Read), 1);
+    assert_eq!(store.count(OperationSelector::Read), 1);
     let filter = index_block_load::load_segment_filter(&store, None, &memo, &descriptor)
         .await
         .expect("filter");
     let filter_bytes = filter.decoded_bytes() + 2 * std::mem::size_of::<usize>();
     assert!(pool.in_use() >= index_reservation + filter_bytes);
-    assert_eq!(store.count(OperationClass::Read), 2);
+    assert_eq!(store.count(OperationSelector::Read), 2);
     assert_eq!(
         *index_block_load::load_segment_index(&store, None, &memo, &descriptor)
             .await
             .expect("retained index"),
         *index
     );
-    assert_eq!(store.count(OperationClass::Read), 2);
+    assert_eq!(store.count(OperationSelector::Read), 2);
     drop(memo);
     assert_eq!(pool.in_use(), 0);
     assert_eq!(index.len(), 2048);

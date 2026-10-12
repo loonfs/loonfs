@@ -122,7 +122,7 @@ impl S3RequestSigner {
             etag: Some(etag),
             version: None,
             size_bytes,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum: Some(expected.clone()),
         })
     }
@@ -174,7 +174,7 @@ impl S3RequestSigner {
             etag,
             version: None,
             size_bytes,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum: Some(expected.clone()),
         })
     }

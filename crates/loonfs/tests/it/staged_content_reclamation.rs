@@ -18,13 +18,13 @@
 
 use crate::common::{open_runtime_with_async, store, TestRuntime};
 use loonfs::{ContentRef, GcOptions, GcResponse, NamespaceId, PutFileOptions, SharedObjectStore};
-use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_MS, UPLOAD_SESSION_LEASE_MS};
+use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS};
 use loonfs_core::MutationContext;
 use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -130,7 +130,7 @@ async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
         "inside the grace evidence could still admit a commit for these bytes"
     );
 
-    let past_ms = staged_at_ms + CONTENT_RECLAMATION_GRACE_MS + 1;
+    let past_ms = staged_at_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1;
     let past = collect(&store, &namespace_id, past_ms).await;
     assert_eq!(
         past.deleted.upload_sessions, 2,
@@ -180,7 +180,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
     let report = collect(
         &store,
         &namespace_id,
-        loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_MS + 1,
+        loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1,
     )
     .await;
 
@@ -249,7 +249,7 @@ async fn imported_content_survives_collection_in_the_source_namespace() {
         .expect("publish imported content");
 
     let after_reclamation =
-        loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_MS + 1;
+        loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1;
     // The first pass removes the session record that roots the source object.
     collect(&store, &source, after_reclamation).await;
     let source_report = collect(&store, &source, after_reclamation).await;
@@ -325,7 +325,8 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         "one session per staging write, published or not"
     );
 
-    let past_ms = loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_MS + 1;
+    let past_ms =
+        loonfs::current_time_ms().expect("wall clock") + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1;
     let report = collect(&store, &namespace_id, past_ms).await;
     assert_eq!(report.deleted.upload_sessions, 2);
     let report = collect(&store, &namespace_id, past_ms).await;
@@ -357,7 +358,7 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
     let failing = Arc::new(FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::content_blob(),
-        OperationClass::Put,
+        OperationSelector::Put,
         InjectedError::PreconditionFailed,
     ));
     let store: SharedObjectStore = failing.clone();
@@ -437,7 +438,7 @@ async fn a_put_pays_two_control_writes_for_the_session_that_owns_its_content() {
     );
     assert_eq!(counts.overwrite_puts, 0, "a session is never clobbered");
     assert_eq!(
-        sessions.count(OperationClass::Read),
+        sessions.count(OperationSelector::Read),
         0,
         "the completion swap reuses the confirmed creation etag without rereading the session"
     );

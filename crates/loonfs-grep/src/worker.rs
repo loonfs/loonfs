@@ -7,7 +7,7 @@
 //! without rewriting most of the base on every step.
 
 use crate::codec::{
-    extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
+    extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, MAX_INDEX_GRAMS_FILE_BYTES,
 };
 use crate::index_read::{load_data_block_span, load_index_block};
 use crate::keyspace::{hint_key, segment_key};
@@ -60,7 +60,7 @@ const GRAM_POSTING_BATCH_TARGET: usize = 256;
 /// Content reads and index segment writes the worker runs at once. Eight
 /// reads of files at the 8 MiB eligibility cap hold at most 64 MiB, the same
 /// as one backfill step's content budget.
-const MAX_GREP_WORKER_IO: usize = 8;
+const GREP_WORKER_READS_IN_FLIGHT: usize = 8;
 const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
@@ -774,7 +774,7 @@ async fn plan_backfill_unit(
         let mut budget_reached = false;
         for file in page.files {
             files_remaining = files_remaining.saturating_sub(1);
-            if file.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
+            if file.size_bytes > MAX_INDEX_GRAMS_FILE_BYTES {
                 stats.skipped_revisions += 1;
             } else {
                 planned_content_bytes += file.size_bytes;
@@ -865,7 +865,7 @@ async fn plan_incremental_unit(
                 break 'changes;
             }
             examined_files += 1;
-            if revision.content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
+            if revision.content_ref.size_bytes > MAX_INDEX_GRAMS_FILE_BYTES {
                 stats.skipped_revisions += 1;
             } else {
                 planned_content_bytes += revision.content_ref.size_bytes;
@@ -914,11 +914,11 @@ async fn index_planned_unit(
         progress,
     } = planned;
     let mut postings: BTreeMap<Gram, Vec<GramPosting>> = BTreeMap::new();
-    for chunk in pending.chunks(MAX_GREP_WORKER_IO) {
+    for chunk in pending.chunks(GREP_WORKER_READS_IN_FLIGHT) {
         let contents = try_join_all(chunk.iter().map(|revision| {
             // Index eligibility is the worker's own read budget: content
             // past the cap was skipped before it was ever planned.
-            reads.read_content(&revision.content_ref, INDEX_GRAMS_MAX_FILE_BYTES)
+            reads.read_content(&revision.content_ref, MAX_INDEX_GRAMS_FILE_BYTES)
         }))
         .await?;
         for (revision, content) in chunk.iter().zip(contents) {
@@ -974,7 +974,7 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
         .collect();
     write_segments_in_waves(
         requests,
-        const { NonZeroUsize::new(MAX_GREP_WORKER_IO).unwrap() },
+        const { NonZeroUsize::new(GREP_WORKER_READS_IN_FLIGHT).unwrap() },
         |segment_rows| write_index_segment(store, namespace_id, run_no, segment_rows, level),
     )
     .await

@@ -8,7 +8,7 @@ use super::Outcome;
 
 /// A broad operation class selected by a test wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperationClass {
+pub enum OperationSelector {
     /// Every operation.
     Any,
     /// Metadata-only reads.
@@ -33,7 +33,7 @@ pub enum OperationClass {
     List,
 }
 
-impl OperationClass {
+impl OperationSelector {
     pub(crate) fn matches(self, kind: &OperationKind<'_>) -> bool {
         match self {
             Self::Any => true,
@@ -270,16 +270,16 @@ impl RecordedOperation {
         }
     }
 
-    pub(crate) fn matches(&self, class: OperationClass) -> bool {
-        match class {
-            OperationClass::Any => true,
-            OperationClass::Head => matches!(self, Self::Head { .. }),
-            OperationClass::Get => matches!(self, Self::Get { .. }),
-            OperationClass::GetWithMetadata => matches!(self, Self::GetWithMetadata { .. }),
-            OperationClass::Read => {
+    pub(crate) fn matches(&self, selector: OperationSelector) -> bool {
+        match selector {
+            OperationSelector::Any => true,
+            OperationSelector::Head => matches!(self, Self::Head { .. }),
+            OperationSelector::Get => matches!(self, Self::Get { .. }),
+            OperationSelector::GetWithMetadata => matches!(self, Self::GetWithMetadata { .. }),
+            OperationSelector::Read => {
                 matches!(self, Self::Get { .. } | Self::GetWithMetadata { .. })
             }
-            OperationClass::Put => matches!(
+            OperationSelector::Put => matches!(
                 self,
                 Self::Put { .. }
                     | Self::PutStreamed { .. }
@@ -287,7 +287,7 @@ impl RecordedOperation {
                     | Self::Assemble { .. }
                     | Self::CompareAndSwap { .. }
             ),
-            OperationClass::PutOverwrite => matches!(
+            OperationSelector::PutOverwrite => matches!(
                 self,
                 Self::Put {
                     mode: PutMode::Overwrite,
@@ -297,7 +297,7 @@ impl RecordedOperation {
                     ..
                 }
             ),
-            OperationClass::PutCreateIfAbsent => matches!(
+            OperationSelector::PutCreateIfAbsent => matches!(
                 self,
                 Self::Put {
                     mode: PutMode::CreateIfAbsent,
@@ -308,7 +308,7 @@ impl RecordedOperation {
                 } | Self::PutImmutableStream { .. }
                     | Self::Assemble { .. }
             ),
-            OperationClass::CompareAndSwap => matches!(
+            OperationSelector::CompareAndSwap => matches!(
                 self,
                 Self::CompareAndSwap { .. }
                     | Self::Put {
@@ -320,8 +320,8 @@ impl RecordedOperation {
                         ..
                     }
             ),
-            OperationClass::Delete => matches!(self, Self::Delete { .. }),
-            OperationClass::List => matches!(self, Self::List { .. }),
+            OperationSelector::Delete => matches!(self, Self::Delete { .. }),
+            OperationSelector::List => matches!(self, Self::List { .. }),
         }
     }
 }

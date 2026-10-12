@@ -18,7 +18,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::{
     api::v0::{FilesystemChange, UploadSessionStatus},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -92,7 +92,7 @@ async fn unadmitted_content_fails_every_candidate_without_being_read() {
             .code(),
         ErrorCode::ContentNotPrepared
     );
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 
     store.reset();
     let responses = publish_namespace_commits_batch(
@@ -121,7 +121,7 @@ async fn unadmitted_content_fails_every_candidate_without_being_read() {
             .as_ref()
             .is_err_and(|error| error.code() == ErrorCode::ContentNotPrepared)
     }));
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 }
 
 #[tokio::test]
@@ -207,7 +207,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
 
     responses[0].as_ref().expect("admitted put commits");
     // A live admission is the fast path: no content read at all.
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
     let mut forged_ref = content_ref.clone();
     forged_ref.owner_namespace_id = NamespaceId::parse("other").expect("owner");
     let mut forged_token = token.clone();
@@ -325,7 +325,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
     .expect_err("expired prepared proof must not admit content");
 
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 }
 
 #[tokio::test]
@@ -608,7 +608,7 @@ async fn metadata_only_mutation_does_not_validate_content_refs() {
 
     assert_eq!(response.committed_seq, ChangeSeq(2));
     assert_eq!(
-        guarded_store.count(OperationClass::Read),
+        guarded_store.count(OperationSelector::Read),
         0,
         "metadata-only validation must not read content",
     );
@@ -672,7 +672,7 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
             loonfs_core::publish::ContentPreparationError::ContentNotPrepared { ref content_id }
         ) if *content_id == missing_content.content_id
     ));
-    assert_eq!(guarded_store.count(OperationClass::Read), 0);
+    assert_eq!(guarded_store.count(OperationSelector::Read), 0);
 }
 
 #[tokio::test]

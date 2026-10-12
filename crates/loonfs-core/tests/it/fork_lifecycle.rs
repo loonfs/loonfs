@@ -18,7 +18,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
     RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
@@ -255,10 +255,10 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
                 &source,
                 &snapshot.checkpoint_id,
             )),
-            OperationClass::Read,
+            OperationSelector::Read,
         ),
         KeyPredicate::prefix(loonfs_objectstore::keys::pin_prefix(&source)),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     let engine = namespace_engine(&store, &source, &context);
     store.block_next();
@@ -548,7 +548,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(forked.head_seq, ChangeSeq(1));
     assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "fork should validate manifest descriptors without loading metadata segment payloads"
     );
@@ -609,7 +609,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let guarded = FailStore::new(
         store.clone(),
         KeyPredicate::new(move |key| key == source_hint || key.starts_with(&source_manifests)),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("source head must not be read".to_owned()),
     );
     guarded.fail_all();
@@ -886,7 +886,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .expect("deletion stamp")
         + options
             .grace_window_ms
-            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_MS);
+            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
     let parent_waiting = loonfs_core::gc_namespace(&store, None, &parent, &options, &aged)
         .await
         .expect("parent waits");
@@ -1360,7 +1360,7 @@ async fn bootstrap_hint_read_failures_write_nothing() {
         let failing = FailStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::exact(hint(&namespace_id)),
-            OperationClass::Read,
+            OperationSelector::Read,
             injected,
         );
         failing.fail_all();
@@ -1418,7 +1418,7 @@ async fn a_creator_losing_after_namespace_discovery_leaves_no_extra_objects() {
     let store = loonfs_test_support::stores::BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(hint(&namespace_id("demo"))),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     );
     let namespace_id = namespace_id("demo");
     let context = mutation_context();
@@ -1574,7 +1574,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         .expect("deletion stamp")
         + options
             .grace_window_ms
-            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_MS);
+            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
     for _ in 0..3 {
         aged.now_ms += options.grace_window_ms;
         let report = loonfs_core::gc_namespace(&store, None, &source, &options, &aged)

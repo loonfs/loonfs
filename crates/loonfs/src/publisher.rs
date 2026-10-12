@@ -30,7 +30,7 @@ use crate::{
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
 use loonfs_core::commit::CommitFingerprint;
-use loonfs_core::limits::{CONTENTION_RETRY_LIMIT, FOLD_AT_WAL_OBJECTS};
+use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS};
 use loonfs_core::publish::{
     is_retryable_wal_publish, settle_publish_attempt, NamespaceCommitEngine,
     SharedWriterSessionStatus, WalPublishError, WriterSessionStatus,
@@ -168,8 +168,8 @@ impl NamespaceSession {
         self.publisher.lock_state().last_published_seq
     }
 
-    pub(crate) fn last_published_ms(&self) -> Option<u64> {
-        self.publisher.lock_state().last_published_ms
+    pub(crate) fn last_published_at_ms(&self) -> Option<u64> {
+        self.publisher.lock_state().last_published_at_ms
     }
 
     pub(crate) fn metadata_caught_up(&self) -> bool {
@@ -525,7 +525,7 @@ struct NamespacePublisherState {
     /// immediately.
     last_publish: Option<Observation>,
     last_published_seq: Option<ChangeSeq>,
-    last_published_ms: Option<u64>,
+    last_published_at_ms: Option<u64>,
     metadata_caught_up: bool,
 }
 
@@ -681,7 +681,7 @@ impl NamespacePublisher {
                 next_task_id: 0,
                 last_publish: None,
                 last_published_seq: None,
-                last_published_ms: None,
+                last_published_at_ms: None,
                 metadata_caught_up: true,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
@@ -788,12 +788,12 @@ impl NamespacePublisher {
             .publisher_sessions(registry.sessions.len());
     }
 
-    fn ensure_admission(
+    fn admitted_session(
         &self,
         state: &NamespacePublisherState,
     ) -> Result<std::sync::MutexGuard<'_, WriterSessionStatus>, CoreError> {
         match state.admission {
-            PublisherAdmissionStatus::Open => self.ensure_not_fenced(),
+            PublisherAdmissionStatus::Open => self.unfenced_session(),
             PublisherAdmissionStatus::Closed => Err(CoreError::ShuttingDown),
             PublisherAdmissionStatus::SessionClosed => Err(CoreError::WriterSessionClosed {
                 namespace_id: self.namespace_id.clone(),
@@ -804,7 +804,7 @@ impl NamespacePublisher {
 
     /// Keeps fencing from racing with admission or a task start until the
     /// caller drops the guard.
-    fn ensure_not_fenced(
+    fn unfenced_session(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, WriterSessionStatus>, CoreError> {
         let session = self
@@ -843,7 +843,7 @@ impl NamespacePublisher {
     /// Once the candidate enters the queue, cancelling the caller only drops
     /// result delivery; the worker still owns and publishes the request.
     async fn submit_candidate(&self, candidate: CommitCandidate) -> CommitResult {
-        drop(self.ensure_admission(&self.lock_state())?);
+        drop(self.admitted_session(&self.lock_state())?);
         let plan = self.plan_inline_candidate(candidate)?;
         let permit = self.acquire_candidate(&plan.candidate)?;
         let candidate = self.stage_inline_candidate(plan, &permit).await?;
@@ -897,7 +897,7 @@ impl NamespacePublisher {
         candidate: &PreparedCandidate,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
         let state = self.lock_state();
-        let _session = self.ensure_admission(&state)?;
+        let _session = self.admitted_session(&state)?;
         self.admission
             .acquire_candidate(&self.namespace_id, candidate)
     }
@@ -911,7 +911,7 @@ impl NamespacePublisher {
         enqueued_at: u64,
     ) -> Result<SubmissionAdmission, CoreError> {
         let mut state = self.lock_state();
-        let _session = self.ensure_admission(&state)?;
+        let _session = self.admitted_session(&state)?;
         if let Some(existing) = state.in_flight.get_mut(&commit_id) {
             if existing.semantic_identity != semantic_identity {
                 let primary_identity = existing.semantic_identity.clone();
@@ -992,7 +992,7 @@ impl NamespacePublisher {
         let (sender, receiver) = oneshot::channel();
         {
             let mut state = self.lock_state();
-            let _session = self.ensure_admission(&state)?;
+            let _session = self.admitted_session(&state)?;
             let permit = self.admission.acquire(&self.namespace_id, 0)?;
             let sender = AdmittedWaiter::new(sender, &permit);
             match state.queue.back_mut() {
@@ -1195,7 +1195,7 @@ impl NamespacePublisher {
             let mut results = vec![None; candidates.len()];
             let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
             let mut retry_count = 0_u64;
-            for attempt in 0..CONTENTION_RETRY_LIMIT {
+            for attempt in 0..MAX_CONTENTION_ATTEMPTS {
                 let (indices, candidates): (Vec<_>, Vec<_>) =
                     std::mem::take(&mut pending).into_iter().unzip();
                 let attempt_permits: Vec<_> = indices
@@ -1217,7 +1217,7 @@ impl NamespacePublisher {
                     indices.into_iter().zip(candidates),
                     observed,
                 );
-                if pending.is_empty() || attempt + 1 == CONTENTION_RETRY_LIMIT {
+                if pending.is_empty() || attempt + 1 == MAX_CONTENTION_ATTEMPTS {
                     break;
                 }
                 retry_count += 1;
@@ -1296,7 +1296,7 @@ impl NamespacePublisher {
         if committed_seq.is_some() {
             let mut state = self.lock_state();
             state.last_published_seq = state.last_published_seq.max(committed_seq);
-            state.last_published_ms = Some(self.timer.monotonic_now_ms());
+            state.last_published_at_ms = Some(self.timer.monotonic_now_ms());
             state.metadata_caught_up = false;
         }
         drop(slot);
@@ -1333,7 +1333,7 @@ impl NamespacePublisher {
     /// session's compaction after it releases its fold permit.
     fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
-        let _session = self.ensure_not_fenced().ok()?;
+        let _session = self.unfenced_session().ok()?;
         if state
             .fold
             .as_ref()
@@ -1362,7 +1362,7 @@ impl NamespacePublisher {
     /// the next fold. The drain reports the contained panic.
     fn start_compaction(&self) {
         let mut state = self.lock_state();
-        let Ok(_session) = self.ensure_admission(&state) else {
+        let Ok(_session) = self.admitted_session(&state) else {
             return;
         };
         if state
@@ -1415,7 +1415,7 @@ impl NamespacePublisher {
             max_wal_tail_objects: std::num::NonZeroU64::MAX,
             inline_content_fold_at_bytes: std::num::NonZeroUsize::MAX,
             // A remaining tail must stay unsettled for the host's idle fold.
-            idle_fold_after_ms: u64::MAX,
+            idle_fold_timeout_ms: u64::MAX,
             ..crate::MaintainMetadataOptions::default()
         };
         let seq = self.lock_state().last_published_seq;
@@ -1817,7 +1817,7 @@ where
     let enqueued_at = timer.monotonic_now_ms();
     let mut candidate = candidate;
     let mut semantic_identity = candidate.candidate.semantic_identity(namespace_id)?;
-    for _ in 0..CONTENTION_RETRY_LIMIT {
+    for _ in 0..MAX_CONTENTION_ATTEMPTS {
         let (sender, receiver) = oneshot::channel();
         let admission = admit(
             commit_id.clone(),

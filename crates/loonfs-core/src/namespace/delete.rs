@@ -7,7 +7,7 @@ use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::options::DeleteNamespaceOptions;
 use crate::time::Deadline;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{AcquiredWriter, NamespaceStatus};
+use loonfs_types::format::control::{ClaimedWriter, NamespaceStatus};
 use loonfs_types::{DeleteNamespaceResponse, NamespaceId};
 
 #[allow(
@@ -18,7 +18,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     options: DeleteNamespaceOptions,
-    acquired_writer: AcquiredWriter,
+    acquired_writer: ClaimedWriter,
     context: &crate::context::MutationContext,
     deadline: &Deadline,
     pool: std::sync::Arc<crate::cache::ReadWorkingMemory>,

@@ -1,11 +1,11 @@
 //! Segment write concurrency, ordering, and publication failures.
 
 use super::*;
+use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::manifest::row::manifest_rows_for_family;
 use crate::manifest::runs::MANIFEST_ROW_FAMILIES;
 use crate::namespace::control::load_current_manifest;
 use crate::namespace::writer_epoch::claim_writer_epoch;
-use crate::store_waves::STORE_WRITE_WAVE;
 use crate::test_support::ops::{create, write_file_bytes};
 use crate::time::StdMonotonicTimer;
 use crate::MutationContext;
@@ -150,13 +150,13 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
             })
             .collect::<Vec<_>>();
         if rows_per_segment == 2 {
-            assert!(expected.len() > STORE_WRITE_WAVE);
+            assert!(expected.len() > STORE_WRITES_IN_FLIGHT);
             for family in MANIFEST_ROW_FAMILIES {
                 let count = expected
                     .iter()
                     .filter(|(actual, _)| *actual == family)
                     .count();
-                assert!(count == 0 || count > STORE_WRITE_WAVE);
+                assert!(count == 0 || count > STORE_WRITES_IN_FLIGHT);
             }
         } else {
             assert_eq!(expected.len(), 7);
@@ -189,7 +189,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
                 assert_eq!(descriptors.len(), expected.len());
                 let concurrency = store.inner().puts();
                 assert!(concurrency.peak_in_flight > 1);
-                assert!(concurrency.peak_in_flight <= STORE_WRITE_WAVE);
+                assert!(concurrency.peak_in_flight <= STORE_WRITES_IN_FLIGHT);
                 assert_eq!(concurrency.total, expected.len());
                 assert!(!store.inner().inner().snapshot().iter().any(|operation| {
                     matches!(operation, RecordedOperation::Put { key, .. } if key == &manifest_key)
@@ -239,7 +239,7 @@ async fn a_failed_segment_put_prevents_fold_publication() {
         move |operation| {
             operation.key().starts_with(&segment_prefix)
                 && matches!(operation.kind(), OperationKind::Put { .. })
-                && puts.fetch_add(1, Ordering::SeqCst) == STORE_WRITE_WAVE
+                && puts.fetch_add(1, Ordering::SeqCst) == STORE_WRITES_IN_FLIGHT
         },
         InjectedError::PermissionDenied("segment put refused".to_owned()),
     );
@@ -272,7 +272,7 @@ async fn a_failed_segment_put_prevents_fold_publication() {
         })
     ));
     assert_eq!(store.inner().inner().remaining(), 0);
-    assert!(store.inner().puts().total > STORE_WRITE_WAVE);
+    assert!(store.inner().puts().total > STORE_WRITES_IN_FLIGHT);
     assert!(!store.snapshot().iter().any(|operation| matches!(operation, RecordedOperation::Put { key, .. } if !key.starts_with(&metadata_segment_prefix(&namespace_id)))));
     let after = load_current_manifest(&store, &namespace_id)
         .await

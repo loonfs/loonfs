@@ -125,7 +125,7 @@ async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace_id)),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
     ));
     let runtime = test_runtime(store.clone());
     create_namespace(&runtime, &namespace_id).await;

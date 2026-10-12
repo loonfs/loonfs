@@ -30,7 +30,7 @@ pub(crate) const IO_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) enum SendPolicy {
     Once,
     Retry,
-    RetryUnbounded,
+    RetryWithoutDeadline,
 }
 
 pub(crate) struct WireRequest {
@@ -138,7 +138,7 @@ impl Client {
     pub(crate) async fn request_bytes(&self, url: &str) -> Result<Vec<u8>> {
         let request = self.get(url);
         Ok(self
-            .call(&request, None, SendPolicy::RetryUnbounded)
+            .call(&request, None, SendPolicy::RetryWithoutDeadline)
             .await?
             .bytes)
     }
@@ -215,7 +215,7 @@ impl Client {
                 );
                 self.send_with_retry(request, body, Some(deadline)).await
             }
-            SendPolicy::RetryUnbounded => self.send_with_retry(request, body, None).await,
+            SendPolicy::RetryWithoutDeadline => self.send_with_retry(request, body, None).await,
         }
     }
 

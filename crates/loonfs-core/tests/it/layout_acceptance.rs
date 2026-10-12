@@ -15,7 +15,7 @@ use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
 use loonfs_objectstore::ObjectStore;
-use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::AbsolutePath;
 use loonfs_types::{ChangeSeq, NamespaceId};
 use std::sync::Arc;
@@ -98,7 +98,7 @@ async fn reads_commits_and_change_feed_never_list() {
         .await
         .expect("write junk");
 
-    let baseline = store.count(OperationClass::List);
+    let baseline = store.count(OperationSelector::List);
     let staged = engine.begin_upload(None).await.expect("begin upload");
     engine
         .upload_content(&staged.upload_id, None, b"uploaded\n")
@@ -162,7 +162,7 @@ async fn reads_commits_and_change_feed_never_list() {
     assert!(!changes.changes.is_empty());
 
     assert_eq!(
-        store.count(OperationClass::List),
+        store.count(OperationSelector::List),
         baseline,
         "read, commit, upload, and change-feed paths must not LIST"
     );

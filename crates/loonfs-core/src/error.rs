@@ -631,7 +631,7 @@ impl CoreError {
 pub(crate) fn contention_message(object_key: &str) -> String {
     format!(
         "`{object_key}` lost all {} compare-and-swap attempts to contention",
-        crate::limits::CONTENTION_RETRY_LIMIT
+        crate::limits::MAX_CONTENTION_ATTEMPTS
     )
 }
 

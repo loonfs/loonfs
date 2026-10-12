@@ -14,7 +14,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, OperationKind,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationKind, OperationSelector,
     RecordedOperation, RecordingStore,
 };
 use loonfs_test_support::test_actor;
@@ -498,7 +498,7 @@ async fn a_parked_visit_does_not_hold_up_later_pages() {
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("local store"),
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
-        OperationClass::Any,
+        OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
     config.max_concurrent_maintenance = 2;
@@ -555,7 +555,7 @@ async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_
     let store = Arc::new(BlockingStore::new(
         failing,
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
-        OperationClass::Any,
+        OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
     config.max_concurrent_maintenance = 2;

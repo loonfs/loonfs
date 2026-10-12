@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 
 /// The most range responses a download holds open at once: the one being
 /// read and the ones requested behind it, in range order.
-const RANGE_WINDOW: usize = 4;
+const RANGE_RESPONSES_IN_FLIGHT: usize = 4;
 
 /// Options for a download of a file's content by path or by inode.
 ///
@@ -177,7 +177,7 @@ impl DirectDownloadStream {
     }
 
     fn request_next_range(&mut self) {
-        while self.next.len() < RANGE_WINDOW - 1 {
+        while self.next.len() < RANGE_RESPONSES_IN_FLIGHT - 1 {
             let Some(range) = self.ranges.pop_front() else {
                 return;
             };

@@ -373,7 +373,7 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
         )
         .await
         .expect("put");
-    assert_eq!(store.count(OperationClass::Put), 1);
+    assert_eq!(store.count(OperationSelector::Put), 1);
     assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
     assert_eq!(
         family_requests(&store, DurableObjectFamily::UploadSession),
@@ -401,7 +401,7 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
             .expect("replay"),
         first
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     assert_eq!(
         namespace_writer
             .put_file_with_options(
@@ -415,7 +415,7 @@ async fn small_writes_use_one_wal_put_and_retry_by_bytes() {
             .code(),
         loonfs_types::ErrorCode::CommitIdReuseConflict
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -495,7 +495,7 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
             )
             .await
             .expect("publish");
-        assert_eq!(store.count(OperationClass::Put), 1);
+        assert_eq!(store.count(OperationSelector::Put), 1);
         let reference = namespace_reader
             .read_file(path)
             .await
@@ -518,7 +518,7 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
                 .expect("replay"),
             first
         );
-        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
     }
     writer.shutdown().await.expect("shutdown");
 }
@@ -582,7 +582,7 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
                 .expect("replay"),
             first
         );
-        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
     }
     writer.shutdown().await.expect("shutdown");
 }
@@ -742,7 +742,7 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
             .expect("replay inline after fold"),
         first
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -753,7 +753,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
         let failing = Arc::new(FailStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
             InjectedError::PermissionDenied("content writes refused".to_owned()),
         ));
         let store = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
@@ -823,7 +823,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             .await
             .expect_err("receipt rejects different bytes before staging");
         assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
         assert_eq!(failing.attempts(), 0);
         writer.shutdown().await.expect("shutdown");
     }
@@ -957,7 +957,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
             .expect("retained receipt"),
         published
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -1016,7 +1016,7 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
                 )
                 .await
                 .expect_err("directory cannot be replaced by a file");
-            assert_eq!(store.count(OperationClass::Put), 0);
+            assert_eq!(store.count(OperationSelector::Put), 0);
             let folds = hold_every_fold_permit(&writer).await;
             namespace
                 .put_file_with_options(
@@ -1027,11 +1027,11 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
                 )
                 .await
                 .expect("reservation released on failure");
-            assert_eq!(store.count(OperationClass::Put), 1);
+            assert_eq!(store.count(OperationSelector::Put), 1);
             assert_eq!(written_records(&store).await[0].inline_content.len(), 1);
             drop(folds);
         } else {
-            assert_eq!(store.count(OperationClass::Put), 2);
+            assert_eq!(store.count(OperationSelector::Put), 2);
             assert_eq!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
         }
         writer.shutdown().await.expect("shutdown");
@@ -1364,7 +1364,7 @@ async fn check_delayed_fold_callback(cache: MetadataCache) {
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::hint(&namespace)),
-        OperationClass::CompareAndSwap,
+        OperationSelector::CompareAndSwap,
     ));
     // The session folds only a full tail, so nothing but the explicit fold
     // runs until the last commit fills it.

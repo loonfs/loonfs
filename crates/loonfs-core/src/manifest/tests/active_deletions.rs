@@ -813,7 +813,7 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
             4,
             "the page must be full to be comparable"
         );
-        store.count(OperationClass::Read)
+        store.count(OperationSelector::Read)
     }
 
     let small = page_reads(8).await;
@@ -1027,7 +1027,7 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
             "{:?}",
             store.snapshot()
         );
-        store.count(OperationClass::Read)
+        store.count(OperationSelector::Read)
     }
 
     let small = page_reads(8).await;

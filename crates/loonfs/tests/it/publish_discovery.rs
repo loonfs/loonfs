@@ -6,7 +6,7 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_test_support::test_actor;
 use std::sync::Arc;
@@ -118,7 +118,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         BlockingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-            OperationClass::Put,
+            OperationSelector::Put,
         ),
         KeyPredicate::any(),
     ));

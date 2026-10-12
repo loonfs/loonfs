@@ -6,7 +6,7 @@ use crate::control_update::{
     load_upload_session_state, try_update_upload_session, CasOutcome, UploadSessionUpdate,
 };
 use crate::error::{CoreError, Result};
-use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
+use crate::limits::CONTENT_RECLAMATION_GRACE_WINDOW_MS;
 use crate::protocol::AbandonedUpload;
 use futures::StreamExt;
 use loonfs_objectstore::keys::upload_session_prefix;
@@ -92,10 +92,11 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             completed_at_ms, ..
         } => {
             if !retired
-                && context.now_ms.saturating_sub(*completed_at_ms) < CONTENT_RECLAMATION_GRACE_MS
+                && context.now_ms.saturating_sub(*completed_at_ms)
+                    < CONTENT_RECLAMATION_GRACE_WINDOW_MS
             {
                 return Ok(retain_until(
-                    completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_MS),
+                    completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_WINDOW_MS),
                 ));
             }
             Ok(UploadSessionSweep::Delete)

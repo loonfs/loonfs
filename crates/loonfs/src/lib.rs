@@ -116,7 +116,8 @@ pub mod engine {
         DecodedBlockCacheStats, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
     };
     pub use loonfs_core::limits::{
-        METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS, UNREFERENCED_SEGMENT_MIN_AGE_MS,
+        METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS,
+        UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
     };
     pub use loonfs_core::time::{Deadline, Observation};
     pub use loonfs_core::{

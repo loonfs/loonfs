@@ -158,7 +158,7 @@ impl NamespaceReadView<'_> {
     }
 
     /// Resolves visibility, revision, and path in input order.
-    pub(crate) async fn resolve_current_files(
+    pub(crate) async fn stat_current_files_by_inode(
         &self,
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
@@ -225,7 +225,7 @@ impl NamespaceReadView<'_> {
     }
 }
 
-/// Ids one [`NamespaceReads::resolve_current_files`] call answers.
+/// Ids one [`NamespaceReads::stat_current_files_by_inode`] call answers.
 pub(crate) fn effective_batch_size(wanted: usize) -> usize {
     wanted.clamp(1, MAX_CURRENT_FILES_PER_STAT)
 }

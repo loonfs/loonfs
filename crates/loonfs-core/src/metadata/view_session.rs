@@ -12,7 +12,7 @@ use super::{
     RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::CoreError;
-use crate::store_waves::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
@@ -29,7 +29,7 @@ where
 {
     // Adjacent inode ids often share a read. Separate ranges let each
     // group start in a different part of the page's segments.
-    let group_size = inode_ids.len().div_ceil(STORE_READ_WAVE).max(1);
+    let group_size = inode_ids.len().div_ceil(STORE_READS_IN_FLIGHT).max(1);
     let lookup = &lookup;
     let loaded =
         futures::future::try_join_all(inode_ids.chunks(group_size).map(|group| async move {

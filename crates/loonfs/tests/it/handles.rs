@@ -19,7 +19,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -899,7 +899,7 @@ async fn namespace_deletion_drops_cached_reads_even_when_its_answer_is_lost() {
             FailStore::new(
                 LocalFsStore::new(directory.path()).expect("store"),
                 KeyPredicate::manifest(&namespace_id),
-                OperationClass::PutCreateIfAbsent,
+                OperationSelector::PutCreateIfAbsent,
                 InjectedError::Transport("lost acknowledgement".to_owned()),
             )
             .apply_then_fail(),

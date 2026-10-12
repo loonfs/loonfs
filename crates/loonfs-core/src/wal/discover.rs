@@ -5,9 +5,9 @@ use super::reader::{load_wal_object, WalWalk};
 use super::replay::project_validated_wal_tail;
 use crate::cache::WalTailProjectionCacheKey;
 use crate::control_object::ControlObjectLoadError;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
-use crate::store_waves::STORE_READ_WAVE;
 use crate::RuntimeReadContext;
 use futures::{stream, StreamExt};
 use loonfs_objectstore::ObjectStore;
@@ -77,7 +77,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
         if ended || end == MAX_PUBLIC_INTEGER {
             break;
         }
-        window = (window * 2).min(STORE_READ_WAVE);
+        window = (window * 2).min(STORE_READS_IN_FLIGHT);
     }
     Ok(DiscoveredTail {
         head,

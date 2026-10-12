@@ -31,7 +31,7 @@ pub struct CurrentFileState {
 /// Rejects an oversized batch before reading metadata.
 ///
 /// Called at the API boundary to enforce the batch limit.
-pub(crate) fn ensure_resolve_batch_within_cap(requested: usize) -> Result<()> {
+pub(crate) fn ensure_stat_batch_within_cap(requested: usize) -> Result<()> {
     if requested > MAX_CURRENT_FILES_PER_STAT {
         return Err(CoreError::BatchTooLarge {
             requested,
@@ -44,12 +44,12 @@ pub(crate) fn ensure_resolve_batch_within_cap(requested: usize) -> Result<()> {
 /// Resolves inode IDs against one loaded view in input order.
 ///
 /// The batch shares one namespace state and caches paths for common ancestors.
-pub(crate) async fn resolve_current_files<S: ObjectStore + ?Sized>(
+pub(crate) async fn stat_current_files_by_inode<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     inode_ids: &[InodeId],
     access: &ReadAccess<'_, S>,
 ) -> Result<Vec<CurrentFileState>> {
-    ensure_resolve_batch_within_cap(inode_ids.len())?;
+    ensure_stat_batch_within_cap(inode_ids.len())?;
     let mut session = view.metadata_view().session();
     let mut ancestor_paths = HashMap::new();
     let mut states = Vec::with_capacity(inode_ids.len());
@@ -185,7 +185,7 @@ async fn current_path<S: ObjectStore + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_resolve_batch_within_cap, MAX_CURRENT_FILES_PER_STAT};
+    use super::{ensure_stat_batch_within_cap, MAX_CURRENT_FILES_PER_STAT};
     use loonfs_types::{ErrorCode, PaginationPolicy};
 
     #[test]
@@ -199,8 +199,8 @@ mod tests {
 
     #[test]
     fn a_batch_at_the_cap_is_accepted_and_one_past_it_names_the_cap() {
-        assert!(ensure_resolve_batch_within_cap(MAX_CURRENT_FILES_PER_STAT).is_ok());
-        let error = ensure_resolve_batch_within_cap(MAX_CURRENT_FILES_PER_STAT + 1)
+        assert!(ensure_stat_batch_within_cap(MAX_CURRENT_FILES_PER_STAT).is_ok());
+        let error = ensure_stat_batch_within_cap(MAX_CURRENT_FILES_PER_STAT + 1)
             .expect_err("one past the cap is refused");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
         assert!(

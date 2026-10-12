@@ -357,7 +357,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .get_bytes(store, &content_ref)
+            .read_bytes(store, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
@@ -842,7 +842,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         })
     }
 
-    pub(crate) async fn get_file_revision_bytes(
+    pub(crate) async fn read_file_revision_bytes(
         &self,
         store: &S,
         absolute_path: &str,
@@ -857,12 +857,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let bytes = self
             .resolve_content_location(&content_ref)
             .await?
-            .get_bytes(store, &content_ref)
+            .read_bytes(store, &content_ref)
             .await?;
         Ok(FileBytes { entry, bytes })
     }
 
-    pub(crate) async fn get_file_revision_bytes_by_inode(
+    pub(crate) async fn read_file_revision_bytes_by_inode(
         &self,
         store: &S,
         inode_id: InodeId,
@@ -877,7 +877,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(self
             .resolve_content_location(&revision.content_ref)
             .await?
-            .get_bytes(store, &revision.content_ref)
+            .read_bytes(store, &revision.content_ref)
             .await?)
     }
 

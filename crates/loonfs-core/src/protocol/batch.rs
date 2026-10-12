@@ -403,7 +403,7 @@ mod tests {
     async fn one_expired_candidate_replans_the_other_without_writing() {
         use crate::storage::content_admission::PreparedContent;
         use loonfs_test_support::clock::ManualClock;
-        use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+        use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 
         let directory = tempdir().expect("directory");
         let store = RecordingStore::new(
@@ -484,9 +484,9 @@ mod tests {
             result.results[1],
             Err(CoreError::WalPublish(WalPublishError::NumberTaken))
         ));
-        assert_eq!(store.count(OperationClass::Put), 0);
-        assert_eq!(store.count(OperationClass::CompareAndSwap), 0);
-        assert_eq!(store.count(OperationClass::Delete), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
+        assert_eq!(store.count(OperationSelector::CompareAndSwap), 0);
+        assert_eq!(store.count(OperationSelector::Delete), 0);
     }
 
     #[tokio::test]

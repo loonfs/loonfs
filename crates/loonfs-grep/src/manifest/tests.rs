@@ -7,7 +7,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector, RecordingStore,
 };
 use loonfs_types::{ManifestNo, RunNo};
 use std::sync::Arc;
@@ -51,7 +51,7 @@ async fn publication_returning_at_budget(drop_acknowledgement: bool) {
         let store = FailStore::new(
             store,
             KeyPredicate::exact(&object_key),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost acknowledgement".to_owned()),
         )
         .apply_then_fail();

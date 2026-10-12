@@ -7,7 +7,7 @@ use super::uploads::{sweep_upload_session, UploadSessionSweep};
 use crate::context::MutationContext;
 use crate::control_update::load_upload_session_state;
 use crate::error::{CoreError, Result};
-use crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS;
+use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::{NamespaceId, RetainedReason};
@@ -83,7 +83,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         // A compaction may publish output that is exactly the minimum age
         // old, so a segment must be strictly older before it goes.
         let min_age_ms = if family == CandidateFamily::MetadataSegments {
-            UNREFERENCED_SEGMENT_MIN_AGE_MS + 1
+            UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1
         } else {
             self.grace_window_ms
         };
@@ -166,7 +166,7 @@ impl<S: ObjectStore + ?Sized> Sweep<'_, S> {
         counter: DeletedCounter,
     ) -> Decision {
         let age = GraceAge::of(
-            entry.last_modified_ms,
+            entry.last_modified_at_ms,
             grace_window_ms,
             self.mutation.now_ms,
         );

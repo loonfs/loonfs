@@ -416,7 +416,7 @@ A read of a mutable object MUST return the bytes and the compare token for those
 
 Successful writes and deletes MUST be strongly consistent. Prefix listings return keys in ascending lexicographic order, and the garbage collection protocols depend on this behavior (being "S3 compatible" doesn't by itself mean a provider conforms). The object-store layer MUST also list the child prefixes directly under a prefix, in the same order and one page per provider request, starting after a given key. A host uses this listing to find namespaces without listing their objects.
 
-A provider MUST also apply each request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of when the client started the operation that sent it. The reclamation grace reserves this much provider time. An implementation can't check this assumption. [Clock and operation assumptions](#114-clock-and-operation-assumptions) explains what depends on it, and [Publication and collection timing](#c1-publication-and-collection-timing) lists the numbers.
+A provider MUST also apply each request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS` of when the client started the operation that sent it. The reclamation grace reserves this much provider time. An implementation can't check this assumption. [Clock and operation assumptions](#114-clock-and-operation-assumptions) explains what depends on it, and [Publication and collection timing](#c1-publication-and-collection-timing) lists the numbers.
 
 Readers determine committed state from verified manifests and numbered WAL objects. Garbage collection also uses listings, to find candidates and dependencies (for example, retiring a namespace requires a complete listing of its pins after deletion). The format doesn't assume transactions across objects, or a consistent snapshot across control objects that are read separately.
 
@@ -1138,7 +1138,7 @@ An ordinary operation that finds the namespace deleted returns `namespace_delete
 
 ```text
 deadline(T) = T.deleted_at_ms
-              + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_MS)
+              + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
 ```
 
 A tombstone is eligible for retirement when the pass clock reaches its deadline and the complete pin listing contains no pin on the namespace. Pins deleted later in the same pass still count, and any unrecognized key under the pin prefix also blocks reclamation.
@@ -1341,13 +1341,13 @@ For example, suppose a collector observes hint 8 and current manifest 10. It kee
 
 Garbage collection decides by age, and an object's age is calculated as `now_ms.saturating_sub(last_modified_ms)`. So safety depends on a bound on how much an age can be overstated. The collector's clock might be ahead of the provider's, timestamps might have limited precision, and a process might pause around a publication check.
 
-The combined allowance (`GC_SAFETY_MARGIN_MS`) is 180,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not three minutes for each participant. A provider whose clock is ahead of the collector's only delays garbage collection. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
+The combined allowance (`GC_SAFETY_WINDOW_MS`) is 180,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not three minutes for each participant. A provider whose clock is ahead of the collector's only delays garbage collection. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
 
 Publication budgets use monotonic elapsed time, on a clock that keeps running while the host sleeps. The minimum ordinary grace covers the longer of two times: the longest bounded publication, or the revalidation bound plus the lifetime of a direct transfer capability (a view up to that bound old can still issue a capability). It then adds the provider publication request bound and the combined allowance. Fork installation and streaming compaction reserve that grace within their own lifetime bounds. [Publication and collection timing](#c1-publication-and-collection-timing) records the exact calculations.
 
 If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout doesn't show that a remote write had no effect, so unknown outcomes still have to be reconciled. The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms the publication only while the budget hasn't expired. After that, the attempt can't rule out that its put was applied outside the provider bound, so the outcome stays unknown. The operation returns `outcome_unknown`, and the caller reloads and plans from the current state.
 
-The publication protocol depends on one assumption that the implementation can't check. A provider applies a request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of when the client started the operation that sent it. This is the provider time that the reclamation grace reserves, and it's an operational requirement on the provider. The protocol is safe under that assumption, for these reasons:
+The publication protocol depends on one assumption that the implementation can't check. A provider applies a request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS` of when the client started the operation that sent it. This is the provider time that the reclamation grace reserves, and it's an operational requirement on the provider. The protocol is safe under that assumption, for these reasons:
 
 1. A WAL object or manifest at number `n` is created no earlier than the observation that `n - 1` was the tip, because that observation found `n` missing.
 2. The object can be deleted only one grace after it's created, and the grace is at least the longest budget, plus the provider request bound, plus the clock allowance.
@@ -1401,7 +1401,7 @@ completion
 In milliseconds:
 
 ```text
-CONTENT_RECLAMATION_GRACE_MS
+CONTENT_RECLAMATION_GRACE_WINDOW_MS
     = COMPLETED_UPLOAD_RECEIPT_WINDOW_MS
       + CONTENT_RECEIPT_TTL_MS
       + GC_MIN_GRACE_WINDOW_MS
@@ -2069,15 +2069,15 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | From the start of a bounded manifest publication (including an epoch claim) to starting its put. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | The shared retry budget for a client operation. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One attempt of a control operation. |
-| `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | The retry budget, the final backoff, and a payload-sized final request. |
-| `GC_SAFETY_MARGIN_MS` | 180,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
+| `PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS` | 255,000 | The retry budget, the final backoff, and a payload-sized final request. |
+| `GC_SAFETY_WINDOW_MS` | 180,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
 | `GC_MIN_GRACE_WINDOW_MS` | 2,490,000 | The derived minimum ordinary garbage collection grace. |
 | `READ_REVALIDATION_BOUND_MS` | 1,155,000 | The longest gap between a view's previous basis confirmation and the answer to its next successor check. |
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | The default configured ordinary grace. |
-| `UNREFERENCED_SEGMENT_MIN_AGE_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
+| `UNREFERENCED_SEGMENT_GRACE_WINDOW_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
 | `METADATA_COMPACTION_BUDGET_MS` | 83,910,000 | The longest time before a streaming compaction starts its publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a direct transfer capability. |
-| `NAMESPACE_RETIREMENT_GRACE_MS` | 3,645,000 | The minimum grace after the deletion call's clock. |
+| `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` | 3,645,000 | The minimum grace after the deletion call's clock. |
 
 A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, and then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (see [Required operations](#31-required-operations)), but a conditional WAL or manifest write can still be larger than the payload threshold in its one request. So the publication allowance reserves 120 + 15 + 120 seconds, not the 30-second timeout for small requests. The allowance covers the request phase, not reading the response body. It keeps the relative-clock and scheduling assumptions, and it doesn't prove that a timed-out remote change had no effect.
 
@@ -2085,19 +2085,19 @@ A provider retry can be admitted before its operation deadline, wait up to 15 se
 GC_MIN_GRACE_WINDOW_MS
     = max(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS,
           READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS)
-      + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-      + GC_SAFETY_MARGIN_MS
+      + PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS
+      + GC_SAFETY_WINDOW_MS
 
 READ_REVALIDATION_BOUND_MS
     = max(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
-      + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+      + PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS
 
 METADATA_COMPACTION_BUDGET_MS
-    = UNREFERENCED_SEGMENT_MIN_AGE_MS - GC_MIN_GRACE_WINDOW_MS
+    = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GC_MIN_GRACE_WINDOW_MS
 
-NAMESPACE_RETIREMENT_GRACE_MS
+NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
     = METADATA_PUBLICATION_BUDGET_MS
-      + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+      + PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS
       + GC_MIN_GRACE_WINDOW_MS
 ```
 
@@ -2111,7 +2111,7 @@ The configured grace `T` can't be lower than the minimum, and retirement uses th
 | `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` | 604,800,000 | The seven-day window in which completed content can issue new receipts. |
 | `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | The one-hour token lifetime. |
 | `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | The receipt issuance window plus the final token's lifetime. |
-| `CONTENT_RECLAMATION_GRACE_MS` | 610,890,000 | The admission window plus the minimum garbage collection grace. |
+| `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 610,890,000 | The admission window plus the minimum garbage collection grace. |
 
 The completed-content interval is seven days, one hour, forty-one minutes, and thirty seconds. Deletion still depends on the namespace's state and on reference evidence, and reaching that age doesn't delete referenced content.
 

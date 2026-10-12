@@ -39,7 +39,7 @@ pub struct BindingConfig {
     pub inline_content: InlineContentPolicy,
     pub content_token_secret: SecretString,
     pub request_deadline_ms: u64,
-    pub idle_fold_after_ms: u64,
+    pub idle_fold_timeout_ms: u64,
     pub store_kind: ConfiguredObjectStoreKind,
     pub auth_policy: AuthPolicy,
 }
@@ -98,13 +98,13 @@ pub struct Namespaces {
 
 pub struct HeldNamespace {
     pub handle: Namespace<Writable>,
-    last_opened_ms: u64,
+    last_opened_at_ms: u64,
     closing: Option<NamespaceClose>,
     pub indexed_seq: Option<ChangeSeq>,
     pub index_dirty: bool,
     pub collected_seq: Option<ChangeSeq>,
-    pub collected_ms: u64,
-    pub metadata_retry_after_ms: u64,
+    pub collected_at_ms: u64,
+    pub metadata_retry_at_ms: u64,
 }
 
 type NamespaceClose = Shared<BoxFuture<'static, loonfs::Result<CloseNamespaceReport>>>;
@@ -143,7 +143,7 @@ impl Namespaces {
                     if held.closing.is_none()
                         && held.handle.session_status() != NamespaceSessionStatus::Closed
                     {
-                        held.last_opened_ms = self.now_ms();
+                        held.last_opened_at_ms = self.now_ms();
                         return Ok(held.handle.clone());
                     }
                     Some((entry.clone(), held.begin_close()))
@@ -154,13 +154,13 @@ impl Namespaces {
                         namespace_id.clone(),
                         Arc::new(Mutex::new(HeldNamespace {
                             handle: handle.clone(),
-                            last_opened_ms: now_ms,
+                            last_opened_at_ms: now_ms,
                             closing: None,
                             indexed_seq: None,
                             index_dirty: false,
                             collected_seq: None,
-                            collected_ms: now_ms,
-                            metadata_retry_after_ms: 0,
+                            collected_at_ms: now_ms,
+                            metadata_retry_at_ms: 0,
                         })),
                     );
                     return Ok(handle);
@@ -194,7 +194,7 @@ impl Namespaces {
             if !held.handle.is_exclusively_held()
                 || held.handle.last_published_seq() != expected_seq
                 || !is_quiet(&held)
-                || self.now_ms().saturating_sub(held.last_opened_ms) <= idle_after_ms
+                || self.now_ms().saturating_sub(held.last_opened_at_ms) <= idle_after_ms
             {
                 return Ok(None);
             }

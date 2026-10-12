@@ -502,6 +502,7 @@ fn uploads_directory() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_client::PutFileStreamOptions;
     use loonfs_types::Checksum;
 
     struct InterruptedUpload<'a>(&'a UploadJournal);
@@ -563,13 +564,15 @@ mod tests {
         let journal = open(&path);
         let error = target
             .client
-            .put_file_stream_resumable(
+            .put_file_stream_with_options(
                 &spec,
                 loonfs_client::PayloadSource::reader(std::io::Cursor::new(b"retained content")),
                 &journal.actor_id(),
-                &journal.options(),
-                &InterruptedUpload(&journal),
-                None,
+                &PutFileStreamOptions {
+                    options: journal.options(),
+                    journal: Some(&InterruptedUpload(&journal)),
+                    resume: None,
+                },
             )
             .await
             .expect_err("interrupted before publication");

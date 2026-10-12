@@ -17,7 +17,7 @@ use loonfs::{
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
-    FailStore, InjectedError, KeyPredicate, OperationClass, RecordingStore,
+    FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -788,7 +788,7 @@ impl RuntimeStoreProbe {
         let fail_wal_publish = Arc::new(FailStore::new(
             hint_gets.clone() as SharedObjectStore,
             KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(namespace_id)),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::PreconditionFailed,
         ));
         Self {
@@ -823,15 +823,15 @@ impl RuntimeStoreProbe {
     }
 
     pub(crate) fn wal_get_count(&self) -> usize {
-        self.wal_gets.count(OperationClass::Read)
+        self.wal_gets.count(OperationSelector::Read)
     }
 
     pub(crate) fn manifest_get_count(&self) -> usize {
-        self.manifest_gets.count(OperationClass::Read)
+        self.manifest_gets.count(OperationSelector::Read)
     }
 
     pub(crate) fn hint_get_count(&self) -> usize {
-        self.hint_gets.count(OperationClass::Read)
+        self.hint_gets.count(OperationSelector::Read)
     }
 }
 

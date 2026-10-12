@@ -5,7 +5,7 @@ use crate::control_object::{
     LoadedControl,
 };
 use crate::error::CoreError;
-use crate::limits::CONTENTION_RETRY_LIMIT;
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use bytes::Bytes;
 use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -23,7 +23,7 @@ pub(crate) enum CasOutcome<T, R> {
     Contended(R),
 }
 
-/// Runs up to [`CONTENTION_RETRY_LIMIT`] attempts.
+/// Runs up to [`MAX_CONTENTION_ATTEMPTS`] attempts.
 pub(crate) async fn retry_while_contended<T, R, E, F, Fut>(
     mut attempt: F,
 ) -> std::result::Result<std::result::Result<T, R>, E>
@@ -32,7 +32,7 @@ where
     Fut: Future<Output = std::result::Result<CasOutcome<T, R>, E>>,
 {
     let mut last_reason = None;
-    for _attempt in 0..CONTENTION_RETRY_LIMIT {
+    for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
         match attempt().await? {
             CasOutcome::Settled(outcome) => return Ok(Ok(outcome)),
             CasOutcome::Contended(reason) => last_reason = Some(reason),
@@ -221,7 +221,7 @@ mod tests {
     use super::*;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::stores::{
-        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
     };
     use tempfile::tempdir;
 
@@ -234,7 +234,7 @@ mod tests {
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost write acknowledgement".to_owned()),
         )
         .apply_then_fail();
@@ -262,10 +262,10 @@ mod tests {
             BlockingStore::new(
                 LocalFsStore::new(temp_dir.path()).expect("store"),
                 KeyPredicate::exact(object_key),
-                OperationClass::PutCreateIfAbsent,
+                OperationSelector::PutCreateIfAbsent,
             ),
             KeyPredicate::exact(object_key),
-            OperationClass::PutCreateIfAbsent,
+            OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost write request".to_owned()),
         );
         store.fail_next(1);
@@ -333,6 +333,6 @@ mod tests {
         .await
         .expect("contention attempts should not fail");
 
-        assert_eq!(exhausted, Err(CONTENTION_RETRY_LIMIT - 1));
+        assert_eq!(exhausted, Err(MAX_CONTENTION_ATTEMPTS - 1));
     }
 }

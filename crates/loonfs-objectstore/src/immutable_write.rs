@@ -162,7 +162,7 @@ mod tests {
             etag: None,
             version: None,
             size_bytes: 5,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum,
         };
         assert!(verify_stored_checksum("key", &expected, metadata(Some(expected.clone()))).is_ok());

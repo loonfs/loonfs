@@ -40,7 +40,7 @@ fn annotate_owner(namespace: &loonfs::Namespace<loonfs::Writable>) {
 
 #[test]
 fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
-    use loonfs_test_support::stores::{KeyPredicate, OperationClass, RecordingStore};
+    use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
     use loonfs_types::{Attributes, MAX_ATTRIBUTES_TOTAL_BYTES};
     use std::sync::Arc;
 
@@ -110,7 +110,7 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
             },
         )
         .expect("maximum updates fit one WAL object");
-    assert_eq!(counted.count(OperationClass::PutCreateIfAbsent), 1);
+    assert_eq!(counted.count(OperationSelector::PutCreateIfAbsent), 1);
     block_on(fs.writer.shutdown()).expect("shutdown");
     drop(fs);
     counted.reset();
@@ -132,8 +132,8 @@ fn maximum_small_attribute_updates_reopen_after_one_wal_publication() {
         MAX_ATTRIBUTES_TOTAL_BYTES
     );
     assert!(response.committed_seq.0 > 0);
-    assert!(counted.count(OperationClass::Read) > 0);
-    assert_eq!(counted.count(OperationClass::Put), 0);
+    assert!(counted.count(OperationSelector::Read) > 0);
+    assert_eq!(counted.count(OperationSelector::Put), 0);
 }
 
 #[test]

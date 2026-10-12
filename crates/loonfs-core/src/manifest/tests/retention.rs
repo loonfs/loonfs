@@ -195,7 +195,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .expect("initial manifest already covers floor zero");
     assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "retention should validate manifest descriptors without loading metadata segment payloads"
     );
@@ -239,12 +239,12 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
-        store.count(OperationClass::Read),
+        store.count(OperationSelector::Read),
         0,
         "retention should advance from manifest descriptors without materializing rows"
     );
     assert_eq!(
-        store.count(OperationClass::Head),
+        store.count(OperationSelector::Head),
         referenced_segment_count,
         "retention should verify each distinct referenced segment"
     );
@@ -991,7 +991,7 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
         loonfs_test_support::stores::KeyPredicate::exact(loonfs_objectstore::keys::hint(
             &namespace_id,
         )),
-        loonfs_test_support::stores::OperationClass::Read,
+        loonfs_test_support::stores::OperationSelector::Read,
         loonfs_test_support::stores::InjectedError::Transport("verification failed".to_owned()),
     );
     store.fail_next(1);
@@ -1338,9 +1338,9 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
         manifest_before,
         "a step that plans a compaction must not publish"
     );
-    assert_eq!(store.count(OperationClass::Put), 0);
+    assert_eq!(store.count(OperationSelector::Put), 0);
     assert!(
-        store.count(OperationClass::Read) <= group.families().len(),
+        store.count(OperationSelector::Read) <= group.families().len(),
         "byte preflight should read only the oldest candidate's index sections"
     );
 
@@ -1377,7 +1377,7 @@ async fn compaction_step_honors_run_row_and_decoded_byte_budgets() {
     assert!(decoded_input_rows <= policy.max_decoded_input_rows_per_step.get() as u64);
     assert!(decoded_input_bytes <= policy.max_decoded_input_bytes_per_step.get() as u64);
     assert!(
-        store.count(OperationClass::Read) <= input_runs * group.families().len() * 2,
+        store.count(OperationSelector::Read) <= input_runs * group.families().len() * 2,
         "the step should read index and data sections only for selected-run family segments"
     );
 }

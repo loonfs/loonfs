@@ -3,7 +3,8 @@
 use super::*;
 use crate::gc::{gc_namespace, GcOptions};
 use crate::limits::{
-    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_MS, GC_MIN_GRACE_WINDOW_MS,
+    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_WINDOW_MS,
+    GC_MIN_GRACE_WINDOW_MS,
 };
 use crate::namespace::control::load_namespace_read_state;
 use crate::protocol::{
@@ -13,7 +14,9 @@ use crate::protocol::{
 use crate::test_support::ops::create;
 use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, MetadataMapStore, OperationClass};
+use loonfs_test_support::stores::{
+    BlockingStore, KeyPredicate, MetadataMapStore, OperationSelector,
+};
 use loonfs_types::{AbsolutePath, DestinationBehavior, WriterId};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
@@ -166,7 +169,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(hint(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup)
@@ -175,7 +178,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let content_key = content_blob(&namespace_id, &completed.prepared.content_ref().content_id);
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
-    let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1);
     let timer = Arc::new(PublicationTimer::default());
     let mut engine = NamespaceCommitEngine::new(
         namespace_id.clone(),
@@ -261,7 +264,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(hint(&namespace_id)),
-        OperationClass::Read,
+        OperationSelector::Read,
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup)
@@ -388,7 +391,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
-        OperationClass::Put,
+        OperationSelector::Put,
     );
     let setup = context(1_000);
     create(&store, &namespace_id, &setup)
@@ -596,7 +599,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         );
         break;
     }
-    let expired = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let expired = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1);
     let later = CommitCandidate::new(directory_request("later", "later"));
     store.reset();
     let replay = engine
@@ -661,7 +664,10 @@ async fn retained_evidence_minting_stops_at_the_upload_issuance_deadline() {
         assert_eq!(expires_at_ms, now_ms + CONTENT_RECEIPT_TTL_MS);
         assert!(expires_at_ms <= setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS);
     }
-    for now_ms in [deadline_ms, setup.now_ms + CONTENT_RECLAMATION_GRACE_MS * 2] {
+    for now_ms in [
+        deadline_ms,
+        setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS * 2,
+    ] {
         assert_eq!(
             mint_content_token("secret", &evidence, now_ms),
             Err(ContentTokenError::Expired)

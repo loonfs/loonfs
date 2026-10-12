@@ -15,8 +15,8 @@ use super::super::validate::{
     validate_direntry_child_bind_index, validate_manifest_materialization_ranges,
     validate_revision_rows_have_unique_keys,
 };
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::{MetadataState, MetadataStateBuilder};
-use crate::store_waves::STORE_READ_WAVE;
 use futures::future::try_join_all;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::ObjectStore;
@@ -117,7 +117,7 @@ where
     let mut revision_rows = Vec::new();
     for family_segments in ordered {
         let mut loaded_segments = Vec::with_capacity(family_segments.segments.len());
-        for chunk in family_segments.segments.chunks(STORE_READ_WAVE) {
+        for chunk in family_segments.segments.chunks(STORE_READS_IN_FLIGHT) {
             loaded_segments.extend(
                 try_join_all(
                     chunk

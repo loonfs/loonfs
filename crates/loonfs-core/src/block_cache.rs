@@ -455,7 +455,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, OperationClass, RecordingStore,
+        BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
     };
     use loonfs_types::MetadataSegmentId;
     use std::pin::pin;
@@ -478,7 +478,7 @@ mod tests {
                 BlockingStore::new(
                     LocalFsStore::new(directory.path()).expect("local store"),
                     KeyPredicate::any(),
-                    OperationClass::Get,
+                    OperationSelector::Get,
                 ),
                 KeyPredicate::any(),
             );

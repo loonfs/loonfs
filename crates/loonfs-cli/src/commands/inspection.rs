@@ -603,7 +603,8 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStoreError;
     use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+        FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
+        RecordingStore,
     };
     use loonfs_types::api::v0::{StoreProbeCheckOutcome, StoreProbeCheckResult};
     use std::collections::BTreeMap;
@@ -624,7 +625,7 @@ mod tests {
                 LocalFsStore::new_with_key_prefix(directory.path(), Some("tenant"))
                     .expect("open scoped store"),
                 KeyPredicate::any(),
-                OperationClass::List,
+                OperationSelector::List,
                 InjectedError::PermissionDenied("private provider detail".to_owned()),
             );
             if denied {

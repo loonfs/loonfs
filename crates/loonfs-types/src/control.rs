@@ -173,7 +173,7 @@ pub struct WriterBlock {
 ///
 /// See [control and manifest payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcquiredWriter {
+pub struct ClaimedWriter {
     /// Stable writer label copied into the manifest's writer block.
     pub writer_id: WriterId,
     /// Fencing epoch every commit publication from this session must match.

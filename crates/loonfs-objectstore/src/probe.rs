@@ -461,7 +461,7 @@ async fn head_reports_last_modified(store: &dyn ObjectStore, run: &ProbeRun) -> 
         "the written object's metadata",
         ok("head", store.head(&key).await)?,
     )?;
-    match head.last_modified_ms {
+    match head.last_modified_at_ms {
         None => Err(wrong(
             "the store reports no last-modified time, so nothing can age out of the grace window",
         )),
@@ -1122,7 +1122,7 @@ mod tests {
 
         async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
             Ok(self.inner.head(key).await?.map(|mut metadata| {
-                metadata.last_modified_ms = Some(0);
+                metadata.last_modified_at_ms = Some(0);
                 metadata
             }))
         }

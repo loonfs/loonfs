@@ -13,7 +13,7 @@ use loonfs_objectstore::keys::upload_session;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
 use loonfs_types::api::v0::CompleteMultipartUploadRequest;
 use loonfs_types::Checksum;
@@ -197,7 +197,7 @@ fn replay_read_guard_store(root: impl AsRef<Path>, namespace: &str) -> FailStore
     let store = FailStore::new(
         LocalFsStore::new(root.as_ref()).expect("store"),
         KeyPredicate::prefix(wal_prefix),
-        OperationClass::Read,
+        OperationSelector::Read,
         InjectedError::Transport("begin_upload unexpectedly read replay object".to_owned()),
     );
     store.fail_all();
@@ -332,14 +332,14 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         .await
         .expect("complete upload");
     assert_eq!(completed.content_ref(), uploaded.content_ref());
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 
     store.reset();
     let completed_again = complete_upload(&store, &namespace_id, &begin.upload_id, &context)
         .await
         .expect("complete upload idempotently");
     assert_eq!(completed_again, completed);
-    assert_eq!(store.count(OperationClass::Read), 0);
+    assert_eq!(store.count(OperationSelector::Read), 0);
 }
 
 /// The streamed proxied upload: same session, same reference, same
@@ -686,7 +686,7 @@ mod streamed_content {
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
         ));
         let context = mutation_context();
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1266,7 +1266,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_refused_assembly_stays_open_without_object_evidence() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = FakeMultipartStore::with_enforcement(
+        let store = FakeMultipartStore::new_with_enforcement(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             MultipartChecksumEnforcement::Precondition,
         );
@@ -1334,7 +1334,7 @@ mod direct_multipart {
         let failing = Arc::new(FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Head,
+            OperationSelector::Head,
             InjectedError::Transport("injected content read failure".to_owned()),
         ));
         let store = FakeMultipartStore::new(Arc::clone(&failing));

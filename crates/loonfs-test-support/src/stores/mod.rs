@@ -25,7 +25,7 @@ pub use key_predicate::KeyPredicate;
 pub use latency_store::{LatencyInterceptor, LatencyStore};
 pub use memory_store::MemoryStore;
 pub use metadata_map_store::MetadataMapStore;
-pub use operation::{OperationClass, OperationContext, OperationKind, RecordedOperation};
+pub use operation::{OperationContext, OperationKind, OperationSelector, RecordedOperation};
 pub use recording_store::{RecordedGet, RecordingInterceptor, RecordingStore, StoreCounts};
 
 #[cfg(test)]
@@ -46,10 +46,10 @@ mod tests {
         let store = FailStore::new(
             store,
             KeyPredicate::any(),
-            OperationClass::List,
+            OperationSelector::List,
             InjectedError::Transport("unused".to_owned()),
         );
-        let store = BlockingStore::new(store, KeyPredicate::any(), OperationClass::List);
+        let store = BlockingStore::new(store, KeyPredicate::any(), OperationSelector::List);
         let store = BufferWatchStore::new(store, KeyPredicate::any());
         let store = ConcurrencyWatchStore::new(store, KeyPredicate::any());
         let store = RecordingStore::new(store, KeyPredicate::any());

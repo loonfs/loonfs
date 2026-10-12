@@ -7,7 +7,7 @@ use std::num::NonZeroUsize;
 /// Writes segment requests in bounded concurrent waves.
 pub async fn write_segments_in_waves<Requests, Write, WriteFuture, Descriptor, Error>(
     requests: Requests,
-    max_io: NonZeroUsize,
+    max_in_flight: NonZeroUsize,
     mut write_segment: Write,
 ) -> std::result::Result<Vec<Descriptor>, Error>
 where
@@ -18,7 +18,10 @@ where
     let mut descriptors = Vec::new();
     let mut pending = requests.into_iter();
     loop {
-        let chunk = pending.by_ref().take(max_io.get()).collect::<Vec<_>>();
+        let chunk = pending
+            .by_ref()
+            .take(max_in_flight.get())
+            .collect::<Vec<_>>();
         if chunk.is_empty() {
             break;
         }

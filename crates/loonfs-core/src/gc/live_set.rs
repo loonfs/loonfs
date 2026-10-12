@@ -8,7 +8,7 @@ use super::reap::GraceAge;
 use super::uploads::protect_session_content;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::limits::NAMESPACE_RETIREMENT_GRACE_MS;
+use crate::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS;
 use crate::manifest::cache::read_working_memory;
 use crate::manifest::{load_namespace_manifest_envelope_if_present, MetadataSegmentCache};
 use crate::namespace::control::{load_current_manifest_with_hint, CurrentManifest, LoadedManifest};
@@ -90,7 +90,7 @@ impl LiveSet {
                 .sum(),
             manifests: Vec::new(),
             has_pins: false,
-            grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_MS),
+            grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
             now_ms: context.now_ms,
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
@@ -159,7 +159,7 @@ impl LiveSet {
             .map_err(|error| CoreError::store(&prefix, &error))?
         {
             if let Some(manifest_no) = manifest_no_of(&entry.key) {
-                listed_manifests.insert(manifest_no, entry.last_modified_ms);
+                listed_manifests.insert(manifest_no, entry.last_modified_at_ms);
             }
         }
         for manifest_no in listed_manifests.keys().copied() {

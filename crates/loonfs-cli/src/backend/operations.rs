@@ -8,7 +8,8 @@ use crate::resolve::ResolvedTarget;
 use crate::uploads::UploadJournal;
 use loonfs_client::{
     ChangesPager, DownloadOptions, ListChangesOptions, ListOptions, NamespacePath,
-    PathEntriesPager, PutFileOptions, ReadFileOptions, StatOptions,
+    PathEntriesPager, PutFileJournal, PutFileOptions, PutFileStreamOptions, ReadFileOptions,
+    StatOptions,
 };
 use loonfs_types::{
     ActorId, ChangeSeq, Commit, InodeId, NamespaceId, PathEntry, PinId, RevisionNo,
@@ -163,16 +164,15 @@ impl ResolvedTarget {
         journal: Option<&UploadJournal>,
     ) -> Result<Commit, CliError> {
         let source = payload.open_source(progress).await?;
-        let Some(journal) = journal else {
-            return Ok(self
-                .client
-                .put_file_stream_with_options(spec, source, actor, options)
-                .await?);
+        let resume = journal.and_then(UploadJournal::resume);
+        let options = PutFileStreamOptions {
+            options: options.clone(),
+            journal: journal.map(|journal| journal as &dyn PutFileJournal),
+            resume: resume.as_ref(),
         };
-        let resume = journal.resume();
         Ok(self
             .client
-            .put_file_stream_resumable(spec, source, actor, options, journal, resume.as_ref())
+            .put_file_stream_with_options(spec, source, actor, &options)
             .await?)
     }
 

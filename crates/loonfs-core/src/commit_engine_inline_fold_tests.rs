@@ -5,7 +5,7 @@ use crate::namespace::control::load_current_manifest;
 use crate::storage::content::content_object_key_for_ref;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::PutMode;
-use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError, OperationClass};
+use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError, OperationSelector};
 use loonfs_types::ErrorCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -333,7 +333,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
     let failing = FailStore::new(
         store.clone(),
         KeyPredicate::manifest(&engine.namespace_id),
-        OperationClass::Put,
+        OperationSelector::Put,
         InjectedError::PermissionDenied("manifest failure".to_owned()),
     );
     failing.fail_all();
@@ -429,7 +429,8 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     publish(&mut first, &store, &context, candidate.clone())
         .await
         .expect("publish");
-    let mut second = NamespaceCommitEngine::with_unshared_head_state(first.namespace_id.clone());
+    let mut second =
+        NamespaceCommitEngine::new_with_unshared_head_state(first.namespace_id.clone());
     publish(&mut second, &store, &context, candidate)
         .await
         .expect("replay");
@@ -439,7 +440,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::content_blob(),
-        OperationClass::Put,
+        OperationSelector::Put,
     );
     blocked.block_next();
     store.reset();
@@ -561,7 +562,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
     let failing = FailStore::new(
         store.clone(),
         KeyPredicate::content_blob(),
-        OperationClass::Put,
+        OperationSelector::Put,
         InjectedError::Transport("assembly failure".to_owned()),
     )
     .apply_then_fail();

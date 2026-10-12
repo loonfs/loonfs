@@ -543,7 +543,7 @@ async fn assert_start_after_contract(store: &dyn ObjectStore) {
             .await
             .expect("head listed object")
             .expect("listed object exists");
-        match (entry.last_modified_ms, metadata.last_modified_ms) {
+        match (entry.last_modified_at_ms, metadata.last_modified_at_ms) {
             (Some(listed), Some(head)) => {
                 assert!(listed.abs_diff(head) < 1000, "{}", entry.key);
             }

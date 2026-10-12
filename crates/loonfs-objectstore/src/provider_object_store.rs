@@ -79,7 +79,7 @@ pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Concurrent in-flight parts of one multipart overwrite or verified
 /// immutable write. A `put_streamed` write sends one part at a time.
-pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
+pub const PROVIDER_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 
 /// The smallest part AWS S3 and Cloudflare R2 accept anywhere but last, and
 /// so the shortest base prefix a provider copies instead of receiving it
@@ -106,7 +106,7 @@ pub const PROVIDER_TRANSFER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120)
 /// payload-sized body, so the bound still holds for it. This does not bound
 /// response-body consumption or prove that a timed-out request cannot take
 /// effect remotely.
-pub const PROVIDER_PUBLICATION_REQUEST_BOUND: Duration = PROVIDER_OPERATION_DEADLINE
+pub const PROVIDER_PUBLICATION_REQUEST_DEADLINE: Duration = PROVIDER_OPERATION_DEADLINE
     .saturating_add(PROVIDER_MAX_RETRY_BACKOFF)
     .saturating_add(PROVIDER_TRANSFER_ATTEMPT_TIMEOUT);
 
@@ -115,13 +115,13 @@ pub const PROVIDER_PUBLICATION_REQUEST_BOUND: Duration = PROVIDER_OPERATION_DEAD
 /// smaller bodies are control-plane traffic bounded by
 /// [`PROVIDER_ATTEMPT_TIMEOUT`]. Sits well below the part size so multipart
 /// tail parts classify with their siblings.
-pub(crate) const PROVIDER_TRANSFER_BODY_MIN_BYTES: u64 = 1024 * 1024;
+pub(crate) const PROVIDER_MIN_TRANSFER_BODY_BYTES: u64 = 1024 * 1024;
 
 /// Bound for one HTTP attempt's request phase (connect, request-body
 /// upload, response headers), by request body size: flat and small for
 /// control-plane requests, flat and generous for payload transfers.
 pub(crate) fn request_phase_bound(request_body_bytes: u64) -> Duration {
-    if request_body_bytes >= PROVIDER_TRANSFER_BODY_MIN_BYTES {
+    if request_body_bytes >= PROVIDER_MIN_TRANSFER_BODY_BYTES {
         PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
     } else {
         PROVIDER_ATTEMPT_TIMEOUT
@@ -354,7 +354,7 @@ impl ProviderObjectStore {
             etag: meta.e_tag,
             version: meta.version,
             size_bytes: meta.size,
-            last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
+            last_modified_at_ms: last_modified_at_ms(meta.last_modified.timestamp_millis()),
             checksum: None,
         })
     }
@@ -364,7 +364,7 @@ impl ProviderObjectStore {
             etag: result.e_tag,
             version: result.version,
             size_bytes,
-            last_modified_ms: None,
+            last_modified_at_ms: None,
             checksum: None,
         })
     }
@@ -681,7 +681,7 @@ impl MultipartWrite<'_> {
         let mut next_part = 0usize;
 
         loop {
-            while in_flight.len() < PROVIDER_MULTIPART_PART_WINDOW && next_part < part_count {
+            while in_flight.len() < PROVIDER_MULTIPART_PARTS_IN_FLIGHT && next_part < part_count {
                 let part_index = next_part;
                 let start = part_index * part_size;
                 let end = (start + part_size).min(bytes.len());
@@ -948,7 +948,7 @@ impl ObjectStore for ProviderObjectStore {
                 );
                 let head = parts.next_part().await?.unwrap_or_default();
                 controller
-                    .put_if_absent(key, head, parts, PROVIDER_MULTIPART_PART_WINDOW)
+                    .put_if_absent(key, head, parts, PROVIDER_MULTIPART_PARTS_IN_FLIGHT)
                     .await
             }
         })
@@ -1013,7 +1013,7 @@ impl ObjectStore for ProviderObjectStore {
                 head,
                 reader,
                 PutMode::CreateIfAbsent,
-                PROVIDER_MULTIPART_PART_WINDOW,
+                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
             )
             .await
         }
@@ -1152,7 +1152,7 @@ impl ObjectStore for ProviderObjectStore {
                         }
                         Some(Ok(ListedObject {
                             key,
-                            last_modified_ms: last_modified_ms(
+                            last_modified_at_ms: last_modified_at_ms(
                                 meta.last_modified.timestamp_millis(),
                             ),
                         }))
@@ -1336,7 +1336,7 @@ impl ProviderObjectStore {
 /// Unix epoch zero. Returning that value would make garbage collection treat
 /// the object as extremely old. Non-positive timestamps are therefore
 /// returned as `None`, which causes unknown-age objects to be retained.
-fn last_modified_ms(timestamp_ms: i64) -> Option<u64> {
+fn last_modified_at_ms(timestamp_ms: i64) -> Option<u64> {
     match timestamp_ms > 0 {
         true => u64::try_from(timestamp_ms).ok(),
         false => None,
@@ -1531,7 +1531,9 @@ mod tests {
                         etag: meta.e_tag,
                         version: meta.version,
                         size_bytes: meta.size,
-                        last_modified_ms: last_modified_ms(meta.last_modified.timestamp_millis()),
+                        last_modified_at_ms: last_modified_at_ms(
+                            meta.last_modified.timestamp_millis(),
+                        ),
                         checksum: Some(Checksum::crc64nvme(&bytes)),
                     }))
                 }
@@ -1615,11 +1617,14 @@ mod tests {
 
     #[test]
     fn a_synthesized_epoch_stamp_reads_as_no_timestamp_at_all() {
-        assert_eq!(last_modified_ms(0), None);
-        assert_eq!(last_modified_ms(-1), None);
-        assert_eq!(last_modified_ms(i64::MIN), None);
-        assert_eq!(last_modified_ms(1), Some(1));
-        assert_eq!(last_modified_ms(1_754_000_000_000), Some(1_754_000_000_000));
+        assert_eq!(last_modified_at_ms(0), None);
+        assert_eq!(last_modified_at_ms(-1), None);
+        assert_eq!(last_modified_at_ms(i64::MIN), None);
+        assert_eq!(last_modified_at_ms(1), Some(1));
+        assert_eq!(
+            last_modified_at_ms(1_754_000_000_000),
+            Some(1_754_000_000_000)
+        );
     }
 
     #[test]
@@ -1795,7 +1800,7 @@ mod tests {
         );
         for entry in entries {
             let head = store.head(&entry.key).await.expect("head").expect("exists");
-            assert_eq!(entry.last_modified_ms, head.last_modified_ms);
+            assert_eq!(entry.last_modified_at_ms, head.last_modified_at_ms);
         }
         let remaining: Vec<_> = store
             .list_prefix_from_stream(prefix, Some(&keys[999]))
@@ -2734,11 +2739,11 @@ mod tests {
     fn request_phase_bound_has_two_flat_tiers() {
         assert_eq!(request_phase_bound(0), PROVIDER_ATTEMPT_TIMEOUT);
         assert_eq!(
-            request_phase_bound(PROVIDER_TRANSFER_BODY_MIN_BYTES - 1),
+            request_phase_bound(PROVIDER_MIN_TRANSFER_BODY_BYTES - 1),
             PROVIDER_ATTEMPT_TIMEOUT
         );
         assert_eq!(
-            request_phase_bound(PROVIDER_TRANSFER_BODY_MIN_BYTES),
+            request_phase_bound(PROVIDER_MIN_TRANSFER_BODY_BYTES),
             PROVIDER_TRANSFER_ATTEMPT_TIMEOUT
         );
         assert_eq!(
@@ -2928,7 +2933,7 @@ mod tests {
                 etag: Some("\"controller\"".to_owned()),
                 version: None,
                 size_bytes,
-                last_modified_ms: None,
+                last_modified_at_ms: None,
                 checksum: Some(checksum.finish()),
             })
         }
@@ -2967,7 +2972,10 @@ mod tests {
             .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload.clone()))
             .await
             .expect("a large verified write creates through the controller");
-        assert_eq!(controller.part_windows(), [PROVIDER_MULTIPART_PART_WINDOW]);
+        assert_eq!(
+            controller.part_windows(),
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT]
+        );
         assert_eq!(written.size_bytes, payload.len() as u64);
         assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
@@ -2982,7 +2990,7 @@ mod tests {
             .expect("a large streamed verified write creates through the controller");
         assert_eq!(
             controller.part_windows(),
-            [PROVIDER_MULTIPART_PART_WINDOW; 2]
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT; 2]
         );
         assert_eq!(written.size_bytes, payload.len() as u64);
         assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
@@ -2994,7 +3002,7 @@ mod tests {
             .expect("a small streamed verified write is one request");
         assert_eq!(
             controller.part_windows(),
-            [PROVIDER_MULTIPART_PART_WINDOW; 2]
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT; 2]
         );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         let held = store.head(small).await.expect("head").expect("object");
@@ -3012,8 +3020,8 @@ mod tests {
         assert_eq!(
             controller.part_windows(),
             [
-                PROVIDER_MULTIPART_PART_WINDOW,
-                PROVIDER_MULTIPART_PART_WINDOW,
+                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
+                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
                 1
             ],
             "a client's upload keeps one part in flight"

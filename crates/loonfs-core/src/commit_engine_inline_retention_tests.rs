@@ -219,7 +219,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         &namespace_id,
         &GcOptions::default(),
         &MutationContext {
-            now_ms: crate::limits::UNREFERENCED_SEGMENT_MIN_AGE_MS + 1,
+            now_ms: crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
             ..context.clone()
         },
     )

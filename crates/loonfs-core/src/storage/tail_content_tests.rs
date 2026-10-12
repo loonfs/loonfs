@@ -4,7 +4,7 @@ use super::*;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
-    BlockingStore, FakeMultipartStore, KeyPredicate, MetadataMapStore, OperationClass,
+    BlockingStore, FakeMultipartStore, KeyPredicate, MetadataMapStore, OperationSelector,
     RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
@@ -328,7 +328,7 @@ async fn validation_materialization_holds_a_write_permit() {
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
-        OperationClass::Head,
+        OperationSelector::Head,
     );
     let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
     let pool = Semaphore::new(1);

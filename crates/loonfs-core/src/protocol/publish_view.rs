@@ -15,13 +15,13 @@ use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::ProjectedWalTail;
 use crate::wal::{replay_discovered_tail, TailChunk, ValidatedWalTail, WalObjectError};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::AcquiredWriter;
+use loonfs_types::format::control::ClaimedWriter;
 use loonfs_types::{CommitId, NamespaceId};
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
-    pub(super) acquired_writer: AcquiredWriter,
+    pub(super) acquired_writer: ClaimedWriter,
     /// The tip observation starts with this load rather than a retained view.
     pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
@@ -166,7 +166,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    acquired_writer: AcquiredWriter,
+    acquired_writer: ClaimedWriter,
     cached_projection: Option<PublishTailProjection>,
     acquired_anchor: Option<NamespaceReadAnchor>,
 ) -> Result<PublishMetadataView<'a, S>> {

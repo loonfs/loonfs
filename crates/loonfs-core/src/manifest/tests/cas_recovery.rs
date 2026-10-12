@@ -78,7 +78,7 @@ async fn a_manifest_put_that_lands_nowhere_and_loses_its_answer_has_an_unknown_o
     let store = FailStore::new(
         store,
         KeyPredicate::exact(&object_key),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost request".to_owned()),
     );
     store.fail_next(1);
@@ -157,7 +157,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             let store = FailStore::new(
                 store,
                 KeyPredicate::exact(&object_key),
-                OperationClass::PutCreateIfAbsent,
+                OperationSelector::PutCreateIfAbsent,
                 InjectedError::Transport("lost acknowledgement".to_owned()),
             )
             .apply_then_fail();
@@ -214,7 +214,7 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
         let blocked = BlockingStore::new(
             store.clone(),
             KeyPredicate::manifest(&namespace_id),
-            OperationClass::Put,
+            OperationSelector::Put,
         );
         let (losing, winning) = if race_at_put {
             blocked.block_next();
@@ -267,7 +267,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         if newer_head {
             let session = Arc::new(std::sync::Mutex::new(
                 crate::commit_engine::WriterSessionStatus::Acquired(
-                    loonfs_types::format::control::AcquiredWriter {
+                    loonfs_types::format::control::ClaimedWriter {
                         writer_id: context.writer_id.clone(),
                         writer_epoch: current.state.envelope.payload().writer_epoch,
                     },
@@ -329,7 +329,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         let blocked = BlockingStore::new(
             store.clone(),
             KeyPredicate::manifest(&namespace_id),
-            OperationClass::Put,
+            OperationSelector::Put,
         );
         blocked.block_next();
         let losing = publish_manifest(&blocked, second.clone());
@@ -506,7 +506,7 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
         let store = FailStore::new(
             store,
             keys,
-            OperationClass::Put,
+            OperationSelector::Put,
             InjectedError::Transport("lost acknowledgment".to_owned()),
         )
         .apply_then_fail();
@@ -577,7 +577,7 @@ async fn a_fold_whose_manifest_put_lands_without_an_answer_reports_published() {
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost acknowledgement".to_owned()),
     )
     .apply_then_fail();
@@ -619,7 +619,7 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::Put,
+        OperationSelector::Put,
     );
     blocked.block_next();
     let losing = create_checkpoint(&blocked, &namespace_id, &context);
@@ -840,7 +840,7 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::new(move |key| key == claim_key),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("response lost".to_owned()),
     )
     .apply_then_fail();

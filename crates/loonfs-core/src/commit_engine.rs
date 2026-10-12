@@ -23,7 +23,7 @@ use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
-use loonfs_types::format::control::AcquiredWriter;
+use loonfs_types::format::control::ClaimedWriter;
 use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
@@ -606,7 +606,7 @@ pub enum WriterSessionStatus {
     Unacquired,
     /// Writer epoch acquired on the first publish and reused for the rest of
     /// the session.
-    Acquired(AcquiredWriter),
+    Acquired(ClaimedWriter),
     /// Permanent fencing record for this session. Later publishes return
     /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
     /// requires an explicit caller action.
@@ -660,7 +660,7 @@ impl NamespaceCommitEngine {
     /// An engine that keeps its WAL tail between units in a head-state cache
     /// of its own, as a runtime's engine does in the shared one.
     #[cfg(test)]
-    pub(crate) fn with_unshared_head_state(namespace_id: NamespaceId) -> Self {
+    pub(crate) fn new_with_unshared_head_state(namespace_id: NamespaceId) -> Self {
         Self::new(
             namespace_id,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
@@ -846,7 +846,7 @@ impl NamespaceCommitEngine {
         &mut self,
         store: &S,
         context: &MutationContext,
-    ) -> Result<AcquiredWriter> {
+    ) -> Result<ClaimedWriter> {
         let already_acquired = match &*self.lock_session() {
             WriterSessionStatus::Fenced(fence) => {
                 return Err(CoreError::WriterFenced(fence.clone()))
@@ -1140,7 +1140,7 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     let batch = Deadline::start(Arc::clone(&engine.timer));
     let mut results = vec![None; candidates.len()];
     let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
-    for _ in 0..crate::limits::CONTENTION_RETRY_LIMIT {
+    for _ in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
         let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
         let observed = engine
             .publish_batch(store, &attempted, context, &batch)
@@ -1197,7 +1197,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+        BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
     };
     use loonfs_types::{
         ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
@@ -1453,7 +1453,8 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        let mut engine_a = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
+        let mut engine_a =
+            NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone());
         let first = engine_a
             .publish_batch(
                 &store,
@@ -1531,7 +1532,7 @@ mod tests {
         let store = StdArc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::prefix(wal_prefix(&namespace_id)),
-            OperationClass::Read,
+            OperationSelector::Read,
         ));
 
         create(store.inner(), &namespace_id, &writer_a)
@@ -1608,8 +1609,9 @@ mod tests {
             .expect("bootstrap");
 
         let session = SharedWriterSessionStatus::default();
-        let mut engine_a1 = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
-            .writer_session(Arc::clone(&session));
+        let mut engine_a1 =
+            NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
+                .writer_session(Arc::clone(&session));
         engine_a1
             .publish_batch(
                 &store,
@@ -1717,7 +1719,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+        let mut engine = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
             .monotonic_timer(timer.clone());
         for (name, advance_ms) in [
             ("alpha", 0),
@@ -1788,7 +1790,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+        let mut engine = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
             .monotonic_timer(timer.clone());
         let first = publish_one(&mut engine, &store, &writer, "alpha").await;
         let basis = first
@@ -1821,7 +1823,7 @@ mod tests {
                 .manifest_no(),
             basis
         );
-        assert_eq!(store.count(OperationClass::Head), 0);
+        assert_eq!(store.count(OperationSelector::Head), 0);
 
         // Two budgets after the load the check finds the successor, and the
         // view is reloaded from the hint before the put.
@@ -1859,7 +1861,7 @@ mod tests {
                 KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
                     &namespace_id,
                 )),
-                OperationClass::Head,
+                OperationSelector::Head,
             ),
             KeyPredicate::any(),
         );
@@ -1868,7 +1870,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+        let mut engine = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
             .monotonic_timer(timer.clone());
         publish_one(&mut engine, &store, &writer, "alpha").await;
         timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
@@ -1928,7 +1930,7 @@ mod tests {
             BlockingStore::new(
                 LocalFsStore::new(directory.path()).expect("store"),
                 gated,
-                OperationClass::Head,
+                OperationSelector::Head,
             ),
             KeyPredicate::any(),
         )
@@ -1949,7 +1951,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+        let mut engine = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
             .monotonic_timer(timer.clone())
             .segment_cache(Arc::new(MetadataSegmentCache::unshared(usize::MAX)));
         publish_one(&mut engine, store, &writer, "alpha").await;
@@ -2033,7 +2035,7 @@ mod tests {
                 .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
             "{operations:?}"
         );
-        assert_eq!(store.count(OperationClass::Put), 0, "{operations:?}");
+        assert_eq!(store.count(OperationSelector::Put), 0, "{operations:?}");
     }
 
     #[tokio::test]
@@ -2183,7 +2185,7 @@ mod tests {
                 store.inner().release();
             });
         assert!(replayed.resulting_read_state.is_none());
-        assert_eq!(store.count(OperationClass::Put), 0);
+        assert_eq!(store.count(OperationSelector::Put), 0);
         assert_eq!(
             engine.projection_observed.as_ref().expect("tip").age_ms(),
             1_000
@@ -2451,7 +2453,7 @@ mod tests {
             .remove(0)
             .expect("uncached publish a");
         assert!(
-            store.count(OperationClass::Read) > 0,
+            store.count(OperationSelector::Read) > 0,
             "publish validation should read segment blocks"
         );
         store.reset();
@@ -2467,7 +2469,7 @@ mod tests {
             .remove(0)
             .expect("uncached publish b");
         assert!(
-            store.count(OperationClass::Read) > 0,
+            store.count(OperationSelector::Read) > 0,
             "without a cache the next publish re-fetches the same blocks"
         );
 
@@ -2490,7 +2492,7 @@ mod tests {
             .remove(0)
             .expect("cached publish a");
         assert!(
-            store.count(OperationClass::Read) > 0,
+            store.count(OperationSelector::Read) > 0,
             "the first cached publish fills the cache"
         );
         store.reset();
@@ -2506,7 +2508,7 @@ mod tests {
             .remove(0)
             .expect("cached publish b");
         assert_eq!(
-            store.count(OperationClass::Read),
+            store.count(OperationSelector::Read),
             0,
             "a warm cache serves every publish-view segment read"
         );

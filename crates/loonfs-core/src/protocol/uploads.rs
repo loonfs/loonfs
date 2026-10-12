@@ -1388,7 +1388,7 @@ fn completed_status(content_ref: &ContentRef, completed_at_ms: u64) -> UploadSes
 ///
 /// The window is what makes content reclamation decidable: past it no new
 /// evidence exists, so no new metadata reference to this content can appear
-/// (`limits::CONTENT_RECLAMATION_GRACE_MS`).
+/// (`limits::CONTENT_RECLAMATION_GRACE_WINDOW_MS`).
 fn evidence_within_window(
     content: &ContentRef,
     completed_at_ms: u64,
@@ -1611,8 +1611,8 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::PutMode;
     use loonfs_test_support::stores::{
-        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass, OperationContext,
-        OperationKind, RecordingStore,
+        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationContext, OperationKind,
+        OperationSelector, RecordingStore,
     };
     use loonfs_types::format::control::decode_control_object;
     use tempfile::tempdir;
@@ -1641,7 +1641,7 @@ mod tests {
         let failing = Arc::new(FailStore::new(
             store,
             KeyPredicate::exact(&session_key),
-            OperationClass::Read,
+            OperationSelector::Read,
             InjectedError::Transport("session read failed".to_owned()),
         ));
         let recording = Arc::new(RecordingStore::new(
@@ -1671,7 +1671,7 @@ mod tests {
         .expect_err("the final session read must succeed");
 
         assert!(matches!(error, CoreError::ControlObjectLoad(_)));
-        assert_eq!(recording.count(OperationClass::Read), 1);
+        assert_eq!(recording.count(OperationSelector::Read), 1);
         assert_eq!(recording.counts().puts, 0);
         assert!(recording
             .get(&content_blob(&namespace_id, &loaded.content_id), None)
@@ -1695,7 +1695,7 @@ mod tests {
         let store = FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
             InjectedError::Transport("content write timed out".to_owned()),
         );
         store.fail_all();
@@ -1747,7 +1747,7 @@ mod tests {
         let store = BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             KeyPredicate::content_blob(),
-            OperationClass::Put,
+            OperationSelector::Put,
         );
         let namespace_id = NamespaceId::parse("aborted-buffered-write").expect("namespace id");
         let setup = context(1_000);
@@ -1927,7 +1927,7 @@ mod tests {
         let failing = FailStore::new(
             inner,
             KeyPredicate::exact(&key),
-            OperationClass::CompareAndSwap,
+            OperationSelector::CompareAndSwap,
             InjectedError::Transport("lost completion acknowledgement".to_owned()),
         )
         .apply_then_fail();
@@ -2030,7 +2030,7 @@ mod tests {
             .await;
 
             assert_eq!(store.counts().compare_and_swaps, 1);
-            assert_eq!(store.count(OperationClass::Read), usize::from(contended));
+            assert_eq!(store.count(OperationSelector::Read), usize::from(contended));
             if contended {
                 assert!(matches!(completed, Err(CoreError::UploadNotFound { .. })));
             } else {

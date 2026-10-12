@@ -92,12 +92,12 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
         FailStore::new(
             inner,
             KeyPredicate::exact(&target_keys[0]),
-            OperationClass::Delete,
+            OperationSelector::Delete,
             InjectedError::Transport("delete acknowledgement lost".to_owned()),
         )
         .apply_then_fail(),
         KeyPredicate::exact(&target_keys[0]),
-        OperationClass::Delete,
+        OperationSelector::Delete,
     );
     store.block_next();
     let (delayed, ()) = tokio::join!(

@@ -862,7 +862,7 @@ fn openapi_document_generation_is_byte_stable() {
         .expect("generate full and proxy OpenAPI JSON again");
     assert_eq!(first, second);
     assert_eq!(
-        openapi_postprocess::proxy_openapi_json_pretty(&first.0)
+        openapi_postprocess::document::proxy_openapi_json_pretty(&first.0)
             .expect("derive proxy OpenAPI JSON again"),
         first.1
     );
@@ -870,8 +870,9 @@ fn openapi_document_generation_is_byte_stable() {
 
 #[test]
 fn every_registered_operation_publishes_its_retry_class() {
-    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
-        .expect("generate openapi json");
+    let generated =
+        openapi_postprocess::document::openapi_json_pretty(&loonfs_http::openapi_document())
+            .expect("generate openapi json");
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
     let published = operations_by_id(&spec)
         .into_iter()
@@ -900,8 +901,9 @@ fn every_registered_operation_publishes_its_retry_class() {
 
 #[test]
 fn every_registered_operation_publishes_its_sdk_name() {
-    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
-        .expect("generate openapi json");
+    let generated =
+        openapi_postprocess::document::openapi_json_pretty(&loonfs_http::openapi_document())
+            .expect("generate openapi json");
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
 
     for (operation_id, operation) in operations_by_id(&spec) {
@@ -983,8 +985,9 @@ fn proxy_operations_keep_their_sdk_names() {
 
 #[test]
 fn non_idempotent_operations_disable_generated_sdk_retries() {
-    let generated = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
-        .expect("generate openapi json");
+    let generated =
+        openapi_postprocess::document::openapi_json_pretty(&loonfs_http::openapi_document())
+            .expect("generate openapi json");
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
     let operations = operations_by_id(&spec);
 

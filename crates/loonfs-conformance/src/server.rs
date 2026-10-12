@@ -111,7 +111,7 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
         .map_err(config_error)?;
     let (shared_store, multipart_store): (SharedObjectStore, _) = match shape {
         StoreShape::S3 => {
-            let store = Arc::new(FakeMultipartStore::with_enforcement(
+            let store = Arc::new(FakeMultipartStore::new_with_enforcement(
                 inner,
                 MultipartChecksumEnforcement::Precondition,
             ));

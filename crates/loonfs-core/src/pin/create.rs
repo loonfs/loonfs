@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 /// Longest accepted user checkpoint name. A label bound, not a durable
 /// format limit.
-const CHECKPOINT_NAME_MAX_CHARS: usize = 128;
+const MAX_CHECKPOINT_NAME_CHARS: usize = 128;
 
 pub(crate) async fn create_pin<S: ObjectStore + ?Sized>(
     store: &S,
@@ -126,9 +126,9 @@ fn validate_checkpoint_name(name: &str) -> Result<()> {
             "checkpoint name must not be empty".to_owned(),
         ));
     }
-    if name.chars().count() > CHECKPOINT_NAME_MAX_CHARS {
+    if name.chars().count() > MAX_CHECKPOINT_NAME_CHARS {
         return Err(CoreError::InvalidCheckpointRequest(format!(
-            "checkpoint name exceeds {CHECKPOINT_NAME_MAX_CHARS} characters"
+            "checkpoint name exceeds {MAX_CHECKPOINT_NAME_CHARS} characters"
         )));
     }
     Ok(())

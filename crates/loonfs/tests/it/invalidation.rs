@@ -15,7 +15,7 @@ use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, OperationClass, RecordedOperation, RecordingStore,
+    BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::control::NamespaceStatus;
 use std::sync::Arc;
@@ -335,7 +335,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
         .await
         .expect("writer a keeps publishing to the other namespace");
 
-    let hint_raises_after_fencing = counting.count(OperationClass::CompareAndSwap);
+    let hint_raises_after_fencing = counting.count(OperationSelector::CompareAndSwap);
     expect_writer_fenced(
         fence_writer_a
             .put_file("/a3.txt", b"a", &loonfs_test_support::test_actor())
@@ -343,7 +343,7 @@ async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
         "fenced session stays fenced after eviction",
     );
     assert_eq!(
-        counting.count(OperationClass::CompareAndSwap),
+        counting.count(OperationSelector::CompareAndSwap),
         hint_raises_after_fencing,
         "a fenced session must not raise the fenced namespace's hint"
     );
@@ -403,7 +403,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
         "superseded writer surfaces fencing",
     );
 
-    let hint_raises_after_fencing = counting.count(OperationClass::CompareAndSwap);
+    let hint_raises_after_fencing = counting.count(OperationSelector::CompareAndSwap);
     expect_writer_fenced(
         namespace_writer_a
             .put_file("/a3.txt", b"a", &loonfs_test_support::test_actor())
@@ -411,7 +411,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
         "fenced session stays fenced with caches disabled",
     );
     assert_eq!(
-        counting.count(OperationClass::CompareAndSwap),
+        counting.count(OperationSelector::CompareAndSwap),
         hint_raises_after_fencing,
         "a fenced session must not raise the namespace's hint"
     );
@@ -511,7 +511,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
             &namespace_id,
         )),
-        OperationClass::Head,
+        OperationSelector::Head,
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
@@ -653,7 +653,7 @@ async fn a_seeded_view_carries_the_writers_basis_confirmation() {
         KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
             &namespace_id,
         )),
-        OperationClass::Head,
+        OperationSelector::Head,
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
@@ -760,7 +760,7 @@ async fn a_seed_on_another_basis_does_not_keep_the_cached_check() {
     let blocking = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::manifest(&namespace_id),
-        OperationClass::Head,
+        OperationSelector::Head,
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
@@ -1032,7 +1032,7 @@ async fn a_tail_evicted_while_its_publish_runs_returns_when_the_publish_lands() 
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
         KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id)),
-        OperationClass::PutCreateIfAbsent,
+        OperationSelector::PutCreateIfAbsent,
     ));
     let store: SharedObjectStore = blocking.clone();
     let cache = MetadataCache::builder()

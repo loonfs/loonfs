@@ -3,7 +3,7 @@
 use loonfs::{
     DestinationBehavior, LoonFs, PageRequest, PutFileOptions, SharedObjectStore, StatOptions,
 };
-use loonfs_core::test_support::STORE_READ_WAVE;
+use loonfs_core::test_support::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
@@ -146,7 +146,7 @@ async fn directory_pages_use_bindings_and_load_revision_heads_concurrently() {
     let concurrency = revisions.reads();
     assert!(concurrency.peak_in_flight > 1, "{concurrency:?}");
     assert!(
-        concurrency.peak_in_flight <= STORE_READ_WAVE,
+        concurrency.peak_in_flight <= STORE_READS_IN_FLIGHT,
         "{concurrency:?}"
     );
     for entry in page.entries {

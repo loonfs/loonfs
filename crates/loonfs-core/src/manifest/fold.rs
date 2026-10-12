@@ -12,7 +12,8 @@ use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
-use crate::limits::CONTENTION_RETRY_LIMIT;
+use crate::in_flight::STORE_WRITES_IN_FLIGHT;
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::CurrentManifest;
@@ -20,7 +21,6 @@ use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::read_working_memory::ReadWorkingMemory;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
-use crate::store_waves::STORE_WRITE_WAVE;
 use crate::time::Deadline;
 use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
@@ -183,7 +183,7 @@ async fn fold_held_projection<'a, S: ObjectStore + ?Sized>(
     let layouts = materialize_tail_content(store, &projection, content_writes).await?;
     let mut attempt =
         publish_fold(store, namespace_id, &projection, &layouts, deadline, policy).await?;
-    for _retry in 0..CONTENTION_RETRY_LIMIT {
+    for _retry in 0..MAX_CONTENTION_ATTEMPTS {
         let TryFoldWalOutcome::RaceLost(winner) = &attempt else {
             break;
         };
@@ -335,7 +335,7 @@ async fn materialize_tail_content<S: ObjectStore + ?Sized>(
     let layouts = Mutex::new(HashMap::new());
     // In a live namespace, failed folds leave committed content for the next fold.
     stream::iter(assembled.into_iter().map(Ok))
-        .try_for_each_concurrent(STORE_WRITE_WAVE, |(content, pieces)| {
+        .try_for_each_concurrent(STORE_WRITES_IN_FLIGHT, |(content, pieces)| {
             let layouts = &layouts;
             async move {
                 let layout =

@@ -9,7 +9,7 @@ use loonfs::{
 use loonfs_core::time::Deadline;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::timing::StdMonotonicTimer;
-use loonfs_test_support::stores::{OperationClass, RecordingStore};
+use loonfs_test_support::stores::{OperationSelector, RecordingStore};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -85,7 +85,7 @@ async fn an_unchanged_view_resolves_the_path_once() {
         .read_file(PATH)
         .await
         .expect("ordinary read");
-    let one_resolution = log.count(OperationClass::Get);
+    let one_resolution = log.count(OperationSelector::Get);
     assert!(
         one_resolution > 0,
         "resolution should read metadata segments"
@@ -104,7 +104,7 @@ async fn an_unchanged_view_resolves_the_path_once() {
         .expect("speculative read");
     assert_eq!(read.bytes, b"first");
     assert_eq!(
-        log.count(OperationClass::Get),
+        log.count(OperationSelector::Get),
         one_resolution,
         "an unchanged view must not resolve the path a second time"
     );

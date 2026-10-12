@@ -10,7 +10,7 @@
 //! a larger grace window, never a smaller one.
 
 use loonfs_objectstore::{
-    PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE, PROVIDER_PUBLICATION_REQUEST_BOUND,
+    PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE, PROVIDER_PUBLICATION_REQUEST_DEADLINE,
 };
 
 /// Caps each Bloom filter used by compaction and content collection.
@@ -44,7 +44,7 @@ pub const MAX_COMMIT_EXTERNAL_CONTENT_REFS: usize = 4096;
 pub const MAX_COMMIT_MESSAGE_BYTES: usize = 4096;
 
 /// Maximum attempts for a bounded compare-and-swap or allocation contention loop.
-pub const CONTENTION_RETRY_LIMIT: usize = 8;
+pub const MAX_CONTENTION_ATTEMPTS: usize = 8;
 
 /// Longest visible WAL tail, in WAL objects, a namespace may carry unfolded.
 /// Every publish surface rejects at this length with `maintenance_required`,
@@ -67,8 +67,8 @@ pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = PROVIDER_ATTEMPT_TIMEOUT.as_millis(
 /// Allowance for publication request phases, including retry admission,
 /// final backoff and a payload-sized final attempt. Conditional publications
 /// always use a single request, even when their bodies are large.
-pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
-    PROVIDER_PUBLICATION_REQUEST_BOUND.as_millis() as u64;
+pub const PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS: u64 =
+    PROVIDER_PUBLICATION_REQUEST_DEADLINE.as_millis() as u64;
 
 /// Maximum elapsed time from observing a tip to initiating its next numbered put.
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 60_000;
@@ -85,9 +85,9 @@ pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 /// host-to-host clock error, timestamp precision, and scheduling delay around
 /// publication checks.
 /// Direct expiry comparisons do not add this margin to stored deadlines.
-pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
+pub const GC_SAFETY_WINDOW_MS: u64 = 3 * 60 * 1000;
 
-const _: () = assert!(GC_SAFETY_MARGIN_MS >= 1000);
+const _: () = assert!(GC_SAFETY_WINDOW_MS >= 1000);
 
 const fn max_u64(left: u64, right: u64) -> u64 {
     if left > right {
@@ -107,8 +107,8 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS),
     READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS,
-) + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-    + GC_SAFETY_MARGIN_MS;
+) + PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS
+    + GC_SAFETY_WINDOW_MS;
 
 /// Longest gap a reader may leave between the manifest probe it relies on
 /// and the successor check that confirms it. A successor published after the
@@ -116,9 +116,9 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
 /// window, which reserves this bound plus the clock allowance.
 pub const READ_REVALIDATION_BOUND_MS: u64 =
     max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
-        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS;
+        + PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS;
 
-const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS);
+const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_WINDOW_MS <= GC_MIN_GRACE_WINDOW_MS);
 
 /// Minimum provider age of a metadata segment no manifest lists before
 /// garbage collection may delete it. A streaming compaction writes its
@@ -126,7 +126,7 @@ const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN
 /// earliest segment is unreferenced for the whole run. One day is the bound
 /// on a run; the difference between this age and the grace window below is
 /// how long a job may keep merging before it gives up.
-pub const UNREFERENCED_SEGMENT_MIN_AGE_MS: u64 = 24 * 60 * 60 * 1000;
+pub const UNREFERENCED_SEGMENT_GRACE_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Elapsed monotonic time after which a streaming compaction abandons
 /// instead of publishing. A job that starts its last publication attempt at
@@ -134,7 +134,7 @@ pub const UNREFERENCED_SEGMENT_MIN_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 /// reserves after the budget. The subtraction fails to compile if the grace
 /// window ever exceeds the minimum age.
 pub const METADATA_COMPACTION_BUDGET_MS: u64 =
-    UNREFERENCED_SEGMENT_MIN_AGE_MS - GC_MIN_GRACE_WINDOW_MS;
+    UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GC_MIN_GRACE_WINDOW_MS;
 
 /// Lifetime of a direct download or upload capability.
 pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
@@ -143,8 +143,9 @@ pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 /// starts within the publication budget, and the provider applies it within
 /// its request bound. Outstanding reads and direct capabilities run from that
 /// landing, and the minimum grace window covers them.
-pub const NAMESPACE_RETIREMENT_GRACE_MS: u64 =
-    METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_MIN_GRACE_WINDOW_MS;
+pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 = METADATA_PUBLICATION_BUDGET_MS
+    + PROVIDER_PUBLICATION_REQUEST_DEADLINE_MS
+    + GC_MIN_GRACE_WINDOW_MS;
 
 /// Default age of an unreachable object before garbage collection may remove it.
 pub const GC_DEFAULT_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
@@ -192,7 +193,7 @@ pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
 /// checks the upload's receipt issuance window. Immediately before the WAL
 /// put-if-absent, content proofs are checked against the request clock plus the whole
 /// attempt's elapsed monotonic time.
-pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
+pub const CONTENT_RECLAMATION_GRACE_WINDOW_MS: u64 =
     COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS;
 
 /// Bounds a chain's own extents while keeping shared base extents separate.
