@@ -3,7 +3,7 @@
 use super::{LoonFs, Mode, ReadOnly, Writable};
 use crate::fs::RuntimeCore;
 use crate::publisher::{CloseNamespaceReport, NamespaceSession, NamespaceSessionStatus};
-use crate::{ChangeSeq, NamespaceId, Result};
+use crate::{ChangeSeq, MetadataMaintenanceOutcome, NamespaceId, Result};
 use loonfs_types::Subject;
 use std::fmt;
 use std::sync::Arc;
@@ -142,9 +142,13 @@ impl Namespace<Writable> {
     ///
     /// This is a hook for a host that runs its own maintenance sweep, such as
     /// the `loonfs-server` sweep. Embedded applications don't call it.
-    pub fn record_metadata_maintenance(&self, expected_seq: Option<ChangeSeq>, caught_up: bool) {
+    pub fn record_metadata_maintenance(
+        &self,
+        expected_seq: Option<ChangeSeq>,
+        outcome: MetadataMaintenanceOutcome,
+    ) {
         self.session()
-            .record_metadata_maintenance(expected_seq, caught_up);
+            .record_metadata_maintenance(expected_seq, outcome);
     }
 
     /// Returns whether this is the only handle holding its writer session.

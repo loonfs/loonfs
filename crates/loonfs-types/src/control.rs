@@ -380,7 +380,45 @@ impl UploadSessionRecordStatus {
             Self::Aborted { .. } => None,
         }
     }
+
+    /// Moves an open session to aborted at `aborted_at_ms`.
+    ///
+    /// An aborted session stays as it is and reports when it was aborted. A
+    /// completed session refuses, because its content may already be
+    /// published.
+    pub fn abort(
+        &mut self,
+        aborted_at_ms: u64,
+    ) -> Result<UploadAbortOutcome, UploadAlreadyCompletedError> {
+        match self {
+            Self::Open { .. } => {
+                *self = Self::Aborted { aborted_at_ms };
+                Ok(UploadAbortOutcome::Aborted)
+            }
+            Self::Aborted { aborted_at_ms } => Ok(UploadAbortOutcome::AlreadyAborted {
+                aborted_at_ms: *aborted_at_ms,
+            }),
+            Self::Completed { .. } => Err(UploadAlreadyCompletedError),
+        }
+    }
 }
+
+/// What [`UploadSessionRecordStatus::abort`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadAbortOutcome {
+    /// The session was open and is now aborted.
+    Aborted,
+    /// The session was already aborted at `aborted_at_ms`, and is unchanged.
+    AlreadyAborted {
+        /// Unix-millisecond stamp of the earlier abort.
+        aborted_at_ms: u64,
+    },
+}
+
+/// Describes an abort of an upload session that already completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a completed upload session cannot be aborted")]
+pub struct UploadAlreadyCompletedError;
 
 impl std::fmt::Display for UploadSessionRecordStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

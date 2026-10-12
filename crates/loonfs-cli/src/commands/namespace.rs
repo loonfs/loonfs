@@ -52,7 +52,7 @@ async fn run_namespace_show(
         kind,
         &loaded.config,
         explicit_profile,
-        args.target.request.no_retry,
+        args.target.request.retry(),
         Some(&args.target.subject),
     )
     .await?;
@@ -86,7 +86,7 @@ async fn run_namespace_create(
         kind,
         &loaded.config,
         explicit_profile,
-        args.request.no_retry,
+        args.request.retry(),
         None,
     )
     .await?;
@@ -160,7 +160,7 @@ async fn run_namespace_delete(
         kind,
         config_path,
         explicit_profile,
-        args.request.no_retry,
+        args.request.retry(),
         Some(&args.subject),
     )
     .await?;
@@ -228,7 +228,7 @@ async fn run_namespace_fork(
         kind,
         &loaded.config,
         explicit_profile,
-        args.request.no_retry,
+        args.request.retry(),
         Some(&args.subject),
     )
     .await?;
@@ -273,7 +273,7 @@ pub(crate) async fn run_namespace_use(
         kind,
         &loaded.config,
         explicit_profile,
-        args.request.no_retry,
+        args.request.retry(),
         None,
     )
     .await?;

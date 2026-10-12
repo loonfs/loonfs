@@ -1041,25 +1041,25 @@ impl NamespaceCommitEngine {
         let projection = publish_view.into_projection();
         self.projection_observed = Some(projection_observed);
         let unknown_inline_bytes = published.unconfirmed_inline_bytes;
-        let (wal_tail_objects, wal_tail_inline_bytes, resulting_read_state) =
+        let update =
             self.update_publish_tail_projection(projection, published.effect, wal_tail_discovered);
         // A put that landed is itself an observation of the tip it created, made no
         // earlier than this attempt began; the next put's budget runs from it.
-        if resulting_read_state.is_some() && self.publish_tail.is_some() {
+        if update.resulting_read_state.is_some() && self.publish_tail.is_some() {
             self.projection_observed = Some(attempt);
         }
         NamespaceCommitEnginePublishResult {
             results: published.results,
             wal_tail: Some(WalTailReport {
-                objects: wal_tail_objects,
-                inline_bytes: wal_tail_inline_bytes + unknown_inline_bytes,
+                objects: update.wal_tail_objects,
+                inline_bytes: update.wal_tail_inline_bytes + unknown_inline_bytes,
                 source: if wal_tail_discovered {
                     TailSource::Store
                 } else {
                     TailSource::Cached
                 },
             }),
-            resulting_read_state,
+            resulting_read_state: update.resulting_read_state,
         }
     }
 
@@ -1072,17 +1072,17 @@ impl NamespaceCommitEngine {
         mut projection: PublishTailProjection,
         effect: PublishViewEffect,
         tail_discovered: bool,
-    ) -> (u64, usize, Option<ResultingReadState>) {
+    ) -> TailProjectionUpdate {
         let advanced = matches!(effect, PublishViewEffect::Advanced { .. });
         let state = match effect {
             PublishViewEffect::Unchanged => None,
             PublishViewEffect::Invalidated => {
                 self.invalidate_projection();
-                return (
-                    projection.position.wal_tail_objects,
-                    projection.tail_state.inline_bytes(),
-                    None,
-                );
+                return TailProjectionUpdate {
+                    wal_tail_objects: projection.position.wal_tail_objects,
+                    wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
+                    resulting_read_state: None,
+                };
             }
             PublishViewEffect::Advanced { records, head } => {
                 projection.position.wal_tail_objects += 1;
@@ -1099,11 +1099,11 @@ impl NamespaceCommitEngine {
                         "could not update the committed WAL projection"
                     );
                     self.invalidate_projection();
-                    return (
-                        projection.position.wal_tail_objects,
-                        projection.tail_state.inline_bytes(),
-                        None,
-                    );
+                    return TailProjectionUpdate {
+                        wal_tail_objects: projection.position.wal_tail_objects,
+                        wal_tail_inline_bytes: projection.tail_state.inline_bytes(),
+                        resulting_read_state: None,
+                    };
                 }
                 projection.reanchor(head.clone());
                 // A put lands only from a view whose basis was confirmed, so this is
@@ -1122,10 +1122,23 @@ impl NamespaceCommitEngine {
         if advanced || tail_discovered {
             self.insert_tail(&position, tail_state);
         }
-        let reported = (position.wal_tail_objects, position.wal_tail_inline_bytes);
+        let update = TailProjectionUpdate {
+            wal_tail_objects: position.wal_tail_objects,
+            wal_tail_inline_bytes: position.wal_tail_inline_bytes,
+            resulting_read_state: state,
+        };
         self.publish_tail = Some(position);
-        (reported.0, reported.1, state)
+        update
     }
+}
+
+/// What folding one batch into the tail projection left: the WAL-tail length
+/// the caller schedules maintenance on, and the read state a landed put
+/// produced.
+struct TailProjectionUpdate {
+    wal_tail_objects: u64,
+    wal_tail_inline_bytes: usize,
+    resulting_read_state: Option<ResultingReadState>,
 }
 
 fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {

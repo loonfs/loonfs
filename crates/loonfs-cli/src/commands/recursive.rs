@@ -276,16 +276,11 @@ pub(crate) async fn run_put_tree(
     context: &CommandContext,
     local_root: &Path,
     remote_root: &str,
-    force: bool,
+    behavior: DestinationBehavior,
     message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let entries = local_tree(local_root, remote_root).map_err(|error| context.fail(kind, error))?;
-    let behavior = if force {
-        DestinationBehavior::Replace
-    } else {
-        DestinationBehavior::NoReplace
-    };
     let progress = Arc::new(ProgressReporter::new(
         runtime,
         ProgressOp::Put,
@@ -366,7 +361,7 @@ pub(crate) async fn run_get_tree(
     context: &CommandContext,
     remote_root: &str,
     local_root: &Path,
-    force: bool,
+    behavior: DestinationBehavior,
     runtime: RuntimeBehavior,
     snapshot_id: Option<&PinId>,
 ) -> Result<CommandOutput, CommandFailure> {
@@ -397,13 +392,12 @@ pub(crate) async fn run_get_tree(
                     Err(error) => return (remote, Err(error)),
                 };
             progress.file_started(&remote, job.size_bytes);
-            let derived_name = false;
             let written = super::fs::stream_download_to_file(
                 &mut download,
                 &local,
                 meta.as_ref(),
-                force,
-                derived_name,
+                behavior,
+                super::fs::DestinationName::Given,
                 &progress,
             )
             .await;
@@ -449,7 +443,7 @@ pub(crate) async fn run_copy_tree(
     context: &CommandContext,
     source_root: &str,
     destination_root: &str,
-    force: bool,
+    behavior: DestinationBehavior,
     message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
@@ -466,11 +460,6 @@ pub(crate) async fn run_copy_tree(
         .await
         .map_err(|error| context.fail(kind, error))?;
     let entries = futures::stream::iter([TreeEntry::Directory(String::new())]).chain(entries);
-    let behavior = if force {
-        DestinationBehavior::Replace
-    } else {
-        DestinationBehavior::NoReplace
-    };
     let transfer = |job: FileJob| {
         let message = message.clone();
         let source = joined_remote(source_root, &job.relative_remote);
@@ -854,7 +843,7 @@ mod tests {
             &context,
             tree.path(),
             "/up",
-            false,
+            DestinationBehavior::NoReplace,
             None,
             unwatched(),
         )
@@ -918,7 +907,7 @@ mod tests {
             &context,
             tree.path(),
             "/up",
-            false,
+            DestinationBehavior::NoReplace,
             None,
             unwatched(),
         )

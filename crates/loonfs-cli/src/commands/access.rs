@@ -1,6 +1,6 @@
 //! Replaces access rows on namespace paths.
 
-use super::context::{namespace_path, render_target, resolve_mutation_context};
+use super::context::{namespace_path, render_target, resolve_mutation_context, RootPath};
 use super::fs::commit_options;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{AccessSetArgs, CommandKind};
@@ -16,7 +16,7 @@ pub(crate) async fn run_access_set(
     args: AccessSetArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let spec = namespace_path(context.namespace(), "path", &args.path, true)
+    let spec = namespace_path(context.namespace(), "path", &args.path, RootPath::Allowed)
         .map_err(|error| context.fail(kind, error))?;
     let access = AccessState {
         boundary: args.boundary,

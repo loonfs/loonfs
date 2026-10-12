@@ -2,7 +2,7 @@
 
 use super::download::FileDownload;
 use crate::error::CliError;
-use loonfs_types::{Checksum, ContentRef, RevisionNo};
+use loonfs_types::{Checksum, ContentRef, DestinationBehavior, RevisionNo};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -161,12 +161,15 @@ impl PartialDownload {
     }
 
     /// Installs the completed download with an atomic rename.
-    pub(super) fn install(mut self, destination: &Path, force: bool) -> std::io::Result<()> {
+    pub(super) fn install(
+        mut self,
+        destination: &Path,
+        behavior: DestinationBehavior,
+    ) -> std::io::Result<()> {
         self.file.flush()?;
-        let persisted = if force {
-            self.file.persist(destination)
-        } else {
-            self.file.persist_noclobber(destination)
+        let persisted = match behavior {
+            DestinationBehavior::Replace => self.file.persist(destination),
+            DestinationBehavior::NoReplace => self.file.persist_noclobber(destination),
         };
         persisted.map(|_| ()).map_err(|error| error.error)
     }

@@ -697,22 +697,16 @@ pub(crate) fn remote_client_config(
     server_url: &str,
     auth_token: Option<&SecretString>,
     ca_cert_path: Option<&str>,
-    no_retry: bool,
+    retry: bool,
 ) -> ClientConfig {
-    remote_client_config_from(
-        server_url,
-        auth_token,
-        ca_cert_path,
-        no_retry,
-        non_empty_env,
-    )
+    remote_client_config_from(server_url, auth_token, ca_cert_path, retry, non_empty_env)
 }
 
 fn remote_client_config_from(
     server_url: &str,
     auth_token: Option<&SecretString>,
     ca_cert_path: Option<&str>,
-    no_retry: bool,
+    retry: bool,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> ClientConfig {
     ClientConfig {
@@ -723,7 +717,7 @@ fn remote_client_config_from(
                 .map(SecretString::from)
         }),
         request_timeout_ms: None,
-        retry: !no_retry,
+        retry,
         ca_cert_path: ca_cert_path.map(ToOwned::to_owned),
     }
 }
@@ -782,7 +776,7 @@ mod tests {
             "https://loonfs.example.com",
             Some(&stored),
             None,
-            false,
+            true,
             |_| Some("env-token".to_owned()),
         );
         assert_eq!(
@@ -792,7 +786,7 @@ mod tests {
         assert!(from_config.retry);
 
         let from_environment =
-            remote_client_config_from("https://loonfs.example.com", None, None, true, |name| {
+            remote_client_config_from("https://loonfs.example.com", None, None, false, |name| {
                 assert_eq!(name, AUTH_TOKEN_ENV);
                 Some("env-token".to_owned())
             });
@@ -806,7 +800,7 @@ mod tests {
         assert!(!from_environment.retry, "--no-retry reaches the client");
 
         let blank =
-            remote_client_config_from("https://loonfs.example.com", None, None, false, |_| {
+            remote_client_config_from("https://loonfs.example.com", None, None, true, |_| {
                 Some("  ".to_owned())
             });
         assert!(blank.auth_token.is_none());

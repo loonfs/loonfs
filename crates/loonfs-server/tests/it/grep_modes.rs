@@ -11,7 +11,8 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, AppConfig, GrepConfig, JobMode, MetadataCacheConfig, ServerConfig, StoreConfig,
+    app, AppConfig, GarbageCollection, GrepConfig, JobMode, MetadataCacheConfig, ServerConfig,
+    StoreConfig,
 };
 use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
 use loonfs_types::{
@@ -808,7 +809,7 @@ async fn sweep(server: &loonfs_server::AppState) {
         .sweep
         .as_ref()
         .expect("a maintaining server has a sweep")
-        .run_pass(false)
+        .run_pass(GarbageCollection::Skip)
         .await
         .expect("list the namespaces");
 }

@@ -1,6 +1,6 @@
 //! The first due step for each held session and the two host intervals.
 
-use super::{lock, RunningSweep, Sweep};
+use super::{lock, GarbageCollection, RunningSweep, Sweep};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, NamespaceId};
 use tokio::time::MissedTickBehavior;
@@ -160,7 +160,7 @@ impl Sweep {
                 () = inner.stop.cancelled() => return,
                 _ = ticks.tick() => {}
             }
-            let _ = self.run_pass(true).await;
+            let _ = self.run_pass(GarbageCollection::Collect).await;
         }
     }
 

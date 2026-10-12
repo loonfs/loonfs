@@ -136,19 +136,14 @@ pub(crate) async fn resolve_profile_context(
     kind: CommandKind,
     config_path: &Path,
     explicit_profile: Option<&str>,
-    no_retry: bool,
+    retry: bool,
     subject: Option<&SubjectSelectorArgs>,
 ) -> Result<CommandContext, CommandFailure> {
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let (context, _) = resolve_profile_context_from_config(
-        kind,
-        &loaded.config,
-        explicit_profile,
-        no_retry,
-        subject,
-    )
-    .await?;
+    let (context, _) =
+        resolve_profile_context_from_config(kind, &loaded.config, explicit_profile, retry, subject)
+            .await?;
     Ok(context)
 }
 
@@ -156,12 +151,12 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
     kind: CommandKind,
     config: &'a CliConfig,
     explicit_profile: Option<&'a str>,
-    no_retry: bool,
+    retry: bool,
     subject: Option<&SubjectSelectorArgs>,
 ) -> Result<(CommandContext, &'a crate::config::ProfileConfig), CommandFailure> {
     let (profile_name, profile) = crate::profiles::resolve_profile(config, explicit_profile)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mut target = ResolvedTarget::resolve(profile_name, profile, no_retry)
+    let mut target = ResolvedTarget::resolve(profile_name, profile, retry)
         .await
         .map_err(|error| fail(kind, Some(profile_name.to_owned()), None, error))?;
     let mode = target.mode_str().to_owned();
@@ -233,7 +228,7 @@ async fn resolve_command_context_with_actor(
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let profile_name = profile_name.to_owned();
     let mut resolved_target =
-        ResolvedTarget::resolve(&profile_name, profile, target.request.no_retry)
+        ResolvedTarget::resolve(&profile_name, profile, target.request.retry())
             .await
             .map_err(|error| fail(kind, Some(profile_name.clone()), None, error))?;
     let mode = resolved_target.mode_str().to_owned();
@@ -266,15 +261,24 @@ async fn resolve_command_context_with_actor(
 
 // --- general helpers ---
 
+/// Whether a command accepts the root path `/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootPath {
+    /// The command accepts `/`.
+    Allowed,
+    /// The command refuses `/` with `invalid_request`.
+    Refused,
+}
+
 pub(crate) fn namespace_path(
     namespace_id: &NamespaceId,
     param: &str,
     path: &str,
-    allow_root: bool,
+    root: RootPath,
 ) -> Result<NamespacePath, CliError> {
     Ok(NamespacePath::new(
         namespace_id.clone(),
-        parse_user_path_arg(param, path, allow_root)?,
+        parse_user_path_arg(param, path, root)?,
     ))
 }
 
@@ -290,7 +294,7 @@ pub(crate) fn directory_intent(path: &str) -> bool {
 pub(crate) fn parse_user_path_arg(
     param: &str,
     path: &str,
-    allow_root: bool,
+    root: RootPath,
 ) -> Result<AbsolutePath, CliError> {
     let trimmed = if directory_intent(path) {
         &path[..path.len() - 1]
@@ -299,7 +303,7 @@ pub(crate) fn parse_user_path_arg(
     };
     let parsed = AbsolutePath::parse(trimmed)
         .map_err(|error| CliError::invalid_request(error.to_string()).with_param(param))?;
-    if !allow_root && parsed.is_root() {
+    if root == RootPath::Refused && parsed.is_root() {
         return Err(
             CliError::invalid_request("root path is not allowed for this command")
                 .with_param(param),
@@ -315,11 +319,11 @@ pub(crate) fn destination_user_path(
     source_leaf_param: &str,
     raw: &str,
     source_leaf: &str,
-    allow_root_directory: bool,
+    root: RootPath,
 ) -> Result<AbsolutePath, CliError> {
     if directory_intent(raw) || raw == "/" {
-        let directory = parse_user_path_arg(path_param, raw, true)?;
-        if !allow_root_directory && directory.is_root() && raw == "/" {
+        let directory = parse_user_path_arg(path_param, raw, RootPath::Allowed)?;
+        if root == RootPath::Refused && directory.is_root() && raw == "/" {
             return Err(
                 CliError::invalid_request("root path is not allowed for this command")
                     .with_param(path_param),
@@ -330,7 +334,7 @@ pub(crate) fn destination_user_path(
         })?;
         return Ok(directory.join(&leaf));
     }
-    parse_user_path_arg(path_param, raw, false)
+    parse_user_path_arg(path_param, raw, RootPath::Refused)
 }
 
 pub(crate) fn utf8_local_name(name: &std::ffi::OsStr) -> Result<&str, CliError> {
@@ -405,7 +409,7 @@ impl UndeleteHint {
     pub(crate) fn new(
         context: &CommandContext,
         location: &ConfigLocation,
-        explicit_profile: bool,
+        explicit_profile: Option<&str>,
     ) -> Self {
         let mut context_flags =
             format!(" --namespace {}", shell_quote(context.namespace().as_str()));
@@ -413,7 +417,7 @@ impl UndeleteHint {
         // exactly the profile this run used whenever `--profile` went
         // unspelled; spelling it means the default may be some other profile,
         // and then the hint has to say which one it meant.
-        if explicit_profile {
+        if explicit_profile.is_some() {
             context_flags.push_str(&format!(
                 " --profile {}",
                 shell_quote(&context.profile_name)
@@ -479,7 +483,7 @@ pub(crate) fn fail(
 
 #[cfg(test)]
 mod tests {
-    use super::{destination_user_path, parse_user_path_arg, shell_quote};
+    use super::{destination_user_path, parse_user_path_arg, shell_quote, RootPath};
 
     #[test]
     fn quoting_leaves_ordinary_paths_alone_and_survives_a_quote() {
@@ -505,17 +509,17 @@ mod tests {
         // One trailing slash is directory intent; everything else the wire
         // rejects, the CLI rejects too, instead of silently rewriting.
         assert_eq!(
-            parse_user_path_arg("path", "/docs/", false)
+            parse_user_path_arg("path", "/docs/", RootPath::Refused)
                 .expect("dir intent")
                 .as_str(),
             "/docs"
         );
-        assert!(parse_user_path_arg("path", "//docs///A.txt/", false).is_err());
-        assert!(parse_user_path_arg("path", "//x.txt", false).is_err());
-        assert!(parse_user_path_arg("path", "docs/A.txt", false).is_err());
-        assert!(parse_user_path_arg("path", "", false).is_err());
+        assert!(parse_user_path_arg("path", "//docs///A.txt/", RootPath::Refused).is_err());
+        assert!(parse_user_path_arg("path", "//x.txt", RootPath::Refused).is_err());
+        assert!(parse_user_path_arg("path", "docs/A.txt", RootPath::Refused).is_err());
+        assert!(parse_user_path_arg("path", "", RootPath::Refused).is_err());
         assert_eq!(
-            parse_user_path_arg("path", "/", true)
+            parse_user_path_arg("path", "/", RootPath::Allowed)
                 .expect("root")
                 .as_str(),
             "/"
@@ -527,7 +531,7 @@ mod tests {
                 "source_path",
                 "/docs/",
                 "report.pdf",
-                false,
+                RootPath::Refused,
             )
             .expect("into directory")
             .as_str(),
@@ -539,16 +543,22 @@ mod tests {
                 "source_path",
                 "/docs/renamed.pdf",
                 "report.pdf",
-                false,
+                RootPath::Refused,
             )
             .expect("full destination")
             .as_str(),
             "/docs/renamed.pdf"
         );
         assert_eq!(
-            destination_user_path("destination_path", "source_path", "/", "report.pdf", true,)
-                .expect("into root")
-                .as_str(),
+            destination_user_path(
+                "destination_path",
+                "source_path",
+                "/",
+                "report.pdf",
+                RootPath::Allowed,
+            )
+            .expect("into root")
+            .as_str(),
             "/report.pdf"
         );
     }

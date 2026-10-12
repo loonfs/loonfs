@@ -34,7 +34,7 @@ use loonfs_types::api::v0::{
     Commit, ListChangesResponse, UploadMode, UploadPartChecksumClaim, UploadSession,
 };
 use loonfs_types::format::control::PinOwner;
-use loonfs_types::options::{DirectMultipartUploadOptions, ListOptions, StatOptions};
+use loonfs_types::options::{AccessState, DirectMultipartUploadOptions, ListOptions, StatOptions};
 use loonfs_types::CompactorEpoch;
 use loonfs_types::EffectiveLimit;
 use loonfs_types::{
@@ -113,6 +113,16 @@ pub type NamespaceReaderEngine<S> = NamespaceEngine<S, ReadOnly>;
 
 /// A namespace engine that exposes both read and mutation operations.
 pub type NamespaceWriterEngine<S> = NamespaceEngine<S, Writable>;
+
+/// The root's access row: its boundary flag, grants, and revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootAccess {
+    /// The root's boundary flag and direct grants, which are empty before the
+    /// root has an access row.
+    pub access: AccessState,
+    /// The row's access revision, or `None` before the root has an access row.
+    pub access_revision_no: Option<loonfs_types::AccessRevisionNo>,
+}
 
 /// A namespace-scoped core API.
 ///
@@ -243,17 +253,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
     }
 
-    /// The root row's current boundary flag, grants, and access revision,
-    /// which is `None` before the root has an access row. Refused on an
-    /// unrestricted namespace, which holds no access rows.
-    pub async fn root_access(
-        &self,
-        context: &RuntimeReadContext,
-    ) -> Result<(
-        bool,
-        loonfs_types::AccessGrants,
-        Option<loonfs_types::AccessRevisionNo>,
-    )> {
+    /// Reads the root's current access row. Refused on an unrestricted
+    /// namespace, which holds no access rows.
+    pub async fn root_access(&self, context: &RuntimeReadContext) -> Result<RootAccess> {
         if matches!(context.head.access, NamespaceAccess::Unrestricted {}) {
             return Err(CoreError::NamespaceUnrestricted {
                 namespace_id: self.namespace_id.clone(),
@@ -265,8 +267,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .latest_access_revision(ROOT_INODE_ID)
             .await?;
         Ok(row.map_or(
-            (false, loonfs_types::AccessGrants::default(), None),
-            |row| (row.boundary, row.grants, Some(row.access_revision_no)),
+            RootAccess {
+                access: AccessState {
+                    boundary: false,
+                    grants: loonfs_types::AccessGrants::default(),
+                },
+                access_revision_no: None,
+            },
+            |row| RootAccess {
+                access: AccessState {
+                    boundary: row.boundary,
+                    grants: row.grants,
+                },
+                access_revision_no: Some(row.access_revision_no),
+            },
         ))
     }
 

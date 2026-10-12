@@ -1,6 +1,7 @@
 //! Metadata retry, collection, and close costs for held sessions.
 
 use super::{seed_unfolded_tail, seed_writer, sweep_config, SweepServer, DAY_MS};
+use crate::sweep::GarbageCollection;
 use loonfs::SharedObjectStore;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -103,7 +104,14 @@ async fn ticks_leave_unheld_namespaces_for_the_daily_pass() {
     }
     assert!(store.take().is_empty());
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
-    assert_eq!(server.sweep.run_pass(true).await.expect("daily pass"), 1);
+    assert_eq!(
+        server
+            .sweep
+            .run_pass(GarbageCollection::Collect)
+            .await
+            .expect("daily pass"),
+        1
+    );
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
 }
 

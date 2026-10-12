@@ -2,6 +2,7 @@
 //! WAL probes observe commits; interval checks observe manifest changes.
 
 use crate::fs::RuntimeCore;
+use crate::metadata_cache::CacheLookup;
 use crate::trace::phase_span;
 use crate::{CoreError, NamespaceId, PinId};
 use crate::{Error, Result};
@@ -31,7 +32,11 @@ impl RuntimeCore {
         let head = self.inner.head_state.get_anchor(namespace_id);
         self.inner
             .metadata_cache
-            .record_head_anchor_lookup(head.is_some());
+            .record_head_anchor_lookup(if head.is_some() {
+                CacheLookup::Hit
+            } else {
+                CacheLookup::Miss
+            });
         head
     }
 
@@ -67,7 +72,9 @@ impl RuntimeCore {
             // this shortcut: it may have observed before an intervening
             // write completed. Local publication is not a remote proof.
             let _span = tracing::debug_span!(target: "loonfs::page", "loonfs.phase", phase = "validation_reuse").entered();
-            self.inner.metadata_cache.record_head_anchor_lookup(true);
+            self.inner
+                .metadata_cache
+                .record_head_anchor_lookup(CacheLookup::Hit);
             return Ok(head);
         }
         // Saturate instead of wrapping: at exhaustion reads simply stop

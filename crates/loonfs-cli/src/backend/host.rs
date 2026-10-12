@@ -31,7 +31,7 @@ pub(crate) fn client(
     grep_service: GrepService,
     store_kind: ConfiguredObjectStoreKind,
     inline_content: InlineContentPolicy,
-    no_retry: bool,
+    retry: bool,
 ) -> Result<Client, CliError> {
     let options = Arc::new(BindingConfig {
         grep: JobMode::ServeAndMaintain,
@@ -89,7 +89,7 @@ pub(crate) fn client(
             server_url: "http://embedded.invalid".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
-            retry: !no_retry,
+            retry,
             ca_cert_path: None,
         },
         service,

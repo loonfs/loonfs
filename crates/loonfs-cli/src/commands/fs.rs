@@ -5,7 +5,7 @@ use super::context::{
     create_directory_tolerating_existing, default_remote_put_path, destination_path_for_get,
     destination_user_path, directory_intent, fail, namespace_path, parse_public_ordinal_arg,
     parse_snapshot_id_arg, parse_user_path_arg, render_target, resolve_command_context,
-    resolve_mutation_context, CommandContext, RemoteDirectoryOutcome, UndeleteHint,
+    resolve_mutation_context, CommandContext, RemoteDirectoryOutcome, RootPath, UndeleteHint,
 };
 use super::download::FileDownload;
 use super::output::{
@@ -122,12 +122,12 @@ pub(crate) async fn run_filesystem_ls(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let allow_root = true;
+    let root = RootPath::Allowed;
     let spec = namespace_path(
         context.namespace(),
         "path",
         args.path.as_deref().unwrap_or("/"),
-        allow_root,
+        root,
     )
     .map_err(|error| context.fail(kind, error))?;
     let snapshot_id = args
@@ -218,8 +218,8 @@ pub(crate) async fn run_filesystem_stat(
                 .path
                 .as_deref()
                 .expect("clap should require either a path or `--inode`");
-            let allow_root = true;
-            let spec = namespace_path(context.namespace(), "path", path, allow_root)
+            let root = RootPath::Allowed;
+            let spec = namespace_path(context.namespace(), "path", path, root)
                 .map_err(|error| context.fail(kind, error))?;
             context
                 .target
@@ -314,8 +314,8 @@ pub(crate) async fn run_filesystem_annotate(
     args: FilesystemAnnotateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let allow_root = true;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Allowed;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
     let (changes, options) = attribute_update(&args).map_err(|error| context.fail(kind, error))?;
     let result = context
@@ -347,7 +347,7 @@ pub(crate) async fn run_filesystem_grep(
     let path_prefix = args
         .path_prefix
         .as_deref()
-        .map(|path| parse_user_path_arg("--path-prefix", path, true))
+        .map(|path| parse_user_path_arg("--path-prefix", path, RootPath::Allowed))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let mut request = loonfs_types::GrepRequest {
@@ -422,8 +422,8 @@ pub(crate) async fn run_filesystem_cat(
     args: FilesystemCatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
     let revision_no = args
         .revision
@@ -463,14 +463,13 @@ pub(crate) async fn run_filesystem_get(
         ));
     }
 
-    let allow_root = args.recursive;
-    let spec = namespace_path(
-        context.namespace(),
-        "remote_path",
-        &args.remote_path,
-        allow_root,
-    )
-    .map_err(|error| context.fail(kind, error))?;
+    let root = if args.recursive {
+        RootPath::Allowed
+    } else {
+        RootPath::Refused
+    };
+    let spec = namespace_path(context.namespace(), "remote_path", &args.remote_path, root)
+        .map_err(|error| context.fail(kind, error))?;
     let revision_no = args
         .revision
         .map(|value| parse_public_ordinal_arg("--revision", value, RevisionNo::parse))
@@ -522,7 +521,7 @@ pub(crate) async fn run_filesystem_get(
             &context,
             spec.absolute_path().as_str(),
             &local_root,
-            args.force,
+            destination_behavior(args.force),
             runtime,
             snapshot_id.as_ref(),
         )
@@ -553,7 +552,11 @@ pub(crate) async fn run_filesystem_get(
         return Ok(context.output(kind, CommandData::StreamedToStdout));
     }
 
-    let derived_name = args.local_destination.is_none();
+    let name = if args.local_destination.is_none() {
+        DestinationName::Derived
+    } else {
+        DestinationName::Given
+    };
     let destination = destination_path_for_get(
         spec.absolute_path().as_str(),
         args.local_destination.as_deref(),
@@ -587,8 +590,8 @@ pub(crate) async fn run_filesystem_get(
         &mut download,
         &destination,
         meta.as_ref(),
-        args.force,
-        derived_name,
+        destination_behavior(args.force),
+        name,
         &progress,
     )
     .await;
@@ -662,15 +665,15 @@ pub(super) async fn stream_download_to_file(
     download: &mut FileDownload,
     destination: &Path,
     meta: Option<&PartialDownloadMetadata>,
-    force: bool,
-    derived_name: bool,
+    behavior: DestinationBehavior,
+    name: DestinationName,
     progress: &ProgressReporter,
 ) -> Result<u64, CliError> {
     let resumed_from = download.resumed_from();
     let mut partial = PartialDownload::open(destination, meta, resumed_from)
-        .map_err(|error| local_open_error(destination, error, force, derived_name))?;
+        .map_err(|error| local_open_error(destination, error, behavior, name))?;
     partial.fold_into(download, |error| {
-        local_destination_error(destination, error, force, derived_name)
+        local_destination_error(destination, error, behavior, name)
     })?;
     progress.already_done(resumed_from);
     if resumed_from > 0 {
@@ -683,14 +686,33 @@ pub(super) async fn stream_download_to_file(
     while let Some(chunk) = download.next_chunk().await? {
         partial
             .write_all(&chunk)
-            .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+            .map_err(|error| local_destination_error(destination, error, behavior, name))?;
         bytes_written += chunk.len() as u64;
         progress.advance(chunk.len() as u64);
     }
     partial
-        .install(destination, force)
-        .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+        .install(destination, behavior)
+        .map_err(|error| local_destination_error(destination, error, behavior, name))?;
     Ok(bytes_written)
+}
+
+/// Whether a local destination's name came from the caller or from the
+/// remote path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DestinationName {
+    /// The caller named the destination.
+    Given,
+    /// The name is the remote file's name.
+    Derived,
+}
+
+/// The destination behavior `--force` asks for.
+fn destination_behavior(force: bool) -> DestinationBehavior {
+    if force {
+        DestinationBehavior::Replace
+    } else {
+        DestinationBehavior::NoReplace
+    }
 }
 
 /// Writes one listing page and makes it visible before the next fetch.
@@ -737,8 +759,8 @@ async fn stream_download_to_stdout(download: &mut FileDownload) -> Result<(), Cl
 fn local_open_error(
     destination: &Path,
     error: std::io::Error,
-    force: bool,
-    derived_name: bool,
+    behavior: DestinationBehavior,
+    name: DestinationName,
 ) -> CliError {
     if error.kind() == std::io::ErrorKind::NotFound {
         let parent_error = std::io::Error::new(
@@ -750,21 +772,23 @@ fn local_open_error(
         );
         return CliError::io_for_path(destination, parent_error);
     }
-    local_destination_error(destination, error, force, derived_name)
+    local_destination_error(destination, error, behavior, name)
 }
 
 /// Shapes a local write failure the way `get` has always reported one.
 fn local_destination_error(
     destination: &Path,
     error: std::io::Error,
-    force: bool,
-    derived_name: bool,
+    behavior: DestinationBehavior,
+    name: DestinationName,
 ) -> CliError {
-    if !force && error.kind() == std::io::ErrorKind::AlreadyExists {
+    if behavior == DestinationBehavior::NoReplace
+        && error.kind() == std::io::ErrorKind::AlreadyExists
+    {
         return CliError::destination_exists(destination);
     }
     let mut error = CliError::io_for_path(destination, error);
-    if derived_name {
+    if name == DestinationName::Derived {
         error.message.push_str(
             "; if the remote name exceeds local filesystem limits, pass an \
              explicit destination or `-` for stdout",
@@ -798,7 +822,7 @@ pub(crate) async fn run_filesystem_trash(
     let PagedListing::Collected(response) = listing else {
         return Ok(context.output(kind, CommandData::StreamedToStdout));
     };
-    let hint = UndeleteHint::new(&context, location, args.target.profile.profile.is_some());
+    let hint = UndeleteHint::new(&context, location, args.target.profile.profile.as_deref());
     let recovery_commands = response
         .entries
         .iter()
@@ -819,8 +843,8 @@ pub(crate) async fn run_filesystem_revisions(
     args: FilesystemRevisionsArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
     let listing = collect_or_stream_pages(
         PagePlan::new(&args.pagination.page_limits),
@@ -887,7 +911,7 @@ pub(crate) async fn run_filesystem_put(
             ));
         }
         let remote_root = match args.remote_path {
-            Some(path) => parse_user_path_arg("remote_path", &path, true),
+            Some(path) => parse_user_path_arg("remote_path", &path, RootPath::Allowed),
             None => default_remote_put_path(&local_path),
         }
         .map_err(|error| context.fail(kind, error))?;
@@ -896,7 +920,7 @@ pub(crate) async fn run_filesystem_put(
             &context,
             &local_path,
             remote_root.as_str(),
-            args.force,
+            destination_behavior(args.force),
             args.commit.message.clone(),
             runtime,
         )
@@ -928,7 +952,13 @@ pub(crate) async fn run_filesystem_put(
     let remote_path = match args.remote_path.as_deref() {
         // A trailing slash names the directory the file lands in — the
         // cp/rsync habit — while a plain path is the full destination.
-        Some(path) => destination_user_path("remote_path", "local_path", path, local_leaf, true),
+        Some(path) => destination_user_path(
+            "remote_path",
+            "local_path",
+            path,
+            local_leaf,
+            RootPath::Allowed,
+        ),
         None => default_remote_put_path(&local_path),
     }
     .map_err(|error| context.fail(kind, error))?;
@@ -975,7 +1005,7 @@ async fn run_filesystem_put_stdin(
             .with_param("remote_path"),
         ));
     };
-    let remote_path = parse_user_path_arg("remote_path", remote_path, false)
+    let remote_path = parse_user_path_arg("remote_path", remote_path, RootPath::Refused)
         .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
     let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
@@ -1172,7 +1202,7 @@ pub(crate) async fn run_filesystem_append(
     args: FilesystemAppendArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let remote_path = parse_user_path_arg("remote_path", &args.remote_path, false)
+    let remote_path = parse_user_path_arg("remote_path", &args.remote_path, RootPath::Refused)
         .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
     let options = append_file_options(&args).map_err(|error| context.fail(kind, error))?;
@@ -1235,8 +1265,8 @@ pub(crate) async fn run_filesystem_rm(
     args: FilesystemRmArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, &location.path, &args.target, &args.actor).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
     let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
     // Resolve the inode before deleting: the id is half of the recovery
@@ -1277,7 +1307,7 @@ pub(crate) async fn run_filesystem_rm(
     // working even if the enclosing directories are renamed before the
     // paste.
     let recovery_command =
-        UndeleteHint::new(&context, location, args.target.profile.profile.is_some())
+        UndeleteHint::new(&context, location, args.target.profile.profile.as_deref())
             .command(deleted_inode, result.committed_seq);
 
     Ok(context.output(
@@ -1299,8 +1329,8 @@ pub(crate) async fn run_filesystem_restore(
     args: FilesystemRestoreArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
     let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
     let revision_no = parse_public_ordinal_arg("--revision", args.revision, RevisionNo::parse)
@@ -1331,13 +1361,13 @@ pub(crate) async fn run_filesystem_undelete(
     args: FilesystemUndeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let allow_root = false;
+    let root = RootPath::Refused;
     // An absent path restores in place; the destination is then the parent
     // and name the deletion recorded, which no path here could name better.
     let spec = args
         .destination_path
         .as_deref()
-        .map(|path| namespace_path(context.namespace(), "destination_path", path, allow_root))
+        .map(|path| namespace_path(context.namespace(), "destination_path", path, root))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
@@ -1388,8 +1418,8 @@ pub(crate) async fn run_filesystem_mkdir(
     args: FilesystemMkdirArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_mutation_context(kind, config_path, &args.target, &args.actor).await?;
-    let allow_root = false;
-    let spec = namespace_path(context.namespace(), "path", &args.path, allow_root)
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", &args.path, root)
         .map_err(|error| context.fail(kind, error))?;
     let commit = commit_options(&args.commit).map_err(|error| context.fail(kind, error))?;
     let options = CreateDirectoryOptions {
@@ -1508,14 +1538,9 @@ async fn run_filesystem_transfer(
                 .with_param("-r"),
         ));
     }
-    let allow_root = false;
-    let from = namespace_path(
-        context.namespace(),
-        "source_path",
-        &args.source_path,
-        allow_root,
-    )
-    .map_err(|error| context.fail(kind, error))?;
+    let root = RootPath::Refused;
+    let from = namespace_path(context.namespace(), "source_path", &args.source_path, root)
+        .map_err(|error| context.fail(kind, error))?;
     let source_leaf = from
         .absolute_path()
         .final_component()
@@ -1532,7 +1557,7 @@ async fn run_filesystem_transfer(
         "source_path",
         &args.destination_path,
         &source_leaf,
-        true,
+        RootPath::Allowed,
     )
     .map(|path| NamespacePath::new(context.namespace().clone(), path))
     .map_err(|error| context.fail(kind, error))?;
@@ -1594,7 +1619,7 @@ async fn run_filesystem_transfer(
                 &context,
                 from.absolute_path().as_str(),
                 to.absolute_path().as_str(),
-                args.force,
+                destination_behavior(args.force),
                 args.commit.message.clone(),
                 runtime,
             )

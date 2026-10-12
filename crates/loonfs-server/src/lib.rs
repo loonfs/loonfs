@@ -21,5 +21,5 @@ pub use http::{
     TlsConfigError,
 };
 pub use local_cache::FoyerStoredMetadataBlockCache;
-pub use sweep::Sweep;
+pub use sweep::{GarbageCollection, Sweep};
 pub use trace::{init_tracing_from_env, TraceInitError};

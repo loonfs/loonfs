@@ -9,7 +9,7 @@
 
 use crate::keyspace::{
     normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
-    unscope_listed_key, validate_segments,
+    unscope_listed_key, validate_segments, TrailingSeparator,
 };
 use crate::object_store::Result;
 use crate::ListedObject;
@@ -118,7 +118,7 @@ impl LocalFsStore {
     }
 
     fn resolve_key(&self, key: &str) -> Result<PathBuf> {
-        let segments = validate_segments(key, false)?;
+        let segments = validate_segments(key, TrailingSeparator::Refused)?;
         // Scratch-shaped names are reserved by this store: they are hidden
         // from listings, so accepting them as keys would create objects a
         // listing can never report.
@@ -691,7 +691,7 @@ impl ObjectStore for LocalFsStore {
     ) -> Result<Page<String, String>> {
         let scoped = scope_child_listing_prefix(self.key_prefix.as_deref(), prefix)?;
         let mut directory = self.root.clone();
-        for segment in validate_segments(&scoped, true)? {
+        for segment in validate_segments(&scoped, TrailingSeparator::Allowed)? {
             directory.push(segment);
         }
         let mut candidates: Vec<(String, PathBuf)> = directory_entries(prefix, &directory)
@@ -741,7 +741,7 @@ async fn list_prefix_for_root(
     prefix: String,
     start_after: Option<&str>,
 ) -> Result<Vec<ListedObject>> {
-    validate_segments(&prefix, true)?;
+    validate_segments(&prefix, TrailingSeparator::Allowed)?;
 
     if !fs::try_exists(&root)
         .await

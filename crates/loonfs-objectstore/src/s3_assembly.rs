@@ -1,7 +1,7 @@
 //! Create-only puts, multipart copy, and bounded reads for S3 and R2 assemblies.
 
 use super::{assembled_crc64nvme, S3RequestSigner, MULTIPART_CONTROL_TTL};
-use crate::assembly::{plan_parts, source_range, verify_expected, READ_BYTES};
+use crate::assembly::{plan_parts, source_range, verify_expected, PartSizing, READ_BYTES};
 use crate::provider_object_store::{
     StoredChecksumReader, MAX_PROVIDER_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
@@ -56,7 +56,11 @@ impl S3RequestSigner {
         let plan = plan_parts(
             &lengths,
             tail.iter().map(|piece| piece.len() as u64).sum::<u64>(),
-            self.kind == ConfiguredObjectStoreKind::CloudflareR2,
+            if self.kind == ConfiguredObjectStoreKind::CloudflareR2 {
+                PartSizing::Equal
+            } else {
+                PartSizing::Varied
+            },
         );
         if plan.len() > MAX_PROVIDER_MULTIPART_PARTS {
             return Err(ObjectStoreError::InvalidContentRef(

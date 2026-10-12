@@ -212,7 +212,8 @@ pub use execution_budget::{
 };
 pub use fs::{
     ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
-    PathEntriesPager, ReadView, SnapshotPolicy, SnapshotsPager, TrashPager,
+    MetadataMaintenanceOutcome, PathEntriesPager, ReadView, SnapshotPolicy, SnapshotsPager,
+    TrashPager,
 };
 pub use handle::{
     LoonFs, LoonFsBuilder, Maintenance, MaintenanceCancellation, Mode, Namespace, ReadOnly,

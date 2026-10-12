@@ -2,7 +2,7 @@
 
 #![allow(clippy::panic)]
 
-use super::Sweep;
+use super::{GarbageCollection, Sweep};
 use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
@@ -261,7 +261,11 @@ async fn a_restart_then_one_sweep_folds_an_idle_tail_and_collects_garbage() {
     let server = SweepServer::start(store.clone(), &sweep_config(None), now_ms).await;
     let tail = server.wal_tail_objects(&namespace_id).await;
     assert!(tail > 0);
-    server.sweep.run_pass(true).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Collect)
+        .await
+        .expect("list namespaces");
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         tail,
@@ -274,7 +278,11 @@ async fn a_restart_then_one_sweep_folds_an_idle_tail_and_collects_garbage() {
     );
 
     server.clock.advance_ms(2 * DAY_MS);
-    server.sweep.run_pass(true).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Collect)
+        .await
+        .expect("list namespaces");
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     assert!(
         server.counter("loonfs.gc.reclaimed", &[("category", "deleted_manifests")]) > 0,
@@ -310,7 +318,11 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
     assert!(!keys_under(store.as_ref(), &content_prefix).await.is_empty());
 
     let server = SweepServer::start(store.clone(), &sweep_config(None), now_ms).await;
-    server.sweep.run_pass(true).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Collect)
+        .await
+        .expect("list namespaces");
     assert!(
         !keys_under(store.as_ref(), &content_prefix).await.is_empty(),
         "content outlives the deletion until the retirement grace passes"
@@ -318,7 +330,11 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
 
     server.clock.advance_ms(DAY_MS);
     assert_eq!(
-        server.sweep.run_pass(true).await.expect("list namespaces"),
+        server
+            .sweep
+            .run_pass(GarbageCollection::Collect)
+            .await
+            .expect("list namespaces"),
         1,
         "a deleted namespace is still listed"
     );
@@ -352,7 +368,11 @@ async fn grep_gc_runs_in_a_sweep() {
     .await;
     let worker = server.grep_worker.as_ref().expect("grep worker");
     worker.enable(&namespace_id).await.expect("enable grep");
-    server.sweep.run_pass(false).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Skip)
+        .await
+        .expect("list namespaces");
     assert!(matches!(
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Active { .. }
@@ -363,7 +383,11 @@ async fn grep_gc_runs_in_a_sweep() {
         .await
         .is_empty());
 
-    server.sweep.run_pass(true).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Collect)
+        .await
+        .expect("list namespaces");
     assert!(
         !keys_under(store.as_ref(), &segments_prefix)
             .await
@@ -371,7 +395,11 @@ async fn grep_gc_runs_in_a_sweep() {
         "a disabled index keeps its segments until the grace passes"
     );
     server.clock.advance_ms(2 * DAY_MS);
-    server.sweep.run_pass(true).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Collect)
+        .await
+        .expect("list namespaces");
     assert_eq!(
         keys_under(store.as_ref(), &segments_prefix).await,
         Vec::<String>::new()
@@ -420,7 +448,11 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
         .await
         .expect("enable grep");
 
-    server.sweep.run_pass(false).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Skip)
+        .await
+        .expect("list namespaces");
     assert!(
         matches!(
             server.grep_status(&namespace_id).await,
@@ -429,7 +461,11 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
         "one visit runs at most {} build steps",
         super::MAX_GREP_BUILD_STEPS_PER_VISIT
     );
-    server.sweep.run_pass(false).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Skip)
+        .await
+        .expect("list namespaces");
     let status = server.grep_status(&namespace_id).await;
     let watermark = status
         .active_watermark()
@@ -461,7 +497,11 @@ async fn a_sweep_survives_a_failing_namespace() {
         SweepServer::start(store.clone(), &sweep_config(None), now_ms + 20 * MINUTE_MS).await;
 
     assert_eq!(
-        server.sweep.run_pass(false).await.expect("list namespaces"),
+        server
+            .sweep
+            .run_pass(GarbageCollection::Skip)
+            .await
+            .expect("list namespaces"),
         3
     );
     store.clear();
@@ -476,7 +516,11 @@ async fn a_sweep_survives_a_failing_namespace() {
         1
     );
 
-    server.sweep.run_pass(false).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Skip)
+        .await
+        .expect("list namespaces");
     assert_eq!(
         server.wal_tail_objects(&names[1]).await,
         0,
@@ -522,7 +566,11 @@ async fn a_corrupt_namespace_is_counted_and_skipped_by_later_passes() {
         )
     };
 
-    server.sweep.run_pass(false).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Skip)
+        .await
+        .expect("list namespaces");
     assert_eq!(skipped(), 1);
     for (key, bytes) in manifests.iter().zip(originals) {
         store
@@ -531,7 +579,11 @@ async fn a_corrupt_namespace_is_counted_and_skipped_by_later_passes() {
             .expect("restore a manifest");
     }
 
-    server.sweep.run_pass(false).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Skip)
+        .await
+        .expect("list namespaces");
     assert_eq!(server.wal_tail_objects(&names[0]).await, 0);
     assert!(
         server.wal_tail_objects(&names[1]).await > 0,
@@ -565,7 +617,11 @@ async fn a_stale_head_failure_is_retried_by_the_next_pass() {
         loonfs::ErrorCode::StaleHead,
         &"a racing publication moved the head",
     );
-    server.sweep.run_pass(false).await.expect("list namespaces");
+    server
+        .sweep
+        .run_pass(GarbageCollection::Skip)
+        .await
+        .expect("list namespaces");
 
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
@@ -606,7 +662,7 @@ async fn a_parked_visit_does_not_hold_up_later_pages() {
     store.block_next();
     let pass = tokio::spawn({
         let sweep = server.sweep.clone();
-        async move { sweep.run_pass(false).await }
+        async move { sweep.run_pass(GarbageCollection::Skip).await }
     });
     tokio::time::timeout(Duration::from_secs(10), async {
         store.wait_until_blocked().await;
@@ -663,7 +719,7 @@ async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_
     store.block_next();
     let pass = tokio::spawn({
         let sweep = server.sweep.clone();
-        async move { sweep.run_pass(false).await }
+        async move { sweep.run_pass(GarbageCollection::Skip).await }
     });
     tokio::time::timeout(Duration::from_secs(10), async {
         store.wait_until_blocked().await;
@@ -755,17 +811,21 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
         let sweep = server.sweep.page_limit(page_limit(2));
         // The first pass collects what the seed left behind, so the passes
         // below find nothing to collect and nothing inside its grace.
-        sweep.run_pass(true).await.expect("list namespaces");
+        sweep
+            .run_pass(GarbageCollection::Collect)
+            .await
+            .expect("list namespaces");
 
-        for (collect_garbage, per_namespace, lists_per_namespace) in [
-            (false, visit, 0),
-            (true, collecting_visit, collecting_lists),
+        for (garbage, per_namespace, lists_per_namespace) in [
+            (GarbageCollection::Skip, visit, 0),
+            (
+                GarbageCollection::Collect,
+                collecting_visit,
+                collecting_lists,
+            ),
         ] {
             store.reset();
-            sweep
-                .run_pass(collect_garbage)
-                .await
-                .expect("list namespaces");
+            sweep.run_pass(garbage).await.expect("list namespaces");
             let operations = store.take();
             let listings = operations
                 .iter()
@@ -788,8 +848,8 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
                 assert_eq!(
                     (visit.len(), lists),
                     (per_namespace, lists_per_namespace),
-                    "requests and lists for `{namespace_id}`, grep {grep:?}, collect_garbage \
-                     {collect_garbage}"
+                    "requests and lists for `{namespace_id}`, grep {grep:?}, garbage \
+                     {garbage:?}"
                 );
             }
             assert_eq!(operations.len(), listings + names.len() * per_namespace);
@@ -819,7 +879,11 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
     store.reset();
 
     assert_eq!(
-        server.sweep.run_pass(true).await.expect("list namespaces"),
+        server
+            .sweep
+            .run_pass(GarbageCollection::Collect)
+            .await
+            .expect("list namespaces"),
         1,
         "a child whose name is not a namespace id is skipped"
     );

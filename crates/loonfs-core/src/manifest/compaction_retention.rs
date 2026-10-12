@@ -2,7 +2,10 @@
 
 use crate::error::{CoreError, Result};
 use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
-use loonfs_types::{ChangeSeq, InodeId, NameKey};
+use loonfs_types::{
+    AccessRevisionNo, AttributesRevisionNo, ChangeSeq, InodeId, NameKey, RevisionNo,
+};
+use std::fmt;
 
 /// One row a retention operator kept, and the family it belongs to.
 pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
@@ -145,7 +148,7 @@ pub(super) struct WholeStateRetention {
     /// kept its newest row at or below the floor once this is set. It also
     /// catches two rows sharing one revision number: descending revision
     /// order puts any such pair next to each other, so one field sees them.
-    previous_at_floor: Option<u64>,
+    previous_at_floor: Option<WholeStateRevisionNo>,
 }
 
 impl WholeStateRetention {
@@ -155,7 +158,12 @@ impl WholeStateRetention {
         row: MetadataRow,
         floor_seq: ChangeSeq,
     ) -> Result<Option<MetadataRow>> {
-        let Some((inode_id, revision, committed_seq)) = whole_state_revision(&row) else {
+        let Some(WholeStateRevision {
+            inode_id,
+            revision,
+            committed_seq,
+        }) = whole_state_revision(&row)
+        else {
             return Ok(Some(row));
         };
         if committed_seq > floor_seq {
@@ -184,23 +192,55 @@ impl WholeStateRetention {
     }
 }
 
-fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, ChangeSeq)> {
-    match row {
-        MetadataRow::FileRevision(record) => {
-            Some((record.inode_id, record.revision_no.0, record.committed_seq))
+/// One whole-state row's place in its inode's history.
+struct WholeStateRevision {
+    inode_id: InodeId,
+    revision: WholeStateRevisionNo,
+    committed_seq: ChangeSeq,
+}
+
+/// A whole-state row's revision number, in its own family's numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WholeStateRevisionNo {
+    File(RevisionNo),
+    Attributes(AttributesRevisionNo),
+    Access(AccessRevisionNo),
+}
+
+impl fmt::Display for WholeStateRevisionNo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File(revision_no) => revision_no.fmt(f),
+            Self::Attributes(revision_no) => revision_no.fmt(f),
+            Self::Access(revision_no) => revision_no.fmt(f),
         }
-        MetadataRow::AttributesRevision(record) => Some((
-            record.inode_id,
-            record.attributes_revision_no.0,
-            record.committed_seq,
-        )),
-        MetadataRow::AccessRevision(record) => Some((
-            record.inode_id,
-            record.access_revision_no.0,
-            record.committed_seq,
-        )),
-        _ => None,
     }
+}
+
+fn whole_state_revision(row: &MetadataRow) -> Option<WholeStateRevision> {
+    let (inode_id, revision, committed_seq) = match row {
+        MetadataRow::FileRevision(record) => (
+            record.inode_id,
+            WholeStateRevisionNo::File(record.revision_no),
+            record.committed_seq,
+        ),
+        MetadataRow::AttributesRevision(record) => (
+            record.inode_id,
+            WholeStateRevisionNo::Attributes(record.attributes_revision_no),
+            record.committed_seq,
+        ),
+        MetadataRow::AccessRevision(record) => (
+            record.inode_id,
+            WholeStateRevisionNo::Access(record.access_revision_no),
+            record.committed_seq,
+        ),
+        _ => return None,
+    };
+    Some(WholeStateRevision {
+        inode_id,
+        revision,
+        committed_seq,
+    })
 }
 
 /// Processes active-deletion rows one deletion identity at a time.

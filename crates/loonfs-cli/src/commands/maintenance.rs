@@ -324,7 +324,7 @@ async fn run_maintenance_store_probe(
         kind,
         config_path,
         explicit_profile,
-        args.request.no_retry,
+        args.request.retry(),
         None,
     )
     .await?;

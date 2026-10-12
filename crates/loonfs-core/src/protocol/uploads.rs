@@ -40,8 +40,9 @@ use loonfs_types::api::v0::{
     UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };
 use loonfs_types::format::control::{
-    encode_control_state, ControlObjectKind, ProxiedStaging, UploadSessionMode,
-    UploadSessionPayload, UploadSessionRecordStatus,
+    encode_control_state, ControlObjectKind, ProxiedStaging, UploadAbortOutcome,
+    UploadAlreadyCompletedError, UploadSessionMode, UploadSessionPayload,
+    UploadSessionRecordStatus,
 };
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::{
@@ -1166,25 +1167,17 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
                     mode,
                     status: UploadSessionStatus::Aborted { aborted_at_ms },
                 };
-                match state.status {
-                    UploadSessionRecordStatus::Aborted { aborted_at_ms } => Ok(
+                match state.status.abort(now_ms) {
+                    Ok(UploadAbortOutcome::AlreadyAborted { aborted_at_ms }) => Ok(
                         UploadSessionUpdate::Noop((aborted(aborted_at_ms), abandoned)),
                     ),
-                    // Completion is final in the other direction: the
-                    // content may already be published, so an abort cannot
-                    // quietly succeed over it.
-                    UploadSessionRecordStatus::Completed { .. } => {
+                    Err(UploadAlreadyCompletedError) => {
                         Err(CoreError::UploadAlreadyCompleted { upload_id })
                     }
-                    UploadSessionRecordStatus::Open { .. } => {
-                        state.status = UploadSessionRecordStatus::Aborted {
-                            aborted_at_ms: now_ms,
-                        };
-                        Ok(UploadSessionUpdate::Replace {
-                            next: Box::new(state),
-                            outcome: (aborted(now_ms), abandoned),
-                        })
-                    }
+                    Ok(UploadAbortOutcome::Aborted) => Ok(UploadSessionUpdate::Replace {
+                        next: Box::new(state),
+                        outcome: (aborted(now_ms), abandoned),
+                    }),
                 }
             }
         })

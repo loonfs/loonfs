@@ -12,7 +12,10 @@ use futures::StreamExt;
 use loonfs_objectstore::keys::upload_session_prefix;
 use loonfs_objectstore::layout::upload_id_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{UploadSessionPayload, UploadSessionRecordStatus};
+use loonfs_types::format::control::{
+    UploadAbortOutcome, UploadAlreadyCompletedError, UploadSessionPayload,
+    UploadSessionRecordStatus,
+};
 use loonfs_types::{ContentId, NamespaceId};
 
 /// Hands the content ID of every upload session record in the namespace to
@@ -137,17 +140,15 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
         &state.namespace_id,
         &state.upload_id,
         |mut state: UploadSessionPayload| async move {
-            if !matches!(state.status, UploadSessionRecordStatus::Open { .. }) {
-                return Ok(UploadSessionUpdate::Noop(None));
-            }
             let abandoned = AbandonedUpload::of(&state);
-            state.status = UploadSessionRecordStatus::Aborted {
-                aborted_at_ms: context.now_ms,
-            };
-            Ok(UploadSessionUpdate::Replace {
-                next: Box::new(state),
-                outcome: Some(abandoned),
-            })
+            match state.status.abort(context.now_ms) {
+                Ok(UploadAbortOutcome::Aborted) => Ok(UploadSessionUpdate::Replace {
+                    next: Box::new(state),
+                    outcome: Some(abandoned),
+                }),
+                Ok(UploadAbortOutcome::AlreadyAborted { .. })
+                | Err(UploadAlreadyCompletedError) => Ok(UploadSessionUpdate::Noop(None)),
+            }
         },
     )
     .await;

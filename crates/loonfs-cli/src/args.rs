@@ -662,6 +662,13 @@ pub(crate) struct RequestBehaviorArgs {
     pub no_retry: bool,
 }
 
+impl RequestBehaviorArgs {
+    /// The client's `retry` setting, which `--no-retry` turns off.
+    pub(crate) fn retry(&self) -> bool {
+        !self.no_retry
+    }
+}
+
 #[derive(Debug, Args, Clone)]
 pub(crate) struct SubjectSelectorArgs {
     #[arg(from_global)]
@@ -1518,7 +1525,7 @@ impl RuntimeBehavior {
             // `interactive` needs: a `put` fed by a pipe still has a
             // terminal to draw on, and `--no-input` says nothing about
             // whether anyone is watching.
-            progress: ProgressMode::detect(cli.no_progress, cli.json),
+            progress: ProgressMode::detect(cli),
         }
     }
 }

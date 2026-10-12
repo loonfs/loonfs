@@ -37,6 +37,21 @@ const MAX_LOST_COMPACTION_RACES: u32 = 3;
 /// so a namespace with a backlog cannot hold its caller for long.
 const MAX_COMPACTION_UNITS_PER_CALL: u32 = 16;
 
+/// Whether metadata maintenance left anything due for a namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataMaintenanceOutcome {
+    /// Nothing is due now, and nothing can become due without a new commit.
+    CaughtUp,
+    /// Work is still due, or the call could not tell.
+    Due,
+}
+
+/// What one metadata step did, and whether it left a WAL fold due.
+struct MetadataStepReport {
+    response: MetadataMaintenanceResponse,
+    wal_fold: MetadataMaintenanceOutcome,
+}
+
 /// What one compaction unit left for its caller.
 enum CompactionUnitOutcome {
     Fenced,
@@ -222,14 +237,14 @@ impl Maintenance {
     ) -> Result<MetadataMaintenanceResponse> {
         self.metadata_step(namespace_id, options)
             .await
-            .map(|(response, _)| response)
+            .map(|step| step.response)
     }
 
     async fn metadata_step(
         &self,
         namespace_id: &NamespaceId,
         options: &MaintainMetadataOptions,
-    ) -> Result<(MetadataMaintenanceResponse, bool)> {
+    ) -> Result<MetadataStepReport> {
         let anchor = self.load_live_anchor(namespace_id).await?;
         let status = NamespaceStorageDiagnostics::from(&anchor);
         let inline_bytes = if status.wal_tail_objects > 0 {
@@ -260,7 +275,14 @@ impl Maintenance {
             WalFoldStepOutcome::AlreadyPublished { .. }
             | WalFoldStepOutcome::RetriesExhausted { .. } => false,
         };
-        Ok((response, wal_caught_up))
+        Ok(MetadataStepReport {
+            response,
+            wal_fold: if wal_caught_up {
+                MetadataMaintenanceOutcome::CaughtUp
+            } else {
+                MetadataMaintenanceOutcome::Due
+            },
+        })
     }
 
     /// Runs [`Self::maintain_metadata_while_due_with_options`] with the
@@ -269,7 +291,7 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
-    ) -> Result<bool> {
+    ) -> Result<MetadataMaintenanceOutcome> {
         self.maintain_metadata_while_due_with_options(
             namespace_id,
             cancellation,
@@ -292,11 +314,12 @@ impl Maintenance {
     /// manifest the runtime learns of the way it learns of another
     /// process's. Fails with the first error. Keeps no state between calls.
     ///
-    /// Returns `true` when nothing is due now and nothing can become due
-    /// without a new commit under `options`, based on the state this call
-    /// read. Returns `false` at a work limit, after lost races, on fencing or cancellation,
-    /// when streaming compaction does not finish, or while a tail waits for
-    /// the idle fold age.
+    /// Returns [`MetadataMaintenanceOutcome::CaughtUp`] when nothing is due
+    /// now and nothing can become due without a new commit under `options`,
+    /// based on the state this call read. Returns
+    /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after lost races,
+    /// on fencing or cancellation, when streaming compaction does not finish,
+    /// or while a tail waits for the idle fold age.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.maintenance.maintain_metadata_while_due",
@@ -314,7 +337,7 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
         options: &MaintainMetadataOptions,
-    ) -> Result<bool> {
+    ) -> Result<MetadataMaintenanceOutcome> {
         self.core.record_trace_context(&tracing::Span::current());
         let mut lost_races = 0;
         let mut published_units = 0;
@@ -322,12 +345,12 @@ impl Maintenance {
             && published_units < MAX_COMPACTION_UNITS_PER_CALL
             && !cancellation.is_cancelled()
         {
-            let (step, wal_caught_up) = tokio::select! {
+            let step = tokio::select! {
                 biased;
-                () = cancellation.cancelled() => return Ok(false),
+                () = cancellation.cancelled() => return Ok(MetadataMaintenanceOutcome::Due),
                 step = self.metadata_step(namespace_id, options) => step?,
             };
-            let won = match step.compaction {
+            let won = match step.response.compaction {
                 CompactionStepOutcome::UnitPublished {} => true,
                 CompactionStepOutcome::ManifestAdvanced {} => false,
                 CompactionStepOutcome::MetadataCompactionRequired {} => {
@@ -341,13 +364,16 @@ impl Maintenance {
                         MetadataCompactionOutcome::Abandoned => false,
                         MetadataCompactionOutcome::NotNeeded
                         | MetadataCompactionOutcome::Cancelled
-                        | MetadataCompactionOutcome::Fenced => return Ok(false),
+                        | MetadataCompactionOutcome::Fenced => {
+                            return Ok(MetadataMaintenanceOutcome::Due)
+                        }
                     }
                 }
-                CompactionStepOutcome::NotNeeded {} => {
-                    return Ok(wal_caught_up && !cancellation.is_cancelled())
+                CompactionStepOutcome::NotNeeded {} if cancellation.is_cancelled() => {
+                    return Ok(MetadataMaintenanceOutcome::Due)
                 }
-                CompactionStepOutcome::Fenced {} => return Ok(false),
+                CompactionStepOutcome::NotNeeded {} => return Ok(step.wal_fold),
+                CompactionStepOutcome::Fenced {} => return Ok(MetadataMaintenanceOutcome::Due),
             };
             if won {
                 published_units += 1;
@@ -356,7 +382,7 @@ impl Maintenance {
                 lost_races += 1;
             }
         }
-        Ok(false)
+        Ok(MetadataMaintenanceOutcome::Due)
     }
 
     /// Optionally folds the WAL tail, then runs one compaction step.
@@ -950,7 +976,8 @@ impl crate::Namespace<crate::Writable> {
         use loonfs_types::{AccessGrants, AccessRight, AccessRights};
 
         let (engine, context) = self.core.pinned_metadata_read(&self.namespace_id).await?;
-        let (boundary, grants, current) = engine.root_access(&context).await?;
+        let root = engine.root_access(&context).await?;
+        let grants = root.access.grants;
         let mut entries: std::collections::BTreeMap<_, _> = grants
             .iter()
             .map(|(principal, rights)| (principal.clone(), rights))
@@ -972,11 +999,12 @@ impl crate::Namespace<crate::Writable> {
             Some("administrator recovery".to_owned()),
             crate::publish::FilesystemOperation::UpdateAccess {
                 path: loonfs_types::AbsolutePath::root(),
-                boundary,
+                boundary: root.access.boundary,
                 grants,
                 expected_inode_id: Some(loonfs_types::ROOT_INODE_ID),
                 expected_access_revision_no: Some(
-                    current.unwrap_or(loonfs_types::AccessRevisionNo(0)),
+                    root.access_revision_no
+                        .unwrap_or(loonfs_types::AccessRevisionNo(0)),
                 ),
             },
         );

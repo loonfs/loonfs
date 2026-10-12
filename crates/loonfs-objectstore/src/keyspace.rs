@@ -3,7 +3,19 @@
 use crate::object_store::Result;
 use crate::ObjectStoreError;
 
-pub(crate) fn validate_segments(key: &str, allow_trailing_separator: bool) -> Result<Vec<&str>> {
+/// Whether a key may end in one `/`, as a listing prefix may.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrailingSeparator {
+    /// One trailing `/` is accepted and dropped.
+    Allowed,
+    /// A trailing `/` is an empty segment and is refused.
+    Refused,
+}
+
+pub(crate) fn validate_segments(
+    key: &str,
+    trailing_separator: TrailingSeparator,
+) -> Result<Vec<&str>> {
     if key.is_empty() {
         return Ok(Vec::new());
     }
@@ -13,7 +25,8 @@ pub(crate) fn validate_segments(key: &str, allow_trailing_separator: bool) -> Re
 
     for (index, segment) in raw_segments.iter().enumerate() {
         if segment.is_empty() {
-            let is_trailing = allow_trailing_separator && index + 1 == raw_segments.len();
+            let is_trailing =
+                trailing_separator == TrailingSeparator::Allowed && index + 1 == raw_segments.len();
             if is_trailing {
                 continue;
             }
@@ -45,12 +58,12 @@ pub(crate) fn normalize_key_prefix(key_prefix: Option<&str>) -> Result<Option<St
         return Ok(None);
     }
 
-    let segments = validate_segments(key_prefix, false)?;
+    let segments = validate_segments(key_prefix, TrailingSeparator::Refused)?;
     Ok(Some(segments.join("/")))
 }
 
 pub(crate) fn scope_object_key(key_prefix: Option<&str>, key: &str) -> Result<String> {
-    validate_segments(key, false)?;
+    validate_segments(key, TrailingSeparator::Refused)?;
 
     match key_prefix {
         Some(key_prefix) if !key_prefix.is_empty() && !key.is_empty() => {
@@ -62,7 +75,7 @@ pub(crate) fn scope_object_key(key_prefix: Option<&str>, key: &str) -> Result<St
 }
 
 pub(crate) fn scope_list_prefix(key_prefix: Option<&str>, prefix: &str) -> Result<String> {
-    validate_segments(prefix, true)?;
+    validate_segments(prefix, TrailingSeparator::Allowed)?;
 
     match key_prefix {
         Some(key_prefix) if !key_prefix.is_empty() && !prefix.is_empty() => {
@@ -96,7 +109,7 @@ pub(crate) fn unscope_listed_key(key_prefix: Option<&str>, scoped_key: &str) -> 
 mod tests {
     use super::{
         normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
-        validate_segments,
+        validate_segments, TrailingSeparator,
     };
     use crate::keys::hint;
     use crate::ObjectStoreError;
@@ -145,9 +158,9 @@ mod tests {
 
     #[test]
     fn validate_segments_allows_trailing_separator_only_for_prefixes() {
-        assert!(validate_segments("namespaces/ns-1/", true).is_ok());
+        assert!(validate_segments("namespaces/ns-1/", TrailingSeparator::Allowed).is_ok());
         assert!(matches!(
-            validate_segments("namespaces/ns-1/", false),
+            validate_segments("namespaces/ns-1/", TrailingSeparator::Refused),
             Err(ObjectStoreError::InvalidKey { .. })
         ));
     }

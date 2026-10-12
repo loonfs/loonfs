@@ -7,7 +7,7 @@ use loonfs::metrics::{
 };
 use loonfs::{
     ChangeSeq, ErrorCode, ErrorKind, MaintainMetadataOptions, Maintenance, MaintenanceCancellation,
-    NamespaceId, SharedObjectStore,
+    MetadataMaintenanceOutcome, NamespaceId, SharedObjectStore,
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
@@ -33,6 +33,15 @@ const MAX_GREP_BUILD_STEPS_PER_VISIT: usize = 16;
 
 const SWEEP_PASS_SECONDS_BOUNDARIES: &[f64] =
     &[1.0, 10.0, 60.0, 300.0, 900.0, 3_600.0, 14_400.0, 86_400.0];
+
+/// Whether a sweep pass also collects each namespace's garbage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GarbageCollection {
+    /// Collect each namespace's garbage and its grep garbage.
+    Collect,
+    /// Maintain metadata and the grep index only.
+    Skip,
+}
 
 /// Ticks held sessions every `tick_interval_ms`. Active sessions publish and
 /// maintain themselves. Settling sessions run the first due step: metadata,
@@ -169,19 +178,20 @@ impl Sweep {
         self
     }
 
-    /// Visits every namespace the store lists once. With `collect_garbage`,
-    /// each visit also collects the namespace's garbage and its grep
-    /// garbage.
+    /// Visits every namespace the store lists once. With
+    /// [`GarbageCollection::Collect`], each visit also collects the
+    /// namespace's garbage and its grep garbage.
     ///
     /// Returns how many namespaces the pass listed, or the listing failure
     /// that ended it once the visits it had started returned. A failed call
     /// on one namespace does not fail the pass.
     /// After [`Sweep`] is stopped, no new visit starts and a running
     /// streaming compaction stops at its next block.
-    pub async fn run_pass(&self, collect_garbage: bool) -> Result<usize, ObjectStoreError> {
+    pub async fn run_pass(&self, garbage: GarbageCollection) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
         let started_at_ms = inner.timer.monotonic_now_ms();
-        let listed = self.visit_every_namespace(collect_garbage).await;
+        let collect_garbage = garbage == GarbageCollection::Collect;
+        let listed = self.visit_every_namespace(garbage).await;
         let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_at_ms);
         inner
             .metrics
@@ -216,7 +226,7 @@ impl Sweep {
 
     async fn visit_every_namespace(
         &self,
-        collect_garbage: bool,
+        garbage: GarbageCollection,
     ) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
         // Boxed for the same reason as a visit: the spawned sweep's `Send`
@@ -251,13 +261,13 @@ impl Sweep {
             .for_each_concurrent(inner.max_concurrent_visits, |namespace_id| {
                 // Boxed so the spawned sweep's `Send` check does not recurse
                 // through every engine future a visit awaits.
-                self.visit(namespace_id, collect_garbage).map(drop).boxed()
+                self.visit(namespace_id, garbage).map(drop).boxed()
             })
             .await;
         listing.map(|()| listed)
     }
 
-    async fn visit(&self, namespace_id: NamespaceId, collect_garbage: bool) {
+    async fn visit(&self, namespace_id: NamespaceId, garbage: GarbageCollection) {
         let inner = &self.inner;
         if self.skipped(&namespace_id) {
             return;
@@ -269,32 +279,32 @@ impl Sweep {
         let seq = entry
             .as_ref()
             .and_then(|entry| lock(entry).handle.last_published_seq());
-        let caught_up = self.maintain_metadata(&namespace_id).await;
+        let outcome = self.maintain_metadata(&namespace_id).await;
         if let Some(entry) = &entry {
-            self.record_metadata(entry, seq, caught_up);
+            self.record_metadata(entry, seq, outcome);
         }
         if let Some(grep) = &inner.grep {
             self.maintain_index(grep, &namespace_id, entry.as_deref(), seq)
                 .await;
         }
-        if collect_garbage && self.gc(&namespace_id).await {
+        if garbage == GarbageCollection::Collect && self.gc(&namespace_id).await {
             if let Some(entry) = &entry {
                 self.record_collection(entry, seq);
             }
         }
     }
 
-    async fn maintain_metadata(&self, namespace_id: &NamespaceId) -> bool {
+    async fn maintain_metadata(&self, namespace_id: &NamespaceId) -> MetadataMaintenanceOutcome {
         let inner = &self.inner;
         match inner
             .maintenance
             .maintain_metadata_while_due_with_options(namespace_id, &inner.stop, &inner.metadata)
             .await
         {
-            Ok(caught_up) => caught_up,
+            Ok(outcome) => outcome,
             Err(error) => {
                 self.record_failure(namespace_id, SweepCall::Metadata, error.code(), &error);
-                false
+                MetadataMaintenanceOutcome::Due
             }
         }
     }
@@ -303,12 +313,12 @@ impl Sweep {
         &self,
         entry: &Mutex<HeldNamespace>,
         seq: Option<ChangeSeq>,
-        caught_up: bool,
+        outcome: MetadataMaintenanceOutcome,
     ) {
         let inner = &self.inner;
         let mut held = lock(entry);
-        held.handle.record_metadata_maintenance(seq, caught_up);
-        held.metadata_retry_at_ms = if caught_up {
+        held.handle.record_metadata_maintenance(seq, outcome);
+        held.metadata_retry_at_ms = if outcome == MetadataMaintenanceOutcome::CaughtUp {
             0
         } else {
             inner

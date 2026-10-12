@@ -179,7 +179,7 @@ pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{
     NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, ResolvedFileContent,
-    Writable,
+    RootAccess, Writable,
 };
 pub use error::{
     classify_store_failure, CoreError, ErrorCode, ErrorKind, MetadataProjectionLoadError,

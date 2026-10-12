@@ -25,7 +25,7 @@ use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, FoldWalOutcome,
-    MaintenanceCancellation,
+    MaintenanceCancellation, MetadataMaintenanceOutcome,
 };
 use admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use futures::FutureExt;
@@ -184,10 +184,10 @@ impl NamespaceSession {
     pub(crate) fn record_metadata_maintenance(
         &self,
         expected_seq: Option<ChangeSeq>,
-        caught_up: bool,
+        outcome: MetadataMaintenanceOutcome,
     ) {
         self.publisher
-            .record_metadata_maintenance(expected_seq, caught_up);
+            .record_metadata_maintenance(expected_seq, outcome);
     }
 
     pub(crate) async fn wait_for_fold(&self) -> Result<(), Error> {
@@ -1439,7 +1439,10 @@ impl NamespacePublisher {
                 &never_fold,
             )
             .await;
-        self.record_metadata_maintenance(seq, matches!(result, Ok(true)));
+        let outcome = result
+            .as_ref()
+            .map_or(MetadataMaintenanceOutcome::Due, |outcome| *outcome);
+        self.record_metadata_maintenance(seq, outcome);
         if let Err(error) = result {
             phase_event!(
                 self.runtime_core,
@@ -1452,10 +1455,14 @@ impl NamespacePublisher {
         }
     }
 
-    fn record_metadata_maintenance(&self, expected_seq: Option<ChangeSeq>, caught_up: bool) {
+    fn record_metadata_maintenance(
+        &self,
+        expected_seq: Option<ChangeSeq>,
+        outcome: MetadataMaintenanceOutcome,
+    ) {
         let mut state = self.lock_state();
         if state.last_published.map(|last| last.seq) == expected_seq {
-            state.metadata_caught_up = caught_up;
+            state.metadata_caught_up = outcome == MetadataMaintenanceOutcome::CaughtUp;
         }
     }
 

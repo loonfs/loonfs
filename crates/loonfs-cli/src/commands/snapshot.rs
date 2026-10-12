@@ -20,7 +20,7 @@ async fn resolve_snapshot_context(
         kind,
         config_path,
         explicit_profile,
-        target.request.no_retry,
+        target.request.retry(),
         Some(&target.subject),
     )
     .await?;

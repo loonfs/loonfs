@@ -1,6 +1,7 @@
 //! Concurrent visits preserve session progress and share the host's slots.
 
 use super::{sweep_config, SweepServer};
+use crate::sweep::GarbageCollection;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
@@ -53,14 +54,24 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
                 if tick_first {
                     sweep.tick().await;
                 } else {
-                    sweep.run_pass(false).await.expect("daily");
+                    sweep
+                        .run_pass(GarbageCollection::Skip)
+                        .await
+                        .expect("daily");
                 }
             }
         });
         store.wait_until_blocked().await;
         store.inner().reset();
         if tick_first {
-            assert_eq!(server.sweep.run_pass(false).await.expect("daily"), 1);
+            assert_eq!(
+                server
+                    .sweep
+                    .run_pass(GarbageCollection::Skip)
+                    .await
+                    .expect("daily"),
+                1
+            );
             let operations = store.inner().take();
             assert_eq!(operations.len(), 1);
             assert!(matches!(&operations[0], RecordedOperation::List { .. }));
@@ -155,7 +166,7 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         store.block_next();
         let daily = tokio::spawn({
             let sweep = server.sweep.clone();
-            async move { sweep.run_pass(false).await }
+            async move { sweep.run_pass(GarbageCollection::Skip).await }
         });
         store.wait_until_blocked().await;
         server

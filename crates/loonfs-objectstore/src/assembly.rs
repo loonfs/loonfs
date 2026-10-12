@@ -184,10 +184,19 @@ pub(crate) struct AssemblyPart {
     pub source: Option<usize>,
 }
 
+/// How a provider sizes the parts of one multipart upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartSizing {
+    /// Every part but the last is the same size, as Cloudflare R2 requires.
+    Equal,
+    /// Parts can differ in size within the provider's minimum and maximum.
+    Varied,
+}
+
 pub(crate) fn plan_parts(
     lengths: &[u64],
     tail_length: u64,
-    equal_parts: bool,
+    sizing: PartSizing,
 ) -> Vec<AssemblyPart> {
     let mut parts = Vec::new();
     let source_length: u64 = lengths.iter().sum();
@@ -201,7 +210,7 @@ pub(crate) fn plan_parts(
         let remaining = lengths
             .get(source)
             .map_or(0, |length| source_start + length - offset);
-        let (length, copied) = if equal_parts {
+        let (length, copied) = if sizing == PartSizing::Equal {
             let length = R2_PART_BYTES.min(total - offset);
             (length, remaining >= length)
         } else if remaining >= MIN_PART_BYTES {
@@ -348,7 +357,7 @@ mod tests {
     #[test]
     fn multipart_plans_pad_small_runs_and_copy_only_contained_r2_chunks() {
         let mib = 1024 * 1024;
-        let aws = plan_parts(&[mib, 10 * mib], 1, false);
+        let aws = plan_parts(&[mib, 10 * mib], 1, PartSizing::Varied);
         assert_eq!(
             aws,
             vec![
@@ -375,7 +384,7 @@ mod tests {
                 },
             ]
         );
-        let r2 = plan_parts(&[40 * mib, 90 * mib], 1, true);
+        let r2 = plan_parts(&[40 * mib, 90 * mib], 1, PartSizing::Equal);
         assert_eq!(
             r2,
             vec![
@@ -402,7 +411,7 @@ mod tests {
                 },
             ]
         );
-        let large = plan_parts(&[12 * 1024 * mib], 0, false);
+        let large = plan_parts(&[12 * 1024 * mib], 0, PartSizing::Varied);
         assert_eq!(large.len(), 3);
         assert!(large.iter().all(|part| part.source == Some(0)
             && part.range.end_exclusive - part.range.start_inclusive == 4 * 1024 * mib));

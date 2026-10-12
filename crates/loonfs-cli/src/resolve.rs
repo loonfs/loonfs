@@ -236,13 +236,13 @@ impl ResolvedTarget {
     pub(crate) async fn resolve(
         profile_name: &str,
         profile: &ProfileConfig,
-        no_retry: bool,
+        retry: bool,
     ) -> Result<Self, CliError> {
         profile.validate_store(profile_name)?;
         match profile {
             ProfileConfig::Embedded {
                 store, writer_id, ..
-            } => Self::embedded(store, writer_id.as_deref(), no_retry).await,
+            } => Self::embedded(store, writer_id.as_deref(), retry).await,
             ProfileConfig::Remote {
                 server_url,
                 auth_token,
@@ -252,7 +252,7 @@ impl ResolvedTarget {
                 server_url,
                 auth_token.as_ref(),
                 ca_cert_path.as_deref(),
-                no_retry,
+                retry,
             ),
         }
     }
@@ -278,7 +278,7 @@ impl ResolvedTarget {
     pub(crate) async fn embedded(
         store_config: &StoreConfig,
         writer_id: Option<&str>,
-        no_retry: bool,
+        retry: bool,
     ) -> Result<Self, CliError> {
         // One command drives the runtime, its maintenance, and grep from one
         // Tokio runtime, so they deliberately share one provider client.
@@ -291,7 +291,7 @@ impl ResolvedTarget {
             writer_id,
             store_config.kind(),
             loonfs::InlineContentPolicy::default(),
-            no_retry,
+            retry,
         )
         .await?;
         target.journal_identity =
@@ -312,7 +312,7 @@ impl ResolvedTarget {
         writer_id: Option<&str>,
         store_kind: loonfs_objectstore::ConfiguredObjectStoreKind,
         inline_content: loonfs::InlineContentPolicy,
-        no_retry: bool,
+        retry: bool,
     ) -> Result<Self, CliError> {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
@@ -350,7 +350,7 @@ impl ResolvedTarget {
             GrepService::new(grep_block_cache),
             store_kind,
             inline_content,
-            no_retry,
+            retry,
         )?;
         Ok(Self {
             client,
@@ -365,13 +365,13 @@ impl ResolvedTarget {
         server_url: &str,
         auth_token: Option<&SecretString>,
         ca_cert_path: Option<&str>,
-        no_retry: bool,
+        retry: bool,
     ) -> Result<Self, CliError> {
         let client = Client::new(remote_client_config(
             server_url,
             auth_token,
             ca_cert_path,
-            no_retry,
+            retry,
         ))
         .map_err(|error| CliError::invalid_config(error.to_string()))?;
         Ok(Self {
