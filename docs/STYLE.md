@@ -23,8 +23,6 @@ Three rules apply everywhere:
 
 - **Don't ship shortcuts.** Ship only work that meets the goals, even if a feature has to wait. A deliberate shortcut still has to be fixed later, and by then other code usually depends on it.
 
-Why is simplicity ahead of performance? Most correctness bugs in LoonFS have come from an extra path, an extra state, or an extra rule, not from a missing one.
-
 ## Simplicity
 
 This section describes how to keep a design simple.
@@ -178,8 +176,6 @@ LoonFS puts a limit on everything, so that the worst case is known in advance, a
 
 - **Cap whole-value reads by default** on every surface, including embedded use, because one large file could otherwise use all of the process's memory.
 
-Why bound allocations with permits and caps, instead of allocating all memory when the process starts? For an async service over object storage that uses Tokio, serde, and HTTP clients, and serves namespaces of any size, the maximum size of every structure can't be known in advance. LoonFS keeps the property that matters, which is that every allocation has a written bound.
-
 ### Time
 
 `clippy.toml` disallows ambient clocks, sleeps, intervals, timeouts, and `rand`, so that protocol code behaves the same way every time it runs with the same inputs.
@@ -261,7 +257,7 @@ This section summarizes the rules for durable objects and the HTTP API. `docs/sp
 
 - **Encode control objects and manifests as JSON, and bulk immutable payloads as CBOR compressed with zstd.** Byte strings use `serde_bytes`, so CBOR stores them as byte strings rather than arrays of integers.
 
-- **Accept exactly one version of each durable family.** Each family has its own `format_version`, and a decoder rejects any other version before it interprets the payload. There's no compatibility path, because a reader that accepts more than one version has two decode paths to keep correct, and a process that misread an object could write its misreading into the next manifest or segment. A change that isn't purely additive increases the owning family's version and no other. Envelope checksums cover the payload bytes as stored, so a reader on another version computes the same checksum, and it never reports a version difference as corruption.
+- **Accept exactly one version of each durable family.** Each family has its own `format_version`, and a decoder rejects any other version before it interprets the payload. There's no compatibility path, because a reader that accepts more than one version has two decode paths to keep correct, and a process that misread an object could write its misreading into the next manifest or segment. Envelope checksums cover the payload bytes as stored, so a reader on another version computes the same checksum, and it never reports a version difference as corruption.
 
 - **Reject unknown fields everywhere except in wire responses.** Wire requests set `deny_unknown_fields`, every durable family rejects unknown fields (mutable and immutable alike), and config structs reject them. Wire responses accept them.
 
@@ -458,8 +454,6 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
 ### Git
 
 - **Write a commit message as one line, `type(scope): summary`**, with the summary in lowercase, starting with a verb, such as `fix(cli): rewrite the command help text`.
-
-- **Write a pull request description as a few plain sentences** that say what changed, what happened before, and how it was tested. Add an "Important callouts:" list only when a reviewer needs to know something that the diff doesn't show.
 
 - **Merge a change to durable or API behavior in the same pull request as its spec change**, its fixture change, and its `openapi.json` change.
 
