@@ -317,5 +317,4 @@ fn create_path_bytes(path: &AbsolutePath) -> usize {
 }
 
 #[cfg(test)]
-#[path = "commit_wal_size_tests.rs"]
 mod tests;

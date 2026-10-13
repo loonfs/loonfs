@@ -1,9 +1,7 @@
 //! Inline publication, retry identity, admission, fold, and append contracts.
 
-#[path = "commit_engine_inline_retention_tests.rs"]
 mod retention;
 
-#[path = "commit_engine_inline_layout_tests.rs"]
 mod layouts;
 
 use super::*;
@@ -551,17 +549,12 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
     }
 }
 
-#[path = "commit_engine_inline_read_tests.rs"]
 mod read_tests;
 
-#[path = "commit_engine_inline_fold_tests.rs"]
 mod fold_tests;
 
-#[path = "commit_engine_inline_gc_tests.rs"]
 mod gc_tests;
 
-#[path = "commit_engine_inline_retry_gc_tests.rs"]
 mod retry_gc_tests;
 
-#[path = "commit_engine_inline_append_tests.rs"]
 mod append_tests;

@@ -1195,15 +1195,12 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
 }
 
 #[cfg(test)]
-#[path = "commit_engine_content_tests.rs"]
 mod content_tests;
 
 #[cfg(test)]
-#[path = "commit_engine_inline_tests.rs"]
 mod inline_tests;
 
 #[cfg(test)]
-#[path = "commit_engine_deletion_tests.rs"]
 mod deletion_tests;
 
 #[cfg(test)]

@@ -63,5 +63,4 @@ impl<S: ObjectStore + ?Sized> PublishValidationSession<'_, S> {
 }
 
 #[cfg(test)]
-#[path = "session_tests.rs"]
 mod tests;

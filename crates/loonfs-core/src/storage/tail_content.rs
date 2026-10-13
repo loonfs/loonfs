@@ -339,5 +339,4 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
 }
 
 #[cfg(test)]
-#[path = "tail_content_tests.rs"]
 mod tests;
