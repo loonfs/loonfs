@@ -1169,14 +1169,10 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
             break;
         }
     }
-    let candidate_count = results.len();
-    let results: Vec<_> = results.into_iter().flatten().collect();
-    assert_eq!(
-        results.len(),
-        candidate_count,
-        "each candidate should receive a publication result"
-    );
     results
+        .into_iter()
+        .map(|result| result.expect("each candidate should receive a publication result"))
+        .collect()
 }
 
 /// Deletes a namespace through a fresh, uncached commit engine: a one-shot

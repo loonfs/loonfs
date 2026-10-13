@@ -1222,17 +1222,14 @@ impl NamespacePublisher {
                 retry_count += 1;
                 self.claim_publish_slot().await;
             }
-            let candidate_count = results.len();
             let results = results
                 .into_iter()
-                .flatten()
-                .map(|result| result.map_err(Error::Core))
+                .map(|result| {
+                    result
+                        .expect("each candidate should receive a publication result")
+                        .map_err(Error::Core)
+                })
                 .collect::<Vec<_>>();
-            assert_eq!(
-                results.len(),
-                candidate_count,
-                "each candidate should receive a publication result"
-            );
             (results, retry_count)
         }
         .instrument(publish_span.clone())
