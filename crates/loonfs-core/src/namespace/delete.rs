@@ -28,7 +28,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
         let acquired_writer = &acquired_writer;
         let pool = std::sync::Arc::clone(&pool);
         async move {
-            let anchor = load_read_anchor(store, namespace_id).await?;
+            let anchor = load_read_anchor(store, namespace_id, deadline.observe()).await?;
             let head = &anchor.read_state;
             super::control::ensure_namespace_live(head)?;
             ensure_writer_not_fenced(head, acquired_writer)?;

@@ -90,8 +90,7 @@ where
             .await
             .map(PagedListing::Collected);
     }
-    let stdout = io::stdout();
-    let mut stdout = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+    let mut stdout = io::BufWriter::with_capacity(64 * 1024, io::stdout());
     visit_pages(plan, cursor, load_page, |page| {
         observe(&page);
         write_jsonl_page(&mut stdout, page.items()).map_err(CliError::io)

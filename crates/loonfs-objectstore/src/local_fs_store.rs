@@ -19,7 +19,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
+use futures::stream::{self, BoxStream, StreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm, EffectiveLimit, Page, StreamingChecksum};
 use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
@@ -44,6 +44,8 @@ pub struct LocalFsStore {
     checksum_algorithm: ChecksumAlgorithm,
     /// Logical prefix every key is confined beneath, or `None` for the root.
     key_prefix: Option<String>,
+    /// A Tokio mutex, because a write holds it across the awaits that take
+    /// the cross-process lock and then check and move the staged file.
     write_lock: Mutex<()>,
     #[cfg(test)]
     largest_staged_chunk: std::sync::atomic::AtomicU64,
@@ -562,40 +564,6 @@ impl ObjectStore for LocalFsStore {
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         self.put_streamed_object(&self.scoped(key)?, body, mode, None)
             .await
-    }
-
-    async fn put_immutable_verified_stream(
-        &self,
-        key: &str,
-        size_bytes: u64,
-        body: BoxStream<'_, Result<Bytes>>,
-    ) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
-        let _ = size_bytes;
-        let mut checksum = StreamingChecksum::for_algorithm(self.checksum_algorithm());
-        let mut complete = false;
-        let created = async {
-            let scoped = self.scoped(key)?;
-            let body = body
-                .inspect_ok(|chunk| checksum.update(chunk))
-                .chain(stream::once(async {
-                    complete = true;
-                    Ok(Bytes::new())
-                }))
-                .boxed();
-            self.put_streamed_object(&scoped, body, PutMode::CreateIfAbsent, None)
-                .await?;
-            self.head_object(&scoped)
-                .await?
-                .ok_or_else(|| ObjectStoreError::transport(key, "object disappeared after write"))
-        }
-        .await;
-        if !complete {
-            return created.map_err(|source| crate::ImmutableWriteError::Transport {
-                object_key: key.to_owned(),
-                source,
-            });
-        }
-        crate::immutable_write::decide_created(self, key, &checksum.finish(), created).await
     }
 
     async fn assemble(

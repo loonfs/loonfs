@@ -129,7 +129,7 @@ async fn read_during_compaction_and_collection(
         }
     };
     let maintenance = async {
-        tokio::time::timeout(
+        loonfs_test_support::clock::bounded(
             std::time::Duration::from_secs(10),
             store.wait_until_blocked(),
         )

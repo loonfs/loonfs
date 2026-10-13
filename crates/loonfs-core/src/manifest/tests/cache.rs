@@ -564,10 +564,15 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
     )
     .await
     .expect("read view");
-    let fold_view = fold::load_manifest_projection(&store, &namespace_id, Some(&cache))
-        .await
-        .expect("fold view")
-        .manifest_segments;
+    let fold_view = fold::load_manifest_projection(
+        &store,
+        &namespace_id,
+        Some(&cache),
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("fold view")
+    .manifest_segments;
     let key = "inode-00000000000000000001";
     for segments in [&read_view, &fold_view] {
         store.reset();

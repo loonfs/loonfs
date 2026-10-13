@@ -276,9 +276,15 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    let advanced = advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance floor");
+    let advanced = advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance floor");
     let floor = advanced.retention_floor_seq;
     assert_eq!(
         floor,

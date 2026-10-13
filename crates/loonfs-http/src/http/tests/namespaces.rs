@@ -78,11 +78,15 @@ async fn create_namespace(state: &BindingState, namespace_id: &NamespaceId) {
 }
 
 async fn writer_epoch(state: &BindingState, namespace_id: &NamespaceId) -> u64 {
-    loonfs::control::load_namespace_read_state(state.probe_store.as_ref(), namespace_id)
-        .await
-        .expect("read head")
-        .writer_epoch
-        .0
+    loonfs::control::load_namespace_read_state(
+        state.probe_store.as_ref(),
+        namespace_id,
+        std::sync::Arc::new(loonfs_types::StdMonotonicTimer::default()),
+    )
+    .await
+    .expect("read head")
+    .writer_epoch
+    .0
 }
 
 #[tokio::test]
@@ -510,7 +514,7 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
         assert!(futures::poll!(opening.as_mut()).is_pending());
         let mut also_opening = Box::pin(state.namespaces.open(&namespace_id));
         assert!(futures::poll!(also_opening.as_mut()).is_pending());
-        let other_handle = tokio::time::timeout(
+        let other_handle = loonfs_test_support::clock::bounded(
             std::time::Duration::from_secs(5),
             state.namespaces.open(&other),
         )

@@ -7,10 +7,10 @@ use super::error::ManifestLoadError;
 use super::load::{load_segment_filter, SessionBlockMemo};
 use super::runs::{MetadataFamilySegments, MetadataRunManifest, MANIFEST_ROW_FAMILIES};
 use super::scan_load::{ScanDescriptor, ScanLoader};
-use crate::in_flight::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 #[cfg(test)]
 use crate::metadata::MetadataState;
-use futures::future::try_join_all;
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
@@ -18,6 +18,11 @@ use loonfs_types::format::manifest::{
 use loonfs_types::format::segment_blocks::{key_range_may_intersect, string_prefix_upper_bound};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+/// Pending segments a bounded scan opens together when it has none open. It
+/// opens every segment that starts no later than the sixteenth, so their
+/// first blocks load in one refill.
+const SCAN_ITERATORS_OPEN: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Readahead {
@@ -334,7 +339,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 .map_or(lower_bound, |(key, _)| key.as_str());
             if iterators.is_empty() && rows.len() < limit {
                 if let Some(candidate) =
-                    descriptors.as_slice()[..descriptors.len().min(STORE_READ_WAVE)].last()
+                    descriptors.as_slice()[..descriptors.len().min(SCAN_ITERATORS_OPEN)].last()
                 {
                     open_through = open_through.max(&candidate.descriptor.min_row_key);
                 }
@@ -417,19 +422,19 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             return Ok(descriptors);
         };
         let mut admitted = Vec::with_capacity(descriptors.len());
-        for chunk in descriptors.chunks(STORE_READ_WAVE) {
-            let checks =
-                try_join_all(chunk.iter().map(|descriptor| {
-                    self.segment_filter_admits(descriptor.descriptor, filter_probe)
-                }))
-                .await?;
-            admitted.extend(
-                chunk
-                    .iter()
-                    .zip(checks)
-                    .filter(|(_, admits)| *admits)
-                    .map(|(descriptor, _)| *descriptor),
-            );
+        let mut checks = stream::iter(0..descriptors.len())
+            .map(|index| {
+                let descriptor = descriptors[index];
+                async move {
+                    let admits = self
+                        .segment_filter_admits(descriptor.descriptor, filter_probe)
+                        .await?;
+                    Ok::<_, ManifestLoadError>(admits.then_some(descriptor))
+                }
+            })
+            .buffered(STORE_READS_IN_FLIGHT);
+        while let Some(descriptor) = checks.try_next().await? {
+            admitted.extend(descriptor);
         }
         Ok(admitted)
     }

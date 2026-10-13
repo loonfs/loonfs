@@ -62,9 +62,13 @@ async fn fill_wal_tail_to_write_stop<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) {
-    let current = loonfs_core::control::load_namespace_read_state(store, namespace_id)
-        .await
-        .expect("tail state");
+    let current = loonfs_core::control::load_namespace_read_state(
+        store,
+        namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("tail state");
     append_wal_objects(
         store,
         namespace_id,
@@ -195,9 +199,13 @@ fn standalone_reader_builds_without_writer_identity() {
         // The only identity on the head is the writer's own label: a read
         // carries none and records none.
         let store = LocalFsStore::new(temp_dir.path()).expect("open store for inspection");
-        let head = loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("load head");
+        let head = loonfs_core::control::load_namespace_read_state(
+            &store,
+            &namespace_id,
+            loonfs_core::test_support::std_timer(),
+        )
+        .await
+        .expect("load head");
         let writer_block = head.writer.expect("head records the writer that published");
         assert_eq!(writer_block.writer_id.as_str(), "handle-test-writer");
         assert_ne!(
@@ -716,7 +724,8 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             }
         });
         blocking.wait_until_blocked().await;
-        let published = match tokio::time::timeout(Duration::from_secs(1), put).await {
+        let published = match loonfs_test_support::clock::bounded(Duration::from_secs(1), put).await
+        {
             Ok(published) => published,
             Err(error) => {
                 blocking.release();

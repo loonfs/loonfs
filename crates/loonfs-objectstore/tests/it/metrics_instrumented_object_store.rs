@@ -481,6 +481,8 @@ impl DelegatingWriteStore {
 
 #[async_trait]
 impl ObjectStore for DelegatingWriteStore {
+    loonfs_test_support::delegate_object_store!(self; buffered);
+
     fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
         loonfs_types::ChecksumAlgorithm::Crc64nvme
     }

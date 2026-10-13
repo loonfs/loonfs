@@ -176,11 +176,6 @@ fn fold_count(mut counts: StoreCounts, operation: &RecordedOperation) -> StoreCo
             counts.written_bytes += bytes.unwrap_or(0);
             fold_put_mode(&mut counts, mode);
         }
-        RecordedOperation::PutImmutableStream { bytes, .. } => {
-            counts.puts += 1;
-            counts.written_bytes += bytes.unwrap_or(0);
-            fold_put_mode(&mut counts, &PutMode::CreateIfAbsent);
-        }
         RecordedOperation::Assemble { bytes, .. } => {
             counts.puts += 1;
             counts.written_bytes +=

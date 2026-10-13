@@ -394,9 +394,17 @@ mod tests {
         let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
-        let view = load_publish_metadata_view(&store, None, &namespace_id, acquired, None, None)
-            .await
-            .expect("publish view");
+        let view = load_publish_metadata_view(
+            &store,
+            None,
+            &namespace_id,
+            acquired,
+            None,
+            None,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("publish view");
         let candidates = [("expired", 1_001), ("valid", 2_000)].map(|(name, expires_at_ms)| {
             let content_ref = PreparedContent::inline(
                 namespace_id.clone(),
@@ -477,10 +485,17 @@ mod tests {
         let acquired_writer = acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
-        let mut view =
-            load_publish_metadata_view(&store, None, &namespace_id, acquired_writer, None, None)
-                .await
-                .expect("load publish view");
+        let mut view = load_publish_metadata_view(
+            &store,
+            None,
+            &namespace_id,
+            acquired_writer,
+            None,
+            None,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("load publish view");
 
         let hint_key = hint(&namespace_id);
         let hint_before = store

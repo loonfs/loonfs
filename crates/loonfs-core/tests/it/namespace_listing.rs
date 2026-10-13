@@ -34,6 +34,7 @@ async fn namespace_listing_returns_every_namespace_id_and_skips_other_children()
             deleted,
             &loonfs_core::GcOptions::default(),
             &aged,
+            loonfs_core::test_support::std_timer(),
         )
         .await
         .expect("collect the deleted namespace");

@@ -121,8 +121,8 @@ pub mod engine {
     };
     pub use loonfs_core::time::{Deadline, Observation};
     pub use loonfs_core::{
-        grace_age, next_run_no_after, refill_iterators, select_next_iterator,
-        write_segments_in_waves, GraceAge, SegmentBlockLoader, SegmentRowIterator,
+        grace_age, next_run_no_after, refill_iterators, select_next_iterator, GraceAge,
+        SegmentBlockLoader, SegmentRowIterator,
     };
 }
 
@@ -203,7 +203,7 @@ pub use loonfs_objectstore::{
     SharedObjectStore, StoreConfig,
 };
 
-pub use config::{InlineContentPolicy, PublicationPolicy};
+pub use config::{InlineContentPolicy, PublicationPolicy, DEFAULT_MAX_READ_CONTENT_BYTES};
 pub use execution_budget::{
     ExecutionBudget, ExecutionBudgetBuilder, ExecutionBudgetStats,
     DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS,

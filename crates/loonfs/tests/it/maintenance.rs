@@ -630,7 +630,7 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
         .maintenance
         .compact_metadata(&namespace_id, &cancellation);
     let reclaim = async {
-        tokio::time::timeout(
+        loonfs_test_support::clock::bounded(
             std::time::Duration::from_secs(10),
             blocked.wait_until_blocked(),
         )
@@ -664,11 +664,12 @@ async fn a_delayed_fenced_compaction_does_not_forget_a_newer_claim() {
         );
         blocked.release();
     };
-    let (delayed, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        tokio::join!(delayed, reclaim)
-    })
-    .await
-    .expect("concurrent compaction attempts finish");
+    let (delayed, ()) =
+        loonfs_test_support::clock::bounded(std::time::Duration::from_secs(30), async {
+            tokio::join!(delayed, reclaim)
+        })
+        .await
+        .expect("concurrent compaction attempts finish");
     assert_eq!(
         delayed.expect("delayed result").compaction,
         MetadataCompactionOutcome::Fenced

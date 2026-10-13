@@ -996,6 +996,7 @@ impl NamespaceCommitEngine {
             acquired_writer,
             cached_projection,
             acquired_anchor,
+            Arc::clone(&self.timer),
         )
         .await;
         let publish_view = match loaded {
@@ -1152,8 +1153,10 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     candidates: Vec<CommitCandidate>,
     context: &MutationContext,
     content_writes: Arc<tokio::sync::Semaphore>,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Vec<Result<Commit>> {
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone(), content_writes);
+    let mut engine =
+        NamespaceCommitEngine::new(namespace_id.clone(), content_writes).monotonic_timer(timer);
     let batch = Deadline::start(Arc::clone(&engine.timer));
     let mut results = vec![None; candidates.len()];
     let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
@@ -1183,8 +1186,10 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     options: DeleteNamespaceOptions,
     context: &MutationContext,
     content_writes: Arc<tokio::sync::Semaphore>,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<DeleteNamespaceResponse> {
     NamespaceCommitEngine::new(namespace_id.clone(), content_writes)
+        .monotonic_timer(timer)
         .delete_namespace(store, options, context)
         .await
 }
@@ -1496,10 +1501,11 @@ mod tests {
         takeover.results[0]
             .as_ref()
             .expect("writer b takeover commit");
-        let epoch_after_takeover = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("read head")
-            .writer_epoch;
+        let epoch_after_takeover =
+            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+                .await
+                .expect("read head")
+                .writer_epoch;
 
         for attempt in 0..3 {
             let fenced = engine_a
@@ -1521,9 +1527,10 @@ mod tests {
                 "attempt {attempt}"
             );
         }
-        let head = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("read head");
+        let head =
+            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+                .await
+                .expect("read head");
         assert_eq!(head.writer_epoch, epoch_after_takeover);
         assert_eq!(
             head.writer.expect("writer block").writer_id.as_str(),
@@ -1670,10 +1677,11 @@ mod tests {
                 expected
             );
         }
-        let epoch_after_fencing = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("read head")
-            .writer_epoch;
+        let epoch_after_fencing =
+            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+                .await
+                .expect("read head")
+                .writer_epoch;
 
         // A rebuilt engine — cache eviction, cache-disabled mode — shares
         // the session state, so the session stays terminally fenced and
@@ -1696,9 +1704,10 @@ mod tests {
             .as_ref()
             .expect_err("rebuilt engine stays fenced");
         assert_eq!(error.code(), ErrorCode::WriterFenced);
-        let head = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("read head");
+        let head =
+            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+                .await
+                .expect("read head");
         assert_eq!(head.writer_epoch, epoch_after_fencing);
         assert_eq!(
             head.writer.expect("writer block").writer_id.as_str(),
@@ -2135,6 +2144,7 @@ mod tests {
             MetadataRunPolicy::default(),
             MetadataCompactionPolicy::CompactImmediately,
             crate::manifest::read_working_memory(engine.segment_cache.as_deref()),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("own compaction");
@@ -2147,9 +2157,10 @@ mod tests {
             manifest_no,
             before.basis.manifest_no().successor().expect("successor")
         );
-        let after = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("head");
+        let after =
+            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+                .await
+                .expect("head");
         assert_eq!(
             after.wal_no, before.head.wal_no,
             "compaction leaves the tip unchanged"
@@ -2353,9 +2364,10 @@ mod tests {
             .expect("acquire");
         let mut over_budget =
             over_budget.monotonic_timer(Arc::new(ExpiredBudgetTimer(AtomicU64::new(0))));
-        let head_before = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("head");
+        let head_before =
+            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+                .await
+                .expect("head");
         let abandoned = over_budget
             .publish_batch(
                 &store,
@@ -2378,9 +2390,10 @@ mod tests {
         // rebuild the commit.
         assert_eq!(error.code(), ErrorCode::StaleHead);
 
-        let head_after = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("read head");
+        let head_after =
+            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+                .await
+                .expect("read head");
         assert_eq!(head_after.seq, head_before.seq);
         assert_eq!(head_after.wal_no, head_before.wal_no);
         assert_eq!(wal_object_count(&store, &namespace_id).await, 1);
@@ -2400,9 +2413,10 @@ mod tests {
         let response = retried.results[0].as_ref().expect("rebuilt publish");
         assert_eq!(response.committed_seq, ChangeSeq(1));
         assert_eq!(wal_object_count(&store, &namespace_id).await, 3);
-        let head_final = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("read head");
+        let head_final =
+            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+                .await
+                .expect("read head");
         assert_eq!(head_final.seq, ChangeSeq(1));
         // Two engines are two sessions, and each acquires its own epoch: the
         // abandoned attempt took 1, the retry took 2.
@@ -2444,6 +2458,7 @@ mod tests {
             Default::default(),
             None,
             &tokio::sync::Semaphore::new(32),
+            crate::test_support::std_timer(),
         )
         .await
         .map(crate::pin::checkpoint_summary)

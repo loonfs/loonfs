@@ -113,7 +113,7 @@ pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> Result<LoadedMetadataView<'a, S>> {
-    let loaded = load_read_anchor(store, namespace_id)
+    let loaded = load_read_anchor(store, namespace_id, crate::test_support::observed_now())
         .await
         .map_err(MetadataProjectionLoadError::LoadHead)?;
     let basis = loaded.basis();
@@ -1338,6 +1338,7 @@ mod tests {
                 ))],
                 &context,
                 std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+                crate::test_support::std_timer(),
             )
             .await
             .into_iter()
@@ -1353,9 +1354,10 @@ mod tests {
     #[tokio::test]
     async fn a_tail_that_replays_to_another_head_is_refused_by_reads_and_publishes_alike() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;
-        let head = load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("state");
+        let head =
+            load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+                .await
+                .expect("state");
         let key = loonfs_objectstore::keys::wal_object(&namespace_id, &head.wal_no);
         let bytes = store.get(&key, None).await.expect("WAL").expect("exists");
         let mut payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
@@ -1390,6 +1392,7 @@ mod tests {
             ))],
             &context(),
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await
         .into_iter()

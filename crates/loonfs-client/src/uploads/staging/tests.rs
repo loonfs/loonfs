@@ -324,8 +324,7 @@ fn commit_landed() -> Outcome {
 /// completion and the commit.
 fn multipart_script(parts: u32, uploaded: ContentRef) -> Vec<Outcome> {
     let mut script = vec![capabilities(true), begin_multipart()];
-    let window =
-        u32::try_from(DIRECT_MULTIPART_PARTS_IN_FLIGHT).expect("the window should fit u32");
+    let window = u32::try_from(DIRECT_MULTIPART_PART_WAVE).expect("the window should fit u32");
     let mut next = 1;
     while next <= parts {
         let wave = window.min(parts + 1 - next);
@@ -418,7 +417,7 @@ impl PutFileJournal for RecordingJournal {
 /// missing.
 fn resumed_script(missing: &[u32], uploaded: ContentRef) -> Vec<Outcome> {
     let mut script = vec![capabilities(true)];
-    let window = DIRECT_MULTIPART_PARTS_IN_FLIGHT;
+    let window = DIRECT_MULTIPART_PART_WAVE;
     for wave in missing.chunks(window) {
         script.push(signed_parts(
             wave[0],
@@ -441,8 +440,7 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
 
     // The first run gets through two waves and is cut off before the third
     // is signed: the script runs out where the interruption did.
-    let window =
-        u32::try_from(DIRECT_MULTIPART_PARTS_IN_FLIGHT).expect("the window should fit u32");
+    let window = u32::try_from(DIRECT_MULTIPART_PART_WAVE).expect("the window should fit u32");
     let landed = window * 2;
     let mut first = vec![capabilities(true), begin_multipart()];
     for wave in 0..2u32 {
@@ -573,7 +571,7 @@ async fn a_direct_multipart_put_holds_only_its_window() {
         .await
         .expect("a scripted multipart put should land");
 
-    let window_bound = DIRECT_MULTIPART_PARTS_IN_FLIGHT as u64 * TEST_PART_BYTES;
+    let window_bound = DIRECT_MULTIPART_PART_WAVE as u64 * TEST_PART_BYTES;
     assert_eq!(
         retention.total_bytes(),
         TEST_PAYLOAD_BYTES as u64,
@@ -585,10 +583,59 @@ async fn a_direct_multipart_put_holds_only_its_window() {
         retention.peak_live_bytes()
     );
     assert!(
-        retention.peak_live_chunks() <= DIRECT_MULTIPART_PARTS_IN_FLIGHT,
+        retention.peak_live_chunks() <= DIRECT_MULTIPART_PART_WAVE,
         "the put held {} parts at once",
         retention.peak_live_chunks()
     );
+}
+
+/// Part 1's first upload fails in transport and waits out a retry backoff,
+/// so parts 2 and 3 fail before it does. The wave still returns part 1's
+/// error, the lowest-numbered failure, and not the first to complete.
+#[tokio::test(start_paused = true)]
+async fn a_part_wave_drains_every_part_and_returns_the_lowest_numbered_failure() {
+    let mut responses = vec![signed_parts(1, 3), Outcome::TransportFailure];
+    responses.extend(std::iter::repeat_with(|| signed_parts(1, 3)).take(15));
+    let transport = scripted_transport::script(responses);
+    let wave = (1..=3)
+        .map(|part_number| PendingPart {
+            claim: UploadPartChecksumClaim {
+                part_number,
+                checksum: Checksum::crc32c(b"part"),
+            },
+            bytes: Bytes::from_static(b"part"),
+        })
+        .collect();
+
+    let error = client(&transport)
+        .upload_wave(&namespace_id(), &upload_id(), wave)
+        .await
+        .expect_err("a part upload answered without an etag fails");
+
+    let ClientError::Protocol(message) = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert_eq!(message, "part 1 upload returned no etag");
+    let sent = transport.sent();
+    let part_url = |part_number: u32| format!("http://provider.invalid/part/{part_number}");
+    assert_eq!(
+        sent.last().map(|request| request.url.as_str()),
+        Some(part_url(1).as_str()),
+        "part 1 failed last"
+    );
+    for (part_number, uploads) in [
+        (1, DIRECT_MULTIPART_PART_ATTEMPTS + 1),
+        (2, DIRECT_MULTIPART_PART_ATTEMPTS),
+        (3, DIRECT_MULTIPART_PART_ATTEMPTS),
+    ] {
+        let url = part_url(part_number);
+        assert_eq!(
+            sent.iter().filter(|request| request.url == url).count(),
+            uploads,
+            "part {part_number} used every attempt"
+        );
+    }
+    assert_eq!(transport.attempts(), 17);
 }
 
 #[tokio::test]

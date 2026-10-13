@@ -519,9 +519,9 @@ pub(crate) enum StreamedPayloadKind {
 
 /// Stages and hashes a payload without buffering the complete stream.
 ///
-/// The write is create-only. Multipart providers may check for an existing
-/// object immediately before assembly rather than atomically with it. Upload
-/// session claims prevent concurrent writes to the same random content ID.
+/// The write is create-only, and the store enforces that atomically with
+/// completion at every size. Upload session claims prevent concurrent writes
+/// to the same random content ID.
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     owner_namespace_id: NamespaceId,

@@ -28,7 +28,7 @@ use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
 use crate::limits::METADATA_COMPACTION_BUDGET_MS;
 use crate::namespace::control::load_current_manifest_if_present;
-use crate::time::{Deadline, StdMonotonicTimer};
+use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
@@ -289,8 +289,8 @@ pub(crate) async fn run_metadata_compaction_job<S: ObjectStore + ?Sized>(
     spec: &MetadataCompactionSpec,
     policy: MetadataRunPolicy,
     cancellation: &MetadataCompactionCancellation,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<MetadataCompactionJobOutcome> {
-    let timer = Arc::new(StdMonotonicTimer::default());
     let compaction = Deadline::start(timer.clone());
     let Some(segments) = load_current_manifest_segments(store, namespace_id).await? else {
         log_metadata_compaction_outcome(

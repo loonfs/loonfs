@@ -5,7 +5,6 @@ use super::reader::{load_wal_object, WalWalk};
 use super::replay::project_validated_wal_tail;
 use crate::cache::WalTailProjectionCacheKey;
 use crate::control_object::ControlObjectLoadError;
-use crate::in_flight::STORE_READ_WAVE;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::RuntimeReadContext;
@@ -13,6 +12,11 @@ use futures::{stream, StreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{NamespaceId, WalNo, MAX_PUBLIC_INTEGER};
 use std::sync::Arc;
+
+/// Largest window of WAL numbers one discovery round reads, at most 16 GETs
+/// in flight. The probe is a lockstep wave by design, because each round's
+/// results decide whether discovery stops and how wide the next window is.
+const WAL_DISCOVERY_PROBE_WAVE: usize = 16;
 
 pub(crate) struct DiscoveredTail {
     pub(crate) head: NamespaceReadState,
@@ -77,7 +81,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
         if ended || end == MAX_PUBLIC_INTEGER {
             break;
         }
-        window = (window * 2).min(STORE_READ_WAVE);
+        window = (window * 2).min(WAL_DISCOVERY_PROBE_WAVE);
     }
     Ok(DiscoveredTail {
         head,

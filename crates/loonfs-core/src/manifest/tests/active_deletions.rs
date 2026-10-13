@@ -720,9 +720,15 @@ async fn a_deletion_far_below_the_retention_floor_still_lists_and_still_undelete
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance retention floor");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance retention floor");
     drain_compaction(
         &store,
         &namespace_id,
@@ -954,9 +960,13 @@ async fn fresh_read_context<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> RuntimeReadContext {
-    let loaded = crate::namespace::read_anchor::load_read_anchor(store, namespace_id)
-        .await
-        .expect("load read basis");
+    let loaded = crate::namespace::read_anchor::load_read_anchor(
+        store,
+        namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("load read basis");
     RuntimeReadContext {
         basis: loaded.basis(),
         head: loaded.read_state,

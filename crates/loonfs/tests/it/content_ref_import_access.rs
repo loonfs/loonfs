@@ -53,6 +53,7 @@ async fn collect_aged_segments(store: &RecordingStore<LocalFsStore>, namespace_i
             writer_id: loonfs_types::WriterId::parse("import-access-gc").expect("writer id"),
             now_ms,
         },
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("garbage collection");
@@ -337,6 +338,7 @@ async fn reclaimed_deleted_owner_import_reports_the_owner_without_writes() {
                 + loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
                 + 1,
         },
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("collect retired content");

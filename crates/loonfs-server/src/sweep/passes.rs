@@ -180,6 +180,10 @@ impl Sweep {
         }
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the configured full-pass interval, so time paces collection passes and decides no outcome"
+    )]
     async fn run_passes(&self) {
         let inner = &self.inner;
         let mut ticks = tokio::time::interval(inner.full_interval);
@@ -194,6 +198,10 @@ impl Sweep {
         }
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the configured session tick interval, so time paces session ticks and decides no outcome"
+    )]
     async fn run_ticks(&self) {
         let inner = &self.inner;
         let mut ticks = tokio::time::interval(inner.tick_interval);

@@ -123,8 +123,7 @@ pub(crate) async fn run_filesystem_ls(
     let streams_pages = args.pagination.page_limits.jsonl
         || (args.pagination.page_limits.all && runtime.output == OutputFormat::Human);
     if streams_pages {
-        let stdout = io::stdout();
-        let mut stdout = BufWriter::with_capacity(64 * 1024, stdout.lock());
+        let mut stdout = BufWriter::with_capacity(64 * 1024, io::stdout());
         let followed = follow_path_entry_pages(
             &context,
             kind,

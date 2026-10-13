@@ -179,7 +179,7 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
 }
 
 #[tokio::test]
-async fn bounded_pages_open_and_refill_segments_in_concurrent_waves() {
+async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let mut runs = Vec::new();
@@ -236,8 +236,14 @@ async fn bounded_pages_open_and_refill_segments_in_concurrent_waves() {
         watched.inner().arm();
         let view = scan::VerifiedMetadataSegments::from_runs(&watched, &cache, runs.clone());
         let mut page = std::pin::pin!(view.scan_range_page(FAMILY, &lower, None, limit));
-        // The watcher yields once before the request reaches the holding store.
-        assert!(futures::poll!(page.as_mut()).is_pending());
+        // The watcher yields once before each request reaches the holding
+        // store, and the window yields after a few of its requests do.
+        for _ in 0..64 {
+            assert!(futures::poll!(page.as_mut()).is_pending());
+            if watched.reads().total == 16 {
+                break;
+            }
+        }
         assert!(futures::poll!(page.as_mut()).is_pending());
         let waiting = watched.reads();
         assert_eq!(waiting.total, 16, "warm first window: {warm_first_window}");

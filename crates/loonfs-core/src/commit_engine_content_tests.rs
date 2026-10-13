@@ -131,6 +131,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         Default::default(),
         &context(clock.now_ms()),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete");
@@ -187,9 +188,10 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         .await
         .expect("acquire writer");
     engine.invalidate_projection();
-    let head_before = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("head");
+    let head_before =
+        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+            .await
+            .expect("head");
     store.block_next();
     let batch = Deadline::start(timer.clone());
     let publish = engine.publish_batch(
@@ -208,12 +210,26 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
             grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
             ..Default::default()
         };
-        gc_namespace(&aged, None, &namespace_id, &options, &reclaimed)
-            .await
-            .expect("gc removes the session record");
-        let report = gc_namespace(&aged, None, &namespace_id, &options, &reclaimed)
-            .await
-            .expect("gc reclaims the content");
+        gc_namespace(
+            &aged,
+            None,
+            &namespace_id,
+            &options,
+            &reclaimed,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("gc removes the session record");
+        let report = gc_namespace(
+            &aged,
+            None,
+            &namespace_id,
+            &options,
+            &reclaimed,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("gc reclaims the content");
         assert_eq!(report.deleted.content_objects, 1);
         assert!(store
             .head(&content_key)
@@ -230,9 +246,10 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
             .code(),
         loonfs_types::ErrorCode::ContentNotPrepared
     );
-    let head_after = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("head");
+    let head_after =
+        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+            .await
+            .expect("head");
     assert_eq!(head_after.seq, head_before.seq);
     assert_eq!(head_after.wal_no, head_before.wal_no);
     assert_eq!(
@@ -286,9 +303,10 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         .results
         .remove(0)
         .expect("original commit");
-    let head_before = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("head");
+    let head_before =
+        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+            .await
+            .expect("head");
     engine.invalidate_projection();
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
@@ -346,9 +364,10 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         publication.now_ms
     );
     assert_eq!(result.results[3].as_ref().expect("replay"), &original);
-    let head_after = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("head");
+    let head_after =
+        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+            .await
+            .expect("head");
     assert_eq!(head_after.seq, ChangeSeq(2));
     assert_eq!(
         head_after.wal_no,
@@ -413,9 +432,10 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .results
         .remove(0)
         .expect("original commit");
-    let head_before = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("head");
+    let head_before =
+        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+            .await
+            .expect("head");
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
     let alias = CommitCandidate::new(primary.intent().clone());
@@ -452,9 +472,10 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         result.results[3].as_ref().expect("independent replay"),
         &original
     );
-    let head_after = load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("head");
+    let head_after =
+        load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
+            .await
+            .expect("head");
     assert_eq!(head_after.seq, ChangeSeq(3));
     assert_eq!(
         head_after.wal_no,
@@ -584,6 +605,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
             },
             MetadataCompactionPolicy::default(),
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("compact metadata");

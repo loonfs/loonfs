@@ -32,7 +32,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<NamespaceMetadata> {
-    let deadline = Deadline::start(timer);
+    let deadline = Deadline::start(Arc::clone(&timer));
     let target = super::control::load_current_manifest_if_present(store, new_namespace_id).await?;
     if let Some(target) = target {
         return Err(if target.state.envelope.payload().status.is_deleted() {
@@ -67,6 +67,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             fold_policy,
             segment_cache,
             content_writes,
+            Arc::clone(&timer),
         )
         .await?
     };
@@ -124,7 +125,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         }
         return Err(error);
     }
-    crate::namespace::status::load_namespace(store, new_namespace_id).await
+    crate::namespace::status::load_namespace(store, new_namespace_id, timer).await
 }
 
 async fn create_snapshot_fork_pin<S: ObjectStore + ?Sized>(
@@ -164,10 +165,14 @@ async fn load_snapshot_fork_basis<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     deadline: &Deadline,
 ) -> Result<PinPayload> {
-    let source_head =
-        crate::namespace::control::load_namespace_read_state(store, source_namespace_id)
-            .await
-            .map_err(CoreError::ControlObjectLoad)?;
+    let source_head = crate::namespace::read_anchor::load_read_anchor(
+        store,
+        source_namespace_id,
+        deadline.observe(),
+    )
+    .await
+    .map_err(CoreError::ControlObjectLoad)?
+    .read_state;
     crate::namespace::control::ensure_namespace_live(&source_head)?;
     let snapshot = load_owned_pin(
         store,

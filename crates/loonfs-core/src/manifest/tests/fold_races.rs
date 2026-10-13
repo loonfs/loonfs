@@ -27,7 +27,7 @@ impl Rival {
         let content_writes = tokio::sync::Semaphore::new(32);
         match self {
             Self::CompactorClaim => {
-                claim_compactor(store, namespace_id)
+                claim_compactor(store, namespace_id, crate::test_support::std_timer())
                     .await
                     .expect("claim the compactor");
             }
@@ -41,6 +41,7 @@ impl Rival {
                         MetadataRunPolicy::default(),
                         MetadataCompactionPolicy::CompactImmediately,
                         Arc::default(),
+                        crate::test_support::std_timer(),
                     )
                     .await
                     .expect("merge")
@@ -53,9 +54,15 @@ impl Rival {
                 assert!(merges > 0, "the merge rival should publish");
             }
             Self::RetentionAdvance => {
-                advance_retention_floor(store, None, namespace_id, RetentionTarget::Head)
-                    .await
-                    .expect("advance the floor");
+                advance_retention_floor(
+                    store,
+                    None,
+                    namespace_id,
+                    RetentionTarget::Head,
+                    crate::test_support::std_timer(),
+                )
+                .await
+                .expect("advance the floor");
             }
             Self::Fold(input) => {
                 let folded = fold_wal_tail(

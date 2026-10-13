@@ -28,6 +28,7 @@ pub(crate) async fn create<S: ObjectStore + ?Sized>(
         context,
         &loonfs_test_support::test_actor(),
         &crate::options::CreateNamespaceOptions::default(),
+        crate::test_support::std_timer(),
     )
     .await
 }
@@ -61,6 +62,7 @@ async fn submit_operation<S: ObjectStore + ?Sized>(
         vec![candidate],
         context,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await;
     assert_eq!(
@@ -155,6 +157,7 @@ pub(crate) async fn write_files_bytes<S: ObjectStore + ?Sized>(
         vec![CommitCandidate::prepared(request, prepared)],
         context,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await;
     results
@@ -270,9 +273,13 @@ pub(crate) async fn append_wal_commit<S: ObjectStore + ?Sized>(
     deltas: Vec<WalDelta>,
     inline_content: Vec<WalInlineContent>,
 ) -> Result<ChangeSeq> {
-    let head = crate::namespace::control::load_namespace_read_state(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
+    let head = crate::namespace::control::load_namespace_read_state(
+        store,
+        namespace_id,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .map_err(CoreError::ControlObjectLoad)?;
     let committed_seq = ChangeSeq(head.seq.0 + 1);
     let wal_no = loonfs_types::WalNo(head.wal_no.0 + 1);
     let payload = WalObjectPayload {

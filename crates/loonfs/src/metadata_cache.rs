@@ -88,8 +88,8 @@ impl MetadataCache {
             segment_filter_skips: segments.filter_skips,
             segment_filter_false_positives: segments.filter_false_positives,
             segment_bytes: segments.cached_decoded_bytes,
-            head_anchor_hits: self.inner.head_anchor_hits.load(Ordering::SeqCst),
-            head_anchor_misses: self.inner.head_anchor_misses.load(Ordering::SeqCst),
+            head_anchor_hits: self.inner.head_anchor_hits.load(Ordering::Relaxed),
+            head_anchor_misses: self.inner.head_anchor_misses.load(Ordering::Relaxed),
             wal_tail_hits: head_state.tail_hits,
             wal_tail_misses: head_state.tail_misses,
             wal_tail_inserts: head_state.tail_inserts,
@@ -124,11 +124,11 @@ impl MetadataCache {
         let inner = &self.inner;
         match lookup {
             CacheLookup::Hit => {
-                inner.head_anchor_hits.fetch_add(1, Ordering::SeqCst);
+                inner.head_anchor_hits.fetch_add(1, Ordering::Relaxed);
                 inner.instruments.namespace_head_cache_hit();
             }
             CacheLookup::Miss => {
-                inner.head_anchor_misses.fetch_add(1, Ordering::SeqCst);
+                inner.head_anchor_misses.fetch_add(1, Ordering::Relaxed);
                 inner.instruments.namespace_head_cache_miss();
             }
         }

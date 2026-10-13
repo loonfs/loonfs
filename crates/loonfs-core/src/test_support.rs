@@ -1,7 +1,17 @@
 //! Test helpers and recording implementations.
 
 /// Shares the read request bound with tests outside this crate.
-pub const STORE_READ_WAVE: usize = crate::in_flight::STORE_READ_WAVE;
+pub const STORE_READS_IN_FLIGHT: usize = crate::in_flight::STORE_READS_IN_FLIGHT;
+
+/// A standard monotonic timer, for a test whose deadlines don't matter.
+pub fn std_timer() -> std::sync::Arc<dyn loonfs_types::MonotonicTimer> {
+    std::sync::Arc::new(loonfs_types::StdMonotonicTimer::default())
+}
+
+/// An observation of a standard monotonic timer's current time.
+pub fn observed_now() -> crate::time::Observation {
+    crate::time::Observation::now(std_timer())
+}
 
 /// Builds the context a test mutation runs under: `writer_id` at `now_ms`.
 pub fn mutation_context(writer_id: &str, now_ms: u64) -> crate::MutationContext {

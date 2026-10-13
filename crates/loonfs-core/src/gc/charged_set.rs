@@ -1,28 +1,92 @@
-//! Sets of content roots charged to the read working memory.
+//! Bytes a collection pass holds, charged to the read working memory.
 
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::{hash_set_table_bytes, HeapBytes};
 use crate::read_working_memory::ReadWorkingMemory;
 use loonfs_types::NamespaceId;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-pub(super) struct ChargedSet<T> {
+/// The read working memory one collection pass charges, and the bytes all of
+/// the pass's charges hold together, so a failed charge can report the whole
+/// live set.
+#[derive(Clone)]
+pub(super) struct PassMemory {
     namespace_id: NamespaceId,
-    values: HashSet<T>,
-    heap_bytes: usize,
     memory: Arc<ReadWorkingMemory>,
-    reserved_bytes: usize,
+    held_bytes: Arc<AtomicUsize>,
 }
 
-impl<T: Eq + std::hash::Hash + HeapBytes> ChargedSet<T> {
+impl PassMemory {
     pub(super) fn new(namespace_id: &NamespaceId, memory: Arc<ReadWorkingMemory>) -> Self {
         Self {
             namespace_id: namespace_id.clone(),
+            memory,
+            held_bytes: Arc::default(),
+        }
+    }
+}
+
+/// One reservation in the read working memory, released when it drops.
+pub(super) struct Charge {
+    pass: PassMemory,
+    reserved_bytes: usize,
+}
+
+impl Charge {
+    pub(super) fn new(pass: &PassMemory) -> Self {
+        Self {
+            pass: pass.clone(),
+            reserved_bytes: 0,
+        }
+    }
+
+    /// Adds `bytes` to the reservation, or fails the pass when the memory
+    /// can't fit them. The error reports what the pass's charges would hold
+    /// together with `bytes` added.
+    pub(super) fn add(&mut self, bytes: usize) -> Result<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        if !self.pass.memory.try_reserve(bytes) {
+            return Err(CoreError::LiveSetExceedsReadMemory {
+                namespace_id: self.pass.namespace_id.clone(),
+                bytes: self
+                    .pass
+                    .held_bytes
+                    .load(Ordering::Relaxed)
+                    .saturating_add(bytes),
+                limit: self.pass.memory.limit(),
+            });
+        }
+        self.reserved_bytes += bytes;
+        self.pass.held_bytes.fetch_add(bytes, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl Drop for Charge {
+    fn drop(&mut self) {
+        self.pass.memory.release(self.reserved_bytes);
+        self.pass
+            .held_bytes
+            .fetch_sub(self.reserved_bytes, Ordering::Relaxed);
+    }
+}
+
+pub(super) struct ChargedSet<T> {
+    values: HashSet<T>,
+    heap_bytes: usize,
+    charge: Charge,
+}
+
+impl<T: Eq + std::hash::Hash + HeapBytes> ChargedSet<T> {
+    pub(super) fn new(pass: &PassMemory) -> Self {
+        Self {
             values: HashSet::new(),
             heap_bytes: 0,
-            memory,
-            reserved_bytes: 0,
+            charge: Charge::new(pass),
         }
     }
 
@@ -40,22 +104,7 @@ impl<T: Eq + std::hash::Hash + HeapBytes> ChargedSet<T> {
         self.heap_bytes += value.heap_bytes();
         self.values.insert(value);
         let bytes = hash_set_table_bytes(&self.values) + self.heap_bytes;
-        if bytes > self.reserved_bytes {
-            if !self.memory.try_reserve(bytes - self.reserved_bytes) {
-                return Err(CoreError::ContentRootsExceedReadMemory {
-                    namespace_id: self.namespace_id.clone(),
-                    bytes,
-                    limit: self.memory.limit(),
-                });
-            }
-            self.reserved_bytes = bytes;
-        }
-        Ok(())
-    }
-}
-
-impl<T> Drop for ChargedSet<T> {
-    fn drop(&mut self) {
-        self.memory.release(self.reserved_bytes);
+        self.charge
+            .add(bytes.saturating_sub(self.charge.reserved_bytes))
     }
 }

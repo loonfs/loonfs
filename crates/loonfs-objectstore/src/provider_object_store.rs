@@ -5,7 +5,7 @@ use crate::keyspace::{
     normalize_key_prefix, scope_child_listing_prefix, scope_list_prefix, scope_object_key,
     unscope_listed_key,
 };
-use crate::object_store::{collect_stream, unsupported_multipart, Result};
+use crate::object_store::{unsupported_multipart, Result};
 use crate::retry::{provider_transport_retryable, with_transport_retry, DEFAULT};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -17,7 +17,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::{BoxFuture, FutureExt};
-use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt, TryStreamExt};
+use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm, REDACTED};
 use loonfs_types::{EffectiveLimit, OperationDeadline, Page, TransportRetryPolicy};
 use object_store as provider_store;
@@ -241,7 +241,7 @@ pub struct ProviderObjectStore {
     multipart: Arc<dyn MultipartStore>,
     paginated: Arc<dyn PaginatedListStore>,
     checksum_reader: Arc<dyn StoredChecksumReader>,
-    multipart_controller: Option<Arc<dyn MultipartController>>,
+    multipart_controller: Arc<dyn MultipartController>,
     compare_token: CompareToken,
     kind: ConfiguredObjectStoreKind,
     io_runtime: StoreIoRuntime,
@@ -279,6 +279,7 @@ impl ProviderObjectStore {
         kind: ConfiguredObjectStoreKind,
         io_runtime: StoreIoRuntime,
         checksum_reader: Arc<dyn StoredChecksumReader>,
+        multipart_controller: Arc<dyn MultipartController>,
     ) -> Result<Self> {
         Ok(Self {
             inner,
@@ -286,7 +287,7 @@ impl ProviderObjectStore {
             multipart,
             paginated,
             checksum_reader,
-            multipart_controller: None,
+            multipart_controller,
             compare_token: CompareToken::Etag,
             kind,
             io_runtime,
@@ -302,11 +303,9 @@ impl ProviderObjectStore {
         self
     }
 
-    pub(crate) fn multipart_controller(
-        mut self,
-        multipart_controller: Arc<dyn MultipartController>,
-    ) -> Self {
-        self.multipart_controller = Some(multipart_controller);
+    #[cfg(test)]
+    fn multipart_controller(mut self, multipart_controller: Arc<dyn MultipartController>) -> Self {
+        self.multipart_controller = multipart_controller;
         self
     }
 
@@ -508,17 +507,26 @@ impl<'a> PartReader<'a> {
 ///
 /// A write that finishes, or that aborts explicitly, disarms this guard. A
 /// failed or cancelled write that does neither has no cleanup `await` point,
-/// so `Drop` starts `abort` on the current Tokio runtime. Without a runtime,
-/// the provider's cleanup of incomplete uploads must remove what was sent.
+/// so `Drop` starts `abort` on the store's IO runtime, which keeps running
+/// when the caller's runtime shuts down and when the drop happens outside any
+/// runtime. The abort is best effort: if it fails, or the store's runtime has
+/// already shut down, the provider's cleanup of incomplete uploads removes
+/// what was sent.
 pub(crate) struct AbortUploadOnDrop {
     object_key: String,
+    io_runtime: tokio::runtime::Handle,
     abort: Option<BoxFuture<'static, Result<()>>>,
 }
 
 impl AbortUploadOnDrop {
-    pub(crate) fn new(object_key: &str, abort: BoxFuture<'static, Result<()>>) -> Self {
+    pub(crate) fn new(
+        object_key: &str,
+        io_runtime: tokio::runtime::Handle,
+        abort: BoxFuture<'static, Result<()>>,
+    ) -> Self {
         Self {
             object_key: object_key.to_owned(),
+            io_runtime,
             abort: Some(abort),
         }
     }
@@ -534,16 +542,7 @@ impl Drop for AbortUploadOnDrop {
             return;
         };
         let object_key = std::mem::take(&mut self.object_key);
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!(
-                object_key,
-                operation = "abort_multipart",
-                "abandoned write has no runtime to abort its upload on; \
-                 what it sent remains until the provider's cleanup collects it",
-            );
-            return;
-        };
-        handle.spawn(async move {
+        self.io_runtime.spawn(async move {
             if abort.await.is_err() {
                 tracing::warn!(
                     object_key,
@@ -594,21 +593,21 @@ impl MultipartWrite<'_> {
                 .await
                 .map_err(|error| map_provider_error(&key, error))
         };
-        Ok((upload_id, AbortUploadOnDrop::new(self.key, abort.boxed())))
+        Ok((
+            upload_id,
+            AbortUploadOnDrop::new(self.key, self.store.io_runtime.handle(), abort.boxed()),
+        ))
     }
 
     /// Uploads a stream as fixed-size parts while retaining at most one part.
     ///
     /// `head` is the first part. Later parts are buffered only after the previous
     /// part has been uploaded and released. The final part may be shorter.
-    /// Conditional modes are checked after the stream is consumed and
-    /// immediately before completion.
     async fn upload_stream_and_complete(
         &self,
         upload_id: &provider_store::MultipartId,
         head: Bytes,
         mut parts_reader: PartReader<'_>,
-        mode: &PutMode,
     ) -> Result<ObjectMetadata> {
         let mut size_bytes = head.len() as u64;
         let mut parts = vec![self.upload_part(upload_id, 0, head).await?];
@@ -627,8 +626,6 @@ impl MultipartWrite<'_> {
             parts.push(self.upload_part(upload_id, parts.len(), payload).await?);
         }
 
-        self.precondition_holds(mode).await?;
-
         match self
             .multipart
             .complete_multipart(self.path, upload_id, parts)
@@ -639,69 +636,26 @@ impl MultipartWrite<'_> {
         }
     }
 
-    /// Checks a streamed multipart write's condition immediately before
-    /// completion.
-    ///
-    /// Providers complete multipart uploads unconditionally, so this separate
-    /// read is required for create-if-absent and compare-and-swap modes. It runs
-    /// after the complete stream has been consumed. The check is not atomic with
-    /// completion; callers requiring stronger exclusion must prevent concurrent
-    /// writes to the key.
-    async fn precondition_holds(&self, mode: &PutMode) -> Result<()> {
-        let refused = || {
-            Err(ObjectStoreError::PreconditionFailed {
-                object_key: self.key.to_owned(),
-            })
-        };
-        match mode {
-            PutMode::Overwrite => Ok(()),
-            PutMode::CreateIfAbsent => match self.store.head(self.key).await? {
-                None => Ok(()),
-                Some(_) => refused(),
-            },
-            PutMode::CompareAndSwap { expected_etag } => match self.store.head(self.key).await? {
-                Some(current) if current.etag.as_deref() == Some(expected_etag.as_str()) => Ok(()),
-                _ => refused(),
-            },
-        }
-    }
-
     async fn upload_parts_and_complete(
         &self,
         upload_id: &provider_store::MultipartId,
         bytes: &Bytes,
     ) -> Result<ObjectMetadata> {
         let part_size = loonfs_types::usize_from_u64(self.store.multipart_geometry.part_bytes);
-        let part_count = bytes.len().div_ceil(part_size);
-        let mut part_ids: Vec<Option<PartId>> = vec![None; part_count];
-        let mut in_flight = FuturesUnordered::new();
-        let mut next_part = 0usize;
-
-        loop {
-            while in_flight.len() < PROVIDER_MULTIPART_PARTS_IN_FLIGHT && next_part < part_count {
-                let part_index = next_part;
+        // An error drops the window, which cancels the sibling part uploads;
+        // the caller aborts the upload so no parts are stranded.
+        let mut uploaded: Vec<(usize, PartId)> = stream::iter(0..bytes.len().div_ceil(part_size))
+            .map(|part_index| {
                 let start = part_index * part_size;
-                let end = (start + part_size).min(bytes.len());
-                let payload = bytes.slice(start..end);
-                in_flight.push(async move {
-                    let uploaded = self.upload_part(upload_id, part_index, payload).await;
-                    (part_index, uploaded)
-                });
-                next_part += 1;
-            }
-            match in_flight.next().await {
-                Some((part_index, Ok(part_id))) => part_ids[part_index] = Some(part_id),
-                // Dropping the window cancels the sibling part uploads; the
-                // caller aborts the upload so no parts are stranded.
-                Some((_, Err(err))) => return Err(err),
-                None => break,
-            }
-        }
-
-        let parts = part_ids
-            .into_iter()
-            .map(|part_id| part_id.expect("every part should complete before the window drains"))
-            .collect();
+                let payload = bytes.slice(start..(start + part_size).min(bytes.len()));
+                self.upload_part(upload_id, part_index, payload)
+                    .map(move |result| result.map(|part_id| (part_index, part_id)))
+            })
+            .buffer_unordered(PROVIDER_MULTIPART_PARTS_IN_FLIGHT)
+            .try_collect()
+            .await?;
+        uploaded.sort_unstable_by_key(|(part_index, _)| *part_index);
+        let parts = uploaded.into_iter().map(|(_, part_id)| part_id).collect();
         self.multipart
             .complete_multipart(self.path, upload_id, parts)
             .await
@@ -778,10 +732,7 @@ impl ObjectStore for ProviderObjectStore {
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
-        match &self.multipart_controller {
-            Some(controller) => controller.create_multipart_upload(key).await,
-            None => Err(unsupported_multipart()),
-        }
+        self.multipart_controller.create_multipart_upload(key).await
     }
 
     async fn complete_multipart_upload(
@@ -791,25 +742,15 @@ impl ObjectStore for ProviderObjectStore {
         parts: &[MultipartPart],
         checksum: &Checksum,
     ) -> Result<()> {
-        match &self.multipart_controller {
-            Some(controller) => {
-                controller
-                    .complete_multipart_upload(key, provider_upload_id, parts, checksum)
-                    .await
-            }
-            None => Err(unsupported_multipart()),
-        }
+        self.multipart_controller
+            .complete_multipart_upload(key, provider_upload_id, parts, checksum)
+            .await
     }
 
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
-        match &self.multipart_controller {
-            Some(controller) => {
-                controller
-                    .abort_multipart_upload(key, provider_upload_id)
-                    .await
-            }
-            None => Err(unsupported_multipart()),
-        }
+        self.multipart_controller
+            .abort_multipart_upload(key, provider_upload_id)
+            .await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
@@ -923,13 +864,10 @@ impl ObjectStore for ProviderObjectStore {
         key: &str,
         bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        let Some(controller) = self
-            .multipart_controller
-            .as_ref()
-            .filter(|_| bytes.len() as u64 >= self.multipart_geometry.threshold_bytes)
-        else {
+        if (bytes.len() as u64) < self.multipart_geometry.threshold_bytes {
             return crate::immutable_write::put(self, key, bytes).await;
-        };
+        }
+        let controller = &self.multipart_controller;
         crate::immutable_write::put_with(self, key, &bytes, || {
             let bytes = bytes.clone();
             async move {
@@ -956,10 +894,8 @@ impl ObjectStore for ProviderObjectStore {
     /// itself draws, so a small streamed write behaves exactly like a small
     /// buffered one. Anything longer goes through the provider's multipart
     /// upload. A create-if-absent completes conditionally through the
-    /// provider's own requests where it has them. Elsewhere a provider
-    /// assembles the upload unconditionally, so a conditional mode is checked
-    /// against a separate read of the key after the payload is consumed and
-    /// immediately before completion.
+    /// provider's own requests, and a longer compare-and-swap is refused as
+    /// unsupported.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         self.to_path(key)?;
         self.validate_compare_token(key, &mode)?;
@@ -973,55 +909,9 @@ impl ObjectStore for ProviderObjectStore {
             self.put(key, head, mode).await?;
             return Ok(size_bytes);
         }
-        self.put_parts(key, head, reader, mode, 1)
+        self.put_parts(key, head, reader, mode)
             .await
             .map(|metadata| metadata.size_bytes)
-    }
-
-    async fn put_immutable_verified_stream(
-        &self,
-        key: &str,
-        size_bytes: u64,
-        body: BoxStream<'_, Result<Bytes>>,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        let mut checksum =
-            loonfs_types::StreamingChecksum::for_algorithm(self.checksum_algorithm());
-        let mut complete = false;
-        let created = async {
-            let body = body
-                .inspect_ok(|chunk| checksum.update(chunk))
-                .chain(stream::once(async {
-                    complete = true;
-                    Ok(Bytes::new())
-                }))
-                .boxed();
-            if size_bytes < self.multipart_geometry.threshold_bytes {
-                return self
-                    .put(key, collect_stream(body).await?, PutMode::CreateIfAbsent)
-                    .await;
-            }
-            let mut reader = PartReader::new(
-                body,
-                loonfs_types::usize_from_u64(self.multipart_geometry.part_bytes),
-            );
-            let head = reader.next_part().await?.unwrap_or_default();
-            self.put_parts(
-                key,
-                head,
-                reader,
-                PutMode::CreateIfAbsent,
-                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
-            )
-            .await
-        }
-        .await;
-        if !complete {
-            return created.map_err(|source| crate::ImmutableWriteError::Transport {
-                object_key: key.to_owned(),
-                source,
-            });
-        }
-        crate::immutable_write::decide_created(self, key, &checksum.finish(), created).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
@@ -1058,9 +948,6 @@ impl ObjectStore for ProviderObjectStore {
                 object_key: key.to_owned(),
                 source,
             })?;
-        let Some(controller) = &self.multipart_controller else {
-            return crate::assembly::put_buffered(self, key, sources, tail, expected).await;
-        };
         match self.head(key).await {
             Ok(Some(existing)) => {
                 return crate::immutable_write::verify_stored_checksum(key, expected, existing)
@@ -1073,7 +960,10 @@ impl ObjectStore for ProviderObjectStore {
             }
             Ok(None) => {}
         }
-        let created = controller.assemble(key, sources, tail, expected).await;
+        let created = self
+            .multipart_controller
+            .assemble(key, sources, tail, expected)
+            .await;
         crate::immutable_write::decide_created(self, key, expected, created).await
     }
 
@@ -1231,11 +1121,12 @@ impl ProviderObjectStore {
         self.validate_compare_token(key, &mode)?;
         if self.kind == ConfiguredObjectStoreKind::GcpGcs && matches!(mode, PutMode::CreateIfAbsent)
         {
-            if let Some(controller) = &self.multipart_controller {
-                let mut rest = PartReader::new(stream::empty().boxed(), 1);
-                rest.next_part().await?;
-                return controller.put_if_absent(key, bytes, rest, 1).await;
-            }
+            let mut rest = PartReader::new(stream::empty().boxed(), 1);
+            rest.next_part().await?;
+            return self
+                .multipart_controller
+                .put_if_absent(key, bytes, rest, 1)
+                .await;
         }
         let checksum = Checksum::compute(self.checksum_algorithm(), &bytes);
         let size_bytes = bytes.len() as u64;
@@ -1275,16 +1166,31 @@ impl ProviderObjectStore {
         }
     }
 
+    /// Writes a payload longer than one part, one part at a time. A
+    /// create-if-absent goes through the provider's own conditional requests.
+    /// A compare-and-swap is refused as unsupported, because this multipart
+    /// completion isn't conditional and the store doesn't emulate a condition
+    /// with a separate read.
     async fn put_parts(
         &self,
         key: &str,
         head: Bytes,
         rest: PartReader<'_>,
         mode: PutMode,
-        part_window: usize,
     ) -> Result<ObjectMetadata> {
-        if let (PutMode::CreateIfAbsent, Some(controller)) = (&mode, &self.multipart_controller) {
-            return controller.put_if_absent(key, head, rest, part_window).await;
+        match mode {
+            PutMode::CreateIfAbsent => {
+                return self
+                    .multipart_controller
+                    .put_if_absent(key, head, rest, 1)
+                    .await
+            }
+            PutMode::CompareAndSwap { .. } => {
+                return Err(ObjectStoreError::Unsupported(
+                    "streamed compare-and-swap longer than one part",
+                ))
+            }
+            PutMode::Overwrite => {}
         }
         let path = self.to_path(key)?;
         let upload = MultipartWrite {
@@ -1295,7 +1201,7 @@ impl ProviderObjectStore {
         };
         let (upload_id, mut abort_on_drop) = upload.create(0).await?;
         let result = upload
-            .upload_stream_and_complete(&upload_id, head, rest, &mode)
+            .upload_stream_and_complete(&upload_id, head, rest)
             .await;
         if result.is_err() {
             // Best effort, and harmless when the failure raced a landed
@@ -1508,9 +1414,70 @@ mod tests {
             },
             ConfiguredObjectStoreKind::LocalFs,
             StoreIoRuntime::new().expect("store io runtime"),
-            inner,
+            Arc::clone(&inner) as Arc<dyn StoredChecksumReader>,
+            Arc::new(ConditionalPutController::over(inner, Some("tenant-a"))),
         )
         .expect("provider store")
+    }
+
+    /// Creates a multipart payload with one conditional put on the provider
+    /// client, standing in for a provider's signed multipart requests.
+    struct ConditionalPutController {
+        client: Arc<dyn provider_store::ObjectStore>,
+        key_prefix: Option<&'static str>,
+    }
+
+    impl ConditionalPutController {
+        fn over(
+            client: Arc<dyn provider_store::ObjectStore>,
+            key_prefix: Option<&'static str>,
+        ) -> Self {
+            Self { client, key_prefix }
+        }
+    }
+
+    #[async_trait]
+    impl MultipartController for ConditionalPutController {
+        async fn put_if_absent(
+            &self,
+            key: &str,
+            head: Bytes,
+            mut rest: PartReader<'_>,
+            _part_window: usize,
+        ) -> Result<ObjectMetadata> {
+            let mut bytes = head.to_vec();
+            while let Some(part) = rest.next_part().await? {
+                bytes.extend_from_slice(&part);
+            }
+            let (size_bytes, checksum) = (bytes.len() as u64, Checksum::crc64nvme(&bytes));
+            let options = PutOptions {
+                mode: provider_store::PutMode::Create,
+                ..Default::default()
+            };
+            let path = Path::from(scope_object_key(self.key_prefix, key)?);
+            let result = self
+                .client
+                .put_opts(&path, PutPayload::from(bytes), options)
+                .await
+                .map_err(|error| map_provider_error(key, error))?;
+            Ok(ObjectMetadata {
+                etag: result.e_tag,
+                version: result.version,
+                size_bytes,
+                last_modified_at_ms: None,
+                checksum: Some(checksum),
+            })
+        }
+
+        async fn assemble(
+            &self,
+            _key: &str,
+            _sources: &[AssemblySource],
+            _tail: Vec<Bytes>,
+            _expected: &Checksum,
+        ) -> Result<ObjectMetadata> {
+            Err(ObjectStoreError::Unsupported("test assembly"))
+        }
     }
 
     #[async_trait]
@@ -2332,7 +2299,8 @@ mod tests {
             },
             ConfiguredObjectStoreKind::LocalFs,
             StoreIoRuntime::new().expect("store io runtime"),
-            flaky,
+            Arc::clone(&flaky) as Arc<dyn StoredChecksumReader>,
+            Arc::new(ConditionalPutController::over(flaky, Some("tenant-a"))),
         )
         .expect("provider store")
         .transport_retry(TransportRetryPolicy {
@@ -2581,6 +2549,7 @@ mod tests {
             ConfiguredObjectStoreKind::LocalFs,
             StoreIoRuntime::new().expect("store io runtime"),
             resending.clone(),
+            Arc::new(ConditionalPutController::over(resending.clone(), None)),
         )
         .expect("provider store");
         script_puts(&one_attempt, [WriteScript::LandThenFail]);
@@ -2978,34 +2947,6 @@ mod tests {
         assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
 
-        let written = store
-            .put_immutable_verified_stream(
-                MULTIPART_KEY,
-                payload.len() as u64,
-                streamed(&payload, 100),
-            )
-            .await
-            .expect("a large streamed verified write creates through the controller");
-        assert_eq!(
-            controller.part_windows(),
-            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT; 2]
-        );
-        assert_eq!(written.size_bytes, payload.len() as u64);
-        assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
-
-        let small = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
-        store
-            .put_immutable_verified_stream(small, 10, streamed(&payload[..10], 4))
-            .await
-            .expect("a small streamed verified write is one request");
-        assert_eq!(
-            controller.part_windows(),
-            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT; 2]
-        );
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
-        let held = store.head(small).await.expect("head").expect("object");
-        assert_eq!(held.checksum, Some(Checksum::crc64nvme(&payload[..10])));
-
         let uploaded = store
             .put_streamed(
                 MULTIPART_KEY,
@@ -3017,11 +2958,7 @@ mod tests {
         assert_eq!(uploaded, payload.len() as u64);
         assert_eq!(
             controller.part_windows(),
-            [
-                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
-                PROVIDER_MULTIPART_PARTS_IN_FLIGHT,
-                1
-            ],
+            [PROVIDER_MULTIPART_PARTS_IN_FLIGHT, 1],
             "a client's upload keeps one part in flight"
         );
     }
@@ -3070,11 +3007,7 @@ mod tests {
         let payload = multipart_payload(1300);
 
         let size_bytes = store
-            .put_streamed(
-                MULTIPART_KEY,
-                streamed(&payload, 100),
-                PutMode::CreateIfAbsent,
-            )
+            .put_streamed(MULTIPART_KEY, streamed(&payload, 100), PutMode::Overwrite)
             .await
             .expect("streamed multipart put");
 
@@ -3129,43 +3062,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_streamed_multipart_put_refuses_an_occupied_key() {
+    async fn a_streamed_compare_and_swap_longer_than_one_part_is_unsupported() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
-        let occupant = multipart_payload(7);
-        seed_scoped_object(&flaky, MULTIPART_KEY, Bytes::from(occupant.clone())).await;
         let payload = multipart_payload(1300);
 
         let error = store
             .put_streamed(
                 MULTIPART_KEY,
                 streamed(&payload, 100),
-                PutMode::CreateIfAbsent,
+                PutMode::CompareAndSwap {
+                    expected_etag: "\"etag\"".to_owned(),
+                },
             )
             .await
-            .expect_err("the key is taken and create-only means it");
+            .expect_err("no store emulates a multipart compare-and-swap");
 
-        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
-        assert_eq!(
-            part_attempts(&flaky, 2),
-            1,
-            "the whole payload is consumed before the condition is evaluated",
-        );
-        assert_eq!(
-            flaky.heads.load(Ordering::SeqCst),
-            1,
-            "one head decides the condition",
-        );
-        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            flaky.multipart_aborts.load(Ordering::SeqCst),
-            1,
-            "the refused upload is aborted, not left holding parts",
-        );
-        assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(Bytes::from(occupant)),
-        );
+        let ObjectStoreError::Unsupported(capability) = error else {
+            panic!("expected Unsupported, got {error:?}");
+        };
+        assert_eq!(capability, "streamed compare-and-swap longer than one part");
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.heads.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -3221,7 +3140,7 @@ mod tests {
         .boxed();
 
         let error = store
-            .put_streamed(MULTIPART_KEY, body, PutMode::CreateIfAbsent)
+            .put_streamed(MULTIPART_KEY, body, PutMode::Overwrite)
             .await
             .expect_err("a payload that stops is not a write");
 

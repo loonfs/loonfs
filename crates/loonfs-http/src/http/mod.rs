@@ -123,6 +123,10 @@ async fn with_request_id(request: Request, next: Next) -> Response {
 }
 
 /// Cancels bounded request work once the deployment's deadline passes.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the configured HTTP request deadline, so time only cancels a request and decides no stored result"
+)]
 async fn with_request_deadline(request_deadline_ms: u64, request: Request, next: Next) -> Response {
     if request
         .extensions()

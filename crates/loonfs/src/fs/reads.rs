@@ -442,7 +442,7 @@ impl ReadView {
                 .read_file(
                     absolute_path,
                     &self.context,
-                    self.core.inner.config.max_read_content_bytes,
+                    Some(self.core.inner.config.max_read_content_bytes),
                 )
                 .await?)
         })
@@ -515,7 +515,7 @@ impl ReadView {
                 .read_file_by_inode(
                     inode_id,
                     &self.context,
-                    self.core.inner.config.max_read_content_bytes,
+                    Some(self.core.inner.config.max_read_content_bytes),
                 )
                 .await?)
         })
@@ -724,7 +724,11 @@ impl<M: crate::Mode> Namespace<M> {
     pub async fn metadata(&self) -> Result<crate::NamespaceMetadata> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         self.core.record_trace_context(&tracing::Span::current());
-        Ok(loonfs_core::cache::load_namespace(self.core.store(), &self.namespace_id).await?)
+        let timer = Arc::clone(&self.core.inner.timer);
+        Ok(
+            loonfs_core::cache::load_namespace(self.core.store(), &self.namespace_id, timer)
+                .await?,
+        )
     }
 
     /// Resolves an absolute path to its authoritative entry at the current
@@ -1570,7 +1574,7 @@ impl<M: crate::Mode> Namespace<M> {
                         absolute_path,
                         revision_no,
                         &read_context,
-                        self.core.inner.config.max_read_content_bytes,
+                        Some(self.core.inner.config.max_read_content_bytes),
                     )
                     .await?;
                 Ok(read)
@@ -1643,7 +1647,7 @@ impl<M: crate::Mode> Namespace<M> {
                     .read_file_by_inode(
                         inode_id,
                         &read_context,
-                        self.core.inner.config.max_read_content_bytes,
+                        Some(self.core.inner.config.max_read_content_bytes),
                     )
                     .await?;
                 Ok(read)
@@ -1776,7 +1780,7 @@ impl<M: crate::Mode> Namespace<M> {
                         inode_id,
                         revision_no,
                         &read_context,
-                        self.core.inner.config.max_read_content_bytes,
+                        Some(self.core.inner.config.max_read_content_bytes),
                     )
                     .await?;
                 Ok(bytes)

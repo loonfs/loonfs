@@ -6,7 +6,6 @@ use super::live_set::LiveSet;
 use super::sweep::Sweep;
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::manifest::cache::read_working_memory;
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::metadata::row_decode::content_layout_from_manifest_row;
 use crate::namespace::control::LoadedManifest;
@@ -18,10 +17,19 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{lookup_keys, ContentLayoutRecord, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{ContentExtent, GcResponse, NamespaceId};
-use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 const LAYOUT_PAGE_ROWS: usize = 1024;
+
+/// Values one hex digit of a content ID takes, so each digit of shard width
+/// multiplies a pass's shard count by this many.
+const SHARDS_PER_HEX_DIGIT: u64 = 16;
+
+/// Most hex digits of a content ID that one shard prefix covers. At width 4 a
+/// pass makes 65,536 shard listings. Below about 4.3 billion layout rows,
+/// shards of the default 65,536 rows need no more than four digits, so the cap
+/// doesn't bind.
+const MAX_CONTENT_SHARD_WIDTH: u32 = 4;
 
 pub(super) struct ContentSweep<'a> {
     views: Vec<&'a LoadedManifest>,
@@ -44,10 +52,11 @@ impl<'a> ContentSweep<'a> {
                 layout_views = 0, "collecting namespace");
             return Ok(None);
         }
-        let mut covered = HashSet::new();
+        let mut covered = ChargedSet::new(&live.memory);
         let mut views = Vec::new();
         for manifest in &live.manifests {
-            let segments: HashSet<_> = manifest
+            let mut adds_segments = false;
+            for key in manifest
                 .state
                 .envelope
                 .payload()
@@ -56,15 +65,19 @@ impl<'a> ContentSweep<'a> {
                 .flat_map(|run| &run.segments)
                 .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
                 .map(metadata_segment_object_key)
-                .collect();
-            if !segments.is_subset(&covered) {
-                covered.extend(segments);
+            {
+                if !covered.contains(&key) {
+                    covered.insert(key)?;
+                    adds_segments = true;
+                }
+            }
+            if adds_segments {
                 views.push(manifest);
             }
         }
         let mut shard_width = 0;
-        while shard_width < 4
-            && live.content_layout_rows / 16_u64.pow(shard_width) > shard_rows as u64
+        while shard_width < MAX_CONTENT_SHARD_WIDTH
+            && live.content_layout_rows / SHARDS_PER_HEX_DIGIT.pow(shard_width) > shard_rows as u64
         {
             shard_width += 1;
         }
@@ -106,13 +119,13 @@ impl<'a> ContentSweep<'a> {
         report: &mut GcResponse,
         cache: Option<&MetadataSegmentCache>,
     ) -> Result<()> {
-        for shard in 0..16_u32.pow(self.shard_width) {
+        for shard in 0..SHARDS_PER_HEX_DIGIT.pow(self.shard_width) {
             let id_prefix = if self.shard_width == 0 {
                 "con_".to_owned()
             } else {
                 format!("con_{shard:0width$x}", width = self.shard_width as usize)
             };
-            let mut keys = ChargedSet::new(sweep.namespace_id, read_working_memory(cache));
+            let mut keys = ChargedSet::new(&sweep.live.memory);
             let _ = scan_layout_extents(
                 sweep.store,
                 cache,

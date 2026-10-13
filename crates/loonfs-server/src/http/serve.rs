@@ -205,7 +205,10 @@ pub async fn app(
             memory.grep.bytes,
             metrics.recorder().as_ref(),
         ));
-        Arc::new(GrepService::new(grep_block_cache))
+        Arc::new(GrepService::new(
+            grep_block_cache,
+            runtime.monotonic_timer(),
+        ))
     });
     let namespaces = Arc::new(Namespaces::new(runtime.clone()));
     let sweep = config

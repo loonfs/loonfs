@@ -332,7 +332,7 @@ mod tests {
         .await
         .expect("bootstrap");
         let limit = EffectiveLimit::new(NonZeroU32::MIN);
-        let loaded = load_read_anchor(&store, &namespace_id)
+        let loaded = load_read_anchor(&store, &namespace_id, crate::test_support::observed_now())
             .await
             .expect("load read basis");
         let context = RuntimeReadContext {
@@ -406,6 +406,7 @@ mod tests {
                 vec![CommitCandidate::new(request)],
                 &context,
                 std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+                crate::test_support::std_timer(),
             )
             .await
             .pop()

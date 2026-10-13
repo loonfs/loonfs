@@ -34,6 +34,7 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
         Default::default(),
         MetadataCompactionPolicy::CompactImmediately,
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("compact bindings");
@@ -106,9 +107,13 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 .cloned()
                 .collect();
             assert!(!dropped.is_empty());
-            let anchor = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-                .await
-                .expect("current anchor");
+            let anchor = crate::namespace::read_anchor::load_read_anchor(
+                &store,
+                &namespace_id,
+                crate::test_support::observed_now(),
+            )
+            .await
+            .expect("current anchor");
             assert_eq!(
                 previous.state.manifest().manifest_no < anchor.hint.state.manifest_no,
                 !lagging_hint
@@ -136,6 +141,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 &namespace_id,
                 &options,
                 &context(published_at_ms + grace_window_ms - 1),
+                crate::test_support::std_timer(),
             )
             .await
             .expect("collect within successor grace");
@@ -177,6 +183,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                 &namespace_id,
                 &options,
                 &context(published_at_ms + grace_window_ms),
+                crate::test_support::std_timer(),
             )
             .await
             .expect("collect at successor grace boundary");
@@ -237,9 +244,16 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         Arc::clone(&recent),
         KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
     );
-    gc_namespace(&recorded, None, &namespace_id, &options(), &context(now_ms))
-        .await
-        .expect("root an older predecessor");
+    gc_namespace(
+        &recorded,
+        None,
+        &namespace_id,
+        &options(),
+        &context(now_ms),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("root an older predecessor");
     assert_eq!(recorded.counts().heads, 1);
     let read: BTreeSet<_> = recorded
         .take_get_keys()
@@ -264,9 +278,16 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         .delete(&successor.object_key)
         .await
         .expect("remove successor");
-    gc_namespace(&recent, None, &namespace_id, &options(), &context(now_ms))
-        .await
-        .expect("collect with missing successor");
+    gc_namespace(
+        &recent,
+        None,
+        &namespace_id,
+        &options(),
+        &context(now_ms),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("collect with missing successor");
     assert_objects_exist(&store, &dropped, false).await;
     assert!(store
         .head(&previous.object_key)
@@ -294,9 +315,16 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     let undated =
         MetadataMapStore::without_last_modified(&store, KeyPredicate::exact(&current.object_key));
     let aged = context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GRACE_MS + 1);
-    let retained = gc_namespace(&undated, None, &namespace_id, &options(), &aged)
-        .await
-        .expect("collect with undated successor");
+    let retained = gc_namespace(
+        &undated,
+        None,
+        &namespace_id,
+        &options(),
+        &aged,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("collect with undated successor");
     assert_objects_exist(&store, &dropped, true).await;
     assert!(store
         .head(&previous.object_key)
@@ -306,9 +334,16 @@ async fn a_successor_without_a_provider_timestamp_keeps_its_predecessor_and_segm
     assert_eq!(retained.deleted.metadata_segments, 0);
     assert_eq!(retained.retained.no_provider_timestamp, 0);
 
-    let collected = gc_namespace(&store, None, &namespace_id, &options(), &aged)
-        .await
-        .expect("collect with aged successor timestamp");
+    let collected = gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &options(),
+        &aged,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("collect with aged successor timestamp");
     assert_objects_exist(&store, &dropped, false).await;
     assert!(store
         .head(&previous.object_key)

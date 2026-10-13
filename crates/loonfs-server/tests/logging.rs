@@ -330,7 +330,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         .body(stalled_body)
         .expect("stalled upload request");
     let stalled_upload = tokio::spawn(router.clone().oneshot(stalled_request));
-    tokio::time::timeout(std::time::Duration::from_secs(5), body_polled_rx)
+    loonfs_test_support::clock::bounded(std::time::Duration::from_secs(5), body_polled_rx)
         .await
         .expect("stalled body should be polled after taking the upload permit")
         .expect("body poll notification");

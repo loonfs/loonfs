@@ -192,9 +192,13 @@ async fn maintenance_preserves_writer_and_logical_head() {
     )
     .await;
 
-    let before = loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("namespace state");
+    let before = loonfs_core::control::load_namespace_read_state(
+        &store,
+        &namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("namespace state");
 
     engine
         .create_checkpoint("test-pin".to_owned(), None)
@@ -204,9 +208,16 @@ async fn maintenance_preserves_writer_and_logical_head() {
         .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await
         .expect("advance floor");
-    gc_namespace(&store, None, &namespace_id, &GcOptions::default(), &context)
-        .await
-        .expect("gc pass");
+    gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &GcOptions::default(),
+        &context,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("gc pass");
     let staged = engine.begin_upload(None).await.expect("second upload");
     engine
         .upload_content(&staged.upload_id, None, b"more\n")
@@ -225,9 +236,13 @@ async fn maintenance_preserves_writer_and_logical_head() {
         .await
         .expect("second upload complete");
 
-    let after = loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("namespace state");
+    let after = loonfs_core::control::load_namespace_read_state(
+        &store,
+        &namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("namespace state");
     assert_eq!(after.writer_epoch, before.writer_epoch);
     assert_eq!(after.writer, before.writer);
     assert_eq!(after.seq, before.seq);

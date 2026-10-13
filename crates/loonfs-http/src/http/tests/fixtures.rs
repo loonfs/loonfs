@@ -90,7 +90,7 @@ pub(super) async fn test_app(
             DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
             metrics.recorder().as_ref(),
         ));
-        Arc::new(GrepService::new(cache))
+        Arc::new(GrepService::new(cache, runtime.monotonic_timer()))
     });
     let state = BindingState {
         request_limit: None,

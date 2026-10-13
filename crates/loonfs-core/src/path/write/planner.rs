@@ -1071,6 +1071,7 @@ mod tests {
             ))],
             &context,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await
         .pop()
@@ -1126,6 +1127,7 @@ mod tests {
                 },
                 ..Default::default()
             },
+            crate::test_support::std_timer(),
         )
         .await
         .expect("bootstrap a restricted namespace");

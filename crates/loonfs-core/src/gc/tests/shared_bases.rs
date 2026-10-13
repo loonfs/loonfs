@@ -114,6 +114,10 @@ async fn publish_layout_manifest(store: &impl ObjectStore, manifest: NamespaceMa
         .expect("write hint");
 }
 
+/// The sharded pass fits in 240,918 bytes: the 198,406-byte live set plus one
+/// shard's keys and scan blocks. An exact set of the 2,048 shared base keys
+/// takes 266,256 bytes on its own, so the 256 KiB budget admits the sharded
+/// pass and not the bases held exactly.
 #[tokio::test]
 async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shard_are_deleted() {
     let directory = tempdir().expect("directory");
@@ -137,7 +141,7 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shar
             .expect("orphan");
         orphans.insert(key);
     }
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(32 * 1024, None));
+    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(256 * 1024, None));
     let cache = root_scan_cache(Arc::clone(&memory));
     let options = GcOptions {
         content_shard_rows: 128,
@@ -150,6 +154,7 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shar
         &namespace_id,
         &options,
         &context(GRACE_MS + 1),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("pass fits the read budget");
@@ -224,9 +229,16 @@ async fn a_shared_base_false_positive_is_collected_with_a_later_pass_seed() {
         .expect("orphan");
     for (now_ms, expected) in [(GRACE_MS + 1, 0), (GRACE_MS + 2, 1)] {
         store.reset();
-        let report = gc_namespace(&store, None, &namespace_id, &options(), &context(now_ms))
-            .await
-            .expect("pass");
+        let report = gc_namespace(
+            &store,
+            None,
+            &namespace_id,
+            &options(),
+            &context(now_ms),
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("pass");
         assert_eq!(report.deleted.content_objects, expected);
         let deleted: Vec<_> = store
             .snapshot()
@@ -289,6 +301,7 @@ async fn a_shared_filter_over_its_cap_skips_content_and_still_sweeps_other_famil
         &namespace_id,
         &options(),
         &context(GRACE_MS + 1),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("pass");
@@ -327,9 +340,16 @@ async fn shared_filter_growth_over_the_cap_skips_content_before_any_content_requ
     let (manifest, _) = layout_manifest(&store, &namespace_id, [row]).await;
     publish_layout_manifest(&store, manifest).await;
     let context = context(GRACE_MS + 1);
-    let live = LiveSet::load(&store, None, &namespace_id, GRACE_MS, &context)
-        .await
-        .expect("roots");
+    let live = LiveSet::load(
+        &store,
+        None,
+        &namespace_id,
+        GRACE_MS,
+        &context,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("roots");
     for (max_bytes, expected_sweep) in [(40, true), (18, false)] {
         store.reset();
         let content = ContentSweep::load(

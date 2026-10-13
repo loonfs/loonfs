@@ -5,7 +5,8 @@ use super::data_block_load::load_segment_data_block_span;
 use super::index_block_load::load_segment_index_for_compaction;
 use super::validate::validate_manifest_row_seq_range;
 use crate::error::{CoreError, Result};
-use crate::in_flight::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
@@ -312,8 +313,8 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
     }
 }
 
-/// Fills every iterator that has run out of rows, a bounded wave at a time,
-/// and answers with the decoded blocks they then hold together.
+/// Fills every iterator that has run out of rows, with a bounded number of
+/// fills in flight, and returns the decoded blocks they then hold together.
 ///
 /// The iterators share `max_decoded_input_bytes` equally; each share caps a
 /// refill below the fetch target when many inputs are open.
@@ -327,17 +328,15 @@ where
     Loader: SegmentBlockLoader<Row, Segment>,
 {
     let max_decoded_bytes = max_decoded_input_bytes / iterators.len().max(1);
-    let mut hungry: Vec<&mut SegmentRowIterator<Row, Segment, SortKey>> = iterators
+    let fills: Vec<_> = iterators
         .iter_mut()
         .filter(|iterator| iterator.needs_fill())
+        .map(|iterator| Box::pin(iterator.fill(loader, max_decoded_bytes)))
         .collect();
-    for wave in hungry.chunks_mut(STORE_READ_WAVE) {
-        futures::future::try_join_all(
-            wave.iter_mut()
-                .map(|iterator| Box::pin(iterator.fill(loader, max_decoded_bytes))),
-        )
+    stream::iter(fills)
+        .buffer_unordered(STORE_READS_IN_FLIGHT)
+        .try_collect::<()>()
         .await?;
-    }
     Ok(iterators
         .iter()
         .map(SegmentRowIterator::resident_blocks)

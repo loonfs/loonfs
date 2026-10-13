@@ -142,10 +142,14 @@ async fn attribute_events<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<(InodeId, AttributesRevisionNo, Attributes)> {
-    let after_seq = loonfs_core::cache::load_namespace(store, namespace_id)
-        .await
-        .expect("namespace state")
-        .retention_floor_seq;
+    let after_seq = loonfs_core::cache::load_namespace(
+        store,
+        namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("namespace state")
+    .retention_floor_seq;
     list_changes_after(store, namespace_id, after_seq)
         .await
         .expect("read the change feed")

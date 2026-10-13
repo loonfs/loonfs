@@ -192,11 +192,11 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
             .lock()
             .expect("decoded block cache lock should not be poisoned");
         DecodedBlockCacheStats {
-            hits: self.stats.hits.load(Ordering::SeqCst),
-            misses: self.stats.misses.load(Ordering::SeqCst),
-            inserts: self.stats.inserts.load(Ordering::SeqCst),
-            evictions: self.stats.evictions.load(Ordering::SeqCst),
-            evicted_decoded_bytes: self.stats.evicted_decoded_bytes.load(Ordering::SeqCst),
+            hits: self.stats.hits.load(Ordering::Relaxed),
+            misses: self.stats.misses.load(Ordering::Relaxed),
+            inserts: self.stats.inserts.load(Ordering::Relaxed),
+            evictions: self.stats.evictions.load(Ordering::Relaxed),
+            evicted_decoded_bytes: self.stats.evicted_decoded_bytes.load(Ordering::Relaxed),
             cached_decoded_bytes: inner.decoded_bytes,
         }
     }
@@ -210,14 +210,14 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
             .lock()
             .expect("decoded block cache lock should not be poisoned");
         let Some(block) = inner.entries.get(key).map(|slot| slot.block.clone()) else {
-            self.stats.misses.fetch_add(1, Ordering::SeqCst);
+            self.stats.misses.fetch_add(1, Ordering::Relaxed);
             if let Some(observer) = &self.config.observer {
                 observer.miss();
             }
             return None;
         };
         inner.touch(key);
-        self.stats.hits.fetch_add(1, Ordering::SeqCst);
+        self.stats.hits.fetch_add(1, Ordering::Relaxed);
         if let Some(observer) = &self.config.observer {
             observer.hit();
         }
@@ -255,7 +255,7 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
         }
         inner.decoded_bytes = inner.decoded_bytes.saturating_add(decoded_bytes);
         inner.touch(&key);
-        self.stats.inserts.fetch_add(1, Ordering::SeqCst);
+        self.stats.inserts.fetch_add(1, Ordering::Relaxed);
         if let Some(observer) = &self.config.observer {
             observer.insert();
         }
@@ -295,10 +295,10 @@ impl<K: Clone + Eq + Hash, V: DecodedBlock> DecodedBlockCache<K, V> {
     }
 
     fn record_eviction(&self, decoded_bytes: usize) {
-        self.stats.evictions.fetch_add(1, Ordering::SeqCst);
+        self.stats.evictions.fetch_add(1, Ordering::Relaxed);
         self.stats
             .evicted_decoded_bytes
-            .fetch_add(decoded_bytes, Ordering::SeqCst);
+            .fetch_add(decoded_bytes, Ordering::Relaxed);
         if let Some(observer) = &self.config.observer {
             observer.evict(decoded_bytes);
         }

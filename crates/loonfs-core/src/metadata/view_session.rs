@@ -12,12 +12,16 @@ use super::{
     RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::{CoreError, Result};
-use crate::in_flight::STORE_READ_WAVE;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+
+/// Groups a view session splits a page's inode lookups into. The groups run
+/// together and each looks up its inodes in order, so at most 16 lookups are
+/// in flight.
+const VIEW_LOOKUP_GROUPS: usize = 16;
 
 async fn preload_inode_groups<T, Lookup, LookupFuture>(
     inode_ids: &[InodeId],
@@ -29,7 +33,7 @@ where
 {
     // Adjacent inode ids often share a read. Separate ranges let each
     // group start in a different part of the page's segments.
-    let group_size = inode_ids.len().div_ceil(STORE_READ_WAVE).max(1);
+    let group_size = inode_ids.len().div_ceil(VIEW_LOOKUP_GROUPS).max(1);
     let lookup = &lookup;
     let loaded =
         futures::future::try_join_all(inode_ids.chunks(group_size).map(|group| async move {

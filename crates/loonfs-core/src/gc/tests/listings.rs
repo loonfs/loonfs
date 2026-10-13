@@ -34,6 +34,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         &namespace_id,
         &options(),
         &context(GRACE_MS + 1),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("pass");
@@ -69,6 +70,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         DeleteNamespaceOptions::default(),
         &context(1_000),
         content_writes,
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete target");
@@ -79,6 +81,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         &target,
         &options(),
         &context(1_000 + retirement_ms()),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("retire fork");
@@ -111,6 +114,7 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
         &namespace_id,
         &options(),
         &context(GRACE_MS + 1),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("pass");
@@ -185,6 +189,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                     Default::default(),
                     MetadataCompactionPolicy::CompactImmediately,
                     Arc::default(),
+                    crate::test_support::std_timer(),
                 )
                 .await
                 .expect("compact");
@@ -220,9 +225,16 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             },
         );
         let rooted = RecordingStore::metadata_segments(recent);
-        gc_namespace(&rooted, None, &namespace_id, &options(), &context(now_ms))
-            .await
-            .expect("root predecessor");
+        gc_namespace(
+            &rooted,
+            None,
+            &namespace_id,
+            &options(),
+            &context(now_ms),
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("root predecessor");
         // Reads within one pass have no fixed order, so both lists are
         // compared sorted.
         let mut rooted_reads = rooted.take_get_keys();
@@ -234,6 +246,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             &namespace_id,
             &options(),
             &context(now_ms),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("current only");

@@ -7,8 +7,8 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::{
-    ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode,
+    AssemblySource, ByteRange, ByteStream, ImmutableWriteError, MultipartPart, ObjectBody,
+    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_types::{Checksum, EffectiveLimit, Page};
 use std::fmt;
@@ -167,6 +167,16 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
     ) -> Result<u64, ObjectStoreError> {
         // Nothing to remap: a streamed write reports a length, not identity.
         self.inner.put_streamed(key, body, mode).await
+    }
+
+    async fn assemble(
+        &self,
+        key: &str,
+        sources: &[AssemblySource],
+        tail: Vec<Bytes>,
+        expected: &Checksum,
+    ) -> Result<ObjectMetadata, ImmutableWriteError> {
+        loonfs_objectstore::buffered::assemble(self, key, sources, tail, expected).await
     }
 
     async fn compare_and_swap(

@@ -1,18 +1,16 @@
 //! Reads numbered WAL objects: one at a time after a position, or a bounded tail between two heads.
-// This module is the physical WAL boundary.
-#![allow(clippy::disallowed_methods)]
 
 use super::frame::ReplayedWalTail;
 use super::replay::{project_validated_wal_tail, validate_wal_object_for_replay};
+use super::wal_object_key;
 use super::{
     ValidatedWalObject, ValidatedWalTail, WalObjectError, WalTailLoadError, WalTailLoadRequest,
 };
 use crate::error::MetadataProjectionLoadError;
-use crate::in_flight::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::MetadataState;
 use crate::namespace::state::NamespaceReadState;
 use futures::{stream, StreamExt};
-use loonfs_objectstore::keys::wal_object;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalObjectEnvelope};
 use loonfs_types::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
@@ -28,7 +26,7 @@ pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     wal_no: WalNo,
 ) -> LoadedWalObject {
-    let object_key = wal_object(namespace_id, &wal_no);
+    let object_key = wal_object_key(namespace_id, &wal_no);
     let envelope = async {
         let Some(bytes) =
             store
@@ -80,7 +78,7 @@ pub(crate) async fn wal_object_exists<S: ObjectStore + ?Sized>(
     wal_no: WalNo,
 ) -> Result<bool, ObjectStoreError> {
     Ok(store
-        .head(&wal_object(namespace_id, &wal_no))
+        .head(&wal_object_key(namespace_id, &wal_no))
         .await?
         .is_some())
 }
@@ -117,7 +115,7 @@ impl<'a> WalWalk<'a> {
     }
 
     pub(super) fn object_key(&self) -> String {
-        wal_object(self.namespace_id, &self.wal_no)
+        wal_object_key(self.namespace_id, &self.wal_no)
     }
 
     pub(super) fn validate(
@@ -160,7 +158,7 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
     );
     let mut loaded = stream::iter(request.base_wal_no.0..request.tip_wal_no.0)
         .map(|number| load_wal_object(store, request.namespace_id, WalNo(number + 1)))
-        .buffered(STORE_READ_WAVE);
+        .buffered(STORE_READS_IN_FLIGHT);
     let mut objects = Vec::new();
     while let Some(LoadedWalObject {
         object_key,

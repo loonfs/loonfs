@@ -1184,6 +1184,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
         &namespace_id,
         &crate::GcOptions::default(),
         &context,
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("first pass");
@@ -1203,6 +1204,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
         &namespace_id,
         &crate::GcOptions::default(),
         &context,
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("repeat pass");

@@ -103,7 +103,13 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> crate::error::Result<(NamespaceReadState, MetadataState)> {
-    let projection = super::fold::load_manifest_projection(store, namespace_id, None).await?;
+    let projection = super::fold::load_manifest_projection(
+        store,
+        namespace_id,
+        None,
+        crate::test_support::observed_now(),
+    )
+    .await?;
     let tail_state = projection.tail_with_deletion_inodes().await?;
     let tail_rows = projection.tail_state.merged_rows();
     let mut metadata_state = MetadataStateBuilder::default();
@@ -141,6 +147,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         Default::default(),
         None,
         &tokio::sync::Semaphore::new(32),
+        crate::test_support::std_timer(),
     )
     .await
     .map(crate::pin::checkpoint_summary)
@@ -224,7 +231,7 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    let head = load_namespace_read_state(store, namespace_id)
+    let head = load_namespace_read_state(store, namespace_id, crate::test_support::std_timer())
         .await
         .expect("read head");
     load_current_manifest(store, &head.namespace_id)
@@ -328,6 +335,7 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
             policy,
             MetadataCompactionPolicy::default(),
             Arc::default(),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("compaction step");
@@ -366,6 +374,7 @@ async fn run_planned_compaction<S: ObjectStore + ?Sized>(
         spec,
         policy,
         &MetadataCompactionCancellation::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("run the planned streaming compaction")
@@ -451,6 +460,7 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
         policy,
         MetadataCompactionPolicy::default(),
         Arc::default(),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("plan a streaming compaction");

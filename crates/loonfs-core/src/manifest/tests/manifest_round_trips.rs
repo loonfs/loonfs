@@ -57,12 +57,17 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         .await
         .expect("build WAL tail");
     let expected_tail = Arc::clone(
-        &fold::load_manifest_projection(&store, &namespace_id, None)
-            .await
-            .expect("load store projection")
-            .tail_state,
+        &fold::load_manifest_projection(
+            &store,
+            &namespace_id,
+            None,
+            crate::test_support::observed_now(),
+        )
+        .await
+        .expect("load store projection")
+        .tail_state,
     );
-    let head = load_namespace_read_state(&store, &namespace_id)
+    let head = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
         .await
         .expect("load head");
     let acquired_writer = loonfs_types::format::control::AcquiredWriter {
@@ -76,6 +81,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         acquired_writer,
         None,
         None,
+        crate::test_support::std_timer(),
     )
     .await
     .expect("load publish projection")
@@ -278,7 +284,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
     )
     .await
     .expect("load genesis from manifest one");
-    let head = load_namespace_read_state(&store, &namespace_id)
+    let head = load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
         .await
         .expect("head");
     assert_eq!(genesis.replay_head(&head), head);
@@ -377,9 +383,15 @@ async fn current_reads_report_a_missing_hint_as_absent_after_retention_advances(
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("materialize the committed state");
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("advance retention");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("advance retention");
 
     store
         .delete(&loonfs_objectstore::keys::hint(&namespace_id))

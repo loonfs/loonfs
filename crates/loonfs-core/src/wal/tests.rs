@@ -105,9 +105,13 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
     drop(engine);
     store.reset();
 
-    let anchor = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-        .await
-        .expect("cold discovery");
+    let anchor = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("cold discovery");
     let tail = crate::namespace::read_anchor::project_anchor_tail(&store, None, &anchor)
         .await
         .expect("replay discovery");
@@ -133,9 +137,13 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
         .delete(&missing)
         .await
         .expect("remove middle WAL object");
-    let error = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-        .await
-        .expect_err("gap in discovery window");
+    let error = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect_err("gap in discovery window");
     assert!(
         matches!(error, crate::control_object::ControlObjectLoadError::Codec { object_key, .. } if object_key == missing)
     );
@@ -170,9 +178,16 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         ..Default::default()
     };
     let aged = context(options.grace_window_ms + 1);
-    let report = crate::gc::gc_namespace(&store, None, &namespace_id, &options, &aged)
-        .await
-        .expect("collect");
+    let report = crate::gc::gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &options,
+        &aged,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("collect");
     assert_eq!(report.deleted.wal_objects, 1);
     assert!(store
         .head(&wal_object(&namespace_id, &WalNo(1)))
@@ -256,9 +271,13 @@ async fn an_acquisition_held_past_the_revalidation_bound_reloads_before_fencing(
             crate::manifest::fold_wal(store.inner(), &namespace_id)
                 .await
                 .expect("fold");
-            crate::manifest::claim_compactor(store.inner(), &namespace_id)
-                .await
-                .expect("compactor claim");
+            crate::manifest::claim_compactor(
+                store.inner(),
+                &namespace_id,
+                crate::test_support::std_timer(),
+            )
+            .await
+            .expect("compactor claim");
             for key in [
                 metadata_manifest_object(&namespace_id, &claim.successor().expect("next")),
                 wal_object(&namespace_id, &WalNo(1)),
@@ -514,10 +533,14 @@ async fn cold_open_probes_past_a_lagging_hint_and_reads_a_missing_hint_as_absent
         .await
         .expect("remove hint");
     assert_eq!(
-        crate::namespace::status::load_namespace(&store, &namespace_id)
-            .await
-            .expect_err("missing hint")
-            .code(),
+        crate::namespace::status::load_namespace(
+            &store,
+            &namespace_id,
+            crate::test_support::std_timer()
+        )
+        .await
+        .expect_err("missing hint")
+        .code(),
         ErrorCode::NamespaceNotFound
     );
 }
@@ -545,7 +568,11 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
     // are published while the read of 6 is parked, so 6 comes back present.
     store.block_next();
     let (anchor, ()) = futures::join!(
-        crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id),
+        crate::namespace::read_anchor::load_read_anchor(
+            &store,
+            &namespace_id,
+            crate::test_support::observed_now()
+        ),
         async {
             store.wait_until_blocked().await;
             for name in ["four", "five"] {
@@ -562,7 +589,7 @@ async fn a_number_published_during_a_window_is_read_again_not_reported_missing()
 #[tokio::test]
 async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
     use super::reader::{load_wal_object, load_wal_tail, WalWalk};
-    use crate::in_flight::STORE_READ_WAVE;
+    use crate::in_flight::STORE_READS_IN_FLIGHT;
 
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
@@ -610,7 +637,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
 
     assert_eq!(watched.reads().total, 20);
     assert!(watched.reads().peak_in_flight > 1);
-    assert!(watched.reads().peak_in_flight <= STORE_READ_WAVE);
+    assert!(watched.reads().peak_in_flight <= STORE_READS_IN_FLIGHT);
     assert_eq!(tail, super::ValidatedWalTail::new(sequential));
 }
 
@@ -707,6 +734,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             None,
             &namespace_id,
             crate::manifest::RetentionTarget::Head,
+            crate::test_support::std_timer(),
         )
         .await
         .expect("advance floor");
@@ -714,9 +742,16 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             now_ms: grace + 1,
             ..context(1_000)
         };
-        crate::gc::gc_namespace(store.inner(), None, &namespace_id, &options, &aged)
-            .await
-            .expect("collect old WAL");
+        crate::gc::gc_namespace(
+            store.inner(),
+            None,
+            &namespace_id,
+            &options,
+            &aged,
+            crate::test_support::std_timer(),
+        )
+        .await
+        .expect("collect old WAL");
         assert!(store
             .inner()
             .head(&wal_object(&namespace_id, &WalNo(1)))
@@ -766,9 +801,13 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
     acquire_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("fence");
-    let loaded = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id)
-        .await
-        .expect("warm head");
+    let loaded = crate::namespace::read_anchor::load_read_anchor(
+        &store,
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .expect("warm head");
     let fence = decode_wal_object_envelope_zstd(
         &store
             .get(&wal_object(&namespace_id, &loaded.read_state.wal_no), None)
@@ -984,6 +1023,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                     now_ms: store_clock.now_ms(),
                     ..context_b.clone()
                 },
+                crate::test_support::std_timer(),
             )
             .await
             .expect("collect folded fence");

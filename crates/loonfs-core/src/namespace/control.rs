@@ -263,9 +263,11 @@ pub(crate) async fn load_manifest_by_no<S: ObjectStore + ?Sized>(
 pub async fn load_namespace_read_state<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
+    timer: std::sync::Arc<dyn crate::time::MonotonicTimer>,
 ) -> Result<NamespaceReadState, ControlObjectLoadError> {
+    let observed = crate::time::Observation::now(timer);
     Ok(
-        crate::namespace::read_anchor::load_read_anchor(store, expected_namespace_id)
+        crate::namespace::read_anchor::load_read_anchor(store, expected_namespace_id, observed)
             .await?
             .read_state,
     )

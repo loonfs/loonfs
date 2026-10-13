@@ -2,8 +2,8 @@
 
 use crate::object_store::Result;
 use crate::{
-    AssemblySource, ByteRange, ImmutableWriteError, ObjectMetadata, ObjectStore, ObjectStoreError,
-    PROVIDER_MAX_MULTIPART_PART_BYTES, PROVIDER_MIN_MULTIPART_PART_BYTES,
+    AssemblySource, ByteRange, ObjectStore, ObjectStoreError, PROVIDER_MAX_MULTIPART_PART_BYTES,
+    PROVIDER_MIN_MULTIPART_PART_BYTES,
 };
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
@@ -160,22 +160,6 @@ pub(crate) async fn read_sources<S: ObjectStore + ?Sized>(
     Ok(bytes.into())
 }
 
-pub(crate) async fn put_buffered<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    sources: &[AssemblySource],
-    tail: Vec<Bytes>,
-    expected: &Checksum,
-) -> std::result::Result<ObjectMetadata, ImmutableWriteError> {
-    let bytes = read_sources(store, sources, tail, expected, key)
-        .await
-        .map_err(|source| ImmutableWriteError::Transport {
-            object_key: key.to_owned(),
-            source,
-        })?;
-    store.put_immutable_verified(key, bytes).await
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AssemblyPart {
     pub range: ByteRange,
@@ -283,7 +267,7 @@ mod tests {
             .assemble("streamed", &sources, tail.clone(), &expected)
             .await
             .expect("assembly");
-        put_buffered(&local, "buffered", &sources, tail, &expected)
+        crate::buffered::assemble(&local, "buffered", &sources, tail, &expected)
             .await
             .expect("buffered assembly");
         assert_eq!(
@@ -335,21 +319,8 @@ mod tests {
                     &Checksum::crc64nvme(b"source other")
                 )
                 .await,
-            Err(ImmutableWriteError::DifferentObject { .. })
+            Err(crate::ImmutableWriteError::DifferentObject { .. })
         ));
-        let streamed = store
-            .put_immutable_verified_stream(
-                "destination",
-                bytes.len() as u64,
-                stream::iter(vec![Ok(bytes.slice(..3)), Ok(bytes.slice(3..))]).boxed(),
-            )
-            .await
-            .expect("streamed retry");
-        assert_eq!(streamed.checksum, Some(expected));
-        assert_eq!(
-            store.get("destination", None).await.expect("get"),
-            Some(bytes)
-        );
     }
 
     #[test]

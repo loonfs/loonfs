@@ -364,7 +364,7 @@ async fn concurrent_snapshot_creates_cannot_both_claim_the_last_quota_slot() {
 }
 
 async fn wait_for_operations(counter: &AtomicUsize, expected: usize) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
         while counter.load(Ordering::SeqCst) < expected {
             tokio::task::yield_now().await;
         }

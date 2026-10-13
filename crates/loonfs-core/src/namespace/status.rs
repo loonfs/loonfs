@@ -5,11 +5,13 @@ use crate::error::CoreError;
 use crate::error::Result;
 use crate::namespace::read_anchor::{load_live_read_anchor, load_read_anchor, NamespaceReadAnchor};
 use crate::namespace::state::NamespaceReadState;
+use crate::time::{MonotonicTimer, Observation};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ForkBasis;
 use loonfs_types::{
     ActorId, ChangeSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
 };
+use std::sync::Arc;
 
 /// Decoded WAL tail usage for test assertions.
 #[cfg(any(test, feature = "test-support"))]
@@ -25,9 +27,13 @@ pub async fn load_namespace_wal_tail_usage<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceWalTailUsage> {
-    let loaded = crate::namespace::read_anchor::load_read_anchor(store, namespace_id)
-        .await
-        .map_err(CoreError::ControlObjectLoad)?;
+    let loaded = crate::namespace::read_anchor::load_read_anchor(
+        store,
+        namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await
+    .map_err(CoreError::ControlObjectLoad)?;
     super::control::ensure_namespace_live(&loaded.read_state)?;
     let basis = crate::manifest::load_basis_metadata_segments(store, None, &loaded.basis()).await?;
     let tail = crate::wal::replay_discovered_tail(
@@ -90,8 +96,9 @@ fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
 pub async fn load_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<NamespaceMetadata> {
-    let anchor = load_read_anchor(store, expected_namespace_id).await?;
+    let anchor = load_read_anchor(store, expected_namespace_id, Observation::now(timer)).await?;
     let retention_floor_seq = anchor.retention_floor_seq();
     let head = anchor.read_state;
     super::control::ensure_namespace_live(&head)?;
@@ -122,7 +129,9 @@ impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {
 pub async fn load_namespace_diagnostics<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<NamespaceStorageDiagnostics> {
-    let anchor = load_live_read_anchor(store, expected_namespace_id).await?;
+    let anchor =
+        load_live_read_anchor(store, expected_namespace_id, Observation::now(timer)).await?;
     Ok(NamespaceStorageDiagnostics::from(&anchor))
 }

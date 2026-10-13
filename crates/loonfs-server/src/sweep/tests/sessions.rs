@@ -356,11 +356,17 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
     server.tick_after(config.tick_interval_ms).await;
     server.sweep.tick().await;
     drop(held);
-    let first_epoch = loonfs_core::control::load_read_anchor(&*store, &namespace_id)
-        .await
-        .expect("anchor")
-        .read_state
-        .writer_epoch;
+    let first_epoch = loonfs_core::control::load_read_anchor(
+        &*store,
+        &namespace_id,
+        loonfs_core::time::Observation::now(std::sync::Arc::new(
+            loonfs_types::StdMonotonicTimer::default(),
+        )),
+    )
+    .await
+    .expect("anchor")
+    .read_state
+    .writer_epoch;
     store.reset();
     server
         .tick_after(config.idle_session_close_after_ms - config.tick_interval_ms)
@@ -409,12 +415,18 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
         .await
         .expect("publish");
     assert_eq!(
-        loonfs_core::control::load_read_anchor(&*store, &namespace_id)
-            .await
-            .expect("anchor")
-            .read_state
-            .writer_epoch
-            .0,
+        loonfs_core::control::load_read_anchor(
+            &*store,
+            &namespace_id,
+            loonfs_core::time::Observation::now(std::sync::Arc::new(
+                loonfs_types::StdMonotonicTimer::default()
+            ))
+        )
+        .await
+        .expect("anchor")
+        .read_state
+        .writer_epoch
+        .0,
         first_epoch.0 + 1
     );
     server.runtime.shutdown().await.expect("shutdown");

@@ -30,6 +30,10 @@ const MAX_REQUIRED_SETS: usize = 16;
 /// Branches an alternation may contribute to one OR-set before the set is
 /// dropped as unselective.
 const MAX_OR_SET_GRAMS: usize = 64;
+/// Deepest nesting the pattern parser accepts, equal to regex-syntax's own
+/// default, so accepted patterns don't change. It bounds the depth of the
+/// recursion in `analyze` over the parsed pattern.
+const MAX_PATTERN_NEST_DEPTH: u32 = 250;
 
 /// Plans a pattern. `Err` is a pattern-syntax problem; `Unindexable` is a
 /// valid pattern with no required bytes.
@@ -38,6 +42,7 @@ pub(crate) fn plan_pattern(
     case_insensitive: bool,
 ) -> Result<GramPlanOutcome, String> {
     let hir = regex_syntax::ParserBuilder::new()
+        .nest_limit(MAX_PATTERN_NEST_DEPTH)
         .utf8(false)
         .case_insensitive(case_insensitive)
         // Matches the executor's line-anchored compilation; the analysis

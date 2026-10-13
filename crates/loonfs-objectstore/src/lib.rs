@@ -13,6 +13,7 @@
 mod assembly;
 mod attempts;
 mod aws_credentials;
+pub mod buffered;
 mod checksum_header;
 mod configured;
 pub mod crypto;

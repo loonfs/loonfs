@@ -12,6 +12,7 @@ use loonfs_grep::{
 };
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::clock::bounded;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, NamespaceOverlapStore, OperationSelector,
 };
@@ -21,7 +22,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
-use tokio::time::timeout;
 
 /// Watches content reads and writes and grep segment reads and writes,
 /// keyed by the namespace that owns them.
@@ -138,7 +138,7 @@ async fn drive_until_reported(
             tokio::task::yield_now().await;
         }
     };
-    timeout(Duration::from_secs(10), async {
+    bounded(Duration::from_secs(10), async {
         tokio::select! {
             outcome = step => panic!("the step finished before the budget reported {expected:?}: {outcome:?}"),
             () = reported => {}
@@ -255,7 +255,7 @@ async fn workers_over_two_stores_share_one_step_permit() {
         matches!(outcome, GrepBuildOutcome::Published { .. }),
         "{outcome:?}"
     );
-    let outcome = timeout(Duration::from_secs(10), waiting_step)
+    let outcome = bounded(Duration::from_secs(10), waiting_step)
         .await
         .expect("the waiting step takes the permit the first step returned")
         .expect("waiting step");
@@ -291,7 +291,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
 
     let busy_step = parked_build_step(&blocking, &first_worker, &busy).await;
     for (worker, namespace_id) in &current {
-        let outcome = timeout(
+        let outcome = bounded(
             Duration::from_secs(10),
             worker.build_step(namespace_id, GramIndexBuildPolicy::default()),
         )
@@ -340,7 +340,7 @@ async fn a_dropped_step_returns_its_permit() {
     }
     // Another step with work waits for that permit, and is dropped waiting.
     assert!(
-        timeout(
+        bounded(
             Duration::from_millis(200),
             worker.build_step(&waiting, policy)
         )
@@ -351,7 +351,7 @@ async fn a_dropped_step_returns_its_permit() {
     drop(holding_step);
     blocking.release();
 
-    let outcome = timeout(Duration::from_secs(10), worker.build_step(&waiting, policy))
+    let outcome = bounded(Duration::from_secs(10), worker.build_step(&waiting, policy))
         .await
         .expect("both dropped steps returned the permit")
         .expect("build step");

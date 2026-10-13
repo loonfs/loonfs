@@ -24,6 +24,7 @@ use loonfs_core::MutationContext;
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use loonfs_test_support::clock::bounded;
 use loonfs_test_support::ids::first_page;
 use loonfs_test_support::stores::{
     delegate_object_store, BlockingStore, FailStore, InjectedError, KeyPredicate,
@@ -36,7 +37,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Condvar;
 use tempfile::tempdir;
-use tokio::time::timeout;
 
 fn is_publication(bytes: &[u8]) -> bool {
     decode_wal_object_envelope_zstd(bytes).is_ok_and(|wal| !wal.payload().records.is_empty())
@@ -205,7 +205,7 @@ fn test_runtime_core(store: SharedStore) -> RuntimeCore {
         store,
         ReadConfig {
             execution_budget: ExecutionBudget::default(),
-            max_read_content_bytes: None,
+            max_read_content_bytes: crate::DEFAULT_MAX_READ_CONTENT_BYTES,
             manifest_revalidation_interval_ms: 1000,
             metadata_run_policy: loonfs_core::MetadataRunPolicy::default(),
             trace_mode: TraceMode::Remote,
@@ -382,7 +382,7 @@ async fn wait_for_queued_candidates(publisher: &NamespacePublisher, expected: us
 }
 
 async fn wait_for_fold_waiters(writer: &crate::LoonFs<crate::Writable>, expected: usize) {
-    timeout(Duration::from_secs(10), async {
+    bounded(Duration::from_secs(10), async {
         while writer.execution_budget().stats().folds_waiting != expected {
             tokio::task::yield_now().await;
         }
@@ -480,7 +480,7 @@ fn spawn_delete(
 /// Bounded: a stranded delete waiter is a hang, and a hang must fail
 /// the test.
 async fn settle_delete(handle: tokio::task::JoinHandle<DeleteResult>, label: &str) -> DeleteResult {
-    timeout(Duration::from_secs(10), handle)
+    bounded(Duration::from_secs(10), handle)
         .await
         .unwrap_or_else(|_| panic!("{label} must settle, not hang"))
         .unwrap_or_else(|err| panic!("{label} task failed: {err}"))
@@ -1272,13 +1272,13 @@ async fn a_request_queued_behind_a_publish_waits_out_the_pacing_interval() {
 
     // `queued` was waiting when `active` settled, so it is paced.
     assert!(
-        timeout(Duration::from_millis(200), &mut queued)
+        bounded(Duration::from_millis(200), &mut queued)
             .await
             .is_err(),
         "a request queued behind a publish must wait out the pacing interval"
     );
     timer.set(400);
-    timeout(Duration::from_secs(10), queued)
+    bounded(Duration::from_secs(10), queued)
         .await
         .expect("queued request publishes at the interval boundary")
         .expect("queued receiver")
@@ -1301,7 +1301,7 @@ async fn a_sequential_follow_up_publishes_at_once() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     for (commit_id, directory) in [("first", "first"), ("second", "second"), ("first", "first")] {
-        tokio::time::timeout(
+        loonfs_test_support::clock::bounded(
             Duration::from_millis(399),
             namespace.commit_candidate(CommitCandidate::new(create_directory_request(
                 commit_id, directory,
@@ -1542,7 +1542,7 @@ async fn second_delete_during_inflight_delete_settles_both() {
     assert_eq!(first_response.head_seq, ChangeSeq(1));
 
     // Bounded: a stranded waiter is a hang, and a hang must fail the test.
-    let second_error = timeout(Duration::from_secs(10), second)
+    let second_error = bounded(Duration::from_secs(10), second)
         .await
         .expect("the second delete must settle, not hang")
         .expect("second delete task")
@@ -2494,7 +2494,7 @@ async fn wal_folds_share_the_writer_concurrency_bound() {
             .await
             .expect("released fold settles");
     }
-    timeout(Duration::from_secs(10), closing)
+    bounded(Duration::from_secs(10), closing)
         .await
         .expect("namespace close should settle")
         .expect("join namespace close")
@@ -2644,7 +2644,7 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
                 .await
         })
     };
-    if let Ok(completed) = timeout(Duration::from_millis(100), &mut delete).await {
+    if let Ok(completed) = bounded(Duration::from_millis(100), &mut delete).await {
         blocking.release();
         panic!("delete completed while its earlier fold was parked: {completed:?}");
     }
@@ -2746,7 +2746,7 @@ async fn a_delete_waiting_for_a_fold_does_not_hold_a_publication_slot() {
         tokio::spawn(async move { writer_a.delete().await })
     };
     wait_for_fold_waiters(&writer, 1).await;
-    timeout(
+    bounded(
         Duration::from_secs(10),
         writer_b.commit_candidate(CommitCandidate::new(create_directory_request(
             "beside-delete",

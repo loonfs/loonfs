@@ -17,6 +17,11 @@ use http::header::CONTENT_TYPE;
 use loonfs_types::{Checksum, ChecksumAlgorithm, NamespaceId};
 use object_store::client::HttpRequestBody;
 
+/// Most source objects one GCS compose request may list, a limit GCS sets.
+/// An assembly with more sources composes them in groups of this many, so
+/// `n` sources take about `n / 31` compose requests.
+const GCS_MAX_COMPOSE_SOURCES: usize = 32;
+
 impl GcsRequestSigner {
     async fn object(&self, key: &str) -> Result<ObjectMetadata> {
         let url = format!(
@@ -141,6 +146,7 @@ impl GcsRequestSigner {
         let temporary = key.to_owned();
         AbortUploadOnDrop::new(
             key,
+            self.io_runtime.clone(),
             async move {
                 signer.delete_temporary(&temporary).await;
                 Ok(())
@@ -337,9 +343,9 @@ impl GcsRequestSigner {
             let metadata = self.put_if_absent(&name, head, reader, 1).await?;
             objects.push(self.compose_source(&name, &metadata)?);
         }
-        while objects.len() > 32 {
+        while objects.len() > GCS_MAX_COMPOSE_SOURCES {
             let mut next = Vec::new();
-            for group in objects.chunks(32) {
+            for group in objects.chunks(GCS_MAX_COMPOSE_SOURCES) {
                 let name = temporary_object(namespace_id);
                 temporary.push((name.clone(), self.temporary_cleanup(&name)));
                 let metadata = self.compose(&name, group.to_vec()).await?;

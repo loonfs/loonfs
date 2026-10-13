@@ -43,7 +43,7 @@ enum StoreSource {
 /// What the runtime core opens from, in every mode.
 struct CoreConfig {
     source: StoreSource,
-    max_read_content_bytes: Option<u64>,
+    max_read_content_bytes: u64,
     /// `None` builds a private cache when the core opens.
     metadata_cache: Option<MetadataCache>,
     manifest_revalidation_interval_ms: u64,
@@ -78,7 +78,7 @@ impl<M> LoonFsBuilder<M> {
         Self {
             core: CoreConfig {
                 source,
-                max_read_content_bytes: None,
+                max_read_content_bytes: crate::config::DEFAULT_MAX_READ_CONTENT_BYTES,
                 metadata_cache: None,
                 manifest_revalidation_interval_ms:
                     crate::config::DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS,
@@ -161,11 +161,12 @@ impl<M> LoonFsBuilder<M> {
 
     /// Caps the file content size the buffered read APIs will materialize
     /// for one call, checked against resolved metadata before any content
-    /// fetch; over-limit reads fail with `content_too_large`. Unset by
-    /// default: embedded callers read files of any size. Servers set this
-    /// so one proxied read cannot buffer arbitrarily large content.
+    /// fetch; over-limit reads fail with `content_too_large`. Defaults to
+    /// [`DEFAULT_MAX_READ_CONTENT_BYTES`](crate::DEFAULT_MAX_READ_CONTENT_BYTES),
+    /// 256 MiB. A caller that reads larger files through these APIs raises it,
+    /// and a server sets it to its download limit.
     pub fn max_read_content_bytes(mut self, max_read_content_bytes: u64) -> Self {
-        self.core.max_read_content_bytes = Some(max_read_content_bytes);
+        self.core.max_read_content_bytes = max_read_content_bytes;
         self
     }
 

@@ -62,6 +62,7 @@ async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: 
             writer_id: loonfs_types::WriterId::parse("reclamation-test").expect("writer id"),
             now_ms,
         },
+        loonfs_core::test_support::std_timer(),
     )
     .await
     .expect("garbage collection")

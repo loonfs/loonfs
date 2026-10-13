@@ -24,6 +24,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     options: &GcOptions,
     context: &MutationContext,
+    timer: std::sync::Arc<dyn crate::time::MonotonicTimer>,
 ) -> Result<GcResponse> {
     options.validate()?;
     let mut report = GcResponse::empty(namespace_id.clone());
@@ -33,6 +34,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
         namespace_id,
         options.grace_window_ms,
         context,
+        timer,
     )
     .await?;
     report.reclaimable_at_ms = live

@@ -28,9 +28,13 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> RuntimeReadContext {
-    let anchor = load_read_anchor(store, namespace_id)
-        .await
-        .expect("load read anchor");
+    let anchor = load_read_anchor(
+        store,
+        namespace_id,
+        loonfs_core::test_support::observed_now(),
+    )
+    .await
+    .expect("load read anchor");
     RuntimeReadContext {
         basis: anchor.basis(),
         head: anchor.read_state,

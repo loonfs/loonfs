@@ -1,6 +1,7 @@
 //! Publication through the next immutable manifest number.
 
 use crate::error::{CoreError, Result};
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::namespace::control::{
     load_current_manifest_if_present, load_current_manifest_with_hint, load_manifest_by_no,
     raise_hint, CurrentManifest, LoadedHint, LoadedManifest,
@@ -52,27 +53,43 @@ where
     F: FnMut(NamespaceManifestPayload) -> Fut,
     Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
 {
+    let mut attempts = 0;
     loop {
+        attempts += 1;
         let (current, hint) = load_current_manifest_with_hint(store, namespace_id).await?;
+        let built_on = current.object_key.clone();
         let predecessor = current.state.envelope.payload().manifest_no;
-        let (mut payload, result) = match change(current.state.envelope.payload().clone()).await? {
-            ManifestChange::Next(payload, result) => (*payload, result),
-            ManifestChange::Finished(result) => return Ok((result, current, hint)),
-            ManifestChange::Again => continue,
-        };
-        payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
-        let manifest = encode_manifest(payload);
-        let manifest_bytes = manifest.as_bytes().len() as u64;
-        let (outcome, raised) =
-            publish_manifest_from(store, manifest, deadline, Some(current), Some(hint.clone()))
+        match change(current.state.envelope.payload().clone()).await? {
+            ManifestChange::Next(payload, result) => {
+                let mut payload = *payload;
+                payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
+                let manifest = encode_manifest(payload);
+                let manifest_bytes = manifest.as_bytes().len() as u64;
+                let (outcome, raised) = publish_manifest_from(
+                    store,
+                    manifest,
+                    deadline,
+                    Some(current),
+                    Some(hint.clone()),
+                )
                 .await?;
-        if let ManifestPublicationOutcome::Published(state) = outcome {
-            let loaded = LoadedManifest {
-                object_key: metadata_manifest_object(namespace_id, &state.manifest().manifest_no),
-                manifest_bytes,
-                state,
-            };
-            return Ok((result, loaded, raised.unwrap_or(hint)));
+                if let ManifestPublicationOutcome::Published(state) = outcome {
+                    let loaded = LoadedManifest {
+                        object_key: metadata_manifest_object(
+                            namespace_id,
+                            &state.manifest().manifest_no,
+                        ),
+                        manifest_bytes,
+                        state,
+                    };
+                    return Ok((result, loaded, raised.unwrap_or(hint)));
+                }
+            }
+            ManifestChange::Finished(result) => return Ok((result, current, hint)),
+            ManifestChange::Again => {}
+        }
+        if attempts == MAX_CONTENTION_ATTEMPTS {
+            return Err(CoreError::contention_exhausted(&built_on));
         }
     }
 }

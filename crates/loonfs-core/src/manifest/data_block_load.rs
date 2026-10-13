@@ -16,6 +16,8 @@ use super::index_block_load::{
 use super::stored_block_cache::StoredMetadataBlockKind;
 use crate::block_cache::SegmentBlockKind;
 use crate::heap_bytes::data_block_heap_bytes;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::MetadataSegmentRef;
@@ -254,8 +256,10 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     }
 
     let mut span_decodes = vec![None; spans.len()];
-    futures::future::try_join_all(spans.iter().zip(&mut span_decodes).map(
-        |((start, end), winner_decodes)| {
+    let span_loads: Vec<_> = spans
+        .iter()
+        .zip(&mut span_decodes)
+        .map(|((start, end), winner_decodes)| {
             let span = &entries[*start..*end];
             async move {
                 // Single-flight on the span's first block: the winning fetch
@@ -293,9 +297,12 @@ pub(super) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 }
                 Ok::<_, ManifestLoadError>(())
             }
-        },
-    ))
-    .await?;
+        })
+        .collect();
+    stream::iter(span_loads)
+        .buffer_unordered(STORE_READS_IN_FLIGHT)
+        .try_collect::<()>()
+        .await?;
 
     for ((start, end), winner_decodes) in spans.iter().zip(span_decodes) {
         let Some(winner_decodes) = winner_decodes else {

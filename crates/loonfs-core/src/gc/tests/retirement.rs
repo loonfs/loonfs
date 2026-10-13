@@ -21,15 +21,23 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
         &namespace_id,
         &options(),
         &context(deadline.now_ms - 1),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("before deadline");
     assert_eq!(waiting.reclaimable_at_ms, Some(1_000 + retirement_ms()));
     assert_eq!(waiting.next_reclamation_at_ms, Some(deadline.now_ms));
     assert_eq!(waiting.deleted.retired_content_objects, 0);
-    let reclaimed = gc_namespace(&store, None, &namespace_id, &options(), &deadline)
-        .await
-        .expect("at deadline");
+    let reclaimed = gc_namespace(
+        &store,
+        None,
+        &namespace_id,
+        &options(),
+        &deadline,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("at deadline");
     assert_eq!(reclaimed.deleted.retired_content_objects, keys.len() as u64);
     assert_eq!(reclaimed.next_reclamation_at_ms, None);
     let after = crate::namespace::control::load_current_manifest(&store, &namespace_id)
@@ -77,6 +85,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         Default::default(),
         &setup,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete target");
@@ -109,6 +118,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         &target,
         &options(),
         &context(setup.now_ms + retirement_ms()),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("release source pin with retained session");
@@ -142,9 +152,16 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
             .expect("collect source segment");
     }
     let expired_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS;
-    let repeated = gc_namespace(&store, None, &target, &options(), &context(expired_at_ms))
-        .await
-        .expect("repeat retirement after source collection");
+    let repeated = gc_namespace(
+        &store,
+        None,
+        &target,
+        &options(),
+        &context(expired_at_ms),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("repeat retirement after source collection");
     assert_eq!(repeated.deleted.retired_content_objects, 0);
     assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
     let finished = gc_namespace(
@@ -153,6 +170,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         &target,
         &options(),
         &context(expired_at_ms + GRACE_MS),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("finish retirement after session cleanup");
@@ -214,6 +232,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         Default::default(),
         &context(clock.now_ms()),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete");
@@ -231,6 +250,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &namespace_id,
         &options,
         &context(clock.now_ms()),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("retire");
@@ -247,6 +267,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &namespace_id,
         &options,
         &context(clock.now_ms()),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("before deadline");
@@ -260,6 +281,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &namespace_id,
         &options,
         &context(clock.now_ms()),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("owner sweep");
@@ -282,6 +304,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &namespace_id,
         &options,
         &context(clock.now_ms()),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("provider cleanup after retirement");
@@ -294,6 +317,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         &namespace_id,
         &options,
         &context(clock.now_ms()),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("reap session");
@@ -350,6 +374,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         &source,
         &options(),
         &context(setup.now_ms + GRACE_MS),
+        crate::test_support::std_timer(),
     )
     .await
     .expect_err("corrupt basis");

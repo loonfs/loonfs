@@ -18,7 +18,7 @@ impl<M: crate::Mode> Namespace<M> {
             .resolve_file_content(
                 absolute_path,
                 &view,
-                self.core.inner.config.max_read_content_bytes,
+                Some(self.core.inner.config.max_read_content_bytes),
             )
             .await
             .ok()?;
@@ -42,7 +42,7 @@ impl<M: crate::Mode> Namespace<M> {
                             .resolve_file_content(
                                 absolute_path,
                                 &context,
-                                self.core.inner.config.max_read_content_bytes,
+                                Some(self.core.inner.config.max_read_content_bytes),
                             )
                             .await?
                     };
@@ -52,7 +52,7 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     pub(super) async fn get_current_file_bytes(&self, absolute_path: &str) -> Result<FileBytes> {
-        let max_bytes = self.core.inner.config.max_read_content_bytes;
+        let max_bytes = Some(self.core.inner.config.max_read_content_bytes);
         let Some(cached) = self.cached_file_target(absolute_path).await else {
             return self
                 .core

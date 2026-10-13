@@ -1,8 +1,10 @@
 //! Forwarding macros for small object-store test doubles.
 
 /// Forwards selected `ObjectStore` methods to an inner store.
-/// `except put` keeps write methods on the trait defaults so they route
-/// through the wrapper's `put`.
+/// `except put` keeps the write methods on the wrapper, so they route through
+/// its `put`: the trait defaults, and the [`loonfs_objectstore::buffered`]
+/// functions for `put_streamed` and `assemble`. `buffered` writes only those
+/// two methods, for a double that implements neither.
 #[macro_export]
 macro_rules! delegate_object_store {
     ($receiver:ident => $inner:expr; except get) => {
@@ -18,7 +20,6 @@ macro_rules! delegate_object_store {
             put_overwrite,
             put_if_absent,
             put_immutable_verified,
-            put_immutable_verified_stream,
             assemble,
             compare_and_swap,
             delete,
@@ -43,6 +44,11 @@ macro_rules! delegate_object_store {
             list_prefix,
             list_child_prefixes,
         );
+        $crate::delegate_object_store!($receiver; buffered);
+    };
+    ($receiver:ident; buffered) => {
+        $crate::__delegate_object_store_method!(buffered_put_streamed, $receiver, ());
+        $crate::__delegate_object_store_method!(buffered_assemble, $receiver, ());
     };
     ($receiver:ident => $inner:expr; $($method:ident),+ $(,)?) => {
         $(
@@ -243,6 +249,45 @@ macro_rules! __delegate_object_store_method {
             ::std::boxed::Box::pin(async move { $inner.put_streamed(key, body, mode).await })
         }
     };
+    (buffered_put_streamed, $receiver:ident, $inner:expr) => {
+        fn put_streamed<'store, 'key, 'future>(
+            &'store $receiver,
+            key: &'key str,
+            body: ::loonfs_objectstore::ByteStream,
+            mode: ::loonfs_objectstore::PutMode,
+        ) -> ::core::pin::Pin<::std::boxed::Box<
+            dyn ::core::future::Future<
+                    Output = ::core::result::Result<u64, ::loonfs_objectstore::ObjectStoreError>,
+                > + Send
+                + 'future,
+        >>
+        where
+            'store: 'future,
+            'key: 'future,
+            Self: 'future,
+        {
+            ::std::boxed::Box::pin(async move {
+                ::loonfs_objectstore::buffered::put_streamed($receiver, key, body, mode).await
+            })
+        }
+    };
+    (buffered_assemble, $receiver:ident, $inner:expr) => {
+        fn assemble<'store, 'key, 'sources, 'expected, 'future>(
+            &'store $receiver,
+            key: &'key str,
+            sources: &'sources [::loonfs_objectstore::AssemblySource],
+            tail: Vec<::bytes::Bytes>,
+            expected: &'expected ::loonfs_types::Checksum,
+        ) -> ::core::pin::Pin<::std::boxed::Box<
+            dyn ::core::future::Future<Output = ::core::result::Result<::loonfs_objectstore::ObjectMetadata, ::loonfs_objectstore::ImmutableWriteError>> + Send + 'future,
+        >>
+        where 'store: 'future, 'key: 'future, 'sources: 'future, 'expected: 'future, Self: 'future,
+        {
+            ::std::boxed::Box::pin(async move {
+                ::loonfs_objectstore::buffered::assemble($receiver, key, sources, tail, expected).await
+            })
+        }
+    };
     (compare_and_swap, $receiver:ident, $inner:expr) => {
         fn compare_and_swap<'store, 'key, 'etag, 'future>(
             &'store $receiver,
@@ -363,37 +408,6 @@ macro_rules! __delegate_object_store_method {
             Self: 'future,
         {
             ::std::boxed::Box::pin(async move { $inner.put_immutable_verified(key, bytes).await })
-        }
-    };
-    (put_immutable_verified_stream, $receiver:ident, $inner:expr) => {
-        fn put_immutable_verified_stream<'store, 'key, 'body, 'future>(
-            &'store $receiver,
-            key: &'key str,
-            size_bytes: u64,
-            body: ::futures::stream::BoxStream<
-                'body,
-                Result<::bytes::Bytes, ::loonfs_objectstore::ObjectStoreError>,
-            >,
-        ) -> ::core::pin::Pin<::std::boxed::Box<
-            dyn ::core::future::Future<
-                    Output = Result<
-                        ::loonfs_objectstore::ObjectMetadata,
-                        ::loonfs_objectstore::ImmutableWriteError,
-                    >,
-                > + Send
-                + 'future,
-        >>
-        where
-            'store: 'future,
-            'key: 'future,
-            'body: 'future,
-            Self: 'future,
-        {
-            ::std::boxed::Box::pin(async move {
-                $inner
-                    .put_immutable_verified_stream(key, size_bytes, body)
-                    .await
-            })
         }
     };
     (assemble, $receiver:ident, $inner:expr) => {

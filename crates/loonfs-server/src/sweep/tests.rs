@@ -832,7 +832,7 @@ async fn a_parked_visit_does_not_hold_up_later_pages() {
         let sweep = server.sweep.clone();
         async move { sweep.run_pass(GarbageCollection::Skip).await }
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
         store.wait_until_blocked().await;
         for namespace_id in &later {
             while server.wal_tail_objects(namespace_id).await > 0 {
@@ -889,7 +889,7 @@ async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_
         let sweep = server.sweep.clone();
         async move { sweep.run_pass(GarbageCollection::Skip).await }
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
         store.wait_until_blocked().await;
         while store.inner().attempts() == 0 {
             tokio::task::yield_now().await;

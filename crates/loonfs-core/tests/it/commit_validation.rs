@@ -222,9 +222,13 @@ async fn valid_content_admission_skips_durable_content_validation() {
         ),
         Err(ContentTokenError::ContentRefMismatch)
     );
-    let head_before = loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
-        .await
-        .expect("head");
+    let head_before = loonfs_core::control::load_namespace_read_state(
+        &store,
+        &namespace_id,
+        loonfs_core::test_support::std_timer(),
+    )
+    .await
+    .expect("head");
     store.reset();
     store.inner().reset();
     let rejected = publisher
@@ -253,9 +257,13 @@ async fn valid_content_admission_skips_durable_content_validation() {
     assert_eq!(store.inner().counts().compare_and_swaps, 0);
     assert_eq!(store.inner().counts().deletes, 0);
     assert_eq!(
-        loonfs_core::control::load_namespace_read_state(&store, &namespace_id)
-            .await
-            .expect("head"),
+        loonfs_core::control::load_namespace_read_state(
+            &store,
+            &namespace_id,
+            loonfs_core::test_support::std_timer()
+        )
+        .await
+        .expect("head"),
         head_before
     );
 }

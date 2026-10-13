@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::in_flight::STORE_READ_WAVE;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::LeafRevisionPreload;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
@@ -96,7 +96,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
     bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let files = 4 * STORE_READ_WAVE;
+    let files = 4 * STORE_READS_IN_FLIGHT;
     for file in 0..files {
         write_file_bytes(
             &inner,
@@ -142,7 +142,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
     let page = crate::pin::list_checkpoint_files_page(
         &store,
         None,
-        &load_namespace_read_state(&store, &namespace_id)
+        &load_namespace_read_state(&store, &namespace_id, crate::test_support::std_timer())
             .await
             .expect("head"),
         &checkpoint.checkpoint_id,
@@ -158,7 +158,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
     let concurrency = store.reads();
     assert!(concurrency.peak_in_flight > 1, "{concurrency:?}");
     assert!(
-        concurrency.peak_in_flight <= STORE_READ_WAVE,
+        concurrency.peak_in_flight <= STORE_READS_IN_FLIGHT,
         "{concurrency:?}"
     );
 }
@@ -216,7 +216,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("pin first binding");
-    let original = load_read_anchor(&store, &namespace_id)
+    let original = load_read_anchor(&store, &namespace_id, crate::test_support::observed_now())
         .await
         .expect("first anchor");
     let first = load_current_metadata_view(&store, &namespace_id)
@@ -258,6 +258,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         })],
         &context,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .into_iter()
@@ -271,12 +272,18 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("pin moved binding");
-    let moved = load_read_anchor(&store, &namespace_id)
+    let moved = load_read_anchor(&store, &namespace_id, crate::test_support::observed_now())
         .await
         .expect("moved anchor");
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("floor at move");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("floor at move");
     let (manifest_no, _) = drain_compaction(
         &store,
         &namespace_id,
@@ -382,9 +389,15 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("fold the move");
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("floor at the move");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("floor at the move");
     let (manifest_no, _) = drain_compaction(
         &store,
         &namespace_id,
@@ -443,6 +456,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         })],
         &context,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .into_iter()
@@ -491,9 +505,15 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         .expect("parent lookup")
         .expect("the child is bound");
     assert_eq!(parent.parent_inode_id, last_parent);
-    advance_retention_floor(&store, None, &namespace_id, RetentionTarget::Head)
-        .await
-        .expect("floor at the last move");
+    advance_retention_floor(
+        &store,
+        None,
+        &namespace_id,
+        RetentionTarget::Head,
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("floor at the last move");
     let (manifest_no, _) = drain_compaction(
         &store,
         &namespace_id,

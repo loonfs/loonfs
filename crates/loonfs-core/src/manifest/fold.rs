@@ -21,7 +21,7 @@ use crate::namespace::read_anchor::load_read_anchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::read_working_memory::ReadWorkingMemory;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content};
-use crate::time::Deadline;
+use crate::time::{Deadline, Observation};
 use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
 use crate::wal::WalPublishError;
@@ -104,7 +104,8 @@ async fn fold_wal_basis_with_deadline<S: ObjectStore + ?Sized>(
     retry_while_contended(|| async move {
         // The fallback reloads after every lost race, so it never relies on
         // the rule that keeps a held tail.
-        let mut projection = load_fold_projection(store, namespace_id, None).await?;
+        let mut projection =
+            load_fold_projection(store, namespace_id, None, deadline.observe()).await?;
         projection.manifest_segments.block_memo = SessionBlockMemo::new(Arc::clone(pool));
         Result::Ok(
             match try_fold_wal_projection(
@@ -137,7 +138,8 @@ pub(crate) async fn try_fold_wal<S: ObjectStore + ?Sized>(
     segment_cache: Option<&MetadataSegmentCache>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<TryFoldWalOutcome> {
-    let projection = load_fold_projection(store, namespace_id, segment_cache).await?;
+    let projection =
+        load_fold_projection(store, namespace_id, segment_cache, deadline.observe()).await?;
     fold_held_projection(
         store,
         segment_cache,
@@ -154,8 +156,9 @@ async fn load_fold_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
     segment_cache: Option<&'a MetadataSegmentCache>,
+    observed: Observation,
 ) -> Result<ManifestProjection<'a, S>> {
-    load_manifest_projection(store, namespace_id, segment_cache)
+    load_manifest_projection(store, namespace_id, segment_cache, observed)
         .instrument(tracing::debug_span!(
             "loonfs.phase",
             phase = "scan_namespace_state"
@@ -467,8 +470,9 @@ pub(super) async fn load_manifest_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
     segment_cache: Option<&'a MetadataSegmentCache>,
+    observed: Observation,
 ) -> Result<ManifestProjection<'a, S>> {
-    let anchor = load_read_anchor(store, namespace_id)
+    let anchor = load_read_anchor(store, namespace_id, observed)
         .await
         .map_err(CoreError::ControlObjectLoad)?;
     let basis = anchor.basis();

@@ -55,6 +55,7 @@ pub struct GcpGcsStoreConfig {
 struct GcsRequestSigner {
     request_signer: Arc<GcsV4Presigner>,
     http: HttpClient,
+    io_runtime: tokio::runtime::Handle,
     credentials: GcpCredentialProvider,
     bucket: String,
     key_prefix: Option<String>,
@@ -102,6 +103,7 @@ pub(crate) fn gcp_gcs_with_issuers(
     let signer = Arc::new(GcsRequestSigner {
         request_signer: Arc::clone(&request_signer),
         http,
+        io_runtime: io_runtime.handle(),
         credentials,
         bucket: config.bucket,
         key_prefix,
@@ -117,6 +119,7 @@ pub(crate) fn gcp_gcs_with_issuers(
         ConfiguredObjectStoreKind::GcpGcs,
         io_runtime,
         signer.clone(),
+        signer,
     )?;
     let direct_transfers = DirectTransferIssuers {
         get: request_signer.clone(),
@@ -124,10 +127,10 @@ pub(crate) fn gcp_gcs_with_issuers(
         multipart: None,
     };
 
-    let store = store
-        .compare_token(CompareToken::Generation)
-        .multipart_controller(signer);
-    Ok((store, direct_transfers))
+    Ok((
+        store.compare_token(CompareToken::Generation),
+        direct_transfers,
+    ))
 }
 
 impl GcsRequestSigner {
@@ -231,7 +234,8 @@ impl MultipartController for GcsRequestSigner {
                 .await
                 .map(|_| ())
         };
-        let mut abort_on_drop = AbortUploadOnDrop::new(key, cancel.boxed());
+        let mut abort_on_drop =
+            AbortUploadOnDrop::new(key, self.io_runtime.clone(), cancel.boxed());
 
         let mut checksum = StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc32c);
         let mut offset = 0;
@@ -461,6 +465,7 @@ mod tests {
                     .expect("signer"),
                 ),
                 http: HttpClient::new(requests.clone()),
+                io_runtime: tokio::runtime::Handle::current(),
                 credentials: Arc::new(object_store::StaticCredentialProvider::new(
                     object_store::gcp::GcpCredential {
                         bearer: "test".to_owned(),
@@ -518,6 +523,7 @@ mod tests {
                 .expect("signer"),
             ),
             http: HttpClient::new(requests.clone()),
+            io_runtime: tokio::runtime::Handle::current(),
             credentials: Arc::new(object_store::StaticCredentialProvider::new(
                 object_store::gcp::GcpCredential {
                     bearer: "test".to_owned(),
