@@ -3493,7 +3493,7 @@
                 }
               }
             },
-            "description": "Inline content is disabled, or an append names content with no recorded digest to continue"
+            "description": "Inline content is disabled"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

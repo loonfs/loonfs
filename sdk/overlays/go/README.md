@@ -65,7 +65,9 @@ requests carry only the presigned headers, and do not follow redirects.
 
 Direct grants contain ordered `ranges`. Each range has a revision `start_offset`,
 `length`, and signed `access`. Helpers validate the range list before any object
-request, read ranges in order, and check each length before opening the next.
+request and read the ranges in order. They keep up to four range responses
+open: the one being read and up to three requested after it. They check each
+range's length and verify the complete file at the end.
 They send the signed headers unchanged. The object Range header can differ from
 the revision offset. An empty file needs no object request. Successful EOF checks
 the total length, then the checksum of the complete file.
