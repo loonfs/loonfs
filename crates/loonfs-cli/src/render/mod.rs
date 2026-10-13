@@ -39,7 +39,6 @@ mod tests {
     use crate::config::{ProfileConfig, StoreConfig};
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
-    use insta::{assert_json_snapshot, assert_snapshot};
     use loonfs_client::ClientError;
     use loonfs_types::api::v0::{
         StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
@@ -392,7 +391,12 @@ mod tests {
                 ],
             },
         };
-        assert_snapshot!(human_success(&output));
+        assert_eq!(
+            human_success(&output),
+            "NAME\tMODE\tSTORE\tDEFAULT\n\
+             default\tembedded\tlocal_fs\t*\n\
+             prod\tremote\t-\t"
+        );
     }
 
     #[test]
@@ -417,7 +421,16 @@ mod tests {
                 default_profile: None,
             },
         };
-        assert_snapshot!(human_success(&output));
+        assert_eq!(
+            human_success(&output),
+            "name = \"default\"\n\
+             mode = \"embedded\"\n\
+             default_namespace = \"demo\"\n\
+             \n\
+             [store]\n\
+             kind = \"local_fs\"\n\
+             root = \"/tmp/store\"\n"
+        );
     }
 
     #[test]
@@ -478,10 +491,22 @@ mod tests {
             mode: Some("remote".to_owned()),
             error: Box::new(CliError::client_error("connection refused")),
         };
-        assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
-            &json_error(&failure).expect("json error renders")
-        )
-        .expect("rendered error is valid json"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &json_error(&failure).expect("json error renders")
+            )
+            .expect("rendered error is valid json"),
+            serde_json::json!({
+                "error": {
+                    "code": "client_error",
+                    "message": "connection refused"
+                },
+                "format_version": 1,
+                "kind": "config_show",
+                "mode": "remote",
+                "profile": "default"
+            })
+        );
     }
 
     #[test]

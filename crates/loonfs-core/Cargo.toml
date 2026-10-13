@@ -20,8 +20,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-# sync-only: single-flight primitives; core stays executor-agnostic.
-tokio = { version = "1", default-features = false, features = ["sync"] }
+# `sync` for single-flight primitives and `macros` for `select!`. Core never
+# spawns, so it stays executor-agnostic.
+tokio = { workspace = true, features = ["macros", "sync"] }
 tracing.workspace = true
 xxhash-rust.workspace = true
 
@@ -34,7 +35,7 @@ test-support = []
 loonfs-model.workspace = true
 loonfs-test-support.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt", "test-util"] }
 
 # The integration harness uses this crate's test-support helpers, which a bare
 # `cargo test -p loonfs-core` does not enable; declaring the requirement makes

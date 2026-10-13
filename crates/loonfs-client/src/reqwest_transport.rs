@@ -13,16 +13,16 @@ pub(crate) fn service(
 ) -> Result<
     impl Service<Request<Body>, Response = Response<Body>, Error = TransportError, Future: Send> + Clone,
 > {
-    let mut builder = reqwest::Client::builder().connect_timeout(IO_INACTIVITY_TIMEOUT);
-    for certificate in extra_root_certificates(config)? {
-        builder = builder.add_root_certificate(certificate);
-    }
-    let client = builder.build().map_err(|err| {
-        ClientError::ConfigField(ConfigFieldError::Invalid {
-            field: "http_client",
-            reason: format!("failed to build: {err}"),
-        })
-    })?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(IO_INACTIVITY_TIMEOUT)
+        .tls_certs_merge(extra_root_certificates(config)?)
+        .build()
+        .map_err(|err| {
+            ClientError::ConfigField(ConfigFieldError::Invalid {
+                field: "http_client",
+                reason: format!("failed to build: {err}"),
+            })
+        })?;
     Ok(tower::service_fn(move |request: Request<Body>| {
         let client = client.clone();
         async move {

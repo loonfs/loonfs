@@ -631,7 +631,7 @@ fn append_section(
         offset: bytes.len() as u64,
         stored_bytes: handle_bytes(stored.len())?,
         decoded_bytes: handle_bytes(payload.len())?,
-        crc32c: crc32c::crc32c(&stored),
+        crc32c: crate::content::crc32c(&stored),
     };
     bytes.extend_from_slice(&stored);
     Ok(handle)
@@ -648,7 +648,7 @@ fn decode_section(
             actual: stored.len(),
         });
     }
-    let actual = crc32c::crc32c(stored);
+    let actual = crate::content::crc32c(stored);
     if actual != handle.crc32c {
         return Err(SegmentBlockCodecError::ChecksumMismatch {
             expected: handle.crc32c,

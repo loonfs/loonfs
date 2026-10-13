@@ -2195,7 +2195,11 @@ fn decode_golden_data_block(name: &str) -> loonfs_types::format::segment_blocks:
         offset: 0,
         stored_bytes: u32::try_from(stored.len()).expect("the test value should fit u32"),
         decoded_bytes: u32::try_from(payload.len()).expect("the test value should fit u32"),
-        crc32c: crc32c::crc32c(&stored),
+        crc32c: u32::try_from(crc_fast::checksum(
+            crc_fast::CrcAlgorithm::Crc32Iscsi,
+            &stored,
+        ))
+        .expect("a CRC-32 value should fit in 32 bits"),
     };
     decode_data_block(&stored, &handle).expect("decode golden data block")
 }

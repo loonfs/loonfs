@@ -411,22 +411,29 @@ pub struct ResumedPrefixIncompleteError {
 }
 
 /// An incremental CRC-64/NVME checksum.
-#[derive(Default)]
 pub struct Crc64Nvme {
-    digest: crc64fast_nvme::Digest,
+    // Boxed because a `crc_fast::Digest` is about 300 bytes, and every enum
+    // that holds a digest would otherwise be that large.
+    digest: Box<crc_fast::Digest>,
+}
+
+impl Default for Crc64Nvme {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Crc64Nvme {
     /// Starts an empty digest.
     pub fn new() -> Self {
         Self {
-            digest: crc64fast_nvme::Digest::new(),
+            digest: Box::new(crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc64Nvme)),
         }
     }
 
     /// Folds the next piece of the payload in, in order.
     pub fn update(&mut self, bytes: &[u8]) {
-        self.digest.write(bytes);
+        self.digest.update(bytes);
     }
 
     /// Closes the digest over everything fed so far.
@@ -437,7 +444,7 @@ impl Crc64Nvme {
     pub fn finish(self) -> Checksum {
         Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: ChecksumHex::encode(&self.digest.sum64().to_be_bytes()),
+            value: ChecksumHex::encode(&self.digest.finalize().to_be_bytes()),
         }
     }
 }
@@ -449,20 +456,28 @@ impl fmt::Debug for Crc64Nvme {
 }
 
 /// An incremental CRC-32C checksum.
-#[derive(Default)]
 pub struct Crc32c {
-    crc: u32,
+    // Boxed for the same reason as the `Crc64Nvme` digest.
+    digest: Box<crc_fast::Digest>,
+}
+
+impl Default for Crc32c {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Crc32c {
     /// Starts an empty digest.
     pub fn new() -> Self {
-        Self { crc: 0 }
+        Self {
+            digest: Box::new(crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi)),
+        }
     }
 
     /// Folds the next piece of the payload in, in order.
     pub fn update(&mut self, bytes: &[u8]) {
-        self.crc = crc32c::crc32c_append(self.crc, bytes);
+        self.digest.update(bytes);
     }
 
     /// Closes the digest over everything fed so far.
@@ -473,9 +488,22 @@ impl Crc32c {
     pub fn finish(self) -> Checksum {
         Checksum {
             algorithm: ChecksumAlgorithm::Crc32c,
-            value: ChecksumHex::encode(&self.crc.to_be_bytes()),
+            value: ChecksumHex::encode(&crc32_from_u64(self.digest.finalize()).to_be_bytes()),
         }
     }
+}
+
+/// Computes the CRC-32C of `bytes`.
+pub(crate) fn crc32c(bytes: &[u8]) -> u32 {
+    crc32_from_u64(crc_fast::checksum(
+        crc_fast::CrcAlgorithm::Crc32Iscsi,
+        bytes,
+    ))
+}
+
+/// Narrows a CRC-32 value, which `crc-fast` returns as a `u64`.
+fn crc32_from_u64(value: u64) -> u32 {
+    u32::try_from(value).expect("a CRC-32 value should fit in 32 bits")
 }
 
 impl fmt::Debug for Crc32c {

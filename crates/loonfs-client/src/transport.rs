@@ -461,7 +461,9 @@ impl QueryBuilder {
         self.has_query = true;
         self.url.push_str(name);
         self.url.push('=');
-        self.url.push_str(&urlencoding::encode(&value.to_string()));
+        self.url.extend(form_urlencoded::byte_serialize(
+            value.to_string().as_bytes(),
+        ));
     }
 
     pub(crate) fn pagination(&mut self, limit: Option<u32>, cursor: Option<&str>) {

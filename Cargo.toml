@@ -27,24 +27,34 @@ homepage = "https://github.com/loonfs/loonfs"
 
 [workspace.dependencies]
 async-trait = "0.1"
+# The standard AWS credentials chain (`DefaultCredentialsChain`), which brings 18 `aws-*` crates.
+aws-config = { version = "1.8.1", default-features = false, features = ["credentials-process", "rt-tokio", "rustls", "sso"] }
+aws-credential-types = "1.2.3"
+aws-types = "1.3.7"
 axum = "0.8"
 base64 = "0.22"
 # `serde` because the server's local block cache stores `Bytes` values through
 # foyer, whose `serde` feature encodes values through their serde impls.
 bytes = { version = "1", features = ["serde"] }
+# CBOR, the encoding of WAL payloads and segment rows.
 ciborium = "0.2"
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
-crc32c = "0.6"
-crc64fast-nvme = "1.2"
-# Combines CRC-64/NVME values, so the CRC of an appended object follows from
-# the CRCs of its parts. Already in the tree beneath object_store.
+# CRC-32C for durable block checksums, and CRC-64/NVME for the checksum
+# S3-compatible providers compute over a multipart object. It also combines
+# CRCs, so the CRC of an appended object follows from the CRCs of its parts.
 crc-fast = "1.8"
+# The CLI's interactive prompts. It brings `thiserror` 1.x beside the workspace's 2.x.
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+hostname = "0.4"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
+httpdate = "1.0.3"
 hyper = "1"
 hyper-util = "0.1"
+# Pinned exactly: name keys fold with this version's Unicode 17.0.0 data
+# (format.md, "Names and paths"), so a version bump is a format change.
 icu_casemap = "=2.1.1"
 icu_normalizer = "=2.1.1"
 libc = "0.2"
@@ -56,25 +66,28 @@ foyer = { version = "=0.22.3", features = ["serde"] }
 # Named directly, though axum already carries both: the server decodes query
 # strings itself so that an unknown parameter is reported the same way an
 # unknown JSON body field is. `form_urlencoded` splits the query string into
-# pairs and `serde_urlencoded` deserializes them.
+# pairs and `serde_urlencoded` deserializes them. The client encodes its query
+# values with `form_urlencoded` too.
 form_urlencoded = "1"
 futures = "0.3"
+# Cross-process file locks for the local store, the CLI's config and upload
+# journal, and the server's cache directory.
 fs4 = "0.13"
 getrandom = "0.3"
-object_store = { version = "=0.14.2", default-features = false, features = ["aws", "gcp"] }
+object_store = { version = "0.14.2", default-features = false, features = ["aws", "gcp"] }
+# Self-signed certificates for the TLS tests.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 regex = { version = "1.11", default-features = false, features = ["std", "perf"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 regex-syntax = "0.8"
 # Already in the tree beneath rustls and rcgen. Named directly because the GCS
 # presigner signs `GOOG4-RSA-SHA256` with an RSA key, which the hash and MAC
 # crates this workspace already carries cannot do.
 ring = "0.17"
-# `ring`, not the crate default `aws-lc-rs`: the rustls stack is already in
-# the tree as a transitive dependency built on ring, and the default provider
-# would pull a second, native-toolchain crypto backend in beside it.
+# `ring` because the server's TLS listener names the ring provider
+# (`http/tls.rs`). `aws-lc-rs` is also in the tree, through object_store and
+# reqwest.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = { version = "1", features = ["raw_value"] }
@@ -101,16 +114,19 @@ loonfs-types = { path = "crates/loonfs-types", version = "0.4.0" }
 mixtrics = "0.2"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 toml = "0.8"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# A blocking client for tests that send raw HTTP requests and read the raw
+# response, outside the typed client.
 ureq = { version = "2.10", features = ["json"] }
+# Generates `openapi.json` from the API types.
 utoipa = { version = "5.5", features = ["macros"] }
-urlencoding = "2"
 walkdir = "2"
+# XXH64, the hash of the durable Bloom filters and of grep cursor fingerprints.
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 zstd = "0.13"
 
