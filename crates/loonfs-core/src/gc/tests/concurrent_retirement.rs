@@ -82,6 +82,7 @@ async fn overlapping_retirement_retries_lost_delete_ack_and_preserves_a_live_sib
             Default::default(),
             &setup,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("delete");

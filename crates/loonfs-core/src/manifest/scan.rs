@@ -19,6 +19,11 @@ use loonfs_types::format::segment_blocks::{key_range_may_intersect, string_prefi
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Pending segments a bounded scan opens together when it has none open. It
+/// opens every segment that starts no later than the sixteenth, so their
+/// first blocks load in one refill.
+const SCAN_ITERATORS_OPEN: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Readahead {
     Enabled,
@@ -334,7 +339,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 .map_or(lower_bound, |(key, _)| key.as_str());
             if iterators.is_empty() && rows.len() < limit {
                 if let Some(candidate) =
-                    descriptors.as_slice()[..descriptors.len().min(STORE_READS_IN_FLIGHT)].last()
+                    descriptors.as_slice()[..descriptors.len().min(SCAN_ITERATORS_OPEN)].last()
                 {
                     open_through = open_through.max(&candidate.descriptor.min_row_key);
                 }

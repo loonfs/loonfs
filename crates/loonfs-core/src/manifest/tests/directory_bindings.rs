@@ -258,6 +258,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         })],
         &context,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .into_iter()
@@ -455,6 +456,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         })],
         &context,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .into_iter()

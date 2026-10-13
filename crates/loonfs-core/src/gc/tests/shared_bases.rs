@@ -114,6 +114,10 @@ async fn publish_layout_manifest(store: &impl ObjectStore, manifest: NamespaceMa
         .expect("write hint");
 }
 
+/// The sharded pass fits in 240,918 bytes: the 198,406-byte live set plus one
+/// shard's keys and scan blocks. An exact set of the 2,048 shared base keys
+/// takes 266,256 bytes on its own, so the 256 KiB budget admits the sharded
+/// pass and not the bases held exactly.
 #[tokio::test]
 async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shard_are_deleted() {
     let directory = tempdir().expect("directory");
@@ -137,7 +141,7 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_in_every_shar
             .expect("orphan");
         orphans.insert(key);
     }
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(320 * 1024, None));
+    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(256 * 1024, None));
     let cache = root_scan_cache(Arc::clone(&memory));
     let options = GcOptions {
         content_shard_rows: 128,

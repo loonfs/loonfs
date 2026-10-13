@@ -61,6 +61,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
             Default::default(),
             &setup,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("delete ancestor");
@@ -101,6 +102,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         Default::default(),
         &setup,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete leaf");

@@ -541,6 +541,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             options,
             &self.mutation_context(),
             Arc::clone(&self.content_writes),
+            Arc::clone(&self.timer),
         )
         .await
     }
@@ -992,6 +993,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             candidates,
             &context,
             Arc::clone(&self.content_writes),
+            Arc::clone(&self.timer),
         )
         .await)
     }

@@ -3,7 +3,7 @@
 //! while their successor is younger than the pass's grace window or has no
 //! provider timestamp.
 
-use super::charged_set::{Charge, ChargedSet};
+use super::charged_set::{Charge, ChargedSet, PassMemory};
 use super::reap::GraceAge;
 use super::uploads::protect_session_content;
 use crate::context::MutationContext;
@@ -41,6 +41,7 @@ pub(super) struct LiveSet {
     pub(super) content_ids: ChargedSet<ContentId>,
     pub(super) manifests: Vec<LoadedManifest>,
     manifest_charge: Charge,
+    pub(super) memory: PassMemory,
     pub(super) content_layout_rows: u64,
     has_pins: bool,
     grace_window_ms: u64,
@@ -67,8 +68,8 @@ impl LiveSet {
         // Sessions are listed before the WAL tail is read. A session this pass
         // misses is newer than the pass, or it ended before the tail read and
         // the tail or a rooted manifest names every commit of its content.
-        let memory = read_working_memory(segment_cache);
-        let mut content_ids = ChargedSet::new(namespace_id, Arc::clone(&memory));
+        let memory = PassMemory::new(namespace_id, read_working_memory(segment_cache));
+        let mut content_ids = ChargedSet::new(&memory);
         if !manifest.state.envelope.payload().status.is_deleted() {
             protect_session_content(store, namespace_id, |content_id| {
                 content_ids.insert(content_id)
@@ -81,7 +82,7 @@ impl LiveSet {
         let mut live = Self {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
-            objects: ChargedSet::new(namespace_id, Arc::clone(&memory)),
+            objects: ChargedSet::new(&memory),
             content_ids,
             content_layout_rows: head
                 .runs
@@ -91,7 +92,8 @@ impl LiveSet {
                 .map(|segment| segment.row_count)
                 .sum(),
             manifests: Vec::new(),
-            manifest_charge: Charge::new(namespace_id, memory),
+            manifest_charge: Charge::new(&memory),
+            memory,
             has_pins: false,
             grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
             now_ms: context.now_ms,

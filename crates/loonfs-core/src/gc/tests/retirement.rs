@@ -85,6 +85,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         Default::default(),
         &setup,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete target");
@@ -231,6 +232,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         Default::default(),
         &context(clock.now_ms()),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete");

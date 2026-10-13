@@ -450,6 +450,7 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
                     Default::default(),
                     &setup,
                     std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+                    crate::test_support::std_timer(),
                 )
                 .await
                 .expect("competing delete");

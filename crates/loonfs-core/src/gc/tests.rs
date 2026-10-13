@@ -364,6 +364,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         DeleteNamespaceOptions::default(),
         &setup,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete namespace");
@@ -528,6 +529,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         DeleteNamespaceOptions::default(),
         &setup,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete source");
@@ -572,6 +574,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         DeleteNamespaceOptions::default(),
         &setup,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete clone");
@@ -2339,6 +2342,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         DeleteNamespaceOptions::default(),
         &setup,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("terminal delete of the fork target");
@@ -3015,6 +3019,7 @@ async fn retired_content_namespace<S: ObjectStore>(
         Default::default(),
         &setup,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete");
@@ -3071,6 +3076,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             Default::default(),
             &setup,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await
         .expect("delete");
@@ -3577,6 +3583,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
         Default::default(),
         &context(deleted_at),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete");

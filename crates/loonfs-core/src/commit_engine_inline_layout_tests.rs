@@ -694,6 +694,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         vec![candidate],
         &context,
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .pop()

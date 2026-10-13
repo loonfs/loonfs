@@ -1153,8 +1153,10 @@ pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     candidates: Vec<CommitCandidate>,
     context: &MutationContext,
     content_writes: Arc<tokio::sync::Semaphore>,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Vec<Result<Commit>> {
-    let mut engine = NamespaceCommitEngine::new(namespace_id.clone(), content_writes);
+    let mut engine =
+        NamespaceCommitEngine::new(namespace_id.clone(), content_writes).monotonic_timer(timer);
     let batch = Deadline::start(Arc::clone(&engine.timer));
     let mut results = vec![None; candidates.len()];
     let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
@@ -1184,8 +1186,10 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     options: DeleteNamespaceOptions,
     context: &MutationContext,
     content_writes: Arc<tokio::sync::Semaphore>,
+    timer: Arc<dyn MonotonicTimer>,
 ) -> Result<DeleteNamespaceResponse> {
     NamespaceCommitEngine::new(namespace_id.clone(), content_writes)
+        .monotonic_timer(timer)
         .delete_namespace(store, options, context)
         .await
 }

@@ -5,46 +5,73 @@ use crate::heap_bytes::{hash_set_table_bytes, HeapBytes};
 use crate::read_working_memory::ReadWorkingMemory;
 use loonfs_types::NamespaceId;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// One reservation in the read working memory, released when it drops.
-pub(super) struct Charge {
+/// The read working memory one collection pass charges, and the bytes all of
+/// the pass's charges hold together, so a failed charge can report the whole
+/// live set.
+#[derive(Clone)]
+pub(super) struct PassMemory {
     namespace_id: NamespaceId,
     memory: Arc<ReadWorkingMemory>,
-    reserved_bytes: usize,
+    held_bytes: Arc<AtomicUsize>,
 }
 
-impl Charge {
+impl PassMemory {
     pub(super) fn new(namespace_id: &NamespaceId, memory: Arc<ReadWorkingMemory>) -> Self {
         Self {
             namespace_id: namespace_id.clone(),
             memory,
+            held_bytes: Arc::default(),
+        }
+    }
+}
+
+/// One reservation in the read working memory, released when it drops.
+pub(super) struct Charge {
+    pass: PassMemory,
+    reserved_bytes: usize,
+}
+
+impl Charge {
+    pub(super) fn new(pass: &PassMemory) -> Self {
+        Self {
+            pass: pass.clone(),
             reserved_bytes: 0,
         }
     }
 
     /// Adds `bytes` to the reservation, or fails the pass when the memory
-    /// can't fit them.
+    /// can't fit them. The error reports what the pass's charges would hold
+    /// together with `bytes` added.
     pub(super) fn add(&mut self, bytes: usize) -> Result<()> {
         if bytes == 0 {
             return Ok(());
         }
-        let total = self.reserved_bytes.saturating_add(bytes);
-        if !self.memory.try_reserve(bytes) {
+        if !self.pass.memory.try_reserve(bytes) {
             return Err(CoreError::LiveSetExceedsReadMemory {
-                namespace_id: self.namespace_id.clone(),
-                bytes: total,
-                limit: self.memory.limit(),
+                namespace_id: self.pass.namespace_id.clone(),
+                bytes: self
+                    .pass
+                    .held_bytes
+                    .load(Ordering::Relaxed)
+                    .saturating_add(bytes),
+                limit: self.pass.memory.limit(),
             });
         }
-        self.reserved_bytes = total;
+        self.reserved_bytes += bytes;
+        self.pass.held_bytes.fetch_add(bytes, Ordering::Relaxed);
         Ok(())
     }
 }
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        self.memory.release(self.reserved_bytes);
+        self.pass.memory.release(self.reserved_bytes);
+        self.pass
+            .held_bytes
+            .fetch_sub(self.reserved_bytes, Ordering::Relaxed);
     }
 }
 
@@ -55,11 +82,11 @@ pub(super) struct ChargedSet<T> {
 }
 
 impl<T: Eq + std::hash::Hash + HeapBytes> ChargedSet<T> {
-    pub(super) fn new(namespace_id: &NamespaceId, memory: Arc<ReadWorkingMemory>) -> Self {
+    pub(super) fn new(pass: &PassMemory) -> Self {
         Self {
             values: HashSet::new(),
             heap_bytes: 0,
-            charge: Charge::new(namespace_id, memory),
+            charge: Charge::new(pass),
         }
     }
 

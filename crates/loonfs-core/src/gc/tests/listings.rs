@@ -70,6 +70,7 @@ async fn a_pass_heads_only_the_discovery_successor() {
         DeleteNamespaceOptions::default(),
         &context(1_000),
         content_writes,
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete target");

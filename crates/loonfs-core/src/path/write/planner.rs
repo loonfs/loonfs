@@ -1071,6 +1071,7 @@ mod tests {
             ))],
             &context,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await
         .pop()

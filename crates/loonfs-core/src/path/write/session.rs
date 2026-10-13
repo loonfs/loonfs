@@ -319,6 +319,7 @@ mod tests {
             )],
             &context,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await
         .remove(0)
@@ -411,6 +412,7 @@ mod tests {
             ],
             &context,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await;
 
@@ -450,6 +452,7 @@ mod tests {
             ],
             &context,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await;
 
@@ -479,6 +482,7 @@ mod tests {
             ],
             &context,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await;
 
@@ -519,6 +523,7 @@ mod tests {
             ],
             &context,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await;
 
@@ -560,6 +565,7 @@ mod tests {
             ],
             &context,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+            crate::test_support::std_timer(),
         )
         .await;
 

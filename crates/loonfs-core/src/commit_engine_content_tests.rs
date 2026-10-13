@@ -131,6 +131,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         Default::default(),
         &context(clock.now_ms()),
         std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
+        crate::test_support::std_timer(),
     )
     .await
     .expect("delete");

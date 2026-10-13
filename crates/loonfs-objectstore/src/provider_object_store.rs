@@ -3062,6 +3062,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_streamed_compare_and_swap_longer_than_one_part_is_unsupported() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let payload = multipart_payload(1300);
+
+        let error = store
+            .put_streamed(
+                MULTIPART_KEY,
+                streamed(&payload, 100),
+                PutMode::CompareAndSwap {
+                    expected_etag: "\"etag\"".to_owned(),
+                },
+            )
+            .await
+            .expect_err("no store emulates a multipart compare-and-swap");
+
+        let ObjectStoreError::Unsupported(capability) = error else {
+            panic!("expected Unsupported, got {error:?}");
+        };
+        assert_eq!(capability, "streamed compare-and-swap longer than one part");
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.heads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn a_streamed_multipart_overwrite_reads_nothing() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));

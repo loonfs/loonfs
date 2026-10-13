@@ -589,10 +589,14 @@ async fn a_direct_multipart_put_holds_only_its_window() {
     );
 }
 
-#[tokio::test]
+/// Part 1's first upload fails in transport and waits out a retry backoff,
+/// so parts 2 and 3 fail before it does. The wave still returns part 1's
+/// error, the lowest-numbered failure, and not the first to complete.
+#[tokio::test(start_paused = true)]
 async fn a_part_wave_drains_every_part_and_returns_the_lowest_numbered_failure() {
-    let signing_responses = std::iter::repeat_with(|| signed_parts(1, 3));
-    let transport = scripted_transport::script(signing_responses.take(16));
+    let mut responses = vec![signed_parts(1, 3), Outcome::TransportFailure];
+    responses.extend(std::iter::repeat_with(|| signed_parts(1, 3)).take(15));
+    let transport = scripted_transport::script(responses);
     let wave = (1..=3)
         .map(|part_number| PendingPart {
             claim: UploadPartChecksumClaim {
@@ -603,7 +607,7 @@ async fn a_part_wave_drains_every_part_and_returns_the_lowest_numbered_failure()
         })
         .collect();
 
-    let error = client_without_retry(&transport)
+    let error = client(&transport)
         .upload_wave(&namespace_id(), &upload_id(), wave)
         .await
         .expect_err("a part upload answered without an etag fails");
@@ -613,15 +617,25 @@ async fn a_part_wave_drains_every_part_and_returns_the_lowest_numbered_failure()
     };
     assert_eq!(message, "part 1 upload returned no etag");
     let sent = transport.sent();
-    for part_number in 1..=3 {
-        let url = format!("http://provider.invalid/part/{part_number}");
+    let part_url = |part_number: u32| format!("http://provider.invalid/part/{part_number}");
+    assert_eq!(
+        sent.last().map(|request| request.url.as_str()),
+        Some(part_url(1).as_str()),
+        "part 1 failed last"
+    );
+    for (part_number, uploads) in [
+        (1, DIRECT_MULTIPART_PART_ATTEMPTS + 1),
+        (2, DIRECT_MULTIPART_PART_ATTEMPTS),
+        (3, DIRECT_MULTIPART_PART_ATTEMPTS),
+    ] {
+        let url = part_url(part_number);
         assert_eq!(
             sent.iter().filter(|request| request.url == url).count(),
-            DIRECT_MULTIPART_PART_ATTEMPTS,
+            uploads,
             "part {part_number} used every attempt"
         );
     }
-    assert_eq!(transport.attempts(), 16);
+    assert_eq!(transport.attempts(), 17);
 }
 
 #[tokio::test]

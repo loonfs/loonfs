@@ -459,11 +459,10 @@ pub trait ObjectStore: Send + Sync + Debug {
     ///
     /// The object must not become visible until the complete body ends without error.
     /// Implementations consume the complete stream before reporting a failed
-    /// precondition, allowing callers to finish checksums. A multipart
-    /// create-if-absent completes conditionally where the provider allows it;
-    /// elsewhere a multipart provider may check `mode` immediately before
-    /// assembly rather than atomically with it, so this method is only safe
-    /// for immutable, uniquely named keys. Failed multipart writes must be aborted.
+    /// precondition, allowing callers to finish checksums. A store that can't
+    /// enforce `mode` atomically with completion for a multipart write returns
+    /// [`ObjectStoreError::Unsupported`] rather than checking the key with a
+    /// separate read. Failed multipart writes must be aborted.
     /// An in-memory store can implement it with [`crate::buffered::put_streamed`].
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64>;
 

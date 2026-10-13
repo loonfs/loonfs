@@ -62,7 +62,7 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
     mut hint: LoadedHint,
     mut observed: crate::time::Observation,
 ) -> Result<NamespaceReadAnchor, ControlObjectLoadError> {
-    loop {
+    for _attempt in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
         match discover_tail(store, namespace_id, &manifest).await {
             Ok(DiscoveredTail { head: state, tail }) => {
                 if !state.status.is_deleted() {
@@ -99,6 +99,9 @@ pub(crate) async fn load_read_anchor_from_manifest<S: ObjectStore + ?Sized>(
             Err(error) => return Err(error),
         }
     }
+    Err(ControlObjectLoadError::StoreContention {
+        object_key: manifest.object_key,
+    })
 }
 
 pub async fn project_anchor_tail<S: ObjectStore + ?Sized>(

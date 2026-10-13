@@ -6,7 +6,6 @@ use super::live_set::LiveSet;
 use super::sweep::Sweep;
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::manifest::cache::read_working_memory;
 use crate::manifest::{metadata_basis_from_manifest, MetadataSegmentCache};
 use crate::metadata::row_decode::content_layout_from_manifest_row;
 use crate::namespace::control::LoadedManifest;
@@ -53,7 +52,7 @@ impl<'a> ContentSweep<'a> {
                 layout_views = 0, "collecting namespace");
             return Ok(None);
         }
-        let mut covered = ChargedSet::new(namespace_id, read_working_memory(cache));
+        let mut covered = ChargedSet::new(&live.memory);
         let mut views = Vec::new();
         for manifest in &live.manifests {
             let mut adds_segments = false;
@@ -126,7 +125,7 @@ impl<'a> ContentSweep<'a> {
             } else {
                 format!("con_{shard:0width$x}", width = self.shard_width as usize)
             };
-            let mut keys = ChargedSet::new(sweep.namespace_id, read_working_memory(cache));
+            let mut keys = ChargedSet::new(&sweep.live.memory);
             let _ = scan_layout_extents(
                 sweep.store,
                 cache,

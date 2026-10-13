@@ -1985,6 +1985,35 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     assert!(advanced.manifest_no > manifest_before.manifest().manifest_no);
 }
 
+/// Every timer reading advances past the revalidation bound, so each check
+/// finds its observation stale and loads the manifest again.
+#[tokio::test]
+async fn a_read_anchor_that_goes_stale_on_every_check_stops_at_the_contention_limit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    bootstrap_namespace(&store, &namespace_id, &test_context())
+        .await
+        .expect("bootstrap");
+    let stale = crate::time::Observation::now(Arc::new(SteppingTimer::new(
+        crate::limits::READ_REVALIDATION_BOUND_MS + 1,
+    )));
+
+    let error = crate::namespace::read_anchor::load_read_anchor(&store, &namespace_id, stale)
+        .await
+        .expect_err("a check that never confirms its manifest stops");
+
+    let crate::control_object::ControlObjectLoadError::StoreContention { object_key } = &error
+    else {
+        panic!("expected StoreContention, got {error:?}");
+    };
+    assert!(
+        object_key.starts_with(&metadata_manifest_prefix(&namespace_id)),
+        "{object_key}"
+    );
+    assert_eq!(error.code(), ErrorCode::StoreContention);
+}
+
 #[tokio::test]
 async fn over_budget_compaction_aborts_without_publishing() {
     let temp_dir = tempdir().expect("tempdir");
