@@ -237,38 +237,6 @@ impl<S: ObjectStore + 'static, I: Interceptor + 'static> ObjectStore for Interce
         Self::finish(&self.interceptor, &context, intercept, result, outcome)
     }
 
-    async fn put_immutable_verified_stream(
-        &self,
-        key: &str,
-        size_bytes: u64,
-        body: BoxStream<'_, Result<Bytes, ObjectStoreError>>,
-    ) -> Result<ObjectMetadata, ImmutableWriteError> {
-        let failed = |source| ImmutableWriteError::Transport {
-            object_key: key.to_owned(),
-            source,
-        };
-        let context = OperationContext::new(key, OperationKind::PutImmutableStream);
-        let intercept = match self.interceptor.before(&context).await {
-            Intercept::FailBefore(error) => return Err(failed(error)),
-            intercept => intercept,
-        };
-        let result = self
-            .inner
-            .put_immutable_verified_stream(key, size_bytes, body)
-            .await;
-        if intercept.calls_after() {
-            let outcome = match &result {
-                Ok(_) => Outcome::StreamedBytes(size_bytes),
-                Err(_) => Outcome::Failure,
-            };
-            self.interceptor.after(&context, &outcome);
-        }
-        match (intercept, result) {
-            (Intercept::FailAfter(error), Ok(_)) => Err(failed(error)),
-            (_, result) => result,
-        }
-    }
-
     async fn compare_and_swap(
         &self,
         key: &str,

@@ -1029,9 +1029,7 @@ impl NamespacePublisher {
             return;
         }
         let publisher = self.clone();
-        let (exit, liveness) = watch::channel(false);
-        let exit = TaskExit(exit);
-        let task = self.runtime.spawn(async move {
+        let (task, liveness) = self.spawn_tracked(|exit| async move {
             let _exit = exit;
             publisher.run_worker().await;
         });
@@ -1402,15 +1400,30 @@ impl NamespacePublisher {
     ) -> SessionTask {
         let id = state.next_task_id;
         state.next_task_id = state.next_task_id.wrapping_add(1);
-        let (exit, liveness) = watch::channel(false);
         let publisher = self.clone();
-        let task = self.runtime.spawn(async move {
-            let exit = TaskExit(exit);
+        let (task, liveness) = self.spawn_tracked(|exit| async move {
             work.await;
             drop(exit);
             publisher.forget_if_ended();
         });
         SessionTask { id, task, liveness }
+    }
+
+    /// Spawns the task that `work` builds around its exit marker, and returns
+    /// the task's handle and its liveness.
+    ///
+    /// The marker exists before the spawn, so a task dropped before its first
+    /// poll still reports that it exited.
+    fn spawn_tracked<Task>(
+        &self,
+        work: impl FnOnce(TaskExit) -> Task,
+    ) -> (JoinHandle<()>, watch::Receiver<bool>)
+    where
+        Task: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (exit, liveness) = watch::channel(false);
+        let task = self.runtime.spawn(work(TaskExit(exit)));
+        (task, liveness)
     }
 
     /// Runs the maintenance loop over this session's namespace with options

@@ -35,6 +35,8 @@ impl MemoryStore {
 
 #[async_trait]
 impl ObjectStore for MemoryStore {
+    crate::delegate_object_store!(self; buffered);
+
     fn checksum_algorithm(&self) -> ChecksumAlgorithm {
         self.algorithm
     }

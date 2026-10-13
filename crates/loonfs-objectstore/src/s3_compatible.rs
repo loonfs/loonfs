@@ -103,6 +103,7 @@ struct S3CompatibleConfig {
 struct S3RequestSigner {
     request_signer: Arc<S3CompatiblePresigner>,
     http: HttpClient,
+    io_runtime: tokio::runtime::Handle,
     kind: ConfiguredObjectStoreKind,
 }
 
@@ -220,6 +221,7 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
     let signer = Arc::new(S3RequestSigner {
         request_signer: Arc::clone(&request_signer),
         http,
+        io_runtime: io_runtime.handle(),
         kind: config.kind,
     });
     let store = ProviderObjectStore::new(
@@ -233,6 +235,7 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         config.kind,
         io_runtime,
         signer.clone(),
+        signer,
     )?;
     let direct_transfers = DirectTransferIssuers {
         get: request_signer.clone(),
@@ -240,10 +243,7 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
         multipart: Some(request_signer),
     };
 
-    let store = store
-        .compare_token(CompareToken::Etag)
-        .multipart_controller(signer);
-    Ok((store, direct_transfers))
+    Ok((store.compare_token(CompareToken::Etag), direct_transfers))
 }
 
 impl SignedResponse {
@@ -653,7 +653,7 @@ impl S3RequestSigner {
                 .abort_multipart_upload(&aborted_key, &aborted_id)
                 .await
         };
-        AbortUploadOnDrop::new(key, abort.boxed())
+        AbortUploadOnDrop::new(key, self.io_runtime.clone(), abort.boxed())
     }
 }
 
@@ -1017,6 +1017,7 @@ mod tests {
         S3RequestSigner {
             request_signer: Arc::new(request_signer),
             http: HttpClient::new(provider.clone()),
+            io_runtime: tokio::runtime::Handle::current(),
             kind,
         }
     }
@@ -1061,9 +1062,9 @@ mod tests {
                 kind,
                 crate::store_io_runtime::StoreIoRuntime::new().expect("runtime"),
                 signer.clone(),
+                signer,
             )
-            .expect("store")
-            .multipart_controller(signer);
+            .expect("store");
             let bytes = Bytes::from_static(b"source tail");
             let expected = Checksum::crc64nvme(&bytes);
             store

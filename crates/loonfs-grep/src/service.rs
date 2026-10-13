@@ -15,7 +15,8 @@ use crate::manifest::{
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{effective_batch_size, published_revision, NamespaceReadView, NamespaceReads};
 use crate::{GrepError, Result};
-use futures::future::{join_all, try_join_all};
+use futures::future::join_all;
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs::engine::{Observation, SegmentBlockKind};
 use loonfs::{CoreError, CurrentFile, CurrentFileState};
 use loonfs_objectstore::timing::StdMonotonicTimer;
@@ -54,7 +55,7 @@ pub(crate) const MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE: usize = 4096;
 ///
 /// Each probe may issue several small ranged reads, so this limit is lower
 /// than the whole-content read limit.
-pub(crate) const MAX_GREP_READ_IO: usize = 16;
+pub(crate) const GREP_READS_IN_FLIGHT: usize = 16;
 /// Commits one unindexed-tail page asks the change feed for. The tail is
 /// measured in files, not commits, so this is a transfer size rather than a
 /// budget: paging continues until the tail is exhausted or exceeds
@@ -421,14 +422,14 @@ async fn indexed_candidates<S: ObjectStore + ?Sized>(
         // streaming intersection would reduce memory but add probe-ordering
         // complexity, so it is deferred until measurements show this allocation matters.
         let mut set_postings = BTreeSet::new();
-        for chunk in probes.chunks(MAX_GREP_READ_IO) {
-            let batches = try_join_all(chunk.iter().map(|(gram_lookup, descriptor)| {
+        let mut batches = stream::iter(0..probes.len())
+            .map(|index| {
+                let (gram_lookup, descriptor) = probes[index];
                 segment_postings_for_gram(store, block_cache, namespace_id, descriptor, gram_lookup)
-            }))
-            .await?;
-            for batch in batches {
-                set_postings.extend(batch);
-            }
+            })
+            .buffered(GREP_READS_IN_FLIGHT);
+        while let Some(batch) = batches.try_next().await? {
+            set_postings.extend(batch);
         }
         intersection = Some(match intersection {
             None => set_postings,
@@ -481,8 +482,8 @@ impl GramLookup {
 /// One gram's postings from one segment: bloom filter first (the inline
 /// copy when the descriptor carries one — no fetch at all — otherwise the
 /// cached filter block), then only the data blocks the segment index
-/// names for the gram's key range, loaded concurrently in chunks of
-/// [`MAX_GREP_READ_IO`] (the cap applies per probe). Every fetched
+/// names for the gram's key range, loaded with at most
+/// [`GREP_READS_IN_FLIGHT`] in flight (the cap applies per probe). Every fetched
 /// section resolves through the grep-private decoded-block cache.
 async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     store: &S,
@@ -518,35 +519,34 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     let range =
         index_blocks_for_key_range(&entries, &gram_lookup.prefix, gram_lookup.upper.as_deref());
     // The range's blocks are independent ranged GETs, so they fan out
-    // instead of paying one round trip each; `try_join_all` returns them
+    // instead of paying one round trip each; `buffered` returns them
     // in entry order and rows fold in that order, so assembly stays
     // deterministic even though the posting union is order-independent.
-    for chunk in entries[range].chunks(MAX_GREP_READ_IO) {
-        let blocks = try_join_all(chunk.iter().map(|entry| {
+    let mut blocks = stream::iter(range)
+        .map(|index| {
             load_data_block(
                 store,
                 block_cache,
                 &object_key,
                 &descriptor.segment_id,
-                &entry.block,
+                &entries[index].block,
             )
-        }))
-        .await?;
-        for block in blocks {
-            for row in &block.rows {
-                let IndexRow::GramPostings { gram: row_gram, .. } = row;
-                if *row_gram != gram_lookup.gram {
-                    continue;
-                }
-                let batch = row
-                    .postings()
-                    .map_err(|error| index_segment_corrupt(&object_key, "posting batch", &error))?;
-                postings.extend(
-                    batch
-                        .into_iter()
-                        .map(|posting| (posting.inode_id, posting.revision_no)),
-                );
+        })
+        .buffered(GREP_READS_IN_FLIGHT);
+    while let Some(block) = blocks.try_next().await? {
+        for row in &block.rows {
+            let IndexRow::GramPostings { gram: row_gram, .. } = row;
+            if *row_gram != gram_lookup.gram {
+                continue;
             }
+            let batch = row
+                .postings()
+                .map_err(|error| index_segment_corrupt(&object_key, "posting batch", &error))?;
+            postings.extend(
+                batch
+                    .into_iter()
+                    .map(|posting| (posting.inode_id, posting.revision_no)),
+            );
         }
     }
     Ok(postings)

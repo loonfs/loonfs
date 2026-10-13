@@ -275,6 +275,8 @@ pub trait ObjectStoreMetricsRecorder: Send + Sync + 'static {
 }
 
 /// In-memory recorder intended for tests and small local diagnostics.
+///
+/// It keeps every sample until it is dropped.
 #[derive(Default)]
 pub struct VecObjectStoreMetricsRecorder {
     samples: Mutex<Vec<ObjectStoreMetricSample>>,
@@ -302,7 +304,8 @@ impl ObjectStoreMetricsRecorder for VecObjectStoreMetricsRecorder {
 /// Buffered JSONL recorder for process-level diagnostics and benchmarks.
 ///
 /// Recording is best-effort: I/O errors while writing a sample are ignored so instrumentation does
-/// not change object-store behavior.
+/// not change object-store behavior. Every request takes a process-wide lock and writes to a
+/// buffered file on the calling thread.
 pub struct JsonlObjectStoreMetricsRecorder {
     writer: Mutex<BufWriter<File>>,
 }
@@ -535,33 +538,6 @@ where
             self.store_kind.clone(),
         );
         sample.bytes_in = Some(bytes_in);
-        sample.put_mode = Some(PutModeKind::CreateIfAbsent);
-        self.record(sample);
-        result
-    }
-
-    /// Recorded as the streamed create-if-absent it is.
-    async fn put_immutable_verified_stream(
-        &self,
-        key: &str,
-        size_bytes: u64,
-        body: BoxStream<'_, Result<Bytes>>,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        let start = sample_clock();
-        let (result, attempts) = counting_attempts(
-            self.inner
-                .put_immutable_verified_stream(key, size_bytes, body),
-        )
-        .await;
-        let mut sample = ObjectStoreMetricSample::new(
-            ObjectStoreOperation::PutStreamed,
-            key,
-            start.elapsed(),
-            attempts,
-            classify_immutable_write(&result),
-            self.store_kind.clone(),
-        );
-        sample.bytes_in = Some(size_bytes);
         sample.put_mode = Some(PutModeKind::CreateIfAbsent);
         self.record(sample);
         result

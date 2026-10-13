@@ -18,10 +18,10 @@ use crate::manifest::{
 use crate::reads::{page_request, published_revision, NamespaceReads};
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, GrepStepBudget, Result};
-use futures::future::try_join_all;
+use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use loonfs::engine::{
-    next_run_no_after, refill_iterators, select_next_iterator, write_segments_in_waves, Deadline,
-    Observation, SegmentBlockLoader, SegmentRowIterator,
+    next_run_no_after, refill_iterators, select_next_iterator, Deadline, Observation,
+    SegmentBlockLoader, SegmentRowIterator,
 };
 use loonfs::{
     CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, LoonFs, Maintenance,
@@ -59,7 +59,7 @@ const GRAM_POSTING_BATCH_TARGET: usize = 256;
 /// Content reads and index segment writes the worker runs at once. Eight
 /// reads of files at the 8 MiB eligibility cap hold at most 64 MiB, the same
 /// as one backfill step's content budget.
-const MAX_GREP_WORKER_IO: usize = 8;
+const GREP_WORKER_READS_IN_FLIGHT: usize = 8;
 const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
@@ -899,27 +899,29 @@ async fn index_planned_unit(
         progress,
     } = planned;
     let mut postings: BTreeMap<Gram, Vec<GramPosting>> = BTreeMap::new();
-    for chunk in pending.chunks(MAX_GREP_WORKER_IO) {
-        let contents = try_join_all(chunk.iter().map(|revision| {
+    let mut contents = stream::iter(0..pending.len())
+        .map(|index| {
+            let revision = &pending[index];
             // Index eligibility is the worker's own read budget: content
             // past the cap was skipped before it was ever planned.
-            reads.read_content(&revision.content_ref, MAX_INDEX_GRAMS_FILE_BYTES)
-        }))
-        .await?;
-        for (revision, content) in chunk.iter().zip(contents) {
-            if !is_indexable_text_content(&content) {
-                stats.skipped_revisions += 1;
-                continue;
-            }
-            let posting = GramPosting {
-                inode_id: revision.inode_id,
-                revision_no: revision.revision_no,
-            };
-            for gram in extract_grams(&content) {
-                postings.entry(gram).or_default().push(posting);
-            }
-            stats.indexed_revisions += 1;
+            reads
+                .read_content(&revision.content_ref, MAX_INDEX_GRAMS_FILE_BYTES)
+                .map_ok(move |content| (revision, content))
+        })
+        .buffered(GREP_WORKER_READS_IN_FLIGHT);
+    while let Some((revision, content)) = contents.try_next().await? {
+        if !is_indexable_text_content(&content) {
+            stats.skipped_revisions += 1;
+            continue;
         }
+        let posting = GramPosting {
+            inode_id: revision.inode_id,
+            revision_no: revision.revision_no,
+        };
+        for gram in extract_grams(&content) {
+            postings.entry(gram).or_default().push(posting);
+        }
+        stats.indexed_revisions += 1;
     }
     Ok(CollectedIndexUnit {
         postings,
@@ -958,12 +960,11 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
         .chunks(max_rows_per_segment.get())
         .map(<[_]>::to_vec)
         .collect();
-    write_segments_in_waves(
-        requests,
-        const { NonZeroUsize::new(MAX_GREP_WORKER_IO).unwrap() },
-        |segment_rows| write_index_segment(store, namespace_id, run_no, segment_rows, level),
-    )
-    .await
+    stream::iter(requests)
+        .map(|segment_rows| write_index_segment(store, namespace_id, run_no, segment_rows, level))
+        .buffered(GREP_WORKER_READS_IN_FLIGHT)
+        .try_collect()
+        .await
 }
 
 async fn write_index_segment<S: ObjectStore + ?Sized>(

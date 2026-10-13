@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 pub const MIN_STREAMING_PUT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Maximum number of multipart payloads held in memory at once.
-const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
+const DIRECT_MULTIPART_PART_WAVE: usize = 4;
 
 /// Maximum attempts for one part, including refreshed authorization.
 const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
@@ -605,7 +605,7 @@ impl Client {
     }
 
     /// Cuts the payload into parts and uploads them, holding at most
-    /// [`DIRECT_MULTIPART_PARTS_IN_FLIGHT`] of them at a time.
+    /// [`DIRECT_MULTIPART_PART_WAVE`] of them at a time.
     ///
     /// Each in-flight part owns one buffer, which bounds memory use. A resumed
     /// upload still reads every byte to compute the final checksum, but it
@@ -632,9 +632,9 @@ impl Client {
         let mut next_part_number = 1u32;
 
         loop {
-            let mut wave = Vec::with_capacity(DIRECT_MULTIPART_PARTS_IN_FLIGHT);
+            let mut wave = Vec::with_capacity(DIRECT_MULTIPART_PART_WAVE);
             let mut source_ended = false;
-            while wave.len() < DIRECT_MULTIPART_PARTS_IN_FLIGHT {
+            while wave.len() < DIRECT_MULTIPART_PART_WAVE {
                 let Some(bytes) = source.next_part().await? else {
                     source_ended = true;
                     break;
@@ -697,31 +697,17 @@ impl Client {
                 Ok((part, access))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut in_flight = tokio::task::JoinSet::new();
-        for (part, access) in authorized {
-            let client = self.clone();
-            let namespace_id = namespace_id.clone();
-            let upload_id = upload_id.clone();
-            in_flight.spawn(async move {
-                client
-                    .upload_one_part(&namespace_id, &upload_id, part, access)
-                    .await
-            });
-        }
-        let mut uploaded = Vec::new();
-        let mut failure = None;
-        while let Some(joined) = in_flight.join_next().await {
-            match joined.map_err(|err| ClientError::Io(format!("part upload task failed: {err}"))) {
-                // Every task is drained before the first failure surfaces,
-                // so no part upload outlives the wave that started it.
-                Ok(Ok(part)) => uploaded.push(part),
-                Ok(Err(error)) | Err(error) => failure = failure.or(Some(error)),
-            }
-        }
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(uploaded),
-        }
+        // One signing request authorizes the whole wave's part URLs, so the
+        // next wave starts only after this one has drained.
+        let uploaded = futures::future::join_all(
+            authorized
+                .into_iter()
+                .map(|(part, access)| self.upload_one_part(namespace_id, upload_id, part, access)),
+        )
+        .await;
+        // Every part is drained before the first failure by part number
+        // surfaces, so no part upload outlives the wave that started it.
+        uploaded.into_iter().collect()
     }
 
     /// Uploads one part, re-asking for its URL if the upload fails.

@@ -10,7 +10,7 @@ use super::scan_load::{ScanDescriptor, ScanLoader};
 use crate::in_flight::STORE_READ_WAVE;
 #[cfg(test)]
 use crate::metadata::MetadataState;
-use futures::future::try_join_all;
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
@@ -417,19 +417,19 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             return Ok(descriptors);
         };
         let mut admitted = Vec::with_capacity(descriptors.len());
-        for chunk in descriptors.chunks(STORE_READ_WAVE) {
-            let checks =
-                try_join_all(chunk.iter().map(|descriptor| {
-                    self.segment_filter_admits(descriptor.descriptor, filter_probe)
-                }))
-                .await?;
-            admitted.extend(
-                chunk
-                    .iter()
-                    .zip(checks)
-                    .filter(|(_, admits)| *admits)
-                    .map(|(descriptor, _)| *descriptor),
-            );
+        let mut checks = stream::iter(0..descriptors.len())
+            .map(|index| {
+                let descriptor = descriptors[index];
+                async move {
+                    let admits = self
+                        .segment_filter_admits(descriptor.descriptor, filter_probe)
+                        .await?;
+                    Ok::<_, ManifestLoadError>(admits.then_some(descriptor))
+                }
+            })
+            .buffered(STORE_READ_WAVE);
+        while let Some(descriptor) = checks.try_next().await? {
+            admitted.extend(descriptor);
         }
         Ok(admitted)
     }

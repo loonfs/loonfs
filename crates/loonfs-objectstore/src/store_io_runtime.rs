@@ -57,14 +57,18 @@ impl StoreIoRuntime {
     /// and applies the transfer-aware timeout scheme
     /// ([`crate::transfer_timeouts`]).
     pub(crate) fn connector(&self) -> TransferTimeoutConnector {
-        let handle = self
-            .inner
+        TransferTimeoutConnector::new(self.handle())
+    }
+
+    /// Handle that spawns onto this runtime, for provider cleanup that must
+    /// not depend on the caller's runtime.
+    pub(crate) fn handle(&self) -> tokio::runtime::Handle {
+        self.inner
             .runtime
             .as_ref()
             .expect("store io runtime should live until the last store clone drops")
             .handle()
-            .clone();
-        TransferTimeoutConnector::new(handle)
+            .clone()
     }
 }
 

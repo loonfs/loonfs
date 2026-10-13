@@ -773,6 +773,25 @@ mod tests {
             loonfs_types::ChecksumAlgorithm::Crc64nvme
         }
 
+        async fn put_streamed(
+            &self,
+            key: &str,
+            body: crate::ByteStream,
+            mode: crate::PutMode,
+        ) -> crate::Result<u64> {
+            crate::buffered::put_streamed(self, key, body, mode).await
+        }
+
+        async fn assemble(
+            &self,
+            key: &str,
+            sources: &[crate::AssemblySource],
+            tail: Vec<bytes::Bytes>,
+            expected: &loonfs_types::Checksum,
+        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+            crate::buffered::assemble(self, key, sources, tail, expected).await
+        }
+
         async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
             Err(Self::denied(key))
         }
@@ -940,6 +959,25 @@ mod tests {
             self.inner.checksum_algorithm()
         }
 
+        async fn put_streamed(
+            &self,
+            key: &str,
+            body: crate::ByteStream,
+            mode: crate::PutMode,
+        ) -> crate::Result<u64> {
+            crate::buffered::put_streamed(self, key, body, mode).await
+        }
+
+        async fn assemble(
+            &self,
+            key: &str,
+            sources: &[crate::AssemblySource],
+            tail: Vec<bytes::Bytes>,
+            expected: &loonfs_types::Checksum,
+        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+            crate::buffered::assemble(self, key, sources, tail, expected).await
+        }
+
         async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
             self.inner.head(key).await
         }
@@ -1040,6 +1078,25 @@ mod tests {
             self.inner.checksum_algorithm()
         }
 
+        async fn put_streamed(
+            &self,
+            key: &str,
+            body: crate::ByteStream,
+            mode: crate::PutMode,
+        ) -> crate::Result<u64> {
+            crate::buffered::put_streamed(self, key, body, mode).await
+        }
+
+        async fn assemble(
+            &self,
+            key: &str,
+            sources: &[crate::AssemblySource],
+            tail: Vec<bytes::Bytes>,
+            expected: &loonfs_types::Checksum,
+        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+            crate::buffered::assemble(self, key, sources, tail, expected).await
+        }
+
         async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {
             Ok(self.inner.head(key).await?.map(|mut metadata| {
                 metadata.checksum = None;
@@ -1095,6 +1152,25 @@ mod tests {
     impl ObjectStore for EpochLastModifiedStore {
         fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
             self.inner.checksum_algorithm()
+        }
+
+        async fn put_streamed(
+            &self,
+            key: &str,
+            body: crate::ByteStream,
+            mode: crate::PutMode,
+        ) -> crate::Result<u64> {
+            crate::buffered::put_streamed(self, key, body, mode).await
+        }
+
+        async fn assemble(
+            &self,
+            key: &str,
+            sources: &[crate::AssemblySource],
+            tail: Vec<bytes::Bytes>,
+            expected: &loonfs_types::Checksum,
+        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+            crate::buffered::assemble(self, key, sources, tail, expected).await
         }
 
         async fn head(&self, key: &str) -> StoreResult<Option<ObjectMetadata>> {

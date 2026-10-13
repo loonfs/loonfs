@@ -10,6 +10,7 @@ use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, load_current_manifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, StdMonotonicTimer};
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -48,14 +49,11 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
         .iter()
         .flat_map(|run| &run.segments)
         .map(metadata_segment_object_key)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    for chunk in object_keys.chunks(STORE_READ_WAVE) {
-        futures::future::try_join_all(chunk.iter().map(|object_key| async move {
+        .collect::<BTreeSet<_>>();
+    stream::iter(object_keys)
+        .map(|object_key| async move {
             match store
-                .head(object_key)
+                .head(&object_key)
                 .await
                 .map_err(|error| ManifestLoadError::ReadSegment {
                     object_key: object_key.clone(),
@@ -63,14 +61,12 @@ async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
                     kind: loonfs_objectstore::ObjectStoreErrorKind::of(&error),
                 })? {
                 Some(_) => Ok(()),
-                None => Err(ManifestLoadError::MissingSegment {
-                    object_key: object_key.clone(),
-                }),
+                None => Err(ManifestLoadError::MissingSegment { object_key }),
             }
-        }))
-        .await?;
-    }
-    Ok(())
+        })
+        .buffer_unordered(STORE_READ_WAVE)
+        .try_collect()
+        .await
 }
 
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(

@@ -707,6 +707,8 @@ struct StaleObjectOnceStore {
 
 #[async_trait]
 impl ObjectStore for StaleObjectOnceStore {
+    loonfs_test_support::delegate_object_store!(self; buffered);
+
     fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
         self.inner.checksum_algorithm()
     }

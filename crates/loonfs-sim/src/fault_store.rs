@@ -383,33 +383,6 @@ where
         result
     }
 
-    /// Traces verified streamed creates without injecting scheduled write
-    /// faults, like streamed writes.
-    async fn put_immutable_verified_stream(
-        &self,
-        key: &str,
-        size_bytes: u64,
-        body: BoxStream<'_, Result<Bytes, ObjectStoreError>>,
-    ) -> Result<ObjectMetadata, ImmutableWriteError> {
-        let op = self.next_object_op(ObjectOperationKind::PutIfAbsent, key);
-        let result = self
-            .inner
-            .put_immutable_verified_stream(key, size_bytes, body)
-            .await;
-        let class = match &result {
-            Ok(_) => {
-                self.remember_successful_write(key);
-                SimEventOutcome::Ok
-            }
-            Err(ImmutableWriteError::Transport { source, .. }) => error_result_class(source),
-            Err(_) => SimEventOutcome::Error {
-                class: "precondition_failed".to_owned(),
-            },
-        };
-        self.push_trace(op, "put_immutable_verified_stream", None, class);
-        result
-    }
-
     async fn assemble(
         &self,
         key: &str,

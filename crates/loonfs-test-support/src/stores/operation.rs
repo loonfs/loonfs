@@ -49,7 +49,6 @@ impl OperationSelector {
                 kind,
                 OperationKind::Put { .. }
                     | OperationKind::PutStreamed { .. }
-                    | OperationKind::PutImmutableStream { .. }
                     | OperationKind::Assemble { .. }
             ),
             Self::PutOverwrite => matches!(
@@ -68,8 +67,7 @@ impl OperationSelector {
                     ..
                 } | OperationKind::PutStreamed {
                     mode: PutMode::CreateIfAbsent,
-                } | OperationKind::PutImmutableStream { .. }
-                    | OperationKind::Assemble { .. }
+                } | OperationKind::Assemble { .. }
             ),
             Self::CompareAndSwap => matches!(
                 kind,
@@ -135,10 +133,6 @@ impl<'a> OperationContext<'a> {
                 mode: (*mode).clone(),
                 bytes: outcome.streamed_bytes(),
             },
-            OperationKind::PutImmutableStream => RecordedOperation::PutImmutableStream {
-                key: self.key.to_owned(),
-                bytes: outcome.streamed_bytes(),
-            },
             OperationKind::Assemble {
                 sources,
                 tail,
@@ -187,8 +181,6 @@ pub enum OperationKind<'a> {
         /// Write mode supplied by the caller.
         mode: &'a PutMode,
     },
-    /// A `put_immutable_verified_stream` call.
-    PutImmutableStream,
     /// A create from source ranges and tail bytes.
     Assemble {
         /// Selected objects and ranges.
@@ -237,8 +229,6 @@ pub enum RecordedOperation {
         mode: PutMode,
         bytes: Option<u64>,
     },
-    /// A streamed create-if-absent.
-    PutImmutableStream { key: String, bytes: Option<u64> },
     /// A create from source ranges and tail bytes.
     Assemble {
         key: String,
@@ -263,7 +253,6 @@ impl RecordedOperation {
             | Self::GetWithMetadata { key, .. }
             | Self::Put { key, .. }
             | Self::PutStreamed { key, .. }
-            | Self::PutImmutableStream { key, .. }
             | Self::Assemble { key, .. }
             | Self::CompareAndSwap { key, .. }
             | Self::Delete { key } => key,
@@ -284,7 +273,6 @@ impl RecordedOperation {
                 self,
                 Self::Put { .. }
                     | Self::PutStreamed { .. }
-                    | Self::PutImmutableStream { .. }
                     | Self::Assemble { .. }
                     | Self::CompareAndSwap { .. }
             ),
@@ -306,8 +294,7 @@ impl RecordedOperation {
                 } | Self::PutStreamed {
                     mode: PutMode::CreateIfAbsent,
                     ..
-                } | Self::PutImmutableStream { .. }
-                    | Self::Assemble { .. }
+                } | Self::Assemble { .. }
             ),
             OperationSelector::CompareAndSwap => matches!(
                 self,

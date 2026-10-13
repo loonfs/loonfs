@@ -115,11 +115,11 @@ impl SharedSegmentBlocks {
             misses: blocks.misses,
             inserts: blocks.inserts,
             evictions: blocks.evictions,
-            filter_skips: self.filter_stats.filter_skips.load(Ordering::SeqCst),
+            filter_skips: self.filter_stats.filter_skips.load(Ordering::Relaxed),
             filter_false_positives: self
                 .filter_stats
                 .filter_false_positives
-                .load(Ordering::SeqCst),
+                .load(Ordering::Relaxed),
             cached_decoded_bytes: blocks.cached_decoded_bytes,
         }
     }
@@ -204,7 +204,7 @@ impl MetadataSegmentCache {
         self.blocks
             .filter_stats
             .filter_skips
-            .fetch_add(1, Ordering::SeqCst);
+            .fetch_add(1, Ordering::Relaxed);
         if let Some(observer) = &self.blocks.observer {
             observer.filter_skip();
         }
@@ -214,7 +214,7 @@ impl MetadataSegmentCache {
         self.blocks
             .filter_stats
             .filter_false_positives
-            .fetch_add(1, Ordering::SeqCst);
+            .fetch_add(1, Ordering::Relaxed);
         if let Some(observer) = &self.blocks.observer {
             observer.filter_false_positive();
         }
@@ -368,13 +368,13 @@ impl SharedHeadState {
         let entries = self.entries.stats();
         let counters = &self.counters;
         HeadStateCacheStats {
-            tail_hits: counters.tail_hits.load(Ordering::SeqCst),
-            tail_misses: counters.tail_misses.load(Ordering::SeqCst),
-            tail_inserts: counters.tail_inserts.load(Ordering::SeqCst),
+            tail_hits: counters.tail_hits.load(Ordering::Relaxed),
+            tail_misses: counters.tail_misses.load(Ordering::Relaxed),
+            tail_inserts: counters.tail_inserts.load(Ordering::Relaxed),
             evictions: entries.evictions,
             evicted_decoded_bytes: entries.evicted_decoded_bytes,
-            rejections: counters.rejections.load(Ordering::SeqCst),
-            rejected_decoded_bytes: counters.rejected_decoded_bytes.load(Ordering::SeqCst),
+            rejections: counters.rejections.load(Ordering::Relaxed),
+            rejected_decoded_bytes: counters.rejected_decoded_bytes.load(Ordering::Relaxed),
             cached_decoded_bytes: entries.cached_decoded_bytes,
         }
     }
@@ -385,10 +385,10 @@ impl SharedHeadState {
         }
         let decoded_bytes = entry.weight();
         if decoded_bytes > self.max_decoded_bytes {
-            self.counters.rejections.fetch_add(1, Ordering::SeqCst);
+            self.counters.rejections.fetch_add(1, Ordering::Relaxed);
             self.counters
                 .rejected_decoded_bytes
-                .fetch_add(decoded_bytes, Ordering::SeqCst);
+                .fetch_add(decoded_bytes, Ordering::Relaxed);
             if let Some(observer) = &self.observer {
                 observer.reject(decoded_bytes);
             }
@@ -471,7 +471,7 @@ impl HeadStateCache {
             Some(_) => &shared.counters.tail_hits,
             None => &shared.counters.tail_misses,
         };
-        counter.fetch_add(1, Ordering::SeqCst);
+        counter.fetch_add(1, Ordering::Relaxed);
         if let Some(observer) = &shared.tail_observer {
             match &tail {
                 Some(_) => observer.hit(),
@@ -487,7 +487,7 @@ impl HeadStateCache {
             (self.scope, HeadStateKey::Tail(key)),
             HeadStateEntry::Tail(tail),
         ) {
-            shared.counters.tail_inserts.fetch_add(1, Ordering::SeqCst);
+            shared.counters.tail_inserts.fetch_add(1, Ordering::Relaxed);
             if let Some(observer) = &shared.tail_observer {
                 observer.insert();
             }

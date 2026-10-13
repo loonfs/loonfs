@@ -146,6 +146,7 @@ impl GcsRequestSigner {
         let temporary = key.to_owned();
         AbortUploadOnDrop::new(
             key,
+            self.io_runtime.clone(),
             async move {
                 signer.delete_temporary(&temporary).await;
                 Ok(())

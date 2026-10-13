@@ -3426,6 +3426,7 @@ mod direct_download {
     #[async_trait::async_trait]
     impl loonfs_objectstore::ObjectStore for Crc32cReadbackStore {
         delegate_object_store!(self => self.inner; get_with_metadata, get, put, delete, list_entries_from_stream, list_child_prefixes);
+        delegate_object_store!(self; buffered);
         fn checksum_algorithm(&self) -> ChecksumAlgorithm {
             ChecksumAlgorithm::Crc32c
         }

@@ -80,7 +80,6 @@ mod read_working_memory;
 mod recency;
 mod storage;
 mod wal;
-mod write_waves;
 
 /// Commit planning, validation, and materialization. Consumed by the `loonfs`
 /// publisher and by this crate's commit-validation integration tests.
@@ -207,7 +206,6 @@ pub use protocol::{
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
     UploadSessionView,
 };
-pub use write_waves::write_segments_in_waves;
 // The streaming read `loonfs`'s namespace handle returns, and the chunk size it
 // reads in.
 pub use storage::content::{FileContentStream, CONTENT_READ_CHUNK_BYTES};

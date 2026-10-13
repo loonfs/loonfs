@@ -368,18 +368,6 @@ pub(crate) fn unsupported_multipart() -> ObjectStoreError {
     ObjectStoreError::Unsupported(CLIENT_MULTIPART_UPLOAD)
 }
 
-/// Drains a byte stream into one buffer, for implementations that cannot
-/// write incrementally.
-pub(crate) async fn collect_stream(mut body: BoxStream<'_, Result<Bytes>>) -> Result<Bytes> {
-    use futures::StreamExt as _;
-
-    let mut buffered = bytes::BytesMut::new();
-    while let Some(chunk) = body.next().await {
-        buffered.extend_from_slice(&chunk?);
-    }
-    Ok(buffered.freeze())
-}
-
 /// Defines the provider-independent durability and consistency boundary LoonFS relies on.
 ///
 /// Implementations must satisfy the
@@ -476,16 +464,8 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// elsewhere a multipart provider may check `mode` immediately before
     /// assembly rather than atomically with it, so this method is only safe
     /// for immutable, uniquely named keys. Failed multipart writes must be aborted.
-    ///
-    /// The default implementation buffers the complete stream before calling
-    /// [`Self::put`]. Providers should override it to provide bounded-memory
-    /// streaming.
-    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
-        let bytes = collect_stream(body).await?;
-        let size_bytes = bytes.len() as u64;
-        self.put(key, bytes, mode).await?;
-        Ok(size_bytes)
-    }
+    /// An in-memory store can implement it with [`crate::buffered::put_streamed`].
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64>;
 
     /// Deletes a key idempotently and makes its absence immediately authoritative.
     ///
@@ -587,41 +567,18 @@ pub trait ObjectStore: Send + Sync + Debug {
         crate::immutable_write::put(self, key, bytes).await
     }
 
-    /// Creates an immutable object while computing its checksum from the stream.
-    /// An error item prevents completion. An occupied key is checked by `head`.
-    /// Providers override this buffered default for bounded memory. Streams do not retry.
-    async fn put_immutable_verified_stream(
-        &self,
-        key: &str,
-        size_bytes: u64,
-        body: BoxStream<'_, Result<Bytes>>,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        let _ = size_bytes;
-        let bytes =
-            collect_stream(body)
-                .await
-                .map_err(|source| crate::ImmutableWriteError::Transport {
-                    object_key: key.to_owned(),
-                    source,
-                })?;
-        let checksum = Checksum::compute(self.checksum_algorithm(), &bytes);
-        let created = self.put(key, bytes, PutMode::CreateIfAbsent).await;
-        crate::immutable_write::decide_created(self, key, &checksum, created).await
-    }
-
     /// Creates `key` from `sources` in order followed by the pieces in `tail`.
     /// `expected` and source checksums use the store's algorithm.
     /// An occupied key succeeds only with an equal stored checksum.
     /// Missing or short sources fail the precondition before completion.
+    /// An in-memory store can implement it with [`crate::buffered::assemble`].
     async fn assemble(
         &self,
         key: &str,
         sources: &[AssemblySource],
         tail: Vec<Bytes>,
         expected: &Checksum,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        crate::assembly::put_buffered(self, key, sources, tail, expected).await
-    }
+    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError>;
 
     /// Replaces `key` only while its current opaque token equals `expected_etag`.
     ///
@@ -738,17 +695,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         bytes: Bytes,
     ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
         self.as_ref().put_immutable_verified(key, bytes).await
-    }
-
-    async fn put_immutable_verified_stream(
-        &self,
-        key: &str,
-        size_bytes: u64,
-        body: BoxStream<'_, Result<Bytes>>,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        self.as_ref()
-            .put_immutable_verified_stream(key, size_bytes, body)
-            .await
     }
 
     async fn assemble(
@@ -868,17 +814,6 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         (*self).put_immutable_verified(key, bytes).await
     }
 
-    async fn put_immutable_verified_stream(
-        &self,
-        key: &str,
-        size_bytes: u64,
-        body: BoxStream<'_, Result<Bytes>>,
-    ) -> std::result::Result<ObjectMetadata, crate::ImmutableWriteError> {
-        (*self)
-            .put_immutable_verified_stream(key, size_bytes, body)
-            .await
-    }
-
     async fn assemble(
         &self,
         key: &str,
@@ -955,6 +890,25 @@ mod tests {
     impl ObjectStore for ListOverrideStore {
         fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
             loonfs_types::ChecksumAlgorithm::Crc64nvme
+        }
+
+        async fn put_streamed(
+            &self,
+            key: &str,
+            body: crate::ByteStream,
+            mode: crate::PutMode,
+        ) -> crate::Result<u64> {
+            crate::buffered::put_streamed(self, key, body, mode).await
+        }
+
+        async fn assemble(
+            &self,
+            key: &str,
+            sources: &[crate::AssemblySource],
+            tail: Vec<bytes::Bytes>,
+            expected: &loonfs_types::Checksum,
+        ) -> std::result::Result<crate::ObjectMetadata, crate::ImmutableWriteError> {
+            crate::buffered::assemble(self, key, sources, tail, expected).await
         }
 
         async fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>> {

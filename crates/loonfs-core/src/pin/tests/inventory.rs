@@ -286,6 +286,8 @@ struct DeleteOnCheckpointLoadStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for DeleteOnCheckpointLoadStore<S> {
+    loonfs_test_support::delegate_object_store!(self; buffered);
+
     fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
         self.inner.checksum_algorithm()
     }
