@@ -247,15 +247,7 @@ LOONFS_AUTH_TOKEN="$LOONFS_AUTH_TOKEN" loonfs --no-input profile create remote s
 
 To check the complete network and TLS path, use the public `https://` URL instead.
 
-Check the object store:
-
-```bash
-loonfs maintenance store probe
-```
-
-`store probe` creates and removes temporary objects. It detects invalid credentials, the wrong bucket or region, and stores that don't support the operations LoonFS requires.
-
-On Kubernetes, the smoke test also checks the rollout, the probes, the object store, and a file upload and download. Install `kubectl`, `curl`, and the `loonfs` CLI, and then run:
+On Kubernetes, the smoke test checks the rollout, the health and readiness probes, and a file upload and download. Install `kubectl`, `curl`, and the `loonfs` CLI, and then run:
 
 ```bash
 export LOONFS_AUTH_TOKEN
@@ -290,7 +282,7 @@ The server has two unauthenticated probes and a metrics route:
 | `GET /readiness` | None | The server is accepting work. It returns 503 during shutdown. |
 | `GET /metrics` | Bearer token | Prometheus metrics for the server. |
 
-Health and readiness don't contact the object store. To check storage access, use `loonfs maintenance store probe`.
+Health and readiness don't contact the object store.
 
 When Prometheus scrapes `/metrics`, it must send the API token as `Authorization: Bearer <LOONFS_AUTH_TOKEN>`.
 

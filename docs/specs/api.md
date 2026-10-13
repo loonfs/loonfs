@@ -625,7 +625,6 @@ The blocking Rust client automatically retries operations labeled `idempotent` o
 - checkpoint create
 - maintenance
 - grep index collection
-- store probe
 
 The client also makes one attempt for a presigned direct PUT.
 
@@ -710,7 +709,7 @@ Every operation includes an `x-loonfs-retry` value for generated SDKs. The value
 - `replayable`: repeating the request returns the original result. A repeated commit is replayed by its `commit_id`, and a repeated upload completion returns the first completion's result.
 - `not_idempotent`: a generated client makes one automatic attempt and leaves recovery to the application.
 
-The following table lists every v0 operation, with its retry class and representative HTTP shape.
+The following table lists v0 operations, with their retry classes and representative HTTP routes.
 
 | Purpose | Operation ID | Retry class | Representative HTTP shape |
 | --- | --- | --- | --- |
@@ -757,7 +756,6 @@ The following table lists every v0 operation, with its retry class and represent
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable` (idempotent) |
 | Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/disable` (idempotent) |
-| Test object storage | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe` with body `{}` |
 | Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#614-get-metrics).) |
 
 ### Maintenance runs
@@ -966,28 +964,6 @@ When an embedded read sets `snapshot_id` in its options, the read opens a read v
 An embedded caller can also open a read view of a checkpoint. A directory cursor from a read view of a checkpoint or snapshot identifies that pin. A read view of the same checkpoint or snapshot can resume the cursor, and a live listing or any other read view rejects it with `invalid_request`.
 
 A snapshot read requires a live snapshot. A read of a missing snapshot, including one that was deleted, returns `snapshot_not_found`. A read of an expired snapshot returns `snapshot_gone` while its pin still exists. In neither case does the read fall back to the current namespace state.
-
-### Store contract probe
-
-The store probe tests whether the configured object store meets the provider contract that the storage format depends on (see [Object-storage requirements](format.md#3-object-storage-requirements)), and it reports the result of each check. The contract covers create-if-absent, compare-and-swap, read-after-write visibility, prefix listing, and ranged reads. A probe writes and deletes objects, so LoonFS doesn't run one at startup or on a schedule. A probe runs only when an operator requests one.
-
-Every object a probe run writes is stored under `probe-runs/{run_id}/`. That prefix isn't a durable object family, so garbage collection never lists it, and no namespace state can be reached from it. The run's last check deletes those objects and confirms that the prefix is empty, so a probe that completes leaves nothing behind. A probe that doesn't finish leaves orphaned objects under that prefix, which nothing reads.
-
-The response includes the `run_id` that the server generated, and one entry for each check, in the order the checks ran. Each entry identifies the check and its `outcome`:
-
-| `outcome` | Means |
-| --- | --- |
-| `passed` | The store behaved as the contract requires. |
-| `unsupported` | The store reports that it can't perform this operation at all. Only checks of the optional capabilities report this outcome, and a deployment that needs neither optional capability is unaffected. |
-| `failed` | The store did something the contract forbids, or the operation failed outright. The entry's `message` says what was expected and what happened instead. |
-
-A failed check is reported in the response body, not as an error. A probe that runs to completion returns 200, whatever it found. The server returns the error envelope only for an unauthorized request or a malformed body. A failed check doesn't end the run, so one probe reports the result of every check, not just the first problem it found.
-
-A probe's result doesn't determine whether a deployment is trusted to serve presigned direct uploads. That trust comes from the endpoint allowlist behind the `uploads.direct_put` capability.
-
-Why does a probe with failed checks return 200? The operator asked whether the store meets the contract, and the failed checks are the answer to that question (the store is wrong), not a failure of the request.
-
-Why doesn't a passing probe make a deployment trusted for direct uploads? A probe exercises the server's own request path, and never a presigned capability that's issued to a client.
 
 ### Deleting, retaining, and reclaiming
 
