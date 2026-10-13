@@ -82,7 +82,7 @@ async fn a_capability_failure_is_not_reported_as_no_direct_download() {
 
     let result = client.offers_direct_download().await;
 
-    assert_matches!(result, Err(ClientError::Json(_)), "{result:?}");
+    assert_matches!(result, Err(ClientError::Json(_)));
     assert_eq!(transport.attempts(), 1);
 }
 

@@ -1,4 +1,8 @@
 //! Checks operation spans for the writer, reader, and maintenance handles.
+//!
+//! This is a separate binary because the tests install a subscriber with
+//! `set_default`, and tracing caches per-callsite interest for the whole
+//! process.
 
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 

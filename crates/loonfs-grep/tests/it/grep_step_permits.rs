@@ -195,14 +195,10 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
     .expect("reorganize steps");
 
     for outcome in backfills.iter().chain(&increments) {
-        assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
+        assert_matches!(outcome, GrepBuildOutcome::Published { .. });
     }
     for outcome in &reorganizations {
-        assert_matches!(
-            outcome,
-            GrepReorganizeOutcome::UnitPublished { .. },
-            "{outcome:?}"
-        );
+        assert_matches!(outcome, GrepReorganizeOutcome::UnitPublished { .. });
     }
     assert_eq!(
         watch.peak_namespaces(),
@@ -247,12 +243,12 @@ async fn workers_over_two_stores_share_one_step_permit() {
 
     blocking.release();
     let outcome = holding_step.await.expect("holding step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
     let outcome = bounded(Duration::from_secs(10), waiting_step)
         .await
         .expect("the waiting step takes the permit the first step returned")
         .expect("waiting step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
     assert_eq!(budget.stats(), GrepStepBudgetStats::default());
 }
 
@@ -288,7 +284,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
         .await
         .expect("an up-to-date step does not wait for the held permit")
         .expect("build step");
-        assert_matches!(outcome, GrepBuildOutcome::UpToDate { .. }, "{outcome:?}");
+        assert_matches!(outcome, GrepBuildOutcome::UpToDate { .. });
     }
     assert_eq!(
         budget.stats(),
@@ -300,7 +296,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
 
     blocking.release();
     let outcome = busy_step.await.expect("busy step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
 }
 
 #[tokio::test]
@@ -336,7 +332,7 @@ async fn a_dropped_step_returns_its_permit() {
         .await
         .expect("both dropped steps returned the permit")
         .expect("build step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
 }
 
 #[tokio::test]
@@ -373,6 +369,6 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
 
     blocking.release();
     let outcome = holding_step.await.expect("holding step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
     assert_eq!(budget.stats(), GrepStepBudgetStats::default());
 }

@@ -1774,8 +1774,9 @@ mod tests {
             .collect();
         assert_matches!(
             heads.as_slice(),
-            [RecordedOperation::Head { key }]
-                if key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)),
+            [RecordedOperation::Head { key }] if key.starts_with(
+                &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
+            ),
             "{operations:?}"
         );
     }
@@ -1998,11 +1999,16 @@ mod tests {
             [
                 RecordedOperation::Head { key: probed },
                 RecordedOperation::Head { key: successor },
-                RecordedOperation::Put { key: written, mode: loonfs_objectstore::PutMode::CreateIfAbsent, .. },
+                RecordedOperation::Put {
+                    key: written,
+                    mode: loonfs_objectstore::PutMode::CreateIfAbsent,
+                    ..
+                },
             ] if probed == written
                 && probed.starts_with(&wal_prefix(&namespace_id))
-                && successor.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)),
-            "{operations:?}"
+                && successor.starts_with(
+                    &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
+                )
         );
     }
 

@@ -40,8 +40,13 @@ fn path(value: &str) -> AbsolutePath {
 fn assert_invalid_commit_request(error: &CoreError, label: &str) {
     assert_matches!(
         error,
-        CoreError::FailedOperation { operation_index: 0, error: source }
-            if matches!(source.as_ref(), CoreError::InvalidCommitRequest(_) | CoreError::InvalidCommitField { .. }),
+        CoreError::FailedOperation {
+            operation_index: 0,
+            error: source,
+        } if matches!(
+            source.as_ref(),
+            CoreError::InvalidCommitRequest(_) | CoreError::InvalidCommitField { .. }
+        ),
         "for `{label}`: {error:?}"
     );
     assert_eq!(error.code(), ErrorCode::InvalidRequest, "for `{label}`");

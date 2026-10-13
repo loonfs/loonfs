@@ -576,8 +576,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
         CoreError::Store {
             kind: loonfs_objectstore::ObjectStoreErrorKind::RetryableTransport,
             ..
-        },
-        "{error:?}"
+        }
     );
     assert_eq!(store.counts().puts, 1);
     assert_eq!(content_assemblies(&store), vec![key]);

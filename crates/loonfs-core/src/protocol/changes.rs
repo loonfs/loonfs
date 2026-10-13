@@ -359,7 +359,7 @@ mod tests {
             .list_changes_after(ChangeSeq(1), limit, &context)
             .await
             .expect_err("an unpublished sequence cannot be a valid cursor");
-        assert_matches!(error, CoreError::InvalidCursor(_), "{error}");
+        assert_matches!(error, CoreError::InvalidCursor(_));
     }
 
     #[tokio::test]

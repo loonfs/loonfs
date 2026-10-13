@@ -40,6 +40,9 @@ mod tests {
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
     use loonfs_client::ClientError;
+    use loonfs_test_support::provider_detail::{
+        assert_provider_markers_absent, POISON_PROVIDER_DETAIL,
+    };
     use loonfs_types::api::v0::{
         StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeResponse,
     };
@@ -47,28 +50,6 @@ mod tests {
         AbsolutePath, AttributesProjection, ChangeSeq, DisplayName, InodeId, NamespaceId,
         PathEntry, PathEntryKind,
     };
-
-    const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
-        arn:aws:iam::123456789012:role/private-role private-bucket \
-        namespaces/customer-a/hint.json x-amz-request-id=provider-request \
-        x-amz-id-2=provider-host-id AKIAEXAMPLE";
-
-    fn assert_provider_markers_absent(rendered: &str) {
-        for marker in [
-            "<Error>AccessDenied</Error>",
-            "arn:aws:iam::123456789012:role/private-role",
-            "private-bucket",
-            "namespaces/customer-a/hint.json",
-            "x-amz-request-id=provider-request",
-            "x-amz-id-2=provider-host-id",
-            "AKIAEXAMPLE",
-        ] {
-            assert!(
-                !rendered.contains(marker),
-                "rendered output leaked {marker}: {rendered}"
-            );
-        }
-    }
 
     fn poison_permission_error() -> loonfs::Error {
         loonfs::Error::Core(loonfs::CoreError::Store {
@@ -125,7 +106,7 @@ mod tests {
         let embedded_human = human_error(&embedded_failure.error, embedded_failure.mode.as_deref());
         let embedded_json = json_error(&embedded_failure).expect("embedded JSON error renders");
         for rendered in [&embedded_human, &embedded_json] {
-            assert_provider_markers_absent(rendered);
+            assert_provider_markers_absent("rendered output", rendered);
             assert!(rendered.contains(&public_message), "{rendered}");
         }
 
@@ -151,7 +132,7 @@ mod tests {
         let remote_human = human_error(&remote_failure.error, remote_failure.mode.as_deref());
         let remote_json = json_error(&remote_failure).expect("remote JSON error renders");
         for rendered in [&remote_human, &remote_json] {
-            assert_provider_markers_absent(rendered);
+            assert_provider_markers_absent("rendered output", rendered);
             assert!(rendered.contains(&public_message), "{rendered}");
             assert!(rendered.contains("req_provider_hygiene"), "{rendered}");
         }
@@ -206,7 +187,7 @@ mod tests {
         let doctor_human = human_success(&doctor);
         let doctor_json = json_success(&doctor).expect("doctor JSON renders");
         for rendered in [&doctor_human, &doctor_json] {
-            assert_provider_markers_absent(rendered);
+            assert_provider_markers_absent("rendered output", rendered);
             assert!(rendered.contains(&public_message), "{rendered}");
         }
         assert!(

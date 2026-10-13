@@ -327,7 +327,8 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         assert_matches!(
             operations.last(),
             Some(RecordedOperation::Assemble { sources, bytes, .. })
-            if *bytes == 10 - loonfs_types::usize_from_u64(size) && sources.len() == usize::from(size == 10)
+                if *bytes == 10 - loonfs_types::usize_from_u64(size)
+                    && sources.len() == usize::from(size == 10)
         );
     }
 }

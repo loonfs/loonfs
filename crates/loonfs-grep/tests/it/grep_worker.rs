@@ -1603,7 +1603,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
         .expect_err("mismatch");
-    assert_matches!(error, GrepError::IndexCorrupt { .. }, "{error:?}");
+    assert_matches!(error, GrepError::IndexCorrupt { .. });
     assert_eq!(recording.counts().puts, 0);
     assert_eq!(recording.counts().deletes, 0);
     writer.shutdown().await.expect("shutdown");
@@ -2376,7 +2376,11 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
     ]) {
         assert_matches!(
             operation,
-            RecordedOperation::Put { key, mode: PutMode::CreateIfAbsent, .. } if key == &expected_key
+            RecordedOperation::Put {
+                key,
+                mode: PutMode::CreateIfAbsent,
+                ..
+            } if key == &expected_key
         );
     }
     host.worker

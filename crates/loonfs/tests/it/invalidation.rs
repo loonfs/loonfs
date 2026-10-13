@@ -476,9 +476,16 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     let operations = recording.take();
     assert_matches!(
         operations.as_slice(),
-        [RecordedOperation::Head { key: manifest_key }, RecordedOperation::Get { key: wal_key, range: None, result_bytes: 0 }]
-            if manifest_key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id))
-                && wal_key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace_id))
+        [
+            RecordedOperation::Head { key: manifest_key },
+            RecordedOperation::Get {
+                key: wal_key,
+                range: None,
+                result_bytes: 0,
+            },
+        ] if manifest_key.starts_with(
+            &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
+        ) && wal_key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace_id))
     );
 }
 

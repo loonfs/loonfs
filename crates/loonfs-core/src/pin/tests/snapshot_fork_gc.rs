@@ -407,7 +407,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
             store.release();
         }
     );
-    assert_matches!(fork, Err(CoreError::SnapshotGone { .. }), "{fork:?}");
+    assert_matches!(fork, Err(CoreError::SnapshotGone { .. }));
     assert_eq!(
         store.inner().counts().create_if_absent_puts,
         0,

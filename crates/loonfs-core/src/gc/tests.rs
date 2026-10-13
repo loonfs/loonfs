@@ -3945,11 +3945,7 @@ async fn session_content_ids_are_charged_as_their_records_are_read() {
     .await
     .expect_err("the first session's content id does not fit the budget");
 
-    assert_matches!(
-        error,
-        CoreError::LiveSetExceedsReadMemory { limit: 1, .. },
-        "{error:?}"
-    );
+    assert_matches!(error, CoreError::LiveSetExceedsReadMemory { limit: 1, .. });
     let prefix = loonfs_objectstore::keys::upload_session_prefix(&namespace_id);
     let session_reads = store
         .snapshot()

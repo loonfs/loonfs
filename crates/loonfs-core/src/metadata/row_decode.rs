@@ -122,7 +122,7 @@ mod tests {
     fn wrong_kind_rows_are_namespace_corruption() {
         let error = direntry_binding_from_manifest_row(foreign())
             .expect_err("foreign row must be rejected");
-        assert_matches!(&error, CoreError::NamespaceCorrupt(_), "{error:?}");
+        assert_matches!(&error, CoreError::NamespaceCorrupt(_));
         let message = error.to_string();
         assert!(message.contains("`direntry_binding`"), "{message}");
         assert!(message.contains("inode-00000000000000000007"), "{message}");

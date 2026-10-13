@@ -2198,6 +2198,7 @@ dependencies = [
  "icu_casemap",
  "icu_normalizer",
  "libc",
+ "loonfs-test-support",
  "serde",
  "serde_bytes",
  "serde_json",

@@ -259,7 +259,10 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     );
     assert_matches!(
         publish(&mut engine, &store, &context, replace(&namespace_id, b"before")).await,
-        Err(CoreError::CommitIdReuseConflict { committed_seq: Some(seq), .. }) if seq == reused.committed_seq
+        Err(CoreError::CommitIdReuseConflict {
+            committed_seq: Some(seq),
+            ..
+        }) if seq == reused.committed_seq
     );
     assert_no_writes(&store);
 

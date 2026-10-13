@@ -710,21 +710,39 @@ mod tests {
         );
     }
 
+    fn assert_cursor_round_trips<C: PageCursor + PartialEq + std::fmt::Debug>(cursor: C) {
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        assert_eq!(decode_cursor::<C>(&encoded).expect("decode cursor"), cursor);
+    }
+
     #[test]
-    fn directory_cursor_round_trips() {
-        let cursor = DirectoryPageCursor {
+    fn every_cursor_kind_round_trips() {
+        assert_cursor_round_trips(DirectoryPageCursor {
             head_seq: ChangeSeq(11),
             pin_id: Some(
                 crate::PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id"),
             ),
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
-        };
-
-        let encoded = encode_cursor(&cursor).expect("encode cursor");
-        let decoded: DirectoryPageCursor = decode_cursor(&encoded).expect("decode cursor");
-
-        assert_eq!(decoded, cursor);
+        });
+        assert_cursor_round_trips(FileRevisionsPageCursor {
+            head_seq: ChangeSeq(11),
+            inode_id: InodeId(7),
+            last_revision_no: RevisionNo(5),
+            last_committed_seq: ChangeSeq(10),
+            last_revision_delta_index: 3,
+        });
+        assert_cursor_round_trips(TrashPageCursor {
+            head_seq: ChangeSeq(11),
+            last_deletion_seq: ChangeSeq(10),
+            last_root_inode_id: InodeId(7),
+        });
+        assert_cursor_round_trips(GrepPageCursor {
+            head_seq: ChangeSeq(11),
+            last_inode_id: InodeId(7),
+            last_byte_offset: 13,
+            fingerprint: 17,
+        });
     }
 
     #[test]
@@ -745,51 +763,6 @@ mod tests {
             decode_cursor::<DirectoryPageCursor>(&encoded).expect("decode cursor"),
             cursor
         );
-    }
-
-    #[test]
-    fn file_revisions_cursor_round_trips() {
-        let cursor = FileRevisionsPageCursor {
-            head_seq: ChangeSeq(11),
-            inode_id: InodeId(7),
-            last_revision_no: RevisionNo(5),
-            last_committed_seq: ChangeSeq(10),
-            last_revision_delta_index: 3,
-        };
-
-        let encoded = encode_cursor(&cursor).expect("encode cursor");
-        let decoded: FileRevisionsPageCursor = decode_cursor(&encoded).expect("decode cursor");
-
-        assert_eq!(decoded, cursor);
-    }
-
-    #[test]
-    fn trash_cursor_round_trips() {
-        let cursor = TrashPageCursor {
-            head_seq: ChangeSeq(11),
-            last_deletion_seq: ChangeSeq(10),
-            last_root_inode_id: InodeId(7),
-        };
-
-        let encoded = encode_cursor(&cursor).expect("encode cursor");
-        let decoded: TrashPageCursor = decode_cursor(&encoded).expect("decode cursor");
-
-        assert_eq!(decoded, cursor);
-    }
-
-    #[test]
-    fn grep_cursor_round_trips() {
-        let cursor = GrepPageCursor {
-            head_seq: ChangeSeq(11),
-            last_inode_id: InodeId(7),
-            last_byte_offset: 13,
-            fingerprint: 17,
-        };
-
-        let encoded = encode_cursor(&cursor).expect("encode cursor");
-        let decoded: GrepPageCursor = decode_cursor(&encoded).expect("decode cursor");
-
-        assert_eq!(decoded, cursor);
     }
 
     #[test]

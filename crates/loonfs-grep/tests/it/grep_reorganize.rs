@@ -197,7 +197,11 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         .expect("reorganize");
     assert_matches!(
         outcome,
-        GrepReorganizeOutcome::UnitPublished { merged_rows, completed: true, .. } if merged_rows == built.row_count * 8
+        GrepReorganizeOutcome::UnitPublished {
+            merged_rows,
+            completed: true,
+            ..
+        } if merged_rows == built.row_count * 8
     );
     assert_eq!(host.block_cache.stats(), cache_before);
     let reads = watched.reads();

@@ -147,7 +147,8 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
     .expect_err("gap in discovery window");
     assert_matches!(
         error,
-        crate::control_object::ControlObjectLoadError::Codec { object_key, .. } if object_key == missing
+        crate::control_object::ControlObjectLoadError::Codec { object_key, .. }
+            if object_key == missing
     );
 }
 
@@ -849,8 +850,7 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         .expect_err("a same-epoch chain break is corruption, not a stale head");
     assert_matches!(
         error,
-        crate::control_object::ControlObjectLoadError::Codec { .. },
-        "{error}"
+        crate::control_object::ControlObjectLoadError::Codec { .. }
     );
 }
 

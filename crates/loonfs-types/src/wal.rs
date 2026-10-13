@@ -880,7 +880,8 @@ mod tests {
         );
         assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(encoded.as_bytes(), document.len() - 1),
-            Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes }) if max_bytes == document.len() - 1
+            Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes })
+                if max_bytes == document.len() - 1
         );
         let invalid = zstd::stream::encode_all(&[0xff; 64][..], 0).expect("compress");
         assert_matches!(

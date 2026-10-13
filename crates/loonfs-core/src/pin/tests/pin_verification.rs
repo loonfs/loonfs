@@ -300,7 +300,7 @@ async fn a_pin_write_that_lands_and_fails_its_read_back_leaves_no_pin() {
     let error = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect_err("an unconfirmed pin write fails creation");
-    assert_matches!(error, CoreError::Store { .. }, "{error:?}");
+    assert_matches!(error, CoreError::Store { .. });
     assert_eq!(store.attempts(), 3, "put, read-back, and cleanup delete");
     assert!(store
         .list_prefix(&pin_prefix(&namespace_id))

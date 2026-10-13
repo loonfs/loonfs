@@ -199,16 +199,7 @@ async fn current_path<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{ensure_stat_batch_within_cap, MAX_CURRENT_FILES_PER_STAT};
-    use loonfs_types::{ErrorCode, PaginationPolicy};
-
-    #[test]
-    fn the_batch_cap_is_the_pagination_maximum() {
-        assert_eq!(
-            MAX_CURRENT_FILES_PER_STAT,
-            PaginationPolicy::default().max_limit().get() as usize,
-            "the batch cap is the page limit, not a second number"
-        );
-    }
+    use loonfs_types::ErrorCode;
 
     #[test]
     fn a_batch_at_the_cap_is_accepted_and_one_past_it_names_the_cap() {

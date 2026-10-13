@@ -6,13 +6,13 @@
     reason = "test helpers preserve the client's structured error type"
 )]
 
-use loonfs_client::{Client, ClientConfig, ListOptions, NamespacePath};
+use loonfs_client::{Client, ClientConfig, ClientError, ListOptions, NamespacePath};
 use loonfs_server::{
     app, serve_with_shutdown, AppConfig, GrepConfig, JobMode, MetadataCacheConfig, ServeError,
     ServerConfig, StoreConfig, TlsServerConfig,
 };
 use loonfs_test_support::http::raw_agent;
-use loonfs_types::{ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
+use loonfs_types::{ErrorCode, ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::net::SocketAddr;
@@ -93,6 +93,26 @@ pub(crate) fn series(scrape: &BTreeMap<String, f64>, name: &str) -> f64 {
         .unwrap_or_else(|| panic!("no series `{name}` in the scrape"))
 }
 
+/// Asserts that `result` failed with an API error of `expected_status` and
+/// `code`.
+pub(crate) fn assert_api_code<T: std::fmt::Debug>(
+    result: Result<T, ClientError>,
+    expected_status: u16,
+    code: ErrorCode,
+) {
+    match result.expect_err("request should fail") {
+        ClientError::Api {
+            status,
+            code: actual,
+            ..
+        } => {
+            assert_eq!(status, expected_status);
+            assert_eq!(actual, code.as_str());
+        }
+        other => panic!("expected API error, got {other:?}"),
+    }
+}
+
 pub(crate) struct TestServer {
     pub(crate) namespaces: std::sync::Arc<loonfs_http::Namespaces>,
     pub(crate) client: Client,
@@ -102,6 +122,10 @@ pub(crate) struct TestServer {
     pub(crate) server: tokio::task::JoinHandle<()>,
 }
 
+// The server runs as a task on the test's own runtime, and the tests call it
+// through the blocking `ureq` agent as well as the async client. A blocking
+// call holds its worker thread until the response arrives, so the tests run
+// with `flavor = "multi_thread"` to give the server a second worker.
 pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
     let (store_root, store_key_prefix) = match &config.store {
         StoreConfig::LocalFs { root, key_prefix } => {

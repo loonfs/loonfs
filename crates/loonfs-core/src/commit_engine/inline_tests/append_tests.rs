@@ -891,9 +891,12 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
     .expect_err("missing base bytes");
     assert_matches!(
         error,
-        CoreError::FailedOperation { error: source, .. }
-        if matches!(*source, CoreError::NamespaceCorrupt(ref message)
-            if message.contains(value.content_ref().content_id.as_str()) && message.contains("offset 3"))
+        CoreError::FailedOperation { error: source, .. } if matches!(
+            *source,
+            CoreError::NamespaceCorrupt(ref message)
+                if message.contains(value.content_ref().content_id.as_str())
+                    && message.contains("offset 3")
+        )
     );
     assert_no_writes(&store);
 }

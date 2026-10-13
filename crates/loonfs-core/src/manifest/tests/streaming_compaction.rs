@@ -3213,7 +3213,8 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     .expect("publish");
     assert_matches!(
         outcome,
-        MetadataCompactionJobOutcome::Published { manifest_no, .. } if manifest_no == before.successor().expect("next number")
+        MetadataCompactionJobOutcome::Published { manifest_no, .. }
+            if manifest_no == before.successor().expect("next number")
     );
     let puts = store
         .take()

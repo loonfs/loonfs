@@ -213,7 +213,8 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
     store.delete(&missing).await.expect("delete span");
     assert_matches!(
         location.read_bytes(&store, &reference).await,
-        Err(DurableContentValidationError::MissingContentObject { object_key }) if object_key == missing
+        Err(DurableContentValidationError::MissingContentObject { object_key })
+            if object_key == missing
     );
 }
 

@@ -187,7 +187,7 @@ fn the_merge_refuses_to_compact_repeated_revision_numbers() {
     )
     .expect_err("repeated revision numbers are corruption");
 
-    assert_matches!(&error, CoreError::NamespaceCorrupt(_), "{error:?}");
+    assert_matches!(&error, CoreError::NamespaceCorrupt(_));
     assert!(error.to_string().contains("two attributes rows"), "{error}");
 }
 

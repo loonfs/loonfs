@@ -883,7 +883,7 @@ async fn a_capability_failure_does_not_downgrade_a_measured_upload_to_the_proxy(
         .await
         .expect_err("capability discovery failure must remain visible");
 
-    assert_matches!(error, ClientError::Json(_), "{error:?}");
+    assert_matches!(error, ClientError::Json(_));
     assert_eq!(transport.attempts(), 1);
 }
 
@@ -1269,7 +1269,11 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
         assert!(request.content_tokens.is_empty());
         assert_matches!(
             &request.operations[0],
-            FilesystemOperation::PutFile { content_ref: None, inline_content: Some(content), .. } if content == bytes
+            FilesystemOperation::PutFile {
+                content_ref: None,
+                inline_content: Some(content),
+                ..
+            } if content == bytes
         );
         let saved = serde_json::to_vec(&request).expect("encode journal");
         let recovered: CommitRequest = serde_json::from_slice(&saved).expect("decode journal");

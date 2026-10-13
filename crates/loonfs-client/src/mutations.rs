@@ -835,7 +835,7 @@ mod tests {
             .get_namespace(&namespace_id)
             .await
             .expect_err("dropped connections must fail");
-        assert_matches!(error, ClientError::Http(_), "{error:?}");
+        assert_matches!(error, ClientError::Http(_));
         assert_eq!(transport.attempts(), max_attempts);
 
         let transport = crate::scripted_transport::failures(1);
@@ -1067,7 +1067,7 @@ mod tests {
 
         let result = client.upload_via_presigned_url(&access, b"direct").await;
 
-        assert_matches!(result, Err(ClientError::Http(_)), "{result:?}");
+        assert_matches!(result, Err(ClientError::Http(_)));
         assert_eq!(transport.attempts(), 1);
     }
 
@@ -1243,7 +1243,10 @@ auth_token = "   "
 
         assert_matches!(
             error,
-            ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid { field, .. }) if field == "auth_token",
+            ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
+                field,
+                ..
+            }) if field == "auth_token",
             "expected config validation error, got {error:?}"
         );
     }

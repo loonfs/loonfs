@@ -307,7 +307,10 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     assert_eq!(forward.len(), 1);
     assert_matches!(
         &forward[0],
-        MetadataRow::DirentryBinding(binding) if binding.is_bound() && binding.name_key.as_str() == "b" && binding.committed_seq == moved.read_state.seq && binding.delta_index == 5
+        MetadataRow::DirentryBinding(binding) if binding.is_bound()
+            && binding.name_key.as_str() == "b"
+            && binding.committed_seq == moved.read_state.seq
+            && binding.delta_index == 5
     );
 
     write_file_bytes(&store, &namespace_id, "/a", b"replacement", &context, None)
@@ -423,7 +426,9 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
     assert_eq!(forward.len(), 1, "{forward:?}");
     assert_matches!(
         &forward[0],
-        MetadataRow::DirentryBinding(binding) if binding.is_bound() && binding.name_key.as_str() == "c" && binding.child_inode_id == moved
+        MetadataRow::DirentryBinding(binding) if binding.is_bound()
+            && binding.name_key.as_str() == "c"
+            && binding.child_inode_id == moved
     );
     let compacted = load_current_metadata_view(&store, &namespace_id)
         .await
@@ -543,8 +548,9 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         .collect::<Vec<_>>();
     assert_matches!(
         child_rows.as_slice(),
-        [MetadataRow::DirentryBinding(binding)] if binding.is_bound() && binding.parent_inode_id == last_parent && binding.name_key.as_str() == "report",
-        "{child_rows:?}"
+        [MetadataRow::DirentryBinding(binding)] if binding.is_bound()
+            && binding.parent_inode_id == last_parent
+            && binding.name_key.as_str() == "report"
     );
     let compacted = load_current_metadata_view(&store, &namespace_id)
         .await

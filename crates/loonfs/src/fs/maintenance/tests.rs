@@ -657,8 +657,7 @@ async fn explicit_compaction_merges_twenty_deltas_and_reads_the_large_base_once(
                         rows_read: 340,
                         rows_written: 340,
                         ..
-                    },
-                    "{compaction:?}"
+                    }
                 );
             } else {
                 assert_eq!(compaction, MetadataCompactionOutcome::BoundedMergePublished);

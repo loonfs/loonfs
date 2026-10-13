@@ -1071,7 +1071,7 @@ mod direct_multipart {
         .await
         .expect_err("a multipart completion needs at least one part");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
-        assert_matches!(error, CoreError::InvalidUploadContent(_), "{error:?}");
+        assert_matches!(error, CoreError::InvalidUploadContent(_));
     }
 
     #[tokio::test]

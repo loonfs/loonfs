@@ -128,6 +128,10 @@ mod tests {
 
     #[test]
     fn unsupported_trace_mode_is_rejected() {
-        assert_matches!(trace_config_from_env(Some("text".to_owned()), None).expect_err("an unknown trace mode should be rejected"), TraceInitError::UnsupportedMode(mode) if mode == "text");
+        assert_matches!(
+            trace_config_from_env(Some("text".to_owned()), None)
+                .expect_err("an unknown trace mode should be rejected"),
+            TraceInitError::UnsupportedMode(mode) if mode == "text"
+        );
     }
 }

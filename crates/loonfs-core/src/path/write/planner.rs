@@ -934,7 +934,11 @@ mod tests {
                 },
                 WalCommitDelta {
                     semantic_operation_index: 1,
-                    delta: WalDelta::AppendFileRevision { delta_index: 4, inode_id: InodeId(3), .. },
+                    delta: WalDelta::AppendFileRevision {
+                        delta_index: 4,
+                        inode_id: InodeId(3),
+                        ..
+                    },
                 },
             ] if display_name.as_str() == "a.txt"
         );

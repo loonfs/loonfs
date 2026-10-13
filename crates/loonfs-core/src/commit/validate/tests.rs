@@ -328,8 +328,7 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondi
             expected: AttributesRevisionNo(1),
             actual: Some(AttributesRevisionNo(2)),
             precondition_index: None,
-        },
-        "{error:?}"
+        }
     );
     assert_eq!(
         CoreError::from(error).code(),
@@ -367,8 +366,7 @@ async fn a_first_attribute_write_states_revision_zero() {
             expected: AttributesRevisionNo(1),
             actual: Some(AttributesRevisionNo(0)),
             ..
-        },
-        "{error:?}"
+        }
     );
 }
 
@@ -390,8 +388,7 @@ async fn an_attribute_update_of_a_missing_inode_is_rejected() {
         CommitValidationError::InodeMissing {
             operand: CommitOperand::AttributeTarget,
             inode_id: InodeId(9)
-        },
-        "{error:?}"
+        }
     );
 }
 
@@ -498,7 +495,7 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
         let error = validate_planned_ops(&[op], 4_200, &context)
             .await
             .expect_err("inode 3 already has a parent");
-        assert_matches!(error, CoreError::NamespaceCorrupt(_), "{error:?}");
+        assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert_eq!(
             error.to_string(),
             "namespace corrupt: a commit binds inode `3`, which is already bound as \

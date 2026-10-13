@@ -67,7 +67,7 @@ fn commit_rows_reject_inline_content_and_decode_without_it() {
         loonfs_types::format::manifest::MetadataRow::Commit(invalid),
     )
     .expect_err("commit rows must not carry inline content");
-    assert_matches!(error, CoreError::NamespaceCorrupt(_), "{error:?}");
+    assert_matches!(error, CoreError::NamespaceCorrupt(_));
     assert!(error.to_string().contains("sequence `9`"), "{error}");
 }
 

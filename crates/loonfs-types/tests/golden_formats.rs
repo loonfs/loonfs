@@ -51,49 +51,34 @@ use std::path::{Path, PathBuf};
 // Golden helpers
 // ---------------------------------------------------------------------------
 
+fn golden_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
+}
+
 fn golden_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(name)
+    golden_dir().join(name)
 }
 
 fn actor() -> ActorId {
     ActorId::parse("loonfs-golden").expect("valid actor id")
 }
 
-// Regenerate with `UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1`:
-// without the single thread, tests that read a fixture race the tests rewriting
-// it and fail on a half-written file.
+// Without the single thread, tests that read a fixture race the tests
+// rewriting it and fail on a half-written file.
+const REGENERATE_GOLDEN: &str = "UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1";
+
 fn assert_matches_golden(name: &str, actual: &[u8]) {
-    let path = golden_path(name);
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::create_dir_all(path.parent().expect("fixture parent dir"))
-            .expect("create golden dir");
-        std::fs::write(&path, actual).expect("write golden fixture");
-    }
-    let expected = std::fs::read(&path).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1` to generate it")
-    });
-    if expected != actual {
-        let offset = expected
-            .iter()
-            .zip(actual.iter())
-            .position(|(left, right)| left != right)
-            .unwrap_or_else(|| expected.len().min(actual.len()));
-        panic!(
-            "golden fixture `{name}` diverged at byte {offset} \
-             (expected {} bytes, actual {} bytes). The durable encoding changed: \
-             while pre-release, regenerate the version-1 fixture with UPDATE_GOLDEN=1 \
-             if the change is intentional.",
-            expected.len(),
-            actual.len(),
-        );
-    }
+    loonfs_test_support::golden::assert_matches_golden(
+        &golden_dir(),
+        REGENERATE_GOLDEN,
+        name,
+        actual,
+    );
 }
 
 fn read_golden(name: &str) -> Vec<u8> {
     std::fs::read(golden_path(name)).unwrap_or_else(|err| {
-        panic!("read golden fixture `{name}` ({err}); run `UPDATE_GOLDEN=1 cargo test -p loonfs-types -- --test-threads=1` to generate it")
+        panic!("read golden fixture `{name}` ({err}); run `{REGENERATE_GOLDEN}` to generate it")
     })
 }
 
@@ -1726,7 +1711,8 @@ fn immutable_envelopes_reject_unknown_fields() {
     manifest.extend_from_slice(br#", "field_from_the_future": true}"#);
     assert_matches!(
         decode_namespace_manifest_json(&manifest),
-        Err(EnvelopeCodecError::EnvelopeDecode(message)) if message.contains("field_from_the_future")
+        Err(EnvelopeCodecError::EnvelopeDecode(message))
+            if message.contains("field_from_the_future")
     );
 
     let encoded = unzstd(
@@ -1741,7 +1727,8 @@ fn immutable_envelopes_reject_unknown_fields() {
     ciborium::ser::into_writer(&document, &mut future).expect("encode document");
     assert_matches!(
         decode_wal_object_envelope_zstd(&rezstd(&future)),
-        Err(EnvelopeCodecError::EnvelopeDecode(message)) if message.contains("field_from_the_future")
+        Err(EnvelopeCodecError::EnvelopeDecode(message))
+            if message.contains("field_from_the_future")
     );
 }
 

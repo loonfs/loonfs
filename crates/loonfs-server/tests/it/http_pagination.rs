@@ -1,14 +1,14 @@
 //! HTTP directory and revision pagination behavior.
 
 use crate::common::http_split_support::*;
-use crate::common::{collect_checkpoints, collect_path_entries, start_server};
+use crate::common::{assert_api_code, collect_checkpoints, collect_path_entries, start_server};
 use loonfs_client::{ClientError, MoveOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id, page_limit};
 use loonfs_types::PageRequest;
 use loonfs_types::{
     api::v0::FilesystemChange, ChangeSeq, CommitId, CreateCheckpointRequest, DestinationBehavior,
-    ErrorResponse, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
+    ErrorCode, ErrorResponse, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
     DEFAULT_MAX_PAGE_LIMIT,
 };
 use std::assert_matches;
@@ -29,13 +29,7 @@ fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
 }
 
 fn assert_invalid_request<T: std::fmt::Debug>(result: Result<T, ClientError>) {
-    match result.expect_err("request should be rejected") {
-        ClientError::Api { status, code, .. } => {
-            assert_eq!(status, 400);
-            assert_eq!(code, "invalid_request");
-        }
-        other => panic!("expected invalid_request API error, got {other:?}"),
-    }
+    assert_api_code(result, 400, ErrorCode::InvalidRequest);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

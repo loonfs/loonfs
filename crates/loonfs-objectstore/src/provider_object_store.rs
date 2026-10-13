@@ -2433,11 +2433,13 @@ mod tests {
         assert_eq!(accepted.checksum, Some(Checksum::crc64nvme(&ours)));
         assert_matches!(
             store.put_immutable_verified(different, ours.clone()).await,
-            Err(crate::ImmutableWriteError::DifferentObject { object_key }) if object_key == different
+            Err(crate::ImmutableWriteError::DifferentObject { object_key })
+                if object_key == different
         );
         assert_matches!(
             store.put_immutable_verified(without_checksum, ours).await,
-            Err(crate::ImmutableWriteError::StoredChecksumMissing { object_key }) if object_key == without_checksum
+            Err(crate::ImmutableWriteError::StoredChecksumMissing { object_key })
+                if object_key == without_checksum
         );
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
         assert_eq!(flaky.heads.load(Ordering::SeqCst), 3);

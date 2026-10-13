@@ -14,7 +14,7 @@ use loonfs_objectstore::s3_compatible::{
     aws_s3, cloudflare_r2, AwsS3StoreConfig, CloudflareR2StoreConfig,
 };
 use loonfs_objectstore::{AssemblySource, ImmutableWriteError, ObjectStoreError};
-use loonfs_objectstore::{AwsS3Credentials, ByteRange, ObjectStore};
+use loonfs_objectstore::{AwsS3Credentials, ByteRange, ObjectStore, ProviderObjectStore};
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::api::v0::StoreProbeResponse;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, NamespaceId, Page};
@@ -22,6 +22,49 @@ use std::assert_matches;
 use tempfile::TempDir;
 
 const MIB: usize = 1024 * 1024;
+
+fn aws_s3_store() -> ProviderObjectStore {
+    let config = AwsS3ConformanceConfig::from_env()
+        .expect("load AWS S3 real-provider conformance environment");
+    aws_s3(AwsS3StoreConfig {
+        bucket: config.bucket,
+        region: config.region,
+        endpoint_url: config.endpoint,
+        credentials: AwsS3Credentials::Static {
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+            session_token: config.session_token,
+        },
+        key_prefix: Some(config.prefix),
+        force_path_style: false,
+    })
+    .expect("create AWS S3 object store")
+}
+
+fn cloudflare_r2_store() -> ProviderObjectStore {
+    let config = CloudflareR2ConformanceConfig::from_env()
+        .expect("load Cloudflare R2 real-provider conformance environment");
+    cloudflare_r2(CloudflareR2StoreConfig {
+        bucket: config.bucket,
+        account_id: config.account_id,
+        endpoint_url: config.endpoint,
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create Cloudflare R2 object store")
+}
+
+fn gcp_gcs_store() -> ProviderObjectStore {
+    let config = GcpGcsConformanceConfig::from_env()
+        .expect("load GCP GCS real-provider conformance environment");
+    gcp_gcs(GcpGcsStoreConfig {
+        bucket: config.bucket,
+        service_account_key_path: config.service_account_key_path,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create GCP GCS object store")
+}
 
 #[test]
 fn provider_env_example_covers_real_provider_contract() {
@@ -101,21 +144,7 @@ async fn local_fs_honours_assembly() {
 #[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_assembly() {
-    let config = AwsS3ConformanceConfig::from_env()
-        .expect("load AWS S3 real-provider conformance environment");
-    let store = aws_s3(AwsS3StoreConfig {
-        bucket: config.bucket,
-        region: config.region,
-        endpoint_url: config.endpoint,
-        credentials: AwsS3Credentials::Static {
-            access_key_id: config.access_key_id,
-            secret_access_key: config.secret_access_key,
-            session_token: config.session_token,
-        },
-        key_prefix: Some(config.prefix),
-        force_path_style: false,
-    })
-    .expect("create AWS S3 object store");
+    let store = aws_s3_store();
     assert_assembly(
         &store,
         &[(1024, 30), (1024, 9 * MIB), (9 * MIB, 9 * MIB)],
@@ -127,47 +156,19 @@ async fn aws_s3_assembly() {
 #[tokio::test]
 #[ignore = "requires real Cloudflare R2 credentials"]
 async fn cloudflare_r2_assembly() {
-    assert_r2_assembly(&[(64 * MIB, 64 * MIB)]).await;
-}
-
-#[tokio::test]
-#[ignore = "requires real Cloudflare R2 credentials"]
-async fn cloudflare_r2_small_assembly() {
-    assert_r2_assembly(&[(1024, 30)]).await;
-}
-
-#[tokio::test]
-#[ignore = "requires real Cloudflare R2 credentials"]
-async fn cloudflare_r2_assembly_spans_sources() {
-    assert_r2_assembly(&[(40 * MIB, 90 * MIB)]).await;
-}
-
-async fn assert_r2_assembly(cases: &[(usize, usize)]) {
-    let config = CloudflareR2ConformanceConfig::from_env()
-        .expect("load Cloudflare R2 real-provider conformance environment");
-    let store = cloudflare_r2(CloudflareR2StoreConfig {
-        bucket: config.bucket,
-        account_id: config.account_id,
-        endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create Cloudflare R2 object store");
-    assert_assembly(&store, cases, ChecksumAlgorithm::Crc64nvme).await;
+    let store = cloudflare_r2_store();
+    assert_assembly(
+        &store,
+        &[(1024, 30), (40 * MIB, 90 * MIB), (64 * MIB, 64 * MIB)],
+        ChecksumAlgorithm::Crc64nvme,
+    )
+    .await;
 }
 
 #[tokio::test]
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_assembly() {
-    let config = GcpGcsConformanceConfig::from_env()
-        .expect("load GCP GCS real-provider conformance environment");
-    let store = gcp_gcs(GcpGcsStoreConfig {
-        bucket: config.bucket,
-        service_account_key_path: config.service_account_key_path,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create GCP GCS object store");
+    let store = gcp_gcs_store();
     assert_assembly(
         &store,
         &[(1024, 30), (9 * MIB, 30)],
@@ -178,123 +179,44 @@ async fn gcp_gcs_assembly() {
 }
 
 #[tokio::test]
-#[ignore = "Azure Blob Storage needs a native checksum adapter"]
-async fn azure_abs_assembly() {
-    let error = toml::from_str::<loonfs_objectstore::StoreConfig>(r#"kind = "azure-abs""#)
-        .expect_err("Azure requires a native adapter");
-    assert!(error
-        .to_string()
-        .contains("Azure Blob Storage is not supported yet: it stores no full-object checksum"));
-}
-
-#[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_real_provider_conformance() {
-    let config = AwsS3ConformanceConfig::from_env()
-        .expect("load AWS S3 real-provider conformance environment");
-    let store = aws_s3(AwsS3StoreConfig {
-        bucket: config.bucket,
-        region: config.region,
-        endpoint_url: config.endpoint,
-        credentials: AwsS3Credentials::Static {
-            access_key_id: config.access_key_id,
-            secret_access_key: config.secret_access_key,
-            session_token: config.session_token,
-        },
-        key_prefix: Some(config.prefix),
-        force_path_style: false,
-    })
-    .expect("create AWS S3 object store");
+    let store = aws_s3_store();
     assert_provider_conformance(&store).await;
 }
 
 #[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_streamed_write_round_trips() {
-    let config = AwsS3ConformanceConfig::from_env()
-        .expect("load AWS S3 real-provider conformance environment");
-    let store = aws_s3(AwsS3StoreConfig {
-        bucket: config.bucket,
-        region: config.region,
-        endpoint_url: config.endpoint,
-        credentials: AwsS3Credentials::Static {
-            access_key_id: config.access_key_id,
-            secret_access_key: config.secret_access_key,
-            session_token: config.session_token,
-        },
-        key_prefix: Some(config.prefix),
-        force_path_style: false,
-    })
-    .expect("create AWS S3 object store");
+    let store = aws_s3_store();
     assert_streamed_write_round_trips(&store).await;
 }
 
 #[tokio::test]
 #[ignore = "requires real Cloudflare R2 credentials"]
 async fn cloudflare_r2_streamed_write_round_trips() {
-    let config = CloudflareR2ConformanceConfig::from_env()
-        .expect("load Cloudflare R2 real-provider conformance environment");
-    let store = cloudflare_r2(CloudflareR2StoreConfig {
-        bucket: config.bucket,
-        account_id: config.account_id,
-        endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create Cloudflare R2 object store");
+    let store = cloudflare_r2_store();
     assert_streamed_write_round_trips(&store).await;
 }
 
 #[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_put_stores_a_trustworthy_checksum() {
-    let config = AwsS3ConformanceConfig::from_env()
-        .expect("load AWS S3 real-provider conformance environment");
-    let store = aws_s3(AwsS3StoreConfig {
-        bucket: config.bucket,
-        region: config.region,
-        endpoint_url: config.endpoint,
-        credentials: AwsS3Credentials::Static {
-            access_key_id: config.access_key_id,
-            secret_access_key: config.secret_access_key,
-            session_token: config.session_token,
-        },
-        key_prefix: Some(config.prefix),
-        force_path_style: false,
-    })
-    .expect("create AWS S3 object store");
+    let store = aws_s3_store();
     assert_put_stores_a_trustworthy_checksum(&store, "aws-s3").await;
 }
 
 #[tokio::test]
 #[ignore = "requires real Cloudflare R2 credentials"]
 async fn cloudflare_r2_put_stores_a_trustworthy_checksum() {
-    let config = CloudflareR2ConformanceConfig::from_env()
-        .expect("load Cloudflare R2 real-provider conformance environment");
-    let store = cloudflare_r2(CloudflareR2StoreConfig {
-        bucket: config.bucket,
-        account_id: config.account_id,
-        endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create Cloudflare R2 object store");
+    let store = cloudflare_r2_store();
     assert_put_stores_a_trustworthy_checksum(&store, "cloudflare-r2").await;
 }
 
 #[tokio::test]
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_put_stores_a_trustworthy_checksum() {
-    let config = GcpGcsConformanceConfig::from_env()
-        .expect("load GCP GCS real-provider conformance environment");
-    let store = gcp_gcs(GcpGcsStoreConfig {
-        bucket: config.bucket,
-        service_account_key_path: config.service_account_key_path,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create GCP GCS object store");
+    let store = gcp_gcs_store();
     assert_put_stores_a_trustworthy_checksum(&store, "gcp-gcs").await;
 }
 
@@ -305,21 +227,7 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
     // current-thread runtimes parked pooled connections until the client
     // timeout fired. The store-owned IO runtime decouples HTTP driving from
     // caller runtime topology, so alternating runtimes stays fast.
-    let config = AwsS3ConformanceConfig::from_env()
-        .expect("load AWS S3 real-provider conformance environment");
-    let store = aws_s3(AwsS3StoreConfig {
-        bucket: config.bucket,
-        region: config.region,
-        endpoint_url: config.endpoint,
-        credentials: AwsS3Credentials::Static {
-            access_key_id: config.access_key_id,
-            secret_access_key: config.secret_access_key,
-            session_token: config.session_token,
-        },
-        key_prefix: Some(config.prefix),
-        force_path_style: false,
-    })
-    .expect("create AWS S3 object store");
+    let store = aws_s3_store();
 
     let runtime_a = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -364,66 +272,22 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
 #[tokio::test]
 #[ignore = "requires real Cloudflare R2 credentials"]
 async fn cloudflare_r2_real_provider_conformance() {
-    let config = CloudflareR2ConformanceConfig::from_env()
-        .expect("load Cloudflare R2 real-provider conformance environment");
-    let store = cloudflare_r2(CloudflareR2StoreConfig {
-        bucket: config.bucket,
-        account_id: config.account_id,
-        endpoint_url: config.endpoint,
-        access_key_id: config.access_key_id,
-        secret_access_key: config.secret_access_key,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create Cloudflare R2 object store");
+    let store = cloudflare_r2_store();
     assert_provider_conformance(&store).await;
 }
 
 #[tokio::test]
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_real_provider_conformance() {
-    let config = GcpGcsConformanceConfig::from_env()
-        .expect("load GCP GCS real-provider conformance environment");
-    let store = gcp_gcs(GcpGcsStoreConfig {
-        bucket: config.bucket,
-        service_account_key_path: config.service_account_key_path,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create GCP GCS object store");
+    let store = gcp_gcs_store();
     assert_provider_conformance(&store).await;
 }
 
 #[tokio::test]
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_streamed_write_round_trips() {
-    let config = GcpGcsConformanceConfig::from_env()
-        .expect("load GCP GCS real-provider conformance environment");
-    let store = gcp_gcs(GcpGcsStoreConfig {
-        bucket: config.bucket,
-        service_account_key_path: config.service_account_key_path,
-        key_prefix: Some(config.prefix),
-    })
-    .expect("create GCP GCS object store");
+    let store = gcp_gcs_store();
     assert_streamed_write_round_trips(&store).await;
-}
-
-#[tokio::test]
-#[ignore = "Azure Blob Storage needs a native checksum adapter"]
-async fn azure_abs_real_provider_conformance() {
-    let error = toml::from_str::<loonfs_objectstore::StoreConfig>(r#"kind = "azure-abs""#)
-        .expect_err("Azure requires a native adapter");
-    assert!(error
-        .to_string()
-        .contains("Azure Blob Storage is not supported yet: it stores no full-object checksum"));
-}
-
-#[tokio::test]
-#[ignore = "Azure Blob Storage needs a native checksum adapter"]
-async fn azure_abs_streamed_write_round_trips() {
-    let error = toml::from_str::<loonfs_objectstore::StoreConfig>(r#"kind = "azure-abs""#)
-        .expect_err("Azure requires a native adapter");
-    assert!(error
-        .to_string()
-        .contains("Azure Blob Storage is not supported yet: it stores no full-object checksum"));
 }
 
 /// The live provider sweep: the store contract probe, plus the key
@@ -482,11 +346,7 @@ async fn assert_child_prefix_contract(store: &dyn ObjectStore) {
     let unterminated = store
         .list_child_prefixes(prefix.trim_end_matches('/'), None, page_limit(10))
         .await;
-    assert_matches!(
-        unterminated,
-        Err(ObjectStoreError::InvalidKey { .. }),
-        "{unterminated:?}"
-    );
+    assert_matches!(unterminated, Err(ObjectStoreError::InvalidKey { .. }));
 
     for key in &keys {
         store

@@ -650,7 +650,7 @@ mod tests {
         let error = operator
             .close_group(floor())
             .expect_err("a second child bound in the slot at the floor is refused");
-        assert_matches!(error, CoreError::NamespaceCorrupt(_), "{error:?}");
+        assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert!(
             error.to_string().contains("children `2` and `3`"),
             "the error must name both children, got: {error}"
@@ -684,7 +684,7 @@ mod tests {
         let error = operator
             .close_group(floor())
             .expect_err("a second edge bound for the child at the floor is refused");
-        assert_matches!(error, CoreError::NamespaceCorrupt(_), "{error:?}");
+        assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert!(
             error
                 .to_string()

@@ -229,9 +229,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
             captured_seq: ChangeSeq(0),
             cursor_inode_id: None,
             ..
-        },
-        "{:?}",
-        enabled.status
+        }
     );
     assert_eq!(
         server.binding.namespaces.visit_held(&namespace_id, |held| (
