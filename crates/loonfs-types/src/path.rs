@@ -501,6 +501,7 @@ impl PathError {
 mod tests {
     use super::{AbsolutePath, DisplayName, PathError};
     use crate::{NameKey, NamespaceNaming};
+    use std::assert_matches;
 
     #[test]
     fn unportable_names_are_rejected() {
@@ -514,10 +515,7 @@ mod tests {
             "lpt9",
             "aux.files.d",
         ] {
-            assert!(
-                DisplayName::parse(name).is_err(),
-                "`{name}` should be rejected"
-            );
+            DisplayName::parse(name).expect_err(&format!("`{name}` should be rejected"));
         }
         // Names that merely resemble the reserved set stay legal.
         for name in ["CONSOLE", "com10", "lpt10.txt", ".hidden", "a.b"] {
@@ -602,20 +600,20 @@ mod tests {
     #[test]
     fn paths_are_bounded_in_bytes_and_depth() {
         let deep = format!("/{}", vec!["d"; super::MAX_PATH_DEPTH + 1].join("/"));
-        assert!(matches!(
+        assert_matches!(
             AbsolutePath::parse(&deep),
             Err(PathError::PathTooDeep { .. })
-        ));
+        );
         let long_component = "a".repeat(200);
         let mut long = String::new();
         while long.len() <= super::MAX_PATH_BYTES {
             long.push('/');
             long.push_str(&long_component);
         }
-        assert!(matches!(
+        assert_matches!(
             AbsolutePath::parse(&long),
             Err(PathError::PathTooLong { .. })
-        ));
+        );
         let fine = format!("/{}", vec!["d"; super::MAX_PATH_DEPTH].join("/"));
         assert!(AbsolutePath::parse(&fine).is_ok());
     }
@@ -633,14 +631,14 @@ mod tests {
 
     #[test]
     fn absolute_path_rejects_dot_and_dotdot_components() {
-        assert!(matches!(
+        assert_matches!(
             AbsolutePath::parse("/docs/./a.txt"),
             Err(PathError::DotComponent { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             AbsolutePath::parse("/docs/../a.txt"),
             Err(PathError::ParentComponent { .. })
-        ));
+        );
     }
 
     #[test]
@@ -651,10 +649,10 @@ mod tests {
             Err(PathError::EmptyDisplayName)
         );
         assert_eq!(AbsolutePath::parse("/a/"), Err(PathError::EmptyDisplayName));
-        assert!(matches!(
+        assert_matches!(
             AbsolutePath::parse("a"),
             Err(PathError::RelativePath { .. })
-        ));
+        );
         assert_eq!(AbsolutePath::parse(""), Err(PathError::EmptyPath));
         for (path, escaped) in [("b.txt", "b.txt"), ("b\n\t\x1b.txt", r"b\n\t\u{1b}.txt")] {
             assert_eq!(
@@ -677,7 +675,8 @@ mod tests {
                 .expect("deserialize path"),
             path
         );
-        assert!(serde_json::from_str::<AbsolutePath>(r#""relative/path""#).is_err());
+        serde_json::from_str::<AbsolutePath>(r#""relative/path""#)
+            .expect_err("a relative path should be rejected");
     }
 
     #[test]
@@ -703,14 +702,14 @@ mod tests {
     #[test]
     fn display_name_rejects_invalid_spellings() {
         assert_eq!(DisplayName::parse(""), Err(PathError::EmptyDisplayName));
-        assert!(matches!(
+        assert_matches!(
             DisplayName::parse("a/b"),
             Err(PathError::DisplayNameContainsSeparator { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             DisplayName::parse("."),
             Err(PathError::ReservedDisplayName { .. })
-        ));
+        );
     }
 
     #[test]
@@ -765,13 +764,13 @@ mod tests {
 
     #[test]
     fn absolute_path_components_satisfy_the_display_name_grammar() {
-        assert!(matches!(
+        assert_matches!(
             AbsolutePath::parse("/docs/bad\u{0}name"),
             Err(PathError::DisplayNameContainsControlCharacter { code_point: 0 })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             AbsolutePath::parse(format!("/docs/{}", "a".repeat(256))),
             Err(PathError::DisplayNameTooLong { .. })
-        ));
+        );
     }
 }

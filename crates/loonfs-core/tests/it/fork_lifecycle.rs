@@ -3,9 +3,6 @@
 //! Tests cover conditional manifest installation and
 //! namespace state before the first metadata publication.
 
-#![allow(clippy::panic)]
-// These integration tests use panic in unexpected match arms for precise diagnostics.
-
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
@@ -28,6 +25,7 @@ use loonfs_types::{
     },
     AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId, PinId,
 };
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -587,15 +585,13 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(source_record.head_seq, ChangeSeq(1));
     // The fork basis and pin must use the same manifest.
     assert_eq!(source_record.manifest(), fork_basis.manifest);
-    assert!(
-        matches!(
-            &source_record.owner,
-            PinOwner::Fork {
-                target_namespace_id,
-                ..
-            }
-                if *target_namespace_id == clone_namespace_id
-        ),
+    assert_matches!(
+        &source_record.owner,
+        PinOwner::Fork {
+            target_namespace_id,
+            ..
+        }
+            if *target_namespace_id == clone_namespace_id,
         "fork record is owned by its target namespace"
     );
 
@@ -1438,7 +1434,7 @@ async fn bootstrap_hint_read_failures_write_nothing() {
                 bootstrap_namespace(&store, &namespace_id, &mutation_context()).await
             })
             .expect_err("hint read failed");
-            assert!(matches!(error, CoreError::ControlObjectLoad(_)));
+            assert_matches!(error, CoreError::ControlObjectLoad(_));
         }
         let counts = store.counts();
         assert_eq!(

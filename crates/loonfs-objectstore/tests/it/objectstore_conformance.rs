@@ -18,6 +18,7 @@ use loonfs_objectstore::{AwsS3Credentials, ByteRange, ObjectStore};
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::api::v0::StoreProbeResponse;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, NamespaceId, Page};
+use std::assert_matches;
 use tempfile::TempDir;
 
 const MIB: usize = 1024 * 1024;
@@ -481,8 +482,9 @@ async fn assert_child_prefix_contract(store: &dyn ObjectStore) {
     let unterminated = store
         .list_child_prefixes(prefix.trim_end_matches('/'), None, page_limit(10))
         .await;
-    assert!(
-        matches!(unterminated, Err(ObjectStoreError::InvalidKey { .. })),
+    assert_matches!(
+        unterminated,
+        Err(ObjectStoreError::InvalidKey { .. }),
         "{unterminated:?}"
     );
 
@@ -798,7 +800,7 @@ async fn assert_assembly<S: ObjectStore>(
             payload.len() as u64
         );
         let wrong_key = content_blob(&namespace_id, &ContentId::generate());
-        assert!(matches!(
+        assert_matches!(
             store
                 .assemble(
                     &wrong_key,
@@ -811,7 +813,7 @@ async fn assert_assembly<S: ObjectStore>(
                 source: ObjectStoreError::ChecksumMismatch { .. },
                 ..
             })
-        ));
+        );
         // A provider that verifies after completion leaves the rejected object
         // for collection; nothing names it, and no writer deletes it.
         let ranged = content_blob(&namespace_id, &ContentId::generate());
@@ -843,7 +845,7 @@ async fn assert_assembly<S: ObjectStore>(
             start_inclusive: 0,
             end_exclusive: first_length as u64 + 1,
         });
-        assert!(matches!(
+        assert_matches!(
             store
                 .assemble(&ranged, &sources, Vec::new(), &expected)
                 .await,
@@ -851,14 +853,14 @@ async fn assert_assembly<S: ObjectStore>(
                 source: ObjectStoreError::PreconditionFailed { .. },
                 ..
             })
-        ));
+        );
         assert!(store
             .head(&ranged)
             .await
             .expect("short source creates nothing")
             .is_none());
         store.delete(&sources[0].key).await.expect("delete source");
-        assert!(matches!(
+        assert_matches!(
             store
                 .assemble(&ranged, &sources, Vec::new(), &expected)
                 .await,
@@ -866,7 +868,7 @@ async fn assert_assembly<S: ObjectStore>(
                 source: ObjectStoreError::PreconditionFailed { .. },
                 ..
             })
-        ));
+        );
         assert!(store
             .head(&ranged)
             .await
@@ -906,7 +908,7 @@ async fn assert_put_and_assembly_share_identity<S: ObjectStore>(
         .expect("put and assembly share the stored checksum");
     assert_eq!(assembled, put_stored);
     assert_eq!(assembled.checksum, Some(expected.clone()));
-    assert!(matches!(
+    assert_matches!(
         store
             .assemble(
                 &put_key,
@@ -916,7 +918,7 @@ async fn assert_put_and_assembly_share_identity<S: ObjectStore>(
             )
             .await,
         Err(ImmutableWriteError::DifferentObject { .. })
-    ));
+    );
     assert_eq!(
         store.head(&put_key).await.expect("unchanged put"),
         Some(put_stored)

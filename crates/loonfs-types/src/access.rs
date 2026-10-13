@@ -677,9 +677,12 @@ mod tests {
 
     #[test]
     fn ids_never_contain_the_wire_separator() {
-        assert!(PrincipalId::parse("visitor,prn_root").is_err());
-        assert!(super::SubjectId::parse("usr,ada").is_err());
-        assert!(super::PrincipalScope::parse("org,demo").is_err());
+        PrincipalId::parse("visitor,prn_root")
+            .expect_err("a principal ID with a comma should be rejected");
+        super::SubjectId::parse("usr,ada")
+            .expect_err("a subject ID with a comma should be rejected");
+        super::PrincipalScope::parse("org,demo")
+            .expect_err("a principal scope with a comma should be rejected");
         assert!(PrincipalId::parse("visitor").is_ok());
     }
     use std::collections::BTreeMap;
@@ -703,8 +706,10 @@ mod tests {
                 .into_iter()
                 .collect()
         );
-        assert!(serde_json::from_str::<AccessRights>(r#"["read","read"]"#).is_err());
-        assert!(serde_json::from_str::<AccessRights>(r#"["owner"]"#).is_err());
+        serde_json::from_str::<AccessRights>(r#"["read","read"]"#)
+            .expect_err("a repeated right should be rejected");
+        serde_json::from_str::<AccessRights>(r#"["owner"]"#)
+            .expect_err("an unknown right should be rejected");
         let empty = serde_json::to_string(&AccessRights::EMPTY).expect("serialize empty rights");
         assert_eq!(empty, "[]");
         assert_eq!(

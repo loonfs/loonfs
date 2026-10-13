@@ -3,6 +3,8 @@
 //! This is a separate binary because its global subscriber would leak across
 //! the shared `it` harness and capture unrelated tests.
 
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
+
 #[path = "it/common/mod.rs"]
 mod common;
 

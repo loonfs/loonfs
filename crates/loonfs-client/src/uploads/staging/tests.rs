@@ -3,9 +3,6 @@
 //! Test chunks record when they are created and dropped. This measures the
 //! payload bytes retained by the uploader without depending on allocator
 //! behavior.
-#![allow(clippy::panic)]
-// Transport-choice tests panic in unexpected match arms for precise
-// diagnostics.
 
 use super::*;
 use crate::scripted_transport::{self, Outcome};
@@ -16,6 +13,7 @@ use loonfs_types::{
     CapabilityDocument, ContentId, ContentRef, ContentRefKind, API_GROUP_FILESYSTEM_V0,
     FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
+use std::assert_matches;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -469,7 +467,7 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
             None,
         )
         .await;
-    assert!(interrupted.is_err(), "the third wave never got signed");
+    interrupted.expect_err("the third wave never got signed");
     assert_eq!(
         journal.part_numbers(),
         (1..=landed).collect::<Vec<_>>(),
@@ -885,7 +883,7 @@ async fn a_capability_failure_does_not_downgrade_a_measured_upload_to_the_proxy(
         .await
         .expect_err("capability discovery failure must remain visible");
 
-    assert!(matches!(error, ClientError::Json(_)), "{error:?}");
+    assert_matches!(error, ClientError::Json(_), "{error:?}");
     assert_eq!(transport.attempts(), 1);
 }
 
@@ -1040,7 +1038,7 @@ async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() 
             )
             .await
             .expect_err("journal error");
-        assert!(matches!(error, ClientError::Io(message) if message.contains("journal disk full")));
+        assert_matches!(error, ClientError::Io(message) if message.contains("journal disk full"));
         assert_eq!(
             transport.attempts(),
             expected_attempts,
@@ -1076,8 +1074,9 @@ async fn a_one_shot_upload_aborts_its_session_once_when_completion_fails() {
             .put_file(&spec(), &payload, &loonfs_test_support::test_actor())
             .await
             .expect_err("the completion failed");
-        assert!(
-            matches!(&error, ClientError::Http(message) if message.contains("/complete")),
+        assert_matches!(
+            &error,
+            ClientError::Http(message) if message.contains("/complete"),
             "expected the completion's error, got {error:?}"
         );
         let sent = transport.sent();
@@ -1268,8 +1267,9 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
             .clone()
             .expect("saved");
         assert!(request.content_tokens.is_empty());
-        assert!(
-            matches!(&request.operations[0], FilesystemOperation::PutFile { content_ref: None, inline_content: Some(content), .. } if content == bytes)
+        assert_matches!(
+            &request.operations[0],
+            FilesystemOperation::PutFile { content_ref: None, inline_content: Some(content), .. } if content == bytes
         );
         let saved = serde_json::to_vec(&request).expect("encode journal");
         let recovered: CommitRequest = serde_json::from_slice(&saved).expect("decode journal");

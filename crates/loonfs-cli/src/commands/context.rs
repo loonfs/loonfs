@@ -493,10 +493,30 @@ mod tests {
                 .as_str(),
             "/docs"
         );
-        assert!(parse_user_path_arg("path", "//docs///A.txt/", RootPath::Refused).is_err());
-        assert!(parse_user_path_arg("path", "//x.txt", RootPath::Refused).is_err());
-        assert!(parse_user_path_arg("path", "docs/A.txt", RootPath::Refused).is_err());
-        assert!(parse_user_path_arg("path", "", RootPath::Refused).is_err());
+        assert_eq!(
+            parse_user_path_arg("path", "//docs///A.txt/", RootPath::Refused)
+                .expect_err("a path with repeated slashes should be rejected")
+                .code,
+            loonfs_types::ErrorCode::InvalidRequest.as_str()
+        );
+        assert_eq!(
+            parse_user_path_arg("path", "//x.txt", RootPath::Refused)
+                .expect_err("a path with a leading double slash should be rejected")
+                .code,
+            loonfs_types::ErrorCode::InvalidRequest.as_str()
+        );
+        assert_eq!(
+            parse_user_path_arg("path", "docs/A.txt", RootPath::Refused)
+                .expect_err("a relative path should be rejected")
+                .code,
+            loonfs_types::ErrorCode::InvalidRequest.as_str()
+        );
+        assert_eq!(
+            parse_user_path_arg("path", "", RootPath::Refused)
+                .expect_err("an empty path should be rejected")
+                .code,
+            loonfs_types::ErrorCode::InvalidRequest.as_str()
+        );
         assert_eq!(
             parse_user_path_arg("path", "/", RootPath::Allowed)
                 .expect("root")

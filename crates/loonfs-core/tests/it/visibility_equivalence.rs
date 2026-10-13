@@ -1,4 +1,3 @@
-#![allow(clippy::panic)]
 //! Differential coverage for tombstone visibility versus root reachability:
 //! after every mutation shape, each tracked inode's reported visibility, its
 //! derived current path, and the forward resolution of that path must agree
@@ -57,7 +56,9 @@ impl VisibilityHarness {
             ))])
             .await
             .expect("acquire writer");
-        assert!(results[0].is_err());
+        results[0]
+            .as_ref()
+            .expect_err("creating the root directory should fail");
         engine
             .fold_wal()
             .await

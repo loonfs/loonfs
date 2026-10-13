@@ -1032,14 +1032,13 @@ fn io_error(key: &str, error: std::io::Error) -> ObjectStoreError {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
-    // Tests panic in unexpected match arms for precise diagnostics.
 
     use super::LocalFsStore;
     use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
     use crate::keys::{hint, upload_session};
     use bytes::Bytes;
     use futures::{stream, StreamExt};
+    use std::assert_matches;
     use std::fs;
     use std::sync::Arc;
     use tokio::sync::Barrier;
@@ -1083,7 +1082,7 @@ mod tests {
             .await
             .expect_err("a failed body cannot publish content");
 
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
         assert!(store.get(key, None).await.expect("get content").is_none());
         assert_eq!(
             fs::read_dir(temp_dir.path().join("content"))
@@ -1170,7 +1169,7 @@ mod tests {
         )
         .await
         .expect_err("reading a directory is not a missing object");
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_matches!(error, ObjectStoreError::Transport { .. });
     }
 
     #[tokio::test]
@@ -1212,14 +1211,14 @@ mod tests {
                 .expect("a range at the end is empty, not missing"),
             Some(Bytes::new())
         );
-        assert!(matches!(
+        assert_matches!(
             store.get(&key, range(11, 12)).await,
             Err(ObjectStoreError::InvalidRange { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             store.get(&key, range(6, 2)).await,
             Err(ObjectStoreError::InvalidRange { .. })
-        ));
+        );
         assert!(store
             .get(
                 &hint(&loonfs_types::NamespaceId::parse("ns-missing").expect("valid namespace id")),
@@ -1394,11 +1393,11 @@ mod tests {
         assert_eq!(keys, vec![key]);
 
         let reserved = store.get(super::STORE_LOCK_FILE_NAME, None).await;
-        assert!(matches!(
+        assert_matches!(
             reserved,
             Err(ObjectStoreError::InvalidKey { object_key, .. })
                 if object_key == super::STORE_LOCK_FILE_NAME
-        ));
+        );
         let temp_shaped = store
             .put(
                 "namespaces/ns-scratch/.hint.json.tmp-9-9",
@@ -1406,10 +1405,7 @@ mod tests {
                 PutMode::Overwrite,
             )
             .await;
-        assert!(matches!(
-            temp_shaped,
-            Err(ObjectStoreError::InvalidKey { .. })
-        ));
+        assert_matches!(temp_shaped, Err(ObjectStoreError::InvalidKey { .. }));
     }
 
     fn test_dir(label: &str) -> tempfile::TempDir {

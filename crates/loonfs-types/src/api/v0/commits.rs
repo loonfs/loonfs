@@ -341,7 +341,8 @@ mod tests {
         );
 
         let missing_content_ref = r#"{"kind":"file_created","inode_id":"ino_2","parent_inode_id":"ino_1","display_name":"a.txt","revision_no":1}"#;
-        assert!(serde_json::from_str::<FilesystemChange>(missing_content_ref).is_err());
+        serde_json::from_str::<FilesystemChange>(missing_content_ref)
+            .expect_err("an event without its content ref should be rejected");
 
         let content_changed = FilesystemChange::ContentChanged {
             inode_id: InodeId(2),

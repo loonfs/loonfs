@@ -1,6 +1,3 @@
-#![allow(clippy::panic)]
-// Tracing-capture tests panic in helper assertions for precise diagnostics.
-
 //! Asserts a read names the anchor it answered from, and that a walk which
 //! finds nothing names the lookup that came back empty.
 //!
@@ -10,6 +7,8 @@
 //! subscriber can race the interest rebuild that `set_default` performs.
 //! Alone in its process, the read callsites are first hit with the capture
 //! subscriber installed, and the assertions are deterministic.
+
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 use loonfs::{LoonFs, StoreConfig, Writable};
 use loonfs_test_support::block_on::block_on;
@@ -90,7 +89,12 @@ fn reads_name_their_anchor_and_the_lookup_that_came_back_empty() {
             .await
             .expect("stat the file that was just written");
         let missing = namespace.stat("/docs/missing.txt").await;
-        assert!(missing.is_err(), "a path that was never written is absent");
+        assert_eq!(
+            missing
+                .expect_err("a path that was never written is absent")
+                .code(),
+            loonfs_types::ErrorCode::PathNotFound
+        );
     });
 
     let log = String::from_utf8(captured.lock().expect("capture lock").clone())

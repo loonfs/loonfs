@@ -1,7 +1,5 @@
 //! Host configuration, operational routes, and shutdown contracts.
 
-#![allow(clippy::panic)]
-
 mod admission;
 mod composition;
 
@@ -315,10 +313,8 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         .expect("graceful shutdown settles background work");
 
     // The listener is closed once serve returns.
-    assert!(
-        std::net::TcpStream::connect(addr).is_err(),
-        "listener should refuse connections after shutdown"
-    );
+    std::net::TcpStream::connect(addr)
+        .expect_err("listener should refuse connections after shutdown");
 }
 
 /// Writes one file and folds it, so each call leaves one more delta run.
@@ -798,10 +794,9 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
         shutdown_started.elapsed() < std::time::Duration::from_millis(shutdown_deadline_ms),
         "shutdown finishes inside its configured budget"
     );
-    assert!(
-        tokio::net::TcpStream::connect(addr).await.is_err(),
-        "the listener stops accepting after the slow request finishes"
-    );
+    tokio::net::TcpStream::connect(addr)
+        .await
+        .expect_err("the listener stops accepting after the slow request finishes");
 }
 
 fn options_with_store(store: SharedObjectStore) -> AppConfig {

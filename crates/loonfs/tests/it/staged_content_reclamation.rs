@@ -13,9 +13,6 @@
 //! same one the runtime wrote through, so the pass sees exactly what the
 //! puts left behind.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::{namespace, open_runtime_with_async, store, TestRuntime};
 use loonfs::{ContentRef, GcOptions, GcResponse, NamespaceId, PutFileOptions, SharedObjectStore};
 use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS};

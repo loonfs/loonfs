@@ -317,7 +317,8 @@ mod tests {
             let parsed: ErrorCode = serde_json::from_value(value).expect("deserialize error code");
             assert_eq!(parsed, code);
         }
-        assert!(serde_json::from_str::<ErrorCode>("\"not_a_code\"").is_err());
+        serde_json::from_str::<ErrorCode>("\"not_a_code\"")
+            .expect_err("an unknown error code should be rejected");
     }
 
     #[test]

@@ -179,12 +179,12 @@ mod tests {
             spool: Some(NamedTempFile::from_parts(reader, path)),
             len: 0,
         };
-        assert!(report
+        report
             .push(TreeTransferFailure {
                 path: "/file".to_owned(),
-                error: CliError::invalid_request("failed")
+                error: CliError::invalid_request("failed"),
             })
-            .is_err());
+            .expect_err("a push to a read-only spool should fail");
         assert_eq!(report.len(), 0);
     }
 
@@ -203,6 +203,7 @@ mod tests {
             .expect("spooled")
             .write_all(b"{broken\n")
             .expect("damage report");
-        assert!(serde_json::to_writer(io::sink(), &report).is_err());
+        serde_json::to_writer(io::sink(), &report)
+            .expect_err("a damaged report should fail to serialize");
     }
 }

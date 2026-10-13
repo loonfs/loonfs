@@ -1,6 +1,3 @@
-#![allow(clippy::panic)]
-// Lifecycle diagnostics deliberately panic with the full unexpected outcome.
-
 //! GrepWorker lifecycle, rebootstrap, query contracts, and GC boundaries.
 
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};
@@ -34,6 +31,7 @@ use loonfs_types::{
     sha256_digest, AbsolutePath, ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse,
     IndexSegmentId, RunNo, MAX_PUBLIC_INTEGER,
 };
+use std::assert_matches;
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -293,18 +291,12 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
 
     let worker = worker(&store).await;
     let enabled = worker.enable(&namespace_id).await.expect("enable");
-    assert!(matches!(
-        enabled,
-        loonfs_grep::GrepEnableOutcome::Enabled { .. }
-    ));
+    assert_matches!(enabled, loonfs_grep::GrepEnableOutcome::Enabled { .. });
     let again = worker
         .enable(&namespace_id)
         .await
         .expect("idempotent enable");
-    assert!(matches!(
-        again,
-        loonfs_grep::GrepEnableOutcome::AlreadyEnabled { .. }
-    ));
+    assert_matches!(again, loonfs_grep::GrepEnableOutcome::AlreadyEnabled { .. });
     let manifest = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
         .await
         .expect("load manifest")
@@ -326,7 +318,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .build_step(&namespace_id, policy)
         .await
         .expect("first backfill page");
-    assert!(matches!(first, GrepBuildOutcome::Published { .. }));
+    assert_matches!(first, GrepBuildOutcome::Published { .. });
     let error = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect_err("backfill is not materialized");
@@ -371,10 +363,10 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
             .await
             .expect("load disabled manifest")
             .expect("disabled manifest remains");
-    assert!(matches!(
+    assert_matches!(
         disabled_manifest.manifest_state().status(),
         GrepIndexStatus::Disabled {}
-    ));
+    );
     assert_eq!(
         worker
             .disable(&namespace_id)
@@ -383,19 +375,16 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         loonfs_grep::GrepDisableOutcome::NotEnabled
     );
     let reenabled = worker.enable(&namespace_id).await.expect("re-enable");
-    assert!(matches!(
-        reenabled,
-        loonfs_grep::GrepEnableOutcome::Enabled { .. }
-    ));
+    assert_matches!(reenabled, loonfs_grep::GrepEnableOutcome::Enabled { .. });
     let manifest = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
         .await
         .expect("load re-enabled manifest")
         .expect("manifest exists");
     assert!(manifest.manifest_state().segments().is_empty());
-    assert!(matches!(
+    assert_matches!(
         manifest.manifest_state().status(),
         GrepIndexStatus::Backfilling { .. }
-    ));
+    );
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -495,10 +484,10 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
             .expect_err("a reorganization cannot allocate above the public maximum"),
     ] {
         assert_eq!(error.code(), ErrorCode::IndexCorrupt);
-        assert!(matches!(
+        assert_matches!(
             error,
             GrepError::IndexCorrupt { message } if message.contains("largest run number")
-        ));
+        );
     }
 
     let after = load_current_grep_manifest(&*store, &namespace_id, crate::common::observation())
@@ -579,7 +568,7 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         .enable(&namespace_id)
         .await
         .expect_err("the manifest load fails before checkpoint creation");
-    assert!(matches!(error, GrepError::StoreUnavailable { .. }));
+    assert_matches!(error, GrepError::StoreUnavailable { .. });
     assert_eq!(failing_store.attempts(), 1);
 
     let mut pager = host.maintenance.list_checkpoints(&namespace_id);
@@ -644,10 +633,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .enable(&namespace_id)
         .await
         .expect("confirm landed manifest");
-    assert!(matches!(
-        outcome,
-        loonfs_grep::GrepEnableOutcome::Enabled { .. }
-    ));
+    assert_matches!(outcome, loonfs_grep::GrepEnableOutcome::Enabled { .. });
     assert_eq!(failing_store.attempts(), 1);
 
     assert_fresh_backfill_attempt(&store, &namespace_id).await;
@@ -713,10 +699,7 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
         .expect("confirm landed restart");
-    assert!(matches!(
-        outcome,
-        GrepBuildOutcome::BackfillRestarted { .. }
-    ));
+    assert_matches!(outcome, GrepBuildOutcome::BackfillRestarted { .. });
     assert_eq!(failing_store.attempts(), 1);
 
     let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
@@ -770,10 +753,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
         .expect("gap restart");
-    assert!(matches!(
-        restart,
-        GrepBuildOutcome::BackfillRestarted { .. }
-    ));
+    assert_matches!(restart, GrepBuildOutcome::BackfillRestarted { .. });
     let gap_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
 
     // The second trigger: the pinned checkpoint stops pinning its basis
@@ -787,10 +767,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
         .expect("vanished checkpoint restart");
-    assert!(matches!(
-        vanished,
-        GrepBuildOutcome::BackfillRestarted { .. }
-    ));
+    assert_matches!(vanished, GrepBuildOutcome::BackfillRestarted { .. });
     // A deleted record is finished for good, so the new attempt takes a
     // pin of its own: a new id, pinning its basis, with the walk starting
     // from nothing.
@@ -870,13 +847,13 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .build_step(&namespace_id, policy)
         .await
         .expect("first backfill page");
-    assert!(matches!(
+    assert_matches!(
         first,
         GrepBuildOutcome::Published {
             indexed_revisions: 1,
             ..
         }
-    ));
+    );
 
     namespace
         .put_file(
@@ -897,13 +874,13 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .build_step(&namespace_id, policy)
         .await
         .expect("final backfill page");
-    assert!(matches!(
+    assert_matches!(
         completed,
         GrepBuildOutcome::Published {
             built_through_seq,
             ..
         } if built_through_seq == captured_seq
-    ));
+    );
     let error = new_query(&store, &namespace_id, &request("handoff needle"))
         .await
         .expect_err("an expired handoff cursor cannot answer a query");
@@ -913,10 +890,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         .build_step(&namespace_id, policy)
         .await
         .expect("restart expired handoff");
-    assert!(matches!(
-        restarted,
-        GrepBuildOutcome::BackfillRestarted { .. }
-    ));
+    assert_matches!(restarted, GrepBuildOutcome::BackfillRestarted { .. });
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
     let response = new_query(&store, &namespace_id, &request("handoff needle"))
@@ -1123,14 +1097,12 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         .build_step(&namespace_id, policy)
         .await
         .expect("first backfill page");
-    assert!(
-        matches!(
-            first,
-            GrepBuildOutcome::Published {
-                indexed_revisions: 1,
-                ..
-            }
-        ),
+    assert_matches!(
+        first,
+        GrepBuildOutcome::Published {
+            indexed_revisions: 1,
+            ..
+        },
         "one file per step must leave the backfill unfinished: {:?}",
         first
     );
@@ -1441,14 +1413,12 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
         .expect("build step after undelete");
-    assert!(
-        matches!(
-            step,
-            GrepBuildOutcome::Published {
-                segments_written: 0,
-                ..
-            }
-        ),
+    assert_matches!(
+        step,
+        GrepBuildOutcome::Published {
+            segments_written: 0,
+            ..
+        },
         "an undelete only advances the watermark: {step:?}"
     );
     assert_eq!(
@@ -1633,7 +1603,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
         .expect_err("mismatch");
-    assert!(matches!(error, GrepError::IndexCorrupt { .. }), "{error:?}");
+    assert_matches!(error, GrepError::IndexCorrupt { .. }, "{error:?}");
     assert_eq!(recording.counts().puts, 0);
     assert_eq!(recording.counts().deletes, 0);
     writer.shutdown().await.expect("shutdown");
@@ -2032,7 +2002,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     assert!(shared.next_cursor.is_none());
     for found in &shared.matches {
         assert!(found.path.starts_with("/docs/file-"));
-        assert!(matches!(found.line_number, 1 | 2));
+        assert_matches!(found.line_number, 1 | 2);
         assert_eq!(
             found.byte_offset,
             if found.line_number == 1 { 0 } else { 16 }
@@ -2404,8 +2374,9 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
         hint_key(&namespace_id),
         manifest_key(&namespace_id, &ManifestNo(1)),
     ]) {
-        assert!(
-            matches!(operation, RecordedOperation::Put { key, mode: PutMode::CreateIfAbsent, .. } if key == &expected_key)
+        assert_matches!(
+            operation,
+            RecordedOperation::Put { key, mode: PutMode::CreateIfAbsent, .. } if key == &expected_key
         );
     }
     host.worker
@@ -2449,7 +2420,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
             .manifest_no(),
         ManifestNo(3)
     );
-    assert!(matches!(
+    assert_matches!(
         grep_with(
             &host.service,
             &host.reader,
@@ -2460,7 +2431,7 @@ async fn enable_disable_and_cached_queries_use_numbered_publication() {
         )
         .await,
         Err(GrepError::NotEnabled)
-    ));
+    );
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -2585,13 +2556,13 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
     failing.fail_all();
     let failing_store: SharedObjectStore = failing;
     recording.reset();
-    assert!(matches!(
+    assert_matches!(
         worker(&failing_store)
             .await
             .gc_namespace(&namespace_id, u64::MAX)
             .await,
         Err(GrepError::StoreUnavailable { .. })
-    ));
+    );
     assert_eq!(recording.counts().deletes, 0);
     let unknown = format!("{}unrecognized", segments_prefix(&namespace_id));
     store
@@ -2606,10 +2577,10 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
         .await
         .expect("corrupt hint");
     recording.reset();
-    assert!(matches!(
+    assert_matches!(
         collector.gc_namespace(&namespace_id, u64::MAX).await,
         Err(GrepError::IndexCorrupt { .. })
-    ));
+    );
     assert_eq!(recording.counts().deletes, 0);
     namespace.delete().await.expect("tombstone");
     let core_keys: Vec<_> = store

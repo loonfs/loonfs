@@ -9,6 +9,7 @@ use loonfs_types::{
     CapabilityDocument, ContentId, ContentRef, API_GROUP_FILESYSTEM_V0,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
 };
+use std::assert_matches;
 use std::collections::BTreeMap;
 
 /// Default maximum size of a proxied read response.
@@ -81,7 +82,7 @@ async fn a_capability_failure_is_not_reported_as_no_direct_download() {
 
     let result = client.offers_direct_download().await;
 
-    assert!(matches!(result, Err(ClientError::Json(_))), "{result:?}");
+    assert_matches!(result, Err(ClientError::Json(_)), "{result:?}");
     assert_eq!(transport.attempts(), 1);
 }
 
@@ -172,8 +173,9 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
         )
         .await
         .expect_err("bytes that are not the granted object");
-    assert!(
-        matches!(&error, ClientError::Protocol(message) if message.contains("grant named")),
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message) if message.contains("grant named"),
         "unexpected error: {error}"
     );
 }
@@ -221,8 +223,9 @@ async fn a_crc32c_only_grant_verifies_the_bytes_it_receives() {
         )
         .await
         .expect_err("bytes that are not the granted object");
-    assert!(
-        matches!(&error, ClientError::Protocol(message) if message.contains("grant named")),
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message) if message.contains("grant named"),
         "unexpected error: {error}"
     );
 }
@@ -259,13 +262,13 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
     let error = loop {
         match download.next_chunk().await {
             Ok(Some(_)) => continue,
-            #[allow(clippy::panic, reason = "the failure this test exists to catch")]
             Ok(None) => panic!("a prefix that is not the object's verified"),
             Err(error) => break error,
         }
     };
-    assert!(
-        matches!(&error, ClientError::Protocol(message) if message.contains("grant named")),
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message) if message.contains("grant named"),
         "unexpected error: {error}"
     );
 }
@@ -295,9 +298,7 @@ async fn a_resumed_download_that_fails_its_checksum_never_reports_completion() {
         .expect("a chunk before the end");
     for _ in 0..2 {
         let result = download.next_chunk().await;
-        #[allow(clippy::panic, reason = "the failure this test exists to catch")]
-        let Err(ClientError::Protocol(message)) = &result
-        else {
+        let Err(ClientError::Protocol(message)) = &result else {
             panic!("expected the checksum failure, got {result:?}");
         };
         assert!(message.contains("grant named"), "{message}");
@@ -625,8 +626,9 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
         .next_chunk()
         .await
         .expect_err("the skipped bytes are still owed");
-    assert!(
-        matches!(&error, ClientError::Http(message) if message.contains("resumed at offset 4")),
+    assert_matches!(
+        &error,
+        ClientError::Http(message) if message.contains("resumed at offset 4"),
         "unexpected error: {error}"
     );
 }
@@ -649,8 +651,9 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
         .download_via_presigned_url(&grant, &mut sink)
         .await
         .expect_err("a write capability cannot serve a read");
-    assert!(
-        matches!(&error, ClientError::Protocol(message) if message.contains("presigned download method")),
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message) if message.contains("presigned download method"),
         "unexpected error: {error}"
     );
     assert!(sink.is_empty());
@@ -674,9 +677,10 @@ async fn a_grant_from_past_the_start_is_refused_before_any_request() {
         .download_via_presigned_url(&resumed, &mut sink)
         .await
         .expect_err("the helper takes a grant from offset 0");
-    assert!(
-        matches!(&error, ClientError::Protocol(message)
-            if message.contains("offset 5") && message.contains("open_direct_download")),
+    assert_matches!(
+        &error,
+        ClientError::Protocol(message)
+            if message.contains("offset 5") && message.contains("open_direct_download"),
         "unexpected error: {error}"
     );
     assert_eq!(transport.attempts(), 0);
@@ -739,7 +743,7 @@ async fn ranges_verify_the_whole_revision_and_resume_inside_the_second_object() 
             .download_via_presigned_url(&whole, &mut Vec::new())
             .await
             .expect_err("invalid range bytes");
-        assert!(matches!(error, ClientError::Protocol(_)));
+        assert_matches!(error, ClientError::Protocol(_));
         assert_eq!(transport.attempts(), expected_attempts);
     }
 }

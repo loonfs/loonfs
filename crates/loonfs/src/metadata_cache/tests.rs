@@ -1,8 +1,6 @@
 //! One metadata cache shared by runtimes over different stores: scoping,
 //! one capacity, binding lifetimes, per-binding policy, and metrics.
 
-#![allow(clippy::panic)]
-
 use super::MetadataCache;
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder, MetricsSnapshot};
 use crate::{LoonFs, NamespaceId, ReadOnly, SharedObjectStore, Writable};

@@ -11,6 +11,7 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
 use loonfs_types::{ErrorCode, ManifestNo, PageRequest};
+use std::assert_matches;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -107,7 +108,7 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
             .is_some(),
         "uncertain publication cleanup must preserve the successor's checkpoint"
     );
-    assert!(matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown));
+    assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
 }
 
 #[tokio::test]
@@ -136,7 +137,7 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
 
     let outcome = host.worker.enable(&namespace_id).await;
 
-    assert!(matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown));
+    assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
     assert!(
         load_current_grep_manifest(&base, &namespace_id, crate::common::observation())
             .await

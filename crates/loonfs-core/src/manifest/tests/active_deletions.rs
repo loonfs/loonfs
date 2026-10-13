@@ -17,6 +17,7 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::{AttributeInclusion, EntryInodeKind, InodeKind};
 use loonfs_types::{DisplayName, Page, PageRequest, TrashEntry, TrashPageCursor};
+use std::assert_matches;
 use std::sync::Arc;
 
 fn position(seq: u64) -> DeltaPosition {
@@ -169,14 +170,12 @@ fn a_removal_carries_the_undeletes_sequence_so_it_lands_in_that_commits_run() {
         1,
         "only the undelete's removal belongs to the run above sequence 5"
     );
-    assert!(
-        matches!(
-            &delta_rows[0],
-            MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
-                action: ActiveDeletionRowAction::Removed { revocation_seq },
-                ..
-            }) if *revocation_seq == ChangeSeq(9)
-        ),
+    assert_matches!(
+        &delta_rows[0],
+        MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
+            action: ActiveDeletionRowAction::Removed { revocation_seq },
+            ..
+        }) if *revocation_seq == ChangeSeq(9),
         "unexpected delta row: {:?}",
         delta_rows[0]
     );
@@ -676,10 +675,8 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
         last_name_key: NameKey::parse("x").expect("name key"),
     })
     .expect("encode cursor");
-    assert!(
-        loonfs_types::decode_cursor::<TrashPageCursor>(&wrong_kind).is_err(),
-        "another endpoint's cursor must not resume a trash listing"
-    );
+    loonfs_types::decode_cursor::<TrashPageCursor>(&wrong_kind)
+        .expect_err("another endpoint's cursor must not resume a trash listing");
 }
 
 #[tokio::test]

@@ -1,13 +1,12 @@
 //! Appends: which content object takes the bytes, guards, rejections, and
 //! retries.
 
-#![allow(clippy::panic)]
-
 use super::*;
 use crate::error::ErrorCode;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::PutMode;
 use loonfs_types::{Checksum, ContentRefKind};
+use std::assert_matches;
 
 fn append(path: &str, bytes: &[u8]) -> FilesystemOperation {
     FilesystemOperation::AppendFile {
@@ -134,13 +133,13 @@ async fn same_chain_appends_keep_pending_bytes_in_the_wal_without_content_writes
                 bytes: bytes.to_vec(),
             }]
         );
-        assert!(matches!(
+        assert_matches!(
             record.deltas.as_slice(),
             [loonfs_types::format::wal::WalCommitDelta {
                 delta: WalDelta::AppendFileRevision { layout: None, .. },
                 ..
             }]
-        ));
+        );
     }
 }
 
@@ -484,7 +483,7 @@ async fn an_append_retry_replays_and_changed_bytes_conflict() {
         .expect("replay"),
         committed
     );
-    assert!(matches!(
+    assert_matches!(
         publish(
             &mut engine,
             &store,
@@ -493,7 +492,7 @@ async fn an_append_retry_replays_and_changed_bytes_conflict() {
         )
         .await,
         Err(CoreError::CommitIdReuseConflict { .. })
-    ));
+    );
     assert_no_writes(&store);
     assert_eq!(
         read_file(&store, &engine.namespace_id, RevisionNo(2)).await,
@@ -890,10 +889,11 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
     )
     .await
     .expect_err("missing base bytes");
-    assert!(
-        matches!(error, CoreError::FailedOperation { error: source, .. }
+    assert_matches!(
+        error,
+        CoreError::FailedOperation { error: source, .. }
         if matches!(*source, CoreError::NamespaceCorrupt(ref message)
-            if message.contains(value.content_ref().content_id.as_str()) && message.contains("offset 3")))
+            if message.contains(value.content_ref().content_id.as_str()) && message.contains("offset 3"))
     );
     assert_no_writes(&store);
 }

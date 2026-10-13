@@ -298,7 +298,8 @@ mod tests {
             .as_object_mut()
             .expect("document")
             .remove("api_groups");
-        assert!(serde_json::from_value::<CapabilityDocument>(missing_groups).is_err());
+        serde_json::from_value::<CapabilityDocument>(missing_groups)
+            .expect_err("a document without groups should be rejected");
 
         let future = encoded.replacen('{', "{\"field_from_the_future\":true,", 1);
         let decoded: CapabilityDocument =

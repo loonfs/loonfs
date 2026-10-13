@@ -77,7 +77,8 @@ fn trace_config_from_env(
 
 #[cfg(test)]
 mod tests {
-    use super::{trace_config_from_env, DEFAULT_TRACE_FILTER};
+    use super::{trace_config_from_env, TraceInitError, DEFAULT_TRACE_FILTER};
+    use std::assert_matches;
 
     #[test]
     fn tracing_is_enabled_without_env() {
@@ -127,6 +128,6 @@ mod tests {
 
     #[test]
     fn unsupported_trace_mode_is_rejected() {
-        assert!(trace_config_from_env(Some("text".to_owned()), None).is_err());
+        assert_matches!(trace_config_from_env(Some("text".to_owned()), None).expect_err("an unknown trace mode should be rejected"), TraceInitError::UnsupportedMode(mode) if mode == "text");
     }
 }

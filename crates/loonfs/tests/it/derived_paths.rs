@@ -1,9 +1,6 @@
 //! Paths derived from stored names can exceed the request path limits, and
 //! inode-addressed reads and writes still serve them.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::{expect_code, open_runtime_async, store};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{

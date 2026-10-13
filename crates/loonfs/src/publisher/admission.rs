@@ -233,6 +233,7 @@ mod tests {
     use super::*;
     use crate::publish::CommitCandidate;
     use crate::ExecutionBudgetStats;
+    use std::assert_matches;
     use std::num::NonZeroUsize;
 
     fn limit(value: usize) -> NonZeroUsize {
@@ -271,9 +272,10 @@ mod tests {
             .expect("oversized commit");
         assert_eq!(error.code(), loonfs_types::ErrorCode::ContentTooLarge);
         assert!(error.to_string().contains("too large for one WAL object"));
-        assert!(
-            matches!(error, CoreError::CommitTooLarge { estimated_bytes, max_bytes }
-            if estimated_bytes == MAX_WAL_OBJECT_BYTES + 1 && max_bytes == MAX_WAL_OBJECT_BYTES)
+        assert_matches!(
+            error,
+            CoreError::CommitTooLarge { estimated_bytes, max_bytes }
+            if estimated_bytes == MAX_WAL_OBJECT_BYTES + 1 && max_bytes == MAX_WAL_OBJECT_BYTES
         );
         drop(permit);
         assert_eq!(admission.used_requests(), 0);

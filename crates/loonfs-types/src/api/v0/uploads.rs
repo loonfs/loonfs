@@ -319,7 +319,8 @@ mod tests {
 
     #[test]
     fn a_create_upload_body_without_a_mode_does_not_decode() {
-        assert!(serde_json::from_str::<CreateUploadBody>("{}").is_err());
+        serde_json::from_str::<CreateUploadBody>("{}")
+            .expect_err("a body without a mode should be rejected");
         assert_eq!(
             serde_json::from_str::<CreateUploadBody>(r#"{"mode":"service_proxied"}"#)
                 .expect("decode proxied begin request"),
@@ -337,10 +338,8 @@ mod tests {
             r#"{"mode":"direct_put","part_size_bytes":8388608}"#,
             r#"{"mode":"direct_multipart","size_bytes":5}"#,
         ] {
-            assert!(
-                serde_json::from_str::<CreateUploadBody>(body).is_err(),
-                "decoded a begin request that mixes modes: {body}"
-            );
+            serde_json::from_str::<CreateUploadBody>(body)
+                .expect_err(&format!("decoded a begin request that mixes modes: {body}"));
         }
     }
 
@@ -400,10 +399,8 @@ mod tests {
             r#"{"mode":"direct_put"}"#,
             r#"{"mode":"direct_multipart"}"#,
         ] {
-            assert!(
-                serde_json::from_str::<CompleteUploadBody>(body).is_err(),
-                "decoded an invalid completion request: {body}"
-            );
+            serde_json::from_str::<CompleteUploadBody>(body)
+                .expect_err(&format!("decoded an invalid completion request: {body}"));
         }
 
         let missing_parts = r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"0123456789abcdef"}}}"#;
@@ -535,13 +532,9 @@ mod tests {
             CreateUploadBody::DirectPut { size_bytes: None }
         );
 
-        assert!(
-            serde_json::from_str::<UploadContentClaim>(
+        serde_json::from_str::<UploadContentClaim>(
                 r#"{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"},"content_id":"con_0123456789abcdef0123456789abcdef"}"#
-            )
-            .is_err(),
-            "a client must not be able to name the content object"
-        );
+            ).expect_err("a client must not be able to name the content object");
     }
 
     #[test]
@@ -672,6 +665,7 @@ mod tests {
             "token": "opaque-server-token",
             "expires_at_ms": 1
         });
-        assert!(serde_json::from_value::<ContentToken>(token).is_err());
+        serde_json::from_value::<ContentToken>(token)
+            .expect_err("a token with an unknown field should be rejected");
     }
 }

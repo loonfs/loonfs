@@ -23,6 +23,7 @@ use loonfs_types::{
     AbsolutePath, AttributeInclusion, ChangeSeq, CommitId, ErrorCode, InodeId, ManifestNo,
     NamespaceId, WalNo, WriterEpoch, WriterId,
 };
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -144,8 +145,9 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
     )
     .await
     .expect_err("gap in discovery window");
-    assert!(
-        matches!(error, crate::control_object::ControlObjectLoadError::Codec { object_key, .. } if object_key == missing)
+    assert_matches!(
+        error,
+        crate::control_object::ControlObjectLoadError::Codec { object_key, .. } if object_key == missing
     );
 }
 
@@ -326,10 +328,10 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
     let error = acquire_writer(&store, &namespace_id, &setup, timer)
         .await
         .expect_err("the acquisition runs out of budget");
-    assert!(matches!(
+    assert_matches!(
         error,
         crate::error::CoreError::MetadataPublicationBudgetExceeded { .. }
-    ));
+    );
     assert_eq!(store.attempts(), 1);
     assert!(store
         .list_prefix(&wal_prefix(&namespace_id))
@@ -679,8 +681,9 @@ async fn a_bounded_tail_load_names_the_missing_wal_object() {
     )
     .await
     .expect_err("a gap below the tip is corruption");
-    assert!(
-        matches!(error, super::WalTailLoadError::MissingWalObject { object_key } if object_key == lowest_missing)
+    assert_matches!(
+        error,
+        super::WalTailLoadError::MissingWalObject { object_key } if object_key == lowest_missing
     );
 }
 
@@ -844,11 +847,9 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
     let error = super::probe_namespace_wal(&store, &mut warm)
         .await
         .expect_err("a same-epoch chain break is corruption, not a stale head");
-    assert!(
-        matches!(
-            error,
-            crate::control_object::ControlObjectLoadError::Codec { .. }
-        ),
+    assert_matches!(
+        error,
+        crate::control_object::ControlObjectLoadError::Codec { .. },
         "{error}"
     );
 }
@@ -910,10 +911,10 @@ async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
     let error = super::publish_wal_object(&store, &fence, &tip)
         .await
         .expect_err("late put must not acknowledge publication");
-    assert!(matches!(
+    assert_matches!(
         error,
         crate::error::CoreError::WalPublish(crate::wal::WalPublishError::OutcomeUnknown(_))
-    ));
+    );
     assert_eq!(store.inner().counts().create_if_absent_puts, 1);
     assert_eq!(store.inner().snapshot().len(), 1);
     assert!(store

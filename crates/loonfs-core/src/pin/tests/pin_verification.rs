@@ -4,6 +4,7 @@ use super::*;
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::control::PinOwner;
+use std::assert_matches;
 
 #[tokio::test]
 async fn pin_creation_retries_after_compaction_and_collection() {
@@ -104,10 +105,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     )
     .await
     .expect("compact");
-    assert!(matches!(
-        report,
-        CompactionStepOutcome::UnitPublished { .. }
-    ));
+    assert_matches!(report, CompactionStepOutcome::UnitPublished { .. });
     let current = load_current_manifest(store, namespace_id)
         .await
         .expect("current manifest");
@@ -225,7 +223,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
             store.release();
         }
     );
-    assert!(matches!(result, Err(CoreError::CheckpointUnavailable(_))));
+    assert_matches!(result, Err(CoreError::CheckpointUnavailable(_)));
     assert!(store
         .list_prefix(&pin_prefix(&namespace_id))
         .await
@@ -302,7 +300,7 @@ async fn a_pin_write_that_lands_and_fails_its_read_back_leaves_no_pin() {
     let error = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect_err("an unconfirmed pin write fails creation");
-    assert!(matches!(error, CoreError::Store { .. }), "{error:?}");
+    assert_matches!(error, CoreError::Store { .. }, "{error:?}");
     assert_eq!(store.attempts(), 3, "put, read-back, and cleanup delete");
     assert!(store
         .list_prefix(&pin_prefix(&namespace_id))

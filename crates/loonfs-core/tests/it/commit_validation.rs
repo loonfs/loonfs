@@ -2,9 +2,6 @@
 //! what a request's earlier operations did, and the all-or-nothing rule that
 //! makes a multi-operation request one commit.
 
-#![allow(clippy::panic)]
-// These integration tests use panic in unexpected match arms for precise diagnostics.
-
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use loonfs_core::content::{
@@ -25,6 +22,7 @@ use loonfs_types::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     NamespaceId, RevisionNo,
 };
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -675,12 +673,12 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
     .expect("one result")
     .expect_err("unprepared content should be reported before the stale revision precondition");
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
-    assert!(matches!(
+    assert_matches!(
         error,
         CoreError::ContentPreparation(
             loonfs_core::publish::ContentPreparationError::ContentNotPrepared { ref content_id }
         ) if *content_id == missing_content.content_id
-    ));
+    );
     assert_eq!(guarded_store.count(OperationSelector::Read), 0);
 }
 

@@ -364,6 +364,7 @@ mod tests {
     };
     use loonfs_types::format::segment_blocks::{decode_index_block, SegmentBlocksBuilder};
     use loonfs_types::{InodeId, RevisionNo};
+    use std::assert_matches;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -478,8 +479,9 @@ mod tests {
         let error = load_index_section_bytes(&store, "segments/one", &handle)
             .await
             .expect_err("a short ranged read should not decode");
-        assert!(
-            matches!(error, GrepError::StoreUnavailable { .. }),
+        assert_matches!(
+            error,
+            GrepError::StoreUnavailable { .. },
             "expected a store failure, got {error:?}"
         );
     }

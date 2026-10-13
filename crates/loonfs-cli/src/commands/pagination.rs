@@ -179,7 +179,7 @@ mod tests {
             },
         )
         .await;
-        assert!(result.is_err());
+        result.expect_err("the failed second fetch should fail the listing");
         assert!(delivered.get());
     }
 

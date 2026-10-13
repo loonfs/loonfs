@@ -1,5 +1,3 @@
-#![allow(clippy::panic)]
-
 use crate::common::commit_split_support::*;
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};

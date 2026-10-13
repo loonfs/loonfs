@@ -6,6 +6,7 @@ use crate::manifest::{compaction_step, fold_wal, CompactionStepOutcome};
 use crate::namespace::control::{load_current_manifest, raise_hint, LoadedManifest};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_types::MetadataFamilyGroup;
+use std::assert_matches;
 
 async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> LoadedManifest {
     let setup = context(1_000);
@@ -38,13 +39,13 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
     )
     .await
     .expect("compact bindings");
-    assert!(matches!(
+    assert_matches!(
         outcome,
         CompactionStepOutcome::UnitPublished {
             group: MetadataFamilyGroup::Bindings,
             ..
         }
-    ));
+    );
     load_current_manifest(store, namespace_id)
         .await
         .expect("compacted manifest")

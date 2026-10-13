@@ -291,6 +291,7 @@ mod tests {
         RecordedOperation, RecordingStore,
     };
     use loonfs_types::ManifestNo;
+    use std::assert_matches;
     use std::sync::Arc;
 
     async fn seed_hint(store: &LocalFsStore, namespace_id: &NamespaceId) -> LoadedHint {
@@ -322,7 +323,7 @@ mod tests {
         let error = raise_hint(&store, &namespace_id, ManifestNo(2), Some(known), &deadline)
             .await
             .expect_err("etag required");
-        assert!(matches!(error, CoreError::Store { .. }));
+        assert_matches!(error, CoreError::Store { .. });
         assert_eq!(
             store
                 .take()

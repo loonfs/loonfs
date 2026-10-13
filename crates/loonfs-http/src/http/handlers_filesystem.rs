@@ -717,6 +717,7 @@ mod tests {
             parse_after_seq("9007199254740991"),
             Ok(loonfs_types::ChangeSeq(loonfs_types::MAX_PUBLIC_INTEGER))
         ));
-        assert!(parse_after_seq("9007199254740992").is_err());
+        parse_after_seq("9007199254740992")
+            .expect_err("the value after the public maximum should be rejected");
     }
 }

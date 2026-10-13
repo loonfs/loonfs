@@ -1225,6 +1225,7 @@ mod tests {
         ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
         WriterEpoch,
     };
+    use std::assert_matches;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
@@ -1774,12 +1775,10 @@ mod tests {
             .iter()
             .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
             .collect();
-        assert!(
-            matches!(
-                heads.as_slice(),
-                [RecordedOperation::Head { key }]
-                    if key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id))
-            ),
+        assert_matches!(
+            heads.as_slice(),
+            [RecordedOperation::Head { key }]
+                if key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)),
             "{operations:?}"
         );
     }
@@ -1921,11 +1920,9 @@ mod tests {
         let error = published.results[0]
             .as_ref()
             .expect_err("a batch older than its budget writes nothing");
-        assert!(
-            matches!(
-                error,
-                CoreError::WalPublish(crate::wal::WalPublishError::PublishBudgetExceeded { .. })
-            ),
+        assert_matches!(
+            error,
+            CoreError::WalPublish(crate::wal::WalPublishError::PublishBudgetExceeded { .. }),
             "unexpected error: {error:?}"
         );
         let operations = store.take();
@@ -1999,17 +1996,15 @@ mod tests {
         // The tail holds a fence and four commits, and none of it is read
         // again: the next WAL number, then the next manifest number, then the put.
         let operations = store.take();
-        assert!(
-            matches!(
-                operations.as_slice(),
-                [
-                    RecordedOperation::Head { key: probed },
-                    RecordedOperation::Head { key: successor },
-                    RecordedOperation::Put { key: written, mode: loonfs_objectstore::PutMode::CreateIfAbsent, .. },
-                ] if probed == written
-                    && probed.starts_with(&wal_prefix(&namespace_id))
-                    && successor.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id))
-            ),
+        assert_matches!(
+            operations.as_slice(),
+            [
+                RecordedOperation::Head { key: probed },
+                RecordedOperation::Head { key: successor },
+                RecordedOperation::Put { key: written, mode: loonfs_objectstore::PutMode::CreateIfAbsent, .. },
+            ] if probed == written
+                && probed.starts_with(&wal_prefix(&namespace_id))
+                && successor.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)),
             "{operations:?}"
         );
     }
@@ -2223,8 +2218,9 @@ mod tests {
         timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1_000);
         store.reset();
         publish_one(&mut engine, &store, &writer, "beta").await;
-        assert!(
-            matches!(store.take().as_slice(), [RecordedOperation::Put { .. }]),
+        assert_matches!(
+            store.take().as_slice(),
+            [RecordedOperation::Put { .. }],
             "the exact budget boundary still trusts the confirmed tip"
         );
     }
@@ -2379,11 +2375,9 @@ mod tests {
         let error = abandoned.results[0]
             .as_ref()
             .expect_err("over-budget publish must abandon");
-        assert!(
-            matches!(
-                error,
-                CoreError::WalPublish(crate::wal::WalPublishError::PublishBudgetExceeded { .. })
-            ),
+        assert_matches!(
+            error,
+            CoreError::WalPublish(crate::wal::WalPublishError::PublishBudgetExceeded { .. }),
             "unexpected error: {error:?}"
         );
         // Retryable exactly like a stale head, so existing retry loops

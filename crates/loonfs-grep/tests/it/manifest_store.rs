@@ -1,7 +1,5 @@
 //! Numbered grep publication, hint discovery, and input validation.
 
-#![allow(clippy::panic)]
-
 use bytes::Bytes;
 use loonfs::engine::Deadline;
 use loonfs_grep::keyspace::{grep_prefix, hint_key, manifest_key, manifests_prefix};
@@ -20,6 +18,7 @@ use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{ChangeSeq, ErrorCode, ManifestNo, NamespaceId, RunNo};
+use std::assert_matches;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -155,10 +154,10 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
             .is_none()
     );
     write_hint(&store, &namespace_id, ManifestNo(4)).await;
-    assert!(matches!(
+    assert_matches!(
         load_current_grep_manifest(&store, &namespace_id, crate::common::observation()).await,
         Err(GrepManifestError::Corrupt { .. })
-    ));
+    );
     let wrong = state(namespace_id.clone(), ManifestNo(5), RunNo(0));
     store
         .put_if_absent(
@@ -167,10 +166,10 @@ async fn discovery_follows_a_lagging_hint_and_rejects_missing_or_misnamed_manife
         )
         .await
         .expect("misnamed manifest");
-    assert!(matches!(
+    assert_matches!(
         load_grep_manifest(&store, &namespace_id, ManifestNo(4)).await,
         Err(GrepManifestError::Corrupt { .. })
-    ));
+    );
 }
 
 #[tokio::test]
@@ -253,30 +252,24 @@ async fn a_failed_hint_raise_leaves_a_discoverable_publication_and_invalid_candi
     assert_eq!(loaded.hint.state.manifest_no, ManifestNo(1));
     assert_eq!(loaded.manifest_no(), ManifestNo(2));
     store.reset();
-    assert!(
-        publish_grep_manifest(&store, Some(&loaded), &next, &deadline)
-            .await
-            .is_err()
-    );
+    publish_grep_manifest(&store, Some(&loaded), &next, &deadline)
+        .await
+        .expect_err("a manifest number that is already published should be refused");
     let wrong = state(
         loonfs_test_support::ids::namespace_id("other"),
         ManifestNo(3),
         RunNo(2),
     );
-    assert!(
-        publish_grep_manifest(&store, Some(&loaded), &wrong, &deadline)
-            .await
-            .is_err()
-    );
+    publish_grep_manifest(&store, Some(&loaded), &wrong, &deadline)
+        .await
+        .expect_err("a manifest for another namespace should be refused");
     let clock = Arc::new(ManualClock::new(0));
     let expired = Deadline::start(clock.clone());
     clock.advance_ms(loonfs::engine::METADATA_PUBLICATION_BUDGET_MS + 1);
     let valid = state(namespace_id, ManifestNo(3), RunNo(2));
-    assert!(
-        publish_grep_manifest(&store, Some(&loaded), &valid, &expired)
-            .await
-            .is_err()
-    );
+    publish_grep_manifest(&store, Some(&loaded), &valid, &expired)
+        .await
+        .expect_err("a publication past its deadline should be refused");
     assert_eq!(store.counts().puts, 0);
 }
 
@@ -327,24 +320,24 @@ async fn missing_hint_etags_fail_without_repeated_store_attempts() {
     );
     let deadline = Deadline::start(Arc::new(StdMonotonicTimer::default()));
     let first = state(namespace_id.clone(), ManifestNo(1), RunNo(0));
-    assert!(matches!(
+    assert_matches!(
         publish_grep_manifest(&store, None, &first, &deadline).await,
         Err(GrepError::StoreUnavailable { .. })
-    ));
+    );
     assert_eq!(store.counts().puts, 1);
     assert!(load_grep_manifest(&raw, &namespace_id, ManifestNo(1))
         .await
         .expect("manifest")
         .is_none());
-    assert!(matches!(
+    assert_matches!(
         load_current_grep_manifest(&store, &namespace_id, crate::common::observation()).await,
         Err(GrepManifestError::Store { .. })
-    ));
+    );
     let published = publish_grep_manifest(&raw, None, &first, &deadline)
         .await
         .expect("first manifest");
     store.reset();
-    assert!(matches!(
+    assert_matches!(
         raise_grep_hint(
             &store,
             &namespace_id,
@@ -354,7 +347,7 @@ async fn missing_hint_etags_fail_without_repeated_store_attempts() {
         )
         .await,
         Err(GrepManifestError::Store { .. })
-    ));
+    );
     assert_eq!(
         store
             .take()
@@ -396,7 +389,7 @@ async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
         if apply {
             assert_eq!(result.expect("landed manifest").manifest_state(), &next);
         } else {
-            assert!(matches!(result, Err(error) if error.code() == ErrorCode::OutcomeUnknown));
+            assert_matches!(result, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
             let current =
                 load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
                     .await
@@ -408,10 +401,10 @@ async fn ambiguous_manifest_puts_reconcile_the_exact_landed_state() {
         }
         store.fail_next(1);
         let different = state(namespace_id.clone(), ManifestNo(2), RunNo(2));
-        assert!(matches!(
+        assert_matches!(
             publish_grep_manifest(&store, Some(&first), &different, &deadline).await,
             Err(GrepError::PublicationConflict { .. })
-        ));
+        );
     }
 }
 
@@ -456,10 +449,10 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
         .expect("first");
         let next = manifest(2, after_run, after_seq, after_event);
         store.reset();
-        assert!(matches!(
+        assert_matches!(
             publish_grep_manifest(&store, Some(&first), &next, &deadline).await,
             Err(GrepError::IndexCorrupt { .. })
-        ));
+        );
         assert_eq!(store.counts().puts, 0);
         store
             .put_if_absent(
@@ -468,10 +461,10 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
             )
             .await
             .expect("corrupt chain");
-        assert!(matches!(
+        assert_matches!(
             load_current_grep_manifest(&store, &namespace_id, crate::common::observation()).await,
             Err(GrepManifestError::Corrupt { .. })
-        ));
+        );
     }
 }
 
@@ -556,10 +549,12 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             blocked.release();
         }
     );
-    assert!(
-        matches!(outcome, Err(GrepError::Runtime(loonfs::Error::Core(CoreError::OutcomeUnknown {
-        object_key: actual_key, ..
-    }))) if actual_key == object_key)
+    assert_matches!(
+        outcome,
+        Err(GrepError::Runtime(loonfs::Error::Core(CoreError::OutcomeUnknown {
+            object_key: actual_key,
+            ..
+        }))) if actual_key == object_key
     );
     assert_eq!(blocked.inner().remaining(), 0);
     assert_eq!(recorded.counts().create_if_absent_puts, 1);

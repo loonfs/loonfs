@@ -566,9 +566,9 @@ fn validate_wal_revision_layouts(payload: &WalObjectPayload) -> Result<(), Envel
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
 
     use super::*;
+    use std::assert_matches;
 
     fn activity(
         content_bytes: u64,
@@ -878,19 +878,19 @@ mod tests {
                 .expect("at limit"),
             encoded.envelope(),
         );
-        assert!(matches!(
+        assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(encoded.as_bytes(), document.len() - 1),
             Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes }) if max_bytes == document.len() - 1
-        ));
+        );
         let invalid = zstd::stream::encode_all(&[0xff; 64][..], 0).expect("compress");
-        assert!(matches!(
+        assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(&invalid, 8),
             Err(EnvelopeCodecError::WalObjectTooLarge { max_bytes: 8 })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             decode_wal_object_envelope_zstd_with_limit(&invalid, 64),
             Err(EnvelopeCodecError::EnvelopeDecode(_))
-        ));
+        );
     }
 
     #[test]
@@ -941,20 +941,21 @@ mod tests {
             } else {
                 if piece_offset == Some(0) {
                     for error in [decoded.as_ref().err(), encoded.as_ref().err()] {
-                        assert!(
-                            matches!(error, Some(EnvelopeCodecError::InvalidWalRevisionLayout { reason, .. })
-                            if *reason == "a whole value carries no layout")
+                        assert_matches!(
+                            error,
+                            Some(EnvelopeCodecError::InvalidWalRevisionLayout { reason, .. })
+                            if *reason == "a whole value carries no layout"
                         );
                     }
                 }
-                assert!(matches!(
+                assert_matches!(
                     decoded,
                     Err(EnvelopeCodecError::InvalidWalRevisionLayout { .. })
-                ));
-                assert!(matches!(
+                );
+                assert_matches!(
                     encoded,
                     Err(EnvelopeCodecError::InvalidWalRevisionLayout { .. })
-                ));
+                );
             }
         }
     }

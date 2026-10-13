@@ -1,7 +1,5 @@
 //! Generated HTTP schema and operation contracts.
 
-#![allow(clippy::panic)]
-
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,6 +11,7 @@ use openapi_postprocess::operations::{
     OPERATION_SDK_NAMES, SDK_EXCLUDED_OPERATIONS,
 };
 use openapi_postprocess::OpenapiPostprocessError;
+use std::assert_matches;
 
 const OPENAPI_JSON_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/openapi.json");
@@ -43,11 +42,11 @@ fn missing_retry_classification_returns_a_named_error() {
 
     let error = validate_operation_retry_classes(&document)
         .expect_err("unknown operation should fail generation");
-    assert!(matches!(
+    assert_matches!(
         error,
         OpenapiPostprocessError::MissingRetryClassification { operation_id }
             if operation_id == "future_operation"
-    ));
+    );
 }
 
 #[test]
@@ -61,11 +60,11 @@ fn missing_sdk_name_returns_a_named_error() {
     });
 
     let error = add_sdk_names(&mut document).expect_err("unknown operation should fail generation");
-    assert!(matches!(
+    assert_matches!(
         error,
         OpenapiPostprocessError::MissingSdkName { operation_id }
             if operation_id == "future_operation"
-    ));
+    );
 }
 
 #[test]
@@ -116,11 +115,11 @@ fn unregistered_cursor_operation_returns_a_named_error() {
     });
     let error = validate_pagination_metadata(&document)
         .expect_err("unregistered cursor operation should fail generation");
-    assert!(matches!(
+    assert_matches!(
         error,
         OpenapiPostprocessError::MissingPaginationMetadata { operation_id }
             if operation_id == "future_list"
-    ));
+    );
 }
 
 #[test]
@@ -895,8 +894,9 @@ fn every_registered_operation_publishes_its_retry_class() {
         registered_operation_ids()
     );
     for (operation_id, retry_class) in published {
-        assert!(
-            matches!(retry_class, "idempotent" | "replayable" | "not_idempotent"),
+        assert_matches!(
+            retry_class,
+            "idempotent" | "replayable" | "not_idempotent",
             "operation `{operation_id}` has invalid retry class `{retry_class}`"
         );
     }

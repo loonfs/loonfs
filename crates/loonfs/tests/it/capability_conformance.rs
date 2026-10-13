@@ -11,8 +11,6 @@
 //! host-specific features and limits from the spec's example. `loonfs-server`'s
 //! `grep_modes` test pins the merged document a composed deployment answers
 //! with.
-#![allow(clippy::panic)]
-// Spec parsing panics with precise messages when a section is missing.
 
 use loonfs::{CapabilityDocument, LoonFs, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;

@@ -154,6 +154,7 @@ mod tests {
     use loonfs_types::format::control::HintPayload;
     use loonfs_types::NamespaceId;
     use serde_json::Value;
+    use std::assert_matches;
     use tempfile::{tempdir, TempDir};
 
     fn local_store() -> (TempDir, LocalFsStore) {
@@ -228,13 +229,13 @@ mod tests {
             .await
             .expect_err("permission failure should surface");
 
-        assert!(matches!(
+        assert_matches!(
             error,
             ControlObjectLoadError::Store {
                 kind: ObjectStoreErrorKind::PermissionDenied,
                 ..
             }
-        ));
+        );
     }
 
     #[tokio::test]
@@ -254,13 +255,13 @@ mod tests {
             .await
             .expect_err("provider failure should surface");
 
-        assert!(matches!(
+        assert_matches!(
             error,
             ControlObjectLoadError::Store {
                 kind: ObjectStoreErrorKind::Other,
                 ..
             }
-        ));
+        );
     }
 
     #[tokio::test]
@@ -276,14 +277,14 @@ mod tests {
             .await
             .expect_err("missing etag should fail");
 
-        assert!(matches!(
+        assert_matches!(
             error,
             ControlObjectLoadError::Store {
                 kind: ObjectStoreErrorKind::Other,
                 message,
                 ..
             } if message.contains("required control-object etag")
-        ));
+        );
     }
 
     #[tokio::test]
@@ -297,7 +298,7 @@ mod tests {
             .await
             .expect_err("malformed envelope should fail");
 
-        assert!(matches!(error, ControlObjectLoadError::Codec { .. }));
+        assert_matches!(error, ControlObjectLoadError::Codec { .. });
     }
 
     #[tokio::test]
@@ -319,11 +320,11 @@ mod tests {
             .await
             .expect_err("wrong kind should fail");
 
-        assert!(matches!(
+        assert_matches!(
             error,
             ControlObjectLoadError::Codec { message, .. }
                 if message.contains("kind mismatch")
-        ));
+        );
     }
 
     #[tokio::test]
@@ -346,14 +347,14 @@ mod tests {
             .await
             .expect_err("checksum mismatch should fail");
 
-        assert!(matches!(
+        assert_matches!(
             error,
             ControlObjectLoadError::ChecksumMismatch {
                 expected,
                 actual,
                 ..
             } if expected == recorded && actual != recorded
-        ));
+        );
     }
 
     #[tokio::test]

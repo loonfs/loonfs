@@ -370,6 +370,7 @@ mod tests {
     use crate::{ObjectStore, ObjectStoreError};
     use bytes::Bytes;
     use loonfs_types::Checksum;
+    use std::assert_matches;
 
     #[test]
     fn a_json_object_resource_reports_its_generation_and_stored_crc32c() {
@@ -577,12 +578,12 @@ mod tests {
         })
         .expect("construct gcs store");
 
-        assert!(matches!(
+        assert_matches!(
             store
                 .compare_and_swap("../escape", "not-a-generation", Bytes::from_static(b"oops"))
                 .await,
             Err(ObjectStoreError::InvalidKey { .. })
-        ));
+        );
     }
 
     #[tokio::test]
@@ -604,19 +605,19 @@ mod tests {
             .await
             .expect_err("non-generation compare token should fail");
 
-        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
+        assert_matches!(error, ObjectStoreError::PreconditionFailed { .. });
     }
 
     #[test]
     fn service_account_key_path_is_required() {
-        assert!(matches!(
+        assert_matches!(
             gcp_gcs(GcpGcsStoreConfig {
                 bucket: "bucket".to_owned(),
                 service_account_key_path: " ".to_owned(),
                 key_prefix: None,
             }),
             Err(ObjectStoreError::Configuration(_))
-        ));
+        );
     }
 
     #[test]
@@ -629,14 +630,14 @@ mod tests {
         )
         .expect("write unsignable service account key");
 
-        assert!(matches!(
+        assert_matches!(
             gcp_gcs(GcpGcsStoreConfig {
                 bucket: "bucket".to_owned(),
                 service_account_key_path: unsignable.display().to_string(),
                 key_prefix: None,
             }),
             Err(ObjectStoreError::Configuration(_))
-        ));
+        );
     }
 
     #[test]

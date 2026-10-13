@@ -502,7 +502,6 @@ impl HeadStateCache {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::{
         CacheScope, DecodedMetadataSegmentBlock, HeadStateCache, MetadataSegmentCache,
@@ -689,7 +688,10 @@ mod tests {
         let failed: Result<_, String> = cache
             .get_or_load(&key("a"), || async { Err("transport".to_owned()) })
             .await;
-        assert!(failed.is_err());
+        assert_eq!(
+            failed.expect_err("the failed load should return its error"),
+            "transport"
+        );
         let recovered: Result<_, String> = cache
             .get_or_load(&key("a"), || async { Ok(block(1)) })
             .await;

@@ -153,6 +153,7 @@ fn transport(key: &str, source: ObjectStoreError) -> ImmutableWriteError {
 mod tests {
     use super::*;
     use crate::test_support::SteppingTimer;
+    use std::assert_matches;
     use std::time::Duration;
 
     #[test]
@@ -167,15 +168,15 @@ mod tests {
         };
         assert!(verify_stored_checksum("key", &expected, metadata(Some(expected.clone()))).is_ok());
         for actual in [Checksum::crc64nvme(b"other"), Checksum::crc32c(b"bytes")] {
-            assert!(matches!(
+            assert_matches!(
                 verify_stored_checksum("key", &expected, metadata(Some(actual))),
                 Err(ImmutableWriteError::DifferentObject { .. })
-            ));
+            );
         }
-        assert!(matches!(
+        assert_matches!(
             verify_stored_checksum("key", &expected, metadata(None)),
             Err(ImmutableWriteError::StoredChecksumMissing { .. })
-        ));
+        );
     }
 
     #[test]

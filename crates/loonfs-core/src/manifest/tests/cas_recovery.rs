@@ -3,6 +3,7 @@
 use super::*;
 use loonfs_objectstore::ListedObject;
 use loonfs_types::format::control::{encode_control_state, ControlObjectKind, HintPayload};
+use std::assert_matches;
 
 #[tokio::test]
 async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
@@ -36,21 +37,21 @@ async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
     let error = crate::manifest::publish::publish_manifest(&store, manifest, &deadline)
         .await
         .expect_err("late put must not acknowledge publication");
-    assert!(matches!(
+    assert_matches!(
         error,
         CoreError::OutcomeUnknown { object_key: actual_key, .. } if actual_key == object_key
-    ));
+    );
     assert_eq!(store.inner().counts().create_if_absent_puts, 1);
     assert_eq!(store.inner().counts().compare_and_swaps, 0);
     let operations = store.inner().snapshot();
     let last = operations.last().expect("numbered put");
-    assert!(matches!(
+    assert_matches!(
         last,
         loonfs_test_support::stores::RecordedOperation::Put {
             mode: loonfs_objectstore::PutMode::CreateIfAbsent,
             ..
         }
-    ));
+    );
     assert_eq!(last.key(), object_key);
     assert!(store
         .inner()
@@ -86,10 +87,10 @@ async fn a_manifest_put_that_lands_nowhere_and_loses_its_answer_has_an_unknown_o
         .await
         .expect_err("a put nobody can confirm has no answer");
     assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
-    assert!(matches!(
+    assert_matches!(
         error,
         CoreError::OutcomeUnknown { object_key: actual_key, .. } if actual_key == object_key
-    ));
+    );
     assert!(store
         .inner()
         .head(&object_key)
@@ -165,22 +166,19 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             let outcome =
                 crate::manifest::publish::publish_manifest(&store, manifest, &deadline).await;
             if elapsed_ms > METADATA_PUBLICATION_BUDGET_MS {
-                assert!(matches!(outcome, Err(CoreError::OutcomeUnknown {
-                    object_key: actual_key,
-                    message,
-                }) if actual_key == object_key && message == format!(
-                    "the publication took {elapsed_ms}ms, over its {METADATA_PUBLICATION_BUDGET_MS}ms budget"
-                )));
+                assert_matches!(
+                    outcome,
+                    Err(CoreError::OutcomeUnknown {
+                        object_key: actual_key,
+                        message,
+                    }) if actual_key == object_key && message == format!(
+                        "the publication took {elapsed_ms}ms, over its {METADATA_PUBLICATION_BUDGET_MS}ms budget"
+                    )
+                );
             } else if fork {
-                assert!(matches!(
-                    outcome,
-                    Ok(ManifestPublicationOutcome::Published(_))
-                ));
+                assert_matches!(outcome, Ok(ManifestPublicationOutcome::Published(_)));
             } else {
-                assert!(matches!(
-                    outcome,
-                    Ok(ManifestPublicationOutcome::CoveredByCurrent(_))
-                ));
+                assert_matches!(outcome, Ok(ManifestPublicationOutcome::CoveredByCurrent(_)));
             }
             assert_eq!(store.remaining(), 0);
             assert_eq!(store.inner().inner().counts().create_if_absent_puts, 1);
@@ -230,14 +228,14 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
             let winning = publish_manifest(&store, claim.clone()).await;
             (publish_manifest(&store, claim).await, winning)
         };
-        assert!(matches!(
+        assert_matches!(
             winning.expect("winner"),
             ManifestPublicationOutcome::Published(_)
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             losing.expect("loser"),
             ManifestPublicationOutcome::CoveredByCurrent(_)
-        ));
+        );
     }
 }
 
@@ -340,10 +338,10 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             result
         };
         let (losing, winning) = futures::join!(losing, winning);
-        assert!(matches!(
+        assert_matches!(
             winning.expect("winner"),
             ManifestPublicationOutcome::Published(_)
-        ));
+        );
         let losing = losing.expect("loser loads winner");
         assert_eq!(store.counts().create_if_absent_puts, 2);
         assert_eq!(store.counts().compare_and_swaps, 0);
@@ -356,23 +354,17 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             .expect("list for assertion");
         assert_eq!(keys.len(), 3);
         if newer_head {
-            assert!(matches!(
-                losing,
-                ManifestPublicationOutcome::PredecessorChanged(_)
-            ));
+            assert_matches!(losing, ManifestPublicationOutcome::PredecessorChanged(_));
             let mut retry = second.into_parts().0.into_payload();
             retry.manifest_no = retry.manifest_no.successor().expect("next number");
-            assert!(matches!(
+            assert_matches!(
                 publish_manifest(&store, encode_manifest(retry))
                     .await
                     .expect("publish retry"),
                 ManifestPublicationOutcome::Published(_)
-            ));
+            );
         } else {
-            assert!(matches!(
-                losing,
-                ManifestPublicationOutcome::CoveredByCurrent(_)
-            ));
+            assert_matches!(losing, ManifestPublicationOutcome::CoveredByCurrent(_));
         }
     }
 }
@@ -531,14 +523,11 @@ async fn manifest_publication_recovers_an_ambiguous_put_and_tolerates_a_failed_h
             .await
             .expect("published");
         if fail_hint {
-            assert!(matches!(outcome, ManifestPublicationOutcome::Published(_)));
+            assert_matches!(outcome, ManifestPublicationOutcome::Published(_));
         } else {
             // The put landed, but a rival could have written the same bytes,
             // so the read-back counts as the current manifest.
-            assert!(matches!(
-                outcome,
-                ManifestPublicationOutcome::CoveredByCurrent(_)
-            ));
+            assert_matches!(outcome, ManifestPublicationOutcome::CoveredByCurrent(_));
         }
         assert_eq!(
             load_current_manifest(&store, &namespace_id)

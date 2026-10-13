@@ -703,6 +703,7 @@ mod tests {
     use loonfs_test_support::ids::content_ref;
     use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
     use loonfs_types::{Checksum, ContentId, ContentRef, ContentRefKind, PathEntry};
+    use std::assert_matches;
     use tempfile::tempdir;
 
     async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
@@ -762,10 +763,10 @@ mod tests {
         let err = validate_durable_content_reference(&store, &content_ref)
             .await
             .expect_err("missing object");
-        assert!(matches!(
+        assert_matches!(
             err,
             DurableContentValidationError::MissingContentObject { .. }
-        ));
+        );
     }
 
     #[tokio::test]
@@ -778,10 +779,10 @@ mod tests {
         let err = validate_durable_content_reference(&store, &content_ref)
             .await
             .expect_err("size mismatch");
-        assert!(matches!(
+        assert_matches!(
             err,
             DurableContentValidationError::ContentLengthMismatch { .. }
-        ));
+        );
     }
 
     #[tokio::test]
@@ -801,10 +802,10 @@ mod tests {
         let err = validate_durable_content_reference(&store, &expected)
             .await
             .expect_err("checksum mismatch");
-        assert!(matches!(
+        assert_matches!(
             err,
             DurableContentValidationError::ContentChecksumMismatch { .. }
-        ));
+        );
     }
 
     #[tokio::test]
@@ -832,12 +833,12 @@ mod tests {
             ..content_ref
         };
         put_content_object(&store, &planted, bytes).await;
-        assert!(matches!(
+        assert_matches!(
             get_durable_content_bytes(&store, &planted)
                 .await
                 .expect_err("crc mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }
-        ));
+        );
     }
 
     #[tokio::test]
@@ -865,12 +866,12 @@ mod tests {
             ..content_ref.clone()
         };
         put_content_object(&store, &planted, bytes).await;
-        assert!(matches!(
+        assert_matches!(
             get_durable_content_bytes(&store, &planted)
                 .await
                 .expect_err("crc mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }
-        ));
+        );
     }
 
     #[tokio::test]
@@ -902,32 +903,32 @@ mod tests {
         let err = verify_durable_content_checksum(&store, &content_ref)
             .await
             .expect_err("missing object");
-        assert!(matches!(
+        assert_matches!(
             err,
             DurableContentValidationError::MissingContentObject { .. }
-        ));
+        );
 
         put_content_object(&store, &content_ref, bytes).await;
         let mut wrong_size = content_ref.clone();
         wrong_size.size_bytes += 1;
-        assert!(matches!(
+        assert_matches!(
             verify_durable_content_checksum(&store, &wrong_size)
                 .await
                 .expect_err("size mismatch"),
             DurableContentValidationError::ContentLengthMismatch { .. }
-        ));
+        );
 
         // The bytes at the key hash to something else: exactly the case the
         // completion check exists to catch on a provider that accepts a
         // wrong claim.
         let mut wrong_checksum = content_ref.clone();
         wrong_checksum.checksum = Checksum::crc64nvme(b"other bytes");
-        assert!(matches!(
+        assert_matches!(
             verify_durable_content_checksum(&store, &wrong_checksum)
                 .await
                 .expect_err("checksum mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }
-        ));
+        );
     }
 
     #[test]
@@ -1134,14 +1135,12 @@ mod tests {
             .await
             .expect("open stream");
         let err = unfed.next_chunk().await.expect_err("prefix still owed");
-        assert!(
-            matches!(
-                err,
-                CoreError::ResumePrefixIncomplete {
-                    start_offset,
-                    folded: 0
-                } if start_offset == held as u64
-            ),
+        assert_matches!(
+            err,
+            CoreError::ResumePrefixIncomplete {
+                start_offset,
+                folded: 0
+            } if start_offset == held as u64,
             "unexpected error: {err}"
         );
         assert_eq!(
@@ -1162,17 +1161,14 @@ mod tests {
                 // A verified end is the only thing that reports `None`, so
                 // this arm would mean bad bytes had been accepted.
                 // This is the failure this test exists to catch.
-                #[allow(clippy::panic)]
                 Ok(None) => panic!("a prefix that is not the object's verified"),
                 Err(error) => break error,
             }
         };
-        assert!(
-            matches!(
-                verdict,
-                CoreError::DurableContent(
-                    DurableContentValidationError::ContentChecksumMismatch { .. }
-                )
+        assert_matches!(
+            verdict,
+            CoreError::DurableContent(
+                DurableContentValidationError::ContentChecksumMismatch { .. }
             ),
             "a prefix that is not the object's fails the whole read: {verdict}"
         );
@@ -1218,14 +1214,12 @@ mod tests {
             .fold_resumed_prefix(overlong)
             .expect_err("a prefix past the start offset");
         assert_eq!(err.code(), loonfs_types::ErrorCode::InvalidRequest);
-        assert!(
-            matches!(
-                err,
-                CoreError::ResumedPrefix(loonfs_types::ResumedPrefixError::PastStartOffset {
-                    prefix_bytes,
-                    start_offset,
-                }) if prefix_bytes == overlong.len() as u64 && start_offset == held as u64
-            ),
+        assert_matches!(
+            err,
+            CoreError::ResumedPrefix(loonfs_types::ResumedPrefixError::PastStartOffset {
+                prefix_bytes,
+                start_offset,
+            }) if prefix_bytes == overlong.len() as u64 && start_offset == held as u64,
             "unexpected error: {err}"
         );
         assert_eq!(
@@ -1249,11 +1243,9 @@ mod tests {
         let err = stream
             .fold_resumed_prefix(&bytes[..8])
             .expect_err("a prefix after a fetch");
-        assert!(
-            matches!(
-                err,
-                CoreError::ResumedPrefix(loonfs_types::ResumedPrefixError::AfterFetch)
-            ),
+        assert_matches!(
+            err,
+            CoreError::ResumedPrefix(loonfs_types::ResumedPrefixError::AfterFetch),
             "unexpected error: {err}"
         );
     }
@@ -1273,11 +1265,9 @@ mod tests {
         let err = stream
             .fold_resumed_prefix(b"")
             .expect_err("a prefix after the end");
-        assert!(
-            matches!(
-                err,
-                CoreError::ResumedPrefix(loonfs_types::ResumedPrefixError::AfterEnd)
-            ),
+        assert_matches!(
+            err,
+            CoreError::ResumedPrefix(loonfs_types::ResumedPrefixError::AfterEnd),
             "unexpected error: {err}"
         );
     }
@@ -1334,17 +1324,14 @@ mod tests {
             match stream.next_chunk().await {
                 Ok(Some(_)) => continue,
                 // This is the failure this test exists to catch.
-                #[allow(clippy::panic)]
                 Ok(None) => panic!("an object that is not the reference's verified"),
                 Err(error) => break error,
             }
         };
-        assert!(
-            matches!(
-                verdict,
-                CoreError::DurableContent(
-                    DurableContentValidationError::ContentChecksumMismatch { .. }
-                )
+        assert_matches!(
+            verdict,
+            CoreError::DurableContent(
+                DurableContentValidationError::ContentChecksumMismatch { .. }
             ),
             "unexpected verdict: {verdict}"
         );
@@ -1404,17 +1391,14 @@ mod tests {
             match wrong.next_chunk().await {
                 Ok(Some(_)) => continue,
                 // This is the failure this test exists to catch.
-                #[allow(clippy::panic)]
                 Ok(None) => panic!("a prefix that is not the object's verified"),
                 Err(error) => break error,
             }
         };
-        assert!(
-            matches!(
-                verdict,
-                CoreError::DurableContent(
-                    DurableContentValidationError::ContentChecksumMismatch { .. }
-                )
+        assert_matches!(
+            verdict,
+            CoreError::DurableContent(
+                DurableContentValidationError::ContentChecksumMismatch { .. }
             ),
             "unexpected verdict: {verdict}"
         );
@@ -1447,12 +1431,12 @@ mod tests {
         }
         .expect("a mismatched object must not report a verified end");
         assert_eq!(chunks, 2, "the mismatch is reported after the last chunk");
-        assert!(matches!(
+        assert_matches!(
             err,
             CoreError::DurableContent(
                 DurableContentValidationError::ContentChecksumMismatch { .. }
             )
-        ));
+        );
     }
 
     #[tokio::test]
@@ -1464,10 +1448,10 @@ mod tests {
             .await
             .expect("open stream");
         let err = stream.next_chunk().await.expect_err("missing object");
-        assert!(matches!(
+        assert_matches!(
             err,
             CoreError::DurableContent(DurableContentValidationError::MissingContentObject { .. })
-        ));
+        );
     }
 
     #[tokio::test]
@@ -1483,10 +1467,10 @@ mod tests {
             .expect("open stream");
         stream.next_chunk().await.expect("first range");
         let err = stream.next_chunk().await.expect_err("length mismatch");
-        assert!(matches!(
+        assert_matches!(
             err,
             CoreError::DurableContent(DurableContentValidationError::ContentLengthMismatch { .. })
-        ));
+        );
     }
 
     fn test_store() -> (tempfile::TempDir, LocalFsStore) {

@@ -1,8 +1,5 @@
 //! Upload session begin, content, direct-put, and completion guards.
 
-#![allow(clippy::panic)]
-// These integration tests use panic in unexpected match arms for precise diagnostics.
-
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
@@ -19,6 +16,7 @@ use loonfs_types::{
     format::control::{ControlObjectKind, UploadSessionMode, UploadSessionPayload},
     ContentRef, DestinationBehavior, NamespaceId, UploadId,
 };
+use std::assert_matches;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -97,10 +95,12 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
         for streamed in [false, true] {
             let engine = namespace_engine(&store, &namespace_id, &context);
             let begin = engine.begin_upload(None).await.expect("begin");
-            assert!(
-                matches!(begin.status, loonfs_types::api::v0::UploadSessionStatus::Open {
-                checksum_algorithm: algorithm, ..
-            } if algorithm == store.checksum_algorithm())
+            assert_matches!(
+                begin.status,
+                loonfs_types::api::v0::UploadSessionStatus::Open {
+                    checksum_algorithm: algorithm,
+                    ..
+                } if algorithm == store.checksum_algorithm()
             );
             if streamed {
                 let body = futures::stream::iter([
@@ -346,6 +346,7 @@ mod streamed_content {
     use super::*;
     use futures::StreamExt;
     use loonfs_objectstore::keys::content_blob;
+    use std::assert_matches;
 
     #[tokio::test]
     async fn slow_upload_cannot_outlive_its_durable_cleanup_record() {
@@ -536,11 +537,11 @@ mod streamed_content {
             )
             .expect("decode")
             .into_payload();
-            assert!(matches!(
+            assert_matches!(
                 aborted.status,
                 UploadSessionRecordStatus::Aborted { aborted_at_ms }
                     if aborted_at_ms == expired.now_ms
-            ));
+            );
             let aged = MutationContext {
                 now_ms: expired.now_ms + options.grace_window_ms + 1,
                 ..context.clone()
@@ -826,6 +827,7 @@ mod direct_multipart {
     use loonfs_types::api::v0::{CompletedUploadPart, UploadContentClaim};
     use loonfs_types::format::control::{decode_control_object, UploadSessionRecordStatus};
     use loonfs_types::options::DirectMultipartUploadOptions;
+    use std::assert_matches;
     use std::sync::Arc;
 
     const PART: &[u8] = b"a part's worth of bytes, repeated enough to be a part\n";
@@ -1069,10 +1071,7 @@ mod direct_multipart {
         .await
         .expect_err("a multipart completion needs at least one part");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
-        assert!(
-            matches!(error, CoreError::InvalidUploadContent(_)),
-            "{error:?}"
-        );
+        assert_matches!(error, CoreError::InvalidUploadContent(_), "{error:?}");
     }
 
     #[tokio::test]
@@ -1197,12 +1196,12 @@ mod direct_multipart {
         .await
         .expect_err("a conflicting completion claim is rejected");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
-        assert!(matches!(
+        assert_matches!(
             session_state(&store, &session.namespace_id, &session.upload_id)
                 .await
                 .status,
             UploadSessionRecordStatus::Open { .. }
-        ));
+        );
         assert_eq!(
             store
                 .get(&session.object_key, None)
@@ -1256,13 +1255,11 @@ mod direct_multipart {
         .expect_err("an unverified assembly cannot complete");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
-        assert!(
-            matches!(
-                session_state(&store, &session.namespace_id, &session.upload_id)
-                    .await
-                    .status,
-                UploadSessionRecordStatus::Open { .. }
-            ),
+        assert_matches!(
+            session_state(&store, &session.namespace_id, &session.upload_id)
+                .await
+                .status,
+            UploadSessionRecordStatus::Open { .. },
             "a rejected claim leaves the session open"
         );
         assert!(
@@ -1307,13 +1304,11 @@ mod direct_multipart {
         .await
         .expect_err("a refused assembly cannot complete");
         assert_eq!(error.code(), ErrorCode::ServerError);
-        assert!(
-            matches!(
-                session_state(&store, &session.namespace_id, &session.upload_id)
-                    .await
-                    .status,
-                UploadSessionRecordStatus::Open { .. }
-            ),
+        assert_matches!(
+            session_state(&store, &session.namespace_id, &session.upload_id)
+                .await
+                .status,
+            UploadSessionRecordStatus::Open { .. },
             "a provider failure the server cannot read is not proof about content"
         );
 
@@ -1327,12 +1322,12 @@ mod direct_multipart {
         .await
         .expect_err("neither an upload nor matching object evidence is available");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
-        assert!(matches!(
+        assert_matches!(
             session_state(&store, &session.namespace_id, &session.upload_id)
                 .await
                 .status,
             UploadSessionRecordStatus::Open { .. }
-        ));
+        );
         assert!(store
             .head(&session.object_key)
             .await
@@ -1367,13 +1362,11 @@ mod direct_multipart {
         .expect_err("a verification that cannot run does not complete the upload");
         assert_eq!(error.code(), ErrorCode::ServerError);
         assert_eq!(failing.attempts(), 1, "the read-back is what failed");
-        assert!(
-            matches!(
-                session_state(&store, &session.namespace_id, &session.upload_id)
-                    .await
-                    .status,
-                UploadSessionRecordStatus::Open { .. }
-            ),
+        assert_matches!(
+            session_state(&store, &session.namespace_id, &session.upload_id)
+                .await
+                .status,
+            UploadSessionRecordStatus::Open { .. },
             "a store failure must not end the session"
         );
         assert_eq!(
@@ -1438,12 +1431,12 @@ mod direct_multipart {
         .await
         .expect("garbage collection");
 
-        assert!(matches!(
+        assert_matches!(
             session_state(&store, &session.namespace_id, &session.upload_id)
                 .await
                 .status,
             UploadSessionRecordStatus::Aborted { .. }
-        ));
+        );
         assert_eq!(
             store.open_uploads(),
             0,

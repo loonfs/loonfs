@@ -7,6 +7,7 @@ use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError, OperationSelector};
 use loonfs_types::ErrorCode;
+use std::assert_matches;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn family(operation: &RecordedOperation) -> Option<DurableObjectFamily> {
@@ -518,7 +519,7 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
         .await
         .expect_err("different object");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
+    assert_matches!(error, CoreError::NamespaceCorrupt(_));
     assert_eq!(store.counts().puts, 1);
     assert_eq!(content_assemblies(&store), vec![key.clone()]);
     assert_eq!(
@@ -570,14 +571,12 @@ async fn a_materialization_transport_failure_remains_retryable() {
     let error = fold_wal(&failing, &engine.namespace_id)
         .await
         .expect_err("assembly failure");
-    assert!(
-        matches!(
-            error,
-            CoreError::Store {
-                kind: loonfs_objectstore::ObjectStoreErrorKind::RetryableTransport,
-                ..
-            }
-        ),
+    assert_matches!(
+        error,
+        CoreError::Store {
+            kind: loonfs_objectstore::ObjectStoreErrorKind::RetryableTransport,
+            ..
+        },
         "{error:?}"
     );
     assert_eq!(store.counts().puts, 1);

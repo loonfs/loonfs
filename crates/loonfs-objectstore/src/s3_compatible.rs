@@ -820,6 +820,7 @@ mod tests {
     use object_store::client::{
         HttpClient, HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
     };
+    use std::assert_matches;
     use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
 
@@ -1083,7 +1084,7 @@ mod tests {
                 .await
                 .expect("same object");
             assert_eq!(accepted.checksum, Some(expected));
-            assert!(matches!(
+            assert_matches!(
                 store
                     .assemble(
                         KEY,
@@ -1093,7 +1094,7 @@ mod tests {
                     )
                     .await,
                 Err(ImmutableWriteError::DifferentObject { .. })
-            ));
+            );
             assert_eq!(provider.operations(), ["put", "head", "head"]);
         }
     }
@@ -1139,10 +1140,7 @@ mod tests {
                     assert_eq!(result.expect("assembly").checksum, Some(expected));
                     assert_eq!(provider.operations(), ["head", "head", "get", "get", "put"]);
                 } else {
-                    assert!(matches!(
-                        result,
-                        Err(ObjectStoreError::ChecksumMismatch { .. })
-                    ));
+                    assert_matches!(result, Err(ObjectStoreError::ChecksumMismatch { .. }));
                     assert_eq!(provider.operations(), ["head", "head", "get"]);
                 }
             }
@@ -1216,10 +1214,7 @@ mod tests {
                     }
                     assert_eq!(provider.operations(), operations);
                 } else {
-                    assert!(matches!(
-                        result,
-                        Err(ObjectStoreError::ChecksumMismatch { .. })
-                    ));
+                    assert_matches!(result, Err(ObjectStoreError::ChecksumMismatch { .. }));
                     let mut operations = vec!["head", "head", "create", "copy", "get", "upload"];
                     if kind == ConfiguredObjectStoreKind::CloudflareR2 {
                         // R2 verifies after completion and leaves the rejected

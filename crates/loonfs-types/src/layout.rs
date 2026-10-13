@@ -127,9 +127,15 @@ mod tests {
         };
         assert_eq!(layout.size_bytes(), 15);
         assert!(layout.validate(15).is_ok());
-        assert!(layout.validate(14).is_err());
-        assert!(layout.validate(16).is_err());
-        assert!(ContentLayout { extents: vec![] }.validate(0).is_err());
+        layout
+            .validate(14)
+            .expect_err("a size below the layout length should be rejected");
+        layout
+            .validate(16)
+            .expect_err("a size above the layout length should be rejected");
+        ContentLayout { extents: vec![] }
+            .validate(0)
+            .expect_err("an empty layout should be rejected");
         assert!(ContentLayout {
             extents: vec![ContentExtent {
                 length: 0,
@@ -144,15 +150,15 @@ mod tests {
             (ExtentObject::Span { start: 10, end: 15 }, 6, 6),
             (ExtentObject::Whole, 0, 1),
         ] {
-            assert!(ContentLayout {
+            ContentLayout {
                 extents: vec![ContentExtent {
                     object,
                     length,
                     ..whole.clone()
-                }]
+                }],
             }
             .validate(size_bytes)
-            .is_err());
+            .expect_err("an extent whose length does not fit its object should be rejected");
         }
         assert!(ContentLayout {
             extents: vec![ContentExtent {
@@ -162,15 +168,15 @@ mod tests {
         }
         .validate(3)
         .is_ok());
-        assert!(ContentLayout {
+        ContentLayout {
             extents: vec![ContentExtent {
                 offset: 4,
                 length: 2,
                 ..span.clone()
-            }]
+            }],
         }
         .validate(2)
-        .is_err());
+        .expect_err("a first extent that does not start at offset 0 should be rejected");
         assert!(ContentLayout {
             extents: vec![ContentExtent {
                 offset: 1,
@@ -180,16 +186,16 @@ mod tests {
         }
         .validate(2)
         .is_ok());
-        assert!(ContentLayout {
+        ContentLayout {
             extents: vec![
                 ContentExtent {
                     length: u64::MAX,
                     ..whole.clone()
                 },
-                whole
-            ]
+                whole,
+            ],
         }
         .validate(9)
-        .is_err());
+        .expect_err("an overflowing layout should be rejected");
     }
 }

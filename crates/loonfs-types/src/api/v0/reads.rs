@@ -289,6 +289,7 @@ pub struct ListTrashResponse {
 mod tests {
     use super::*;
     use crate::NameKey;
+    use std::assert_matches;
 
     fn binding_version() -> crate::BindingVersion {
         crate::BindingVersion::parse("abcdef").expect("binding version")
@@ -373,15 +374,10 @@ mod tests {
             serde_json::from_value::<PathEntry>(wire.clone()).expect("decode the derived path"),
             derived
         );
-        assert!(
-            serde_json::from_value::<AbsolutePath>(wire["path"].clone()).is_err(),
-            "a request path keeps the limits"
-        );
+        serde_json::from_value::<AbsolutePath>(wire["path"].clone())
+            .expect_err("a request path keeps the limits");
         wire["path"] = serde_json::json!("d/d");
-        assert!(
-            serde_json::from_value::<PathEntry>(wire).is_err(),
-            "a derived path keeps the grammar"
-        );
+        serde_json::from_value::<PathEntry>(wire).expect_err("a derived path keeps the grammar");
     }
 
     #[test]
@@ -605,7 +601,7 @@ mod tests {
         });
         let operation: crate::api::v0::FilesystemOperation =
             serde_json::from_value(operation_json).expect("decode copied trash handle");
-        assert!(matches!(
+        assert_matches!(
             operation,
             crate::api::v0::FilesystemOperation::Undelete {
                 inode_id: InodeId(42),
@@ -614,6 +610,6 @@ mod tests {
                 destination_parent_inode_id: None,
                 destination_display_name: None,
             }
-        ));
+        );
     }
 }

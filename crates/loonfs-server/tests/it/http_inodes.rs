@@ -1,7 +1,5 @@
 //! HTTP stat, revision history, content reads, and mutations by inode ID.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::{start_server, TestServer};
 use futures::StreamExt;

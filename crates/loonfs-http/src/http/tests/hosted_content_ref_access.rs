@@ -1,7 +1,5 @@
 //! Hosted admission of content references from another namespace.
 
-#![allow(clippy::panic)]
-
 use super::fixtures::{test_app, test_options, TestAppOptions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

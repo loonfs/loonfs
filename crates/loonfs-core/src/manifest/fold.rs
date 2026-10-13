@@ -632,6 +632,7 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
 mod ordinal_tests {
     use super::*;
     use loonfs_types::MAX_PUBLIC_INTEGER;
+    use std::assert_matches;
 
     #[test]
     fn manifest_no_advancement_accepts_the_maximum_and_rejects_the_next_value() {
@@ -643,10 +644,10 @@ mod ordinal_tests {
 
         let error = next_manifest_no_after(ManifestNo(MAX_PUBLIC_INTEGER))
             .expect_err("manifest number must not exceed the public maximum");
-        assert!(matches!(
+        assert_matches!(
             error,
             CoreError::NamespaceCorrupt(message) if message.contains("largest manifest number")
-        ));
+        );
     }
 }
 

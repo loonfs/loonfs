@@ -274,7 +274,8 @@ mod tests {
         let at_cap = "🐧".repeat(MAX_ATTRIBUTE_KEY_BYTES / 4);
         assert_eq!(at_cap.len(), MAX_ATTRIBUTE_KEY_BYTES);
         assert_eq!(key(&at_cap).as_str(), at_cap);
-        assert!(AttributeKey::parse(format!("{at_cap}🐧")).is_err());
+        AttributeKey::parse(format!("{at_cap}🐧"))
+            .expect_err("a key one character over the byte cap should be rejected");
     }
 
     #[test]
@@ -444,10 +445,13 @@ mod tests {
                 .expect("serialize oversized value")
         );
 
-        assert!(serde_json::from_str::<Attributes>(&over_entries).is_err());
-        assert!(serde_json::from_str::<Attributes>(&over_value).is_err());
+        serde_json::from_str::<Attributes>(&over_entries)
+            .expect_err("a map over the entry cap should be rejected");
+        serde_json::from_str::<Attributes>(&over_value)
+            .expect_err("a value over the byte cap should be rejected");
         // The key grammar is enforced on the way in as well.
-        assert!(serde_json::from_str::<Attributes>(r#"{"":"a"}"#).is_err());
+        serde_json::from_str::<Attributes>(r#"{"":"a"}"#)
+            .expect_err("an empty key should be rejected");
     }
 
     #[test]

@@ -1646,10 +1646,6 @@ fn core_path_answer(answer: Result<ResolvedVisiblePath, VisiblePathError>) -> Pa
             inode_kind,
         },
         Err(VisiblePathError::RootMissing) => PathAnswer::RootMissing,
-        #[expect(
-            clippy::panic,
-            reason = "a new visible-path error needs a model answer before the differential compares it"
-        )]
         Err(other) => panic!("expected a path answer the model compares, got {other:?}"),
     }
 }

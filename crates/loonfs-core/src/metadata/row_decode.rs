@@ -105,6 +105,7 @@ mod tests {
     use super::*;
     use loonfs_types::format::manifest::TombstoneRowAction;
     use loonfs_types::{ChangeSeq, CommitId, InodeId};
+    use std::assert_matches;
 
     fn foreign() -> MetadataRow {
         MetadataRow::Inode(InodeRecord {
@@ -121,18 +122,31 @@ mod tests {
     fn wrong_kind_rows_are_namespace_corruption() {
         let error = direntry_binding_from_manifest_row(foreign())
             .expect_err("foreign row must be rejected");
-        assert!(
-            matches!(&error, CoreError::NamespaceCorrupt(_)),
-            "{error:?}"
-        );
+        assert_matches!(&error, CoreError::NamespaceCorrupt(_), "{error:?}");
         let message = error.to_string();
         assert!(message.contains("`direntry_binding`"), "{message}");
         assert!(message.contains("inode-00000000000000000007"), "{message}");
 
-        assert!(revision_from_manifest_row(foreign()).is_err());
-        assert!(tombstone_from_manifest_row(foreign()).is_err());
-        assert!(commit_receipt_from_manifest_row(foreign()).is_err());
-        assert!(attributes_revision_from_manifest_row(foreign()).is_err());
+        assert_matches!(
+            revision_from_manifest_row(foreign())
+                .expect_err("a revision decoder should reject a foreign row"),
+            CoreError::NamespaceCorrupt(_)
+        );
+        assert_matches!(
+            tombstone_from_manifest_row(foreign())
+                .expect_err("a tombstone decoder should reject a foreign row"),
+            CoreError::NamespaceCorrupt(_)
+        );
+        assert_matches!(
+            commit_receipt_from_manifest_row(foreign())
+                .expect_err("a commit receipt decoder should reject a foreign row"),
+            CoreError::NamespaceCorrupt(_)
+        );
+        assert_matches!(
+            attributes_revision_from_manifest_row(foreign())
+                .expect_err("an attributes revision decoder should reject a foreign row"),
+            CoreError::NamespaceCorrupt(_)
+        );
         let tombstone = MetadataRow::Tombstone(SubtreeTombstoneRecord {
             root_inode_id: InodeId(1),
             committed_seq: ChangeSeq(1),
@@ -149,6 +163,10 @@ mod tests {
             committed_at_ms: 4_000,
             committed_by: loonfs_types::ActorId::loonfs(),
         });
-        assert!(inode_from_manifest_row(tombstone).is_err());
+        assert_matches!(
+            inode_from_manifest_row(tombstone)
+                .expect_err("an inode decoder should reject a tombstone row"),
+            CoreError::NamespaceCorrupt(_)
+        );
     }
 }

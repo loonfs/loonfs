@@ -1,9 +1,6 @@
 //! Unit coverage for the recorder surface: registration identity, the
 //! atomic-backed values, and histogram bucket arithmetic.
 
-#![allow(clippy::panic)]
-// A reading of the wrong kind is a bug in the test, not a case to handle.
-
 use super::*;
 
 fn counter_value(snapshot: &MetricsSnapshot, name: &str) -> u64 {

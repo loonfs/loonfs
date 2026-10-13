@@ -1,7 +1,5 @@
 //! HTTP request validation and configured limit enforcement.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_client::NamespacePath;

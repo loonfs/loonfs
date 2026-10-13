@@ -21,6 +21,7 @@ use loonfs_types::{
     AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, InodeId, RevisionNo,
     WriterId,
 };
+use std::assert_matches;
 
 async fn setup() -> (
     tempfile::TempDir,
@@ -287,8 +288,9 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
             )
             .await
             .expect("stat");
-        assert!(
-            matches!(entry.kind, PathEntryKind::File { content_ref, .. } if content_ref == *value.content_ref())
+        assert_matches!(
+            entry.kind,
+            PathEntryKind::File { content_ref, .. } if content_ref == *value.content_ref()
         );
     }
 }
@@ -330,10 +332,10 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         "retry",
         vec![inline(&engine.namespace_id, Bytes::from_static(b"other"))],
     );
-    assert!(matches!(
+    assert_matches!(
         publish(&mut engine, &store, &context, changed).await,
         Err(CoreError::CommitIdReuseConflict { .. })
-    ));
+    );
     assert_no_writes(&store);
 
     let staged = store_bytes_as_content(&store, &engine.namespace_id, b"hello")
@@ -352,10 +354,10 @@ async fn inline_retry_identity_uses_bytes_and_distinguishes_staged_content() {
         .await
         .expect("inline publish");
     store.reset();
-    assert!(matches!(
+    assert_matches!(
         publish(&mut engine, &store, &context, staged_candidate).await,
         Err(CoreError::CommitIdReuseConflict { .. })
-    ));
+    );
     assert_no_writes(&store);
 }
 
@@ -429,10 +431,10 @@ async fn invalid_inline_candidates_write_nothing() {
         wrong_checksum,
     ] {
         store.reset();
-        assert!(matches!(
+        assert_matches!(
             publish(&mut engine, &store, &context, candidate).await,
             Err(CoreError::InvalidCommitRequest(_))
-        ));
+        );
         assert_no_writes(&store);
     }
 }

@@ -193,6 +193,7 @@ pub(crate) fn classify_signed_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn head(status: u16, headers: &[(&str, &str)]) -> SignedResponse {
         let mut map = http::HeaderMap::new();
@@ -245,13 +246,13 @@ mod tests {
             object_length_from_signed_head(key, &head(404, &[])).expect("absent"),
             None
         );
-        assert!(matches!(
+        assert_matches!(
             object_length_from_signed_head(key, &head(200, &[("etag", "\"v1\"")])),
             Err(ObjectStoreError::Transport { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             object_length_from_signed_head(key, &head(403, &[])),
             Err(ObjectStoreError::PermissionDenied { .. })
-        ));
+        );
     }
 }

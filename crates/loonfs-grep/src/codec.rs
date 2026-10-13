@@ -304,6 +304,7 @@ pub mod lookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn posting(inode: u64, revision: u64) -> GramPosting {
         GramPosting {
@@ -351,18 +352,18 @@ mod tests {
 
     #[test]
     fn posting_batches_reject_disorder_duplicates_and_empties() {
-        assert!(matches!(
+        assert_matches!(
             encode_gram_postings(&[]),
             Err(IndexGramsCodecError::EmptyPostings)
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             encode_gram_postings(&[posting(2, 1), posting(1, 1)]),
             Err(IndexGramsCodecError::PostingsOutOfOrder { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             encode_gram_postings(&[posting(1, 1), posting(1, 1)]),
             Err(IndexGramsCodecError::PostingsOutOfOrder { .. })
-        ));
+        );
     }
 
     #[test]
@@ -371,21 +372,21 @@ mod tests {
 
         let mut trailing = bytes.clone();
         trailing.push(0);
-        assert!(matches!(
+        assert_matches!(
             decode_gram_postings(&trailing),
             Err(IndexGramsCodecError::Malformed(_))
-        ));
+        );
 
         let truncated = &bytes[..bytes.len() - 1];
-        assert!(matches!(
+        assert_matches!(
             decode_gram_postings(truncated),
             Err(IndexGramsCodecError::Malformed(_))
-        ));
+        );
 
-        assert!(matches!(
+        assert_matches!(
             decode_gram_postings(&[]),
             Err(IndexGramsCodecError::Malformed(_))
-        ));
+        );
     }
 
     #[test]
@@ -408,8 +409,11 @@ mod tests {
         );
         let error = decode_gram_postings(&first_revision_overflow)
             .expect_err("first revision above the public range");
-        assert!(matches!(error, IndexGramsCodecError::Malformed(message)
-            if message.contains("must be an integer from 0 through 9007199254740991")));
+        assert_matches!(
+            error,
+            IndexGramsCodecError::Malformed(message)
+                if message.contains("must be an integer from 0 through 9007199254740991")
+        );
 
         let mut later_revision_overflow = Vec::new();
         write_varint(&mut later_revision_overflow, 2);
@@ -422,8 +426,11 @@ mod tests {
         );
         let error = decode_gram_postings(&later_revision_overflow)
             .expect_err("later revision above the public range");
-        assert!(matches!(error, IndexGramsCodecError::Malformed(message)
-            if message.contains("must be an integer from 0 through 9007199254740991")));
+        assert_matches!(
+            error,
+            IndexGramsCodecError::Malformed(message)
+                if message.contains("must be an integer from 0 through 9007199254740991")
+        );
     }
 
     #[test]
@@ -436,10 +443,10 @@ mod tests {
         write_varint(&mut bytes, 3);
         write_varint(&mut bytes, 0);
         write_varint(&mut bytes, 3);
-        assert!(matches!(
+        assert_matches!(
             decode_gram_postings(&bytes),
             Err(IndexGramsCodecError::PostingsOutOfOrder { .. })
-        ));
+        );
     }
 
     #[test]
@@ -482,13 +489,13 @@ mod tests {
                 encode_gram_postings(&[posting(42, 7)]).expect("encode"),
             ),
         };
-        assert!(matches!(
+        assert_matches!(
             row.postings(),
             Err(IndexGramsCodecError::FirstInodeMismatch {
                 declared: 9,
                 actual: 42
             })
-        ));
+        );
     }
 
     #[test]
@@ -496,8 +503,8 @@ mod tests {
         let gram = Gram([0x00, 0xab, 0xff]);
         assert_eq!(gram.as_hex(), "00abff");
         assert_eq!(Gram::from_hex("00abff").expect("parse"), gram);
-        assert!(Gram::from_hex("00ab").is_err());
-        assert!(Gram::from_hex("00abff00").is_err());
-        assert!(Gram::from_hex("00abzz").is_err());
+        Gram::from_hex("00ab").expect_err("a two-byte gram should be rejected");
+        Gram::from_hex("00abff00").expect_err("a four-byte gram should be rejected");
+        Gram::from_hex("00abzz").expect_err("a gram with non-hex digits should be rejected");
     }
 }

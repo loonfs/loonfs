@@ -8,6 +8,7 @@ use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_test_support::test_actor;
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -74,7 +75,7 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
             );
             let operations = store.inner().take();
             assert_eq!(operations.len(), 1);
-            assert!(matches!(&operations[0], RecordedOperation::List { .. }));
+            assert_matches!(&operations[0], RecordedOperation::List { .. });
             assert_eq!(operations[0].key(), "namespaces/");
         } else {
             server.sweep.tick().await;

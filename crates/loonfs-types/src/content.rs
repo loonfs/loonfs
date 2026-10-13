@@ -577,6 +577,7 @@ mod tests {
         ContentRefKind, ContentRefValidationError, StreamingChecksum,
     };
     use crate::ids::ContentId;
+    use std::assert_matches;
 
     fn content_id() -> ContentId {
         ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id")
@@ -635,8 +636,9 @@ mod tests {
 
     #[test]
     fn an_unknown_checksum_algorithm_fails_to_decode() {
-        assert!(serde_json::from_str::<ChecksumAlgorithm>("\"md5\"").is_err());
-        assert!(serde_json::from_str::<ChecksumAlgorithm>("\"sha256\"").is_err());
+        serde_json::from_str::<ChecksumAlgorithm>("\"md5\"").expect_err("`md5` should be rejected");
+        serde_json::from_str::<ChecksumAlgorithm>("\"sha256\"")
+            .expect_err("`sha256` should be rejected");
 
         let json = r#"{
             "kind": "blob_v1",
@@ -645,7 +647,8 @@ mod tests {
             "size_bytes": 5,
             "checksum": {"algorithm": "md5", "value": "00000000000000000000000000000000"}
         }"#;
-        assert!(serde_json::from_str::<ContentRef>(json).is_err());
+        serde_json::from_str::<ContentRef>(json)
+            .expect_err("a content ref with an unknown algorithm should be rejected");
     }
 
     #[test]
@@ -671,7 +674,8 @@ mod tests {
             .as_object_mut()
             .expect("reference")
             .remove("owner_namespace_id");
-        assert!(serde_json::from_value::<ContentRef>(missing_owner).is_err());
+        serde_json::from_value::<ContentRef>(missing_owner)
+            .expect_err("a content ref without an owner should be rejected");
         assert!(object.contains_key("checksum"));
     }
 
@@ -687,12 +691,12 @@ mod tests {
             algorithm: ChecksumAlgorithm::Crc64nvme,
             value: ChecksumHex::parse("0".repeat(64)).expect("a lowercase hex checksum"),
         };
-        assert!(matches!(
+        assert_matches!(
             content_ref.validate(),
             Err(ContentRefValidationError::InvalidChecksum(
                 ChecksumValidationError::InvalidWidth { .. }
             ))
-        ));
+        );
     }
 
     #[test]
@@ -706,14 +710,14 @@ mod tests {
                 value: ChecksumHex::parse("a".repeat(len)).expect("a lowercase hex checksum"),
             };
             checksum(width).validate().expect("exact width");
-            assert!(matches!(
+            assert_matches!(
                 checksum(width - 2).validate(),
                 Err(ChecksumValidationError::InvalidWidth { .. })
-            ));
-            assert!(matches!(
+            );
+            assert_matches!(
                 checksum(width + 2).validate(),
                 Err(ChecksumValidationError::InvalidWidth { .. })
-            ));
+            );
         }
     }
 

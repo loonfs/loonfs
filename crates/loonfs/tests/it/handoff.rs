@@ -1,7 +1,5 @@
 //! Multi-node handoff and durable reconstruction.
 
-#![allow(clippy::panic)]
-
 use crate::common::{collect_path_entries, expect_code, writer};
 use loonfs::{
     ErrorCode, LoonFs, MaintainMetadataOptions, ManifestNo, Namespace, NamespaceId,

@@ -604,6 +604,7 @@ mod tests {
     use crate::{AwsS3Credentials, ByteRange, ObjectStoreError, PutMode};
     use async_trait::async_trait;
     use object_store::client::CredentialProvider;
+    use std::assert_matches;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
@@ -746,32 +747,32 @@ mod tests {
             .await
             .expect("shorter requested lifetime is preserved");
         assert_eq!(signed.expires_at_ms, 1_700_000_060_000);
-        assert!(signer
+        signer
             .presign_head(CONTENT_KEY, Duration::from_secs(1), expiry)
             .await
-            .is_err());
-        assert!(signer
+            .expect_err("a capability signed at the credential expiry should be refused");
+        signer
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
                     ttl: Duration::ZERO,
                 },
-                now
+                now,
             )
             .await
-            .is_err());
-        assert!(signer
+            .expect_err("a zero lifetime should be refused");
+        signer
             .presign_get(
                 PresignedGetRequest {
                     object_key: CONTENT_KEY,
                     range: GRANT,
                     ttl: Duration::MAX,
                 },
-                now
+                now,
             )
             .await
-            .is_err());
+            .expect_err("a lifetime past the maximum should be refused");
     }
 
     fn presigner_config() -> S3PresignerConfig {
@@ -1142,7 +1143,7 @@ mod tests {
     #[test]
     fn an_unusable_key_prefix_fails_construction() {
         for raw_prefix in ["tenant-a//bad", "../escape"] {
-            assert!(matches!(
+            assert_matches!(
                 S3CompatiblePresigner::new(
                     S3PresignerConfig {
                         bucket: "bucket".to_owned(),
@@ -1159,7 +1160,7 @@ mod tests {
                     }
                 ),
                 Err(ObjectStoreError::InvalidKey { .. })
-            ));
+            );
         }
     }
 

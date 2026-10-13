@@ -1,7 +1,5 @@
 //! HTTP integration tests for actor and timestamp fields.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_client::AttributeChanges;

@@ -317,6 +317,7 @@ mod tests {
     use loonfs_types::{
         AccessRevisionNo, AttributesRevisionNo, DisplayName, InodeId, NameKey, RevisionNo,
     };
+    use std::assert_matches;
 
     #[test]
     fn layout_compaction_keeps_the_first_row_per_content_id() {
@@ -649,7 +650,7 @@ mod tests {
         let error = operator
             .close_group(floor())
             .expect_err("a second child bound in the slot at the floor is refused");
-        assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+        assert_matches!(error, CoreError::NamespaceCorrupt(_), "{error:?}");
         assert!(
             error.to_string().contains("children `2` and `3`"),
             "the error must name both children, got: {error}"
@@ -683,7 +684,7 @@ mod tests {
         let error = operator
             .close_group(floor())
             .expect_err("a second edge bound for the child at the floor is refused");
-        assert!(matches!(error, CoreError::NamespaceCorrupt(_)), "{error:?}");
+        assert_matches!(error, CoreError::NamespaceCorrupt(_), "{error:?}");
         assert!(
             error
                 .to_string()

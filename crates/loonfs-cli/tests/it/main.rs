@@ -1,4 +1,4 @@
-#![allow(clippy::panic)]
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 mod access;
 mod common;

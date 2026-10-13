@@ -1,6 +1,3 @@
-#![allow(clippy::panic)]
-// A step that finishes while its content read is held panics with its outcome.
-
 //! How many grep steps hold file content or index segments at once.
 
 use crate::common::GrepHost;
@@ -16,6 +13,7 @@ use loonfs_test_support::clock::bounded;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, NamespaceOverlapStore, OperationSelector,
 };
+use std::assert_matches;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -197,14 +195,12 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
     .expect("reorganize steps");
 
     for outcome in backfills.iter().chain(&increments) {
-        assert!(
-            matches!(outcome, GrepBuildOutcome::Published { .. }),
-            "{outcome:?}"
-        );
+        assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
     }
     for outcome in &reorganizations {
-        assert!(
-            matches!(outcome, GrepReorganizeOutcome::UnitPublished { .. }),
+        assert_matches!(
+            outcome,
+            GrepReorganizeOutcome::UnitPublished { .. },
             "{outcome:?}"
         );
     }
@@ -251,18 +247,12 @@ async fn workers_over_two_stores_share_one_step_permit() {
 
     blocking.release();
     let outcome = holding_step.await.expect("holding step");
-    assert!(
-        matches!(outcome, GrepBuildOutcome::Published { .. }),
-        "{outcome:?}"
-    );
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
     let outcome = bounded(Duration::from_secs(10), waiting_step)
         .await
         .expect("the waiting step takes the permit the first step returned")
         .expect("waiting step");
-    assert!(
-        matches!(outcome, GrepBuildOutcome::Published { .. }),
-        "{outcome:?}"
-    );
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
     assert_eq!(budget.stats(), GrepStepBudgetStats::default());
 }
 
@@ -298,10 +288,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
         .await
         .expect("an up-to-date step does not wait for the held permit")
         .expect("build step");
-        assert!(
-            matches!(outcome, GrepBuildOutcome::UpToDate { .. }),
-            "{outcome:?}"
-        );
+        assert_matches!(outcome, GrepBuildOutcome::UpToDate { .. }, "{outcome:?}");
     }
     assert_eq!(
         budget.stats(),
@@ -313,10 +300,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
 
     blocking.release();
     let outcome = busy_step.await.expect("busy step");
-    assert!(
-        matches!(outcome, GrepBuildOutcome::Published { .. }),
-        "{outcome:?}"
-    );
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
 }
 
 #[tokio::test]
@@ -339,15 +323,12 @@ async fn a_dropped_step_returns_its_permit() {
         () = blocking.wait_until_blocked() => {}
     }
     // Another step with work waits for that permit, and is dropped waiting.
-    assert!(
-        bounded(
-            Duration::from_millis(200),
-            worker.build_step(&waiting, policy)
-        )
-        .await
-        .is_err(),
-        "a step with work waits while the only permit is held"
-    );
+    bounded(
+        Duration::from_millis(200),
+        worker.build_step(&waiting, policy),
+    )
+    .await
+    .expect_err("a step with work waits while the only permit is held");
     drop(holding_step);
     blocking.release();
 
@@ -355,10 +336,7 @@ async fn a_dropped_step_returns_its_permit() {
         .await
         .expect("both dropped steps returned the permit")
         .expect("build step");
-    assert!(
-        matches!(outcome, GrepBuildOutcome::Published { .. }),
-        "{outcome:?}"
-    );
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
 }
 
 #[tokio::test]
@@ -395,9 +373,6 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
 
     blocking.release();
     let outcome = holding_step.await.expect("holding step");
-    assert!(
-        matches!(outcome, GrepBuildOutcome::Published { .. }),
-        "{outcome:?}"
-    );
+    assert_matches!(outcome, GrepBuildOutcome::Published { .. }, "{outcome:?}");
     assert_eq!(budget.stats(), GrepStepBudgetStats::default());
 }

@@ -1,7 +1,5 @@
 //! HTTP read-snapshot lifecycle operations.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::test_config;
 use crate::common::start_server;
 use loonfs_client::{NamespacePath, PutFileOptions, ReadFileOptions, StatOptions};

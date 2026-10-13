@@ -1,7 +1,6 @@
-#![allow(clippy::panic)]
-// Include the captured output when an assertion fails.
-
 //! Checks operation spans for the writer, reader, and maintenance handles.
+
+#![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 use loonfs::{LoonFs, StoreConfig};
 use loonfs_test_support::block_on::block_on;

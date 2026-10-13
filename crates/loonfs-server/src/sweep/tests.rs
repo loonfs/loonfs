@@ -1,7 +1,5 @@
 //! Daily listing, session ticks, and their store request costs.
 
-#![allow(clippy::panic)]
-
 use super::{GarbageCollection, Sweep};
 use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
@@ -19,6 +17,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_test_support::test_actor;
 use loonfs_types::EffectiveLimit;
+use std::assert_matches;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -373,10 +372,10 @@ async fn grep_gc_runs_in_a_sweep() {
         .run_pass(GarbageCollection::Skip)
         .await
         .expect("list namespaces");
-    assert!(matches!(
+    assert_matches!(
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Active { .. }
-    ));
+    );
     worker.disable(&namespace_id).await.expect("disable grep");
     let segments_prefix = loonfs_grep::keyspace::segments_prefix(&namespace_id);
     assert!(!keys_under(store.as_ref(), &segments_prefix)
@@ -453,11 +452,9 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
         .run_pass(GarbageCollection::Skip)
         .await
         .expect("list namespaces");
-    assert!(
-        matches!(
-            server.grep_status(&namespace_id).await,
-            GrepIndexStatus::Backfilling { .. }
-        ),
+    assert_matches!(
+        server.grep_status(&namespace_id).await,
+        GrepIndexStatus::Backfilling { .. },
         "one visit runs at most {} build steps",
         super::MAX_GREP_BUILD_STEPS_PER_VISIT
     );
@@ -907,8 +904,9 @@ async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_
         .await
         .expect("join the pass")
         .expect_err("a failed listing fails the pass");
-    assert!(
-        matches!(error, ObjectStoreError::Transport { .. }),
+    assert_matches!(
+        error,
+        ObjectStoreError::Transport { .. },
         "expected the injected listing failure, got {error:?}"
     );
     assert_eq!(

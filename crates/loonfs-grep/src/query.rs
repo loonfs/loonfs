@@ -261,7 +261,6 @@ fn single_folded_byte(class: &Class) -> Option<u8> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::*;
 

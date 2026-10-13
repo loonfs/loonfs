@@ -563,6 +563,7 @@ mod tests {
         CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
         NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo, Subject, SubjectId,
     };
+    use std::assert_matches;
     use tempfile::tempdir;
 
     #[derive(Debug)]
@@ -901,7 +902,7 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(
+        assert_matches!(
             planned.deltas.as_slice(),
             [
                 WalCommitDelta {
@@ -936,7 +937,7 @@ mod tests {
                     delta: WalDelta::AppendFileRevision { delta_index: 4, inode_id: InodeId(3), .. },
                 },
             ] if display_name.as_str() == "a.txt"
-        ));
+        );
         assert_eq!(planned.allocation.resulting_next_inode_id(), InodeId(4));
     }
 
@@ -986,22 +987,13 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(
-            planned.deltas[0].delta,
-            WalDelta::UnbindDirentry { .. }
-        ));
-        assert!(matches!(
-            planned.deltas[1].delta,
-            WalDelta::TombstoneSubtree { .. }
-        ));
-        assert!(matches!(
-            planned.deltas[2].delta,
-            WalDelta::CreateInode { .. }
-        ));
-        assert!(matches!(
+        assert_matches!(planned.deltas[0].delta, WalDelta::UnbindDirentry { .. });
+        assert_matches!(planned.deltas[1].delta, WalDelta::TombstoneSubtree { .. });
+        assert_matches!(planned.deltas[2].delta, WalDelta::CreateInode { .. });
+        assert_matches!(
             &planned.deltas[3].delta,
             WalDelta::BindDirentry { display_name, .. } if display_name.as_str() == "tmp.txt"
-        ));
+        );
     }
 
     #[tokio::test]

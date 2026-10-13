@@ -1,7 +1,5 @@
 //! HTTP directory and revision pagination behavior.
 
-#![allow(clippy::panic)]
-
 use crate::common::http_split_support::*;
 use crate::common::{collect_checkpoints, collect_path_entries, start_server};
 use loonfs_client::{ClientError, MoveOptions, NamespacePath, PutFileOptions};
@@ -13,6 +11,7 @@ use loonfs_types::{
     ErrorResponse, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
     DEFAULT_MAX_PAGE_LIMIT,
 };
+use std::assert_matches;
 use tempfile::tempdir;
 
 fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
@@ -505,7 +504,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     );
     // Restoring a revision emits the same event as a regular content update.
     assert_eq!(changes.changes[2].events.len(), 1);
-    assert!(matches!(
+    assert_matches!(
         &changes.changes[2].events[0],
         FilesystemChange::ContentChanged {
             inode_id: event_inode,
@@ -514,7 +513,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         } if *event_inode == inode_id
             && *revision_no == RevisionNo(3)
             && *content_ref == first_content_ref
-    ));
+    );
 
     let first_page = harness
         .client
@@ -625,10 +624,10 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         )
         .await
         .expect("move path");
-    assert!(matches!(
+    assert_matches!(
         harness.client.list_file_revisions(&target).page(first_page()).await,
         Err(ClientError::Api { code, .. }) if code == "path_not_found"
-    ));
+    );
     // Revision history follows the inode after a move.
     let moved_revisions = harness
         .client

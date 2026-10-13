@@ -221,6 +221,7 @@ pub(crate) fn plan_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[tokio::test]
     async fn local_fs_assembly_matches_buffered_sources_and_tail() {
@@ -310,7 +311,7 @@ mod tests {
             assembled.etag,
             Some(format!("local-fs-v1:crc64nvme:{}", expected.value))
         );
-        assert!(matches!(
+        assert_matches!(
             store
                 .assemble(
                     "destination",
@@ -320,7 +321,7 @@ mod tests {
                 )
                 .await,
             Err(crate::ImmutableWriteError::DifferentObject { .. })
-        ));
+        );
     }
 
     #[test]

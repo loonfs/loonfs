@@ -3,6 +3,7 @@
 use super::*;
 use crate::time::Deadline;
 use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
+use std::assert_matches;
 
 async fn current_manifest_no<S: ObjectStore + ?Sized>(
     store: &S,
@@ -469,12 +470,12 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
     )
     .await
     .expect_err("missing basis segment blocks floor advancement");
-    assert!(matches!(
+    assert_matches!(
         error,
         CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::MissingSegment { object_key }
         )) if object_key == missing_key
-    ));
+    );
     assert_eq!(
         read_floor_seq(&store, &namespace_id).await,
         ChangeSeq(0),
@@ -550,12 +551,12 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     .await
     .expect_err("failed basis probe blocks floor advancement");
     assert_eq!(error.code(), ErrorCode::ServerError);
-    assert!(matches!(
+    assert_matches!(
         error,
         CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::ReadSegment { object_key, .. }
         )) if object_key == failed_key
-    ));
+    );
     assert_eq!(store.attempts(), 1);
     assert_eq!(
         read_floor_seq(store.inner(), &namespace_id).await,
@@ -1499,10 +1500,10 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
     )
     .await
     .expect("first bounded step");
-    assert!(matches!(
+    assert_matches!(
         first,
         super::CompactionStepOutcome::UnitPublished { input_runs: 2, .. }
-    ));
+    );
     let visible_between = load_current_projection(&bounded_store, &namespace_id)
         .await
         .expect("visible state between bounded steps");
@@ -1581,10 +1582,10 @@ async fn bounded_compaction_converges_to_unbounded_shape_and_preserves_intermedi
     )
     .await
     .expect("below-trigger step");
-    assert!(matches!(
+    assert_matches!(
         below_trigger,
         super::CompactionStepOutcome::NotNeeded { delta_runs: 1 }
-    ));
+    );
 }
 
 #[tokio::test]
@@ -1963,8 +1964,9 @@ async fn over_budget_wal_fold_aborts_without_publishing() {
     )
     .await
     .expect_err("over-budget publication must abort");
-    assert!(
-        matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. }),
+    assert_matches!(
+        error,
+        CoreError::MetadataPublicationBudgetExceeded { .. },
         "expected budget error, got {error:?}"
     );
 
@@ -2061,8 +2063,9 @@ async fn over_budget_compaction_aborts_without_publishing() {
     )
     .await
     .expect_err("over-budget compaction must abort");
-    assert!(
-        matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. }),
+    assert_matches!(
+        error,
+        CoreError::MetadataPublicationBudgetExceeded { .. },
         "expected budget error, got {error:?}"
     );
 
@@ -2083,10 +2086,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
     )
     .await
     .expect("in-budget retry merges the unit");
-    assert!(matches!(
-        report,
-        super::CompactionStepOutcome::UnitPublished { .. }
-    ));
+    assert_matches!(report, super::CompactionStepOutcome::UnitPublished { .. });
 }
 
 /// Runs the selector exactly as a step runs it — same family group, same
@@ -2557,11 +2557,9 @@ async fn a_run_in_the_middle_over_the_budget_stops_the_window() {
     )
     .await
     .expect("compaction step");
-    assert!(
-        matches!(
-            report,
-            super::CompactionStepOutcome::CompactionPlanned { .. }
-        ),
+    assert_matches!(
+        report,
+        super::CompactionStepOutcome::CompactionPlanned { .. },
         "expected a planned compaction, got {:?}",
         report
     );

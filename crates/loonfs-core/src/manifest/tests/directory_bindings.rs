@@ -8,6 +8,7 @@ use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use loonfs_test_support::stores::ConcurrencyWatchStore;
 use loonfs_types::{AttributeInclusion, DirectoryPageCursor, InodeKind, PageRequest};
+use std::assert_matches;
 
 #[tokio::test]
 async fn a_cold_path_walk_reads_no_inode() {
@@ -304,8 +305,9 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     );
     assert_eq!(forward, reverse);
     assert_eq!(forward.len(), 1);
-    assert!(
-        matches!(&forward[0], MetadataRow::DirentryBinding(binding) if binding.is_bound() && binding.name_key.as_str() == "b" && binding.committed_seq == moved.read_state.seq && binding.delta_index == 5)
+    assert_matches!(
+        &forward[0],
+        MetadataRow::DirentryBinding(binding) if binding.is_bound() && binding.name_key.as_str() == "b" && binding.committed_seq == moved.read_state.seq && binding.delta_index == 5
     );
 
     write_file_bytes(&store, &namespace_id, "/a", b"replacement", &context, None)
@@ -419,8 +421,9 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
     );
     assert_eq!(forward, reverse);
     assert_eq!(forward.len(), 1, "{forward:?}");
-    assert!(
-        matches!(&forward[0], MetadataRow::DirentryBinding(binding) if binding.is_bound() && binding.name_key.as_str() == "c" && binding.child_inode_id == moved)
+    assert_matches!(
+        &forward[0],
+        MetadataRow::DirentryBinding(binding) if binding.is_bound() && binding.name_key.as_str() == "c" && binding.child_inode_id == moved
     );
     let compacted = load_current_metadata_view(&store, &namespace_id)
         .await
@@ -538,8 +541,9 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         .iter()
         .filter(|row| matches!(row, MetadataRow::DirentryBinding(binding) if binding.child_inode_id == child))
         .collect::<Vec<_>>();
-    assert!(
-        matches!(child_rows.as_slice(), [MetadataRow::DirentryBinding(binding)] if binding.is_bound() && binding.parent_inode_id == last_parent && binding.name_key.as_str() == "report"),
+    assert_matches!(
+        child_rows.as_slice(),
+        [MetadataRow::DirentryBinding(binding)] if binding.is_bound() && binding.parent_inode_id == last_parent && binding.name_key.as_str() == "report",
         "{child_rows:?}"
     );
     let compacted = load_current_metadata_view(&store, &namespace_id)

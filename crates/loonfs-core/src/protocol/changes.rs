@@ -291,6 +291,7 @@ mod tests {
         AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, EffectiveLimit,
         InodeId, NamespaceId,
     };
+    use std::assert_matches;
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -358,7 +359,7 @@ mod tests {
             .list_changes_after(ChangeSeq(1), limit, &context)
             .await
             .expect_err("an unpublished sequence cannot be a valid cursor");
-        assert!(matches!(error, CoreError::InvalidCursor(_)), "{error}");
+        assert_matches!(error, CoreError::InvalidCursor(_), "{error}");
     }
 
     #[tokio::test]

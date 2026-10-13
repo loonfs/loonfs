@@ -1,7 +1,6 @@
 //! Shared fixtures for the crate's integration tests.
 
 #![allow(dead_code)]
-#![allow(clippy::panic)]
 #![allow(
     clippy::result_large_err,
     reason = "test helpers preserve the client's structured error type"
@@ -280,7 +279,7 @@ async fn reserve_loopback_addr() -> SocketAddr {
     probe.local_addr().expect("probe addr")
 }
 
-#[allow(clippy::disallowed_methods, clippy::panic)]
+#[allow(clippy::disallowed_methods)]
 // Test-harness polling for a port the server binds on its own schedule.
 async fn wait_until_listening(
     addr: SocketAddr,

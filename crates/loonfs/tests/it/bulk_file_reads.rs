@@ -2,9 +2,6 @@
 //! filesystem: enumerating the files a checkpoint pinned, asking where those
 //! files are now, and reading one content object by reference.
 
-#![allow(clippy::panic)]
-// Runtime integration tests use panic in helper assertions for precise diagnostics.
-
 use crate::common::*;
 use loonfs::{
     CheckpointFile, CheckpointFilesPageCursor, ContentRef, CurrentFile, CurrentFileState,
@@ -14,6 +11,7 @@ use loonfs::{
 };
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
+use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -905,8 +903,9 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
         .await
         .expect_err("bytes that do not hash to the reference are refused");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    assert!(
-        matches!(&error, Error::Core(error) if error.to_string().contains("checksum mismatch")),
+    assert_matches!(
+        &error,
+        Error::Core(error) if error.to_string().contains("checksum mismatch"),
         "unexpected error: {error}"
     );
 }

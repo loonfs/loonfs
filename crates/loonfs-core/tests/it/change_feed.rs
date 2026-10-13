@@ -1,8 +1,5 @@
 //! Change-feed behavior for operations that create or replace file content.
 
-#![allow(clippy::panic)]
-// Unexpected variants include the full event in the failure message.
-
 use crate::common::commit_split_support::*;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_objectstore::local_fs_store::LocalFsStore;

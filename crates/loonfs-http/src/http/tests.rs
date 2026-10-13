@@ -1,8 +1,5 @@
 //! HTTP router and handler contracts.
 
-#![allow(clippy::panic)]
-// HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
-
 mod attribution;
 mod handler_panics;
 mod hosted_content_ref_access;
@@ -491,6 +488,7 @@ use loonfs_test_support::stores::{
     delegate_object_store, BufferWatchStore, FailStore, InjectedError, KeyPredicate,
     OperationContext, OperationKind, OperationSelector,
 };
+use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -2549,10 +2547,10 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
 
     let next_permit = state.download_permits.clone().acquire_owned();
     tokio::pin!(next_permit);
-    assert!(matches!(
+    assert_matches!(
         futures::poll!(next_permit.as_mut()),
         std::task::Poll::Pending
-    ));
+    );
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await

@@ -1,8 +1,6 @@
 //! Shared fixtures for the crate's integration tests.
 
 #![allow(dead_code)]
-#![allow(clippy::panic)]
-// Fixture assertions panic for precise diagnostics, as the test modules do.
 
 use loonfs::publish::{CommitCandidate, CommitIntent};
 use loonfs::{

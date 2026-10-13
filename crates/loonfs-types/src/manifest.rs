@@ -1391,6 +1391,7 @@ mod tests {
         ChangeSeq, CommitId, InodeId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, RunNo,
         WriterEpoch,
     };
+    use std::assert_matches;
 
     fn row_commit_id() -> CommitId {
         CommitId::parse("c_metadata_row").expect("commit id")
@@ -1458,7 +1459,9 @@ mod tests {
                 serde_json::from_value(payload.clone()).expect("regression");
             regression.manifest_no = ManifestNo(3);
             regression.head_seq = ChangeSeq(2);
-            assert!(successor.ensure_successor(&regression).is_err());
+            successor
+                .ensure_successor(&regression)
+                .expect_err("a successor whose activity totals go backward should be rejected");
             assert_eq!(regression.activity.checked_add(increment), Some(maximum));
 
             payload["activity"][field] = (crate::MAX_PUBLIC_INTEGER + 1).into();
@@ -1469,11 +1472,11 @@ mod tests {
             )
             .expect("encode invalid payload")
             .into_parts();
-            assert!(matches!(
+            assert_matches!(
                 decode_namespace_manifest_json(&encoded),
                 Err(crate::envelope::EnvelopeCodecError::PayloadDecode(message))
                     if message.contains(&crate::PublicOrdinalRangeError.to_string())
-            ));
+            );
         }
     }
 

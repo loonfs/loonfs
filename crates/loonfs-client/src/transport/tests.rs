@@ -4,6 +4,7 @@ use super::*;
 use crate::{scripted_transport, ClientConfig};
 use futures::FutureExt as _;
 use loonfs_test_support::clock::ManualClock;
+use std::assert_matches;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -317,7 +318,7 @@ async fn service_timeouts_cover_readiness_headers_and_streamed_bodies() {
             .now_or_never()
             .expect("request should finish")
             .expect_err("upload timeout");
-        assert!(matches!(error, ClientError::Http(message) if message.contains("timed out")));
+        assert_matches!(error, ClientError::Http(message) if message.contains("timed out"));
         assert_eq!(transport.attempts(), 1);
         assert_eq!(transport.sent()[0].body_bytes(), 0);
 
@@ -333,7 +334,7 @@ async fn service_timeouts_cover_readiness_headers_and_streamed_bodies() {
             .now_or_never()
             .expect("request should finish")
             .expect_err("header timeout");
-        assert!(matches!(error, ClientError::Http(message) if message.contains("timed out")));
+        assert_matches!(error, ClientError::Http(message) if message.contains("timed out"));
 
         let service = tower::service_fn(|_: Request<Body>| async {
             Ok(Response::new(Body::from_stream(
@@ -384,7 +385,7 @@ async fn service_timeouts_cover_readiness_headers_and_streamed_bodies() {
             .now_or_never()
             .expect("request should finish")
             .expect_err("readiness timeout");
-        assert!(matches!(error, ClientError::Http(message) if message.contains("timed out")));
+        assert_matches!(error, ClientError::Http(message) if message.contains("timed out"));
     }
 }
 
@@ -408,8 +409,9 @@ async fn upload_progress_resets_inactivity_without_resetting_the_request_deadlin
                     .now_or_never()
                     .expect("request should finish at its deadline")
                     .expect_err("total deadline");
-                assert!(
-                    matches!(error, ClientError::Http(message) if message.contains("timed out"))
+                assert_matches!(
+                    error,
+                    ClientError::Http(message) if message.contains("timed out")
                 );
                 assert_eq!(transport.sent()[0].body_chunks, vec![3; 2]);
                 break;

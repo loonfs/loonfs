@@ -430,8 +430,6 @@ fn validate_tls_on_proven_domains(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
-    // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{resolve_r2_credentials, CloudflareR2Credentials, ConfigFieldError, StoreConfig};
     use crate::ConfiguredObjectStoreKind;
@@ -503,10 +501,7 @@ path = "/tmp/service-account.json"
     fn a_hyphenated_store_kind_does_not_load() {
         for kind in ["local-fs", "aws-s3", "cloudflare-r2", "gcp-gcs"] {
             let contents = format!("kind = \"{kind}\"\nroot = \"/tmp/store\"");
-            assert!(
-                toml::from_str::<StoreConfig>(&contents).is_err(),
-                "`{kind}` must not load"
-            );
+            toml::from_str::<StoreConfig>(&contents).expect_err(&format!("`{kind}` must not load"));
         }
     }
 

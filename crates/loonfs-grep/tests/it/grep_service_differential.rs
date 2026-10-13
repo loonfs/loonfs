@@ -1,6 +1,3 @@
-#![allow(clippy::panic)]
-// Lifecycle assertions use panic for precise full-pipeline diagnostics.
-
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
 use crate::common::{control, default_page_limit, grep_with, page_limit, GrepHost};

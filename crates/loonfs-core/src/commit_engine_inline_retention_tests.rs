@@ -11,6 +11,7 @@ use crate::path::read::{load_metadata_view, ReadLoadContext};
 use crate::pin::{create_pin, load_snapshot_read_basis};
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::control::PinOwner;
+use std::assert_matches;
 
 fn replace(namespace_id: &NamespaceId, bytes: &'static [u8]) -> CommitCandidate {
     let value = inline(namespace_id, Bytes::from_static(bytes));
@@ -66,10 +67,7 @@ async fn compact_and_check_pair(
             finished = true;
             break;
         }
-        assert!(matches!(
-            outcome,
-            CompactionStepOutcome::UnitPublished { .. }
-        ));
+        assert_matches!(outcome, CompactionStepOutcome::UnitPublished { .. });
     }
     assert!(finished, "small fixture did not finish compaction");
 }
@@ -259,10 +257,10 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .expect("new receipt replay"),
         reused
     );
-    assert!(matches!(
+    assert_matches!(
         publish(&mut engine, &store, &context, replace(&namespace_id, b"before")).await,
         Err(CoreError::CommitIdReuseConflict { committed_seq: Some(seq), .. }) if seq == reused.committed_seq
-    ));
+    );
     assert_no_writes(&store);
 
     let current = load_current_metadata_view(&store, &namespace_id)

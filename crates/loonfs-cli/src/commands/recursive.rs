@@ -598,7 +598,6 @@ fn spec_target(spec: &NamespacePath) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::args::RuntimeBehavior;

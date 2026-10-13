@@ -18,6 +18,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::api::v0::CompleteUploadBody;
 use loonfs_types::{AbsolutePath, DestinationBehavior};
+use std::assert_matches;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
 
@@ -153,10 +154,10 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
             &Deadline::start(clock.clone()),
         )
         .await;
-    assert!(matches!(
+    assert_matches!(
         &result.results[..],
         [Err(CoreError::NamespaceDeleted { .. })]
-    ));
+    );
     assert_eq!(store.counts().puts, 0);
 }
 
@@ -612,8 +613,9 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         if matches!(outcome, CompactionStepOutcome::UnitPublished { .. }) {
             continue;
         }
-        assert!(
-            matches!(outcome, CompactionStepOutcome::NotNeeded { .. }),
+        assert_matches!(
+            outcome,
+            CompactionStepOutcome::NotNeeded { .. },
             "unexpected compaction outcome: {outcome:?}"
         );
         break;

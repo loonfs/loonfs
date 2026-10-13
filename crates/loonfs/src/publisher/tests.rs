@@ -1,8 +1,5 @@
 //! Publisher batching, shutdown, retry, and observability tests.
 
-#![allow(clippy::panic)]
-// Publisher tests use panic in async result helpers for precise diagnostics.
-
 #[path = "publication_clock.rs"]
 mod publication_clock;
 
@@ -32,6 +29,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
+use std::assert_matches;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -796,7 +794,7 @@ async fn publisher_delivery_preserves_bootstrap_namespace_exists_code() {
         .await
         .expect("publisher should deliver the result")
         .expect_err("bootstrap failure should remain an error");
-    assert!(matches!(error, Error::Core(_)));
+    assert_matches!(error, Error::Core(_));
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
 }
 
@@ -967,14 +965,14 @@ async fn publisher_contender_waits_for_active_request_receipt() {
         .expect_err("different request conflicts after the primary lands");
     assert_eq!(active_response.committed_seq, ChangeSeq(1));
     assert_eq!(duplicate_response.committed_seq, ChangeSeq(1));
-    assert!(matches!(
+    assert_matches!(
         conflict,
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
             committed_seq: Some(ChangeSeq(1)),
             committed_fingerprint: Some(fingerprint),
         }) if commit_id == "active" && fingerprint == active_identity
-    ));
+    );
 }
 
 #[tokio::test]
@@ -1079,14 +1077,14 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
         .await
         .expect("contender task")
         .expect_err("retry limit reports a conflict");
-    assert!(matches!(
+    assert_matches!(
         error,
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id: conflicting_id,
             committed_seq: None,
             committed_fingerprint: None,
         }) if conflicting_id == commit_id.as_str()
-    ));
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1138,20 +1136,20 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
         &namespace_id,
         create_directory_request("overflow", "overflow"),
     );
-    assert!(matches!(overflow, Err(CoreError::CommitQueueFull)));
+    assert_matches!(overflow, Err(CoreError::CommitQueueFull));
 
-    assert!(matches!(
+    assert_matches!(
         try_admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request("pending-0", "pending-0")
         ),
         Err(CoreError::CommitQueueFull)
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         publisher.admit_delete(DeleteNamespaceOptions::default()),
         Err(CoreError::CommitQueueFull)
-    ));
+    );
 
     store.release();
     assert_eq!(
@@ -1172,14 +1170,14 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
         .await
         .expect("conflict task")
         .expect_err("different request conflicts after the primary lands");
-    assert!(matches!(
+    assert_matches!(
         conflict,
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
             committed_seq: Some(ChangeSeq(2)),
             committed_fingerprint: Some(_),
         }) if commit_id == "pending-0"
-    ));
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1271,12 +1269,9 @@ async fn a_request_queued_behind_a_publish_waits_out_the_pacing_interval() {
     recv_commit(active, "active").await;
 
     // `queued` was waiting when `active` settled, so it is paced.
-    assert!(
-        bounded(Duration::from_millis(200), &mut queued)
-            .await
-            .is_err(),
-        "a request queued behind a publish must wait out the pacing interval"
-    );
+    bounded(Duration::from_millis(200), &mut queued)
+        .await
+        .expect_err("a request queued behind a publish must wait out the pacing interval");
     timer.set(400);
     bounded(Duration::from_secs(10), queued)
         .await
@@ -1481,7 +1476,7 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         &namespace_id,
         create_directory_request("too-late", "too-late"),
     );
-    assert!(matches!(fast_fail, Err(CoreError::NamespaceDeleted { .. })));
+    assert_matches!(fast_fail, Err(CoreError::NamespaceDeleted { .. }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2058,7 +2053,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         &namespace_id,
         create_directory_request("direct", "direct"),
     );
-    assert!(matches!(direct, Err(CoreError::ShuttingDown)));
+    assert_matches!(direct, Err(CoreError::ShuttingDown));
 
     // The admitted publication still settles, and drain joins its worker.
     store.release();

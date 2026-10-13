@@ -670,11 +670,11 @@ impl Client {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::transport::{retryable_transport_failure, DEFAULT};
     use loonfs_types::{ContentId, ErrorCode};
+    use std::assert_matches;
     use std::fs;
     use tempfile::tempdir;
 
@@ -697,14 +697,12 @@ mod tests {
             ca_cert_path: None,
         })
         .expect_err("ftp scheme must be rejected");
-        assert!(
-            matches!(
-                &error,
-                super::ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
-                    field: "server_url",
-                    ..
-                })
-            ),
+        assert_matches!(
+            &error,
+            super::ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
+                field: "server_url",
+                ..
+            }),
             "unexpected error: {error:?}"
         );
     }
@@ -837,7 +835,7 @@ mod tests {
             .get_namespace(&namespace_id)
             .await
             .expect_err("dropped connections must fail");
-        assert!(matches!(error, ClientError::Http(_)), "{error:?}");
+        assert_matches!(error, ClientError::Http(_), "{error:?}");
         assert_eq!(transport.attempts(), max_attempts);
 
         let transport = crate::scripted_transport::failures(1);
@@ -1069,7 +1067,7 @@ mod tests {
 
         let result = client.upload_via_presigned_url(&access, b"direct").await;
 
-        assert!(matches!(result, Err(ClientError::Http(_))), "{result:?}");
+        assert_matches!(result, Err(ClientError::Http(_)), "{result:?}");
         assert_eq!(transport.attempts(), 1);
     }
 
@@ -1177,12 +1175,10 @@ mod tests {
                 .complete_staged(&namespace_id, &upload_id)
                 .await
                 .expect_err("a completion response must report completed");
-            assert!(
-                matches!(
-                    &error,
-                    ClientError::Protocol(message)
-                        if message.contains(upload_id.as_str()) && message.contains(status_name)
-                ),
+            assert_matches!(
+                &error,
+                ClientError::Protocol(message)
+                    if message.contains(upload_id.as_str()) && message.contains(status_name),
                 "expected protocol error, got {error:?}"
             );
             assert_eq!(transport.attempts(), 1);
@@ -1245,8 +1241,9 @@ auth_token = "   "
 
         let error = ClientConfig::load(&path).expect_err("blank auth token");
 
-        assert!(
-            matches!(error, ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid { field, .. }) if field == "auth_token"),
+        assert_matches!(
+            error,
+            ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid { field, .. }) if field == "auth_token",
             "expected config validation error, got {error:?}"
         );
     }
@@ -1258,7 +1255,7 @@ auth_token = "   "
 
         let error = ClientConfig::load(&path).expect_err("missing config");
 
-        assert!(matches!(error, ClientError::ConfigIo(_)));
+        assert_matches!(error, ClientError::ConfigIo(_));
     }
 
     #[test]
@@ -1267,17 +1264,15 @@ auth_token = "   "
 
         let error = ClientConfig::load(&path).expect_err("decode error");
 
-        assert!(matches!(error, ClientError::ConfigDecode(_)));
+        assert_matches!(error, ClientError::ConfigDecode(_));
     }
 
     #[test]
     fn namespace_path_parse_rejects_invalid_namespace_id() {
         for namespace in ["bad/name", "Demo", "..", "demo?"] {
-            assert!(
-                matches!(
-                    NamespacePath::parse(namespace, "/notes.txt"),
-                    Err(ClientError::InvalidNamespacePath(_))
-                ),
+            assert_matches!(
+                NamespacePath::parse(namespace, "/notes.txt"),
+                Err(ClientError::InvalidNamespacePath(_)),
                 "expected invalid namespace path for id {namespace:?}"
             );
         }

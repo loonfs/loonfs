@@ -1,8 +1,5 @@
 //! Batch publication, replay, acknowledgement loss, limits, and fencing preconditions.
 
-#![allow(clippy::panic)]
-// These integration tests use panic in unexpected match arms for precise diagnostics.
-
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
@@ -25,6 +22,7 @@ use loonfs_types::{
     AbsolutePath, ActorId, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
     InodeId, NamespaceId,
 };
+use std::assert_matches;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -288,14 +286,14 @@ async fn batch_commit_writes_one_wal_object_and_expands_change_feed() {
         CommitId::parse("req-batch-b").expect("valid commit id")
     );
     assert_eq!(changes.changes[0].events.len(), 1);
-    assert!(matches!(
+    assert_matches!(
         &changes.changes[0].events[0],
         FilesystemChange::DirectoryCreated {
             parent_inode_id: InodeId(1),
             display_name,
             ..
         } if display_name.as_str() == "alpha"
-    ));
+    );
 }
 
 #[tokio::test]
@@ -530,10 +528,11 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         .expect_err("materialization-decided rejection");
     assert_eq!(materialization_rejection.code(), ErrorCode::PathNotFound);
     let accepted = failed[1].as_ref().expect_err("accepted candidate fails");
-    assert!(matches!(accepted, CoreError::WalWrite { .. }));
+    assert_matches!(accepted, CoreError::WalWrite { .. });
     let speculative = failed[2].as_ref().expect_err("speculative rejection");
-    assert!(
-        matches!(speculative, CoreError::WalWrite { .. }),
+    assert_matches!(
+        speculative,
+        CoreError::WalWrite { .. },
         "rejection decided against unpublished in-batch state must take the \
          batch error, got {speculative:?}"
     );
@@ -542,7 +541,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let accepted_alias = failed[4]
         .as_ref()
         .expect_err("alias of an accepted candidate fails with it");
-    assert!(matches!(accepted_alias, CoreError::WalWrite { .. }));
+    assert_matches!(accepted_alias, CoreError::WalWrite { .. });
 
     let head = load_namespace_read_state(
         &store,
@@ -627,7 +626,7 @@ async fn failed_batch_preserves_an_independent_commit_id_conflict() {
     )
     .await;
 
-    assert!(matches!(failed[0], Err(CoreError::WalWrite { .. })));
+    assert_matches!(failed[0], Err(CoreError::WalWrite { .. }));
     assert_eq!(
         failed[1]
             .as_ref()
@@ -993,7 +992,7 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
     )
     .await
     .expect_err("a different actor cannot reuse the commit id");
-    assert!(matches!(
+    assert_matches!(
         error,
         CoreError::CommitIdReuseConflict {
             commit_id,
@@ -1002,7 +1001,7 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
         } if commit_id == "attributed-receipt"
             && committed_seq == first.committed_seq
             && fingerprint.as_str().starts_with("v1:sha256:")
-    ));
+    );
 }
 
 #[tokio::test]
@@ -1043,14 +1042,14 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     // Neither claim had committed when the batch admitted them, so the
     // conflict has no receipt to name: neither the sequence nor the
     // fingerprint a retry would reconcile against.
-    assert!(matches!(
+    assert_matches!(
         error,
         CoreError::CommitIdReuseConflict {
             commit_id,
             committed_seq: None,
             committed_fingerprint: None,
         } if commit_id == "req-conflict"
-    ));
+    );
 
     let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
@@ -1122,7 +1121,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
     // The receipt decided this one, so the conflict names where the id
     // landed and what landed there — the sequence a retry reads back, and
     // the identity it proves itself against.
-    assert!(matches!(
+    assert_matches!(
         conflict,
         CoreError::CommitIdReuseConflict {
             commit_id,
@@ -1131,7 +1130,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         } if commit_id == "same-path-request"
             && committed_seq == Some(first.committed_seq)
             && fingerprint.as_str().starts_with("v1:sha256:")
-    ));
+    );
 
     let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
@@ -1246,14 +1245,14 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
         )
         .await
         .expect_err("changed precondition must conflict");
-        assert!(matches!(
+        assert_matches!(
             error,
             CoreError::CommitIdReuseConflict {
                 commit_id: reused,
                 committed_seq: Some(_),
                 committed_fingerprint: Some(_),
             } if reused == commit_id
-        ));
+        );
     }
 
     let head = load_namespace_read_state(
@@ -1336,14 +1335,14 @@ async fn fresh_delete_path_expected_inode_precondition_still_matches_or_rejects(
     else {
         panic!("expected failed operation, got {error:?}");
     };
-    assert!(matches!(
+    assert_matches!(
         *source,
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
             expected_inode_id: Some(InodeId(1)),
             actual_inode_id: Some(actual),
             ..
         }) if actual == mismatching_inode
-    ));
+    );
     assert_eq!(
         resolve_path(&store, &namespace_id, "/mismatching-precondition.txt")
             .await

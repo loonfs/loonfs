@@ -18,8 +18,6 @@
 //! The decode-rejection rules sit in `manifest_format`, which builds its inputs
 //! from these same files.
 
-#![allow(clippy::panic)]
-
 use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
 use loonfs_grep::manifest::{
     decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest, GrepHint,

@@ -2,6 +2,7 @@
 
 use super::*;
 use loonfs_types::Checksum;
+use std::assert_matches;
 
 #[derive(serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -519,13 +520,13 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     ] {
         let kept = &rows[&family];
         assert_eq!(kept.len(), 1);
-        assert!(matches!(
+        assert_matches!(
             kept[0],
             MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
                 delta_index: 2,
                 ..
             })
-        ));
+        );
     }
 }
 
@@ -552,7 +553,7 @@ fn drop_pass_refuses_superseded_bind_without_unbind() {
 
     let error = merge_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
         .expect_err("superseded live bind must refuse the drop");
-    assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
+    assert_matches!(error, CoreError::NamespaceCorrupt(_));
 }
 
 #[tokio::test]
@@ -1213,8 +1214,9 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
         else {
             panic!("{label}: perturbed manifest must not load")
         };
-        assert!(
-            matches!(error, ManifestLoadError::SegmentDescriptorMismatch { .. }),
+        assert_matches!(
+            error,
+            ManifestLoadError::SegmentDescriptorMismatch { .. },
             "{label}: unexpected error {error:?}"
         );
     }
@@ -1325,11 +1327,11 @@ async fn manifest_rejects_duplicate_revision_rows() {
     rewrite_revision_segment(&store, &namespace_id, &mut manifest, rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
 
-    assert!(matches!(
+    assert_matches!(
         load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
         Err(ManifestLoadError::DuplicateRevisionRow {
             family: ApiMetadataRowFamily::Revisions,
             ..
         })
-    ));
+    );
 }

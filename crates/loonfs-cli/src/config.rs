@@ -771,8 +771,6 @@ fn validate_client_config(profile_name: &str, config: ClientConfig) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
-    // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{remote_client_config_from, CliConfig, ProfileConfig};
     use loonfs_test_support::EnvGuard;
@@ -1240,8 +1238,18 @@ secret_access_key = "secret"
         let path = dir.path().join("config.toml");
         std::os::unix::fs::symlink(dir.path().join("missing.toml"), &path).expect("symlink");
 
-        assert!(super::load_config_if_exists(&path).is_err());
-        assert!(super::mutate_config(&path, |_| Ok(())).is_err());
+        assert_eq!(
+            super::load_config_if_exists(&path)
+                .expect_err("a broken config symlink should not read as an absent config")
+                .code,
+            crate::error::CliErrorCode::InvalidConfig.as_str()
+        );
+        assert_eq!(
+            super::mutate_config(&path, |_| Ok(()))
+                .expect_err("a broken config symlink should not be replaced")
+                .code,
+            crate::error::CliErrorCode::InvalidConfig.as_str()
+        );
         assert!(!dir.path().join("missing.toml").exists());
     }
 
@@ -1304,9 +1312,11 @@ root = "/tmp/store"
             crate::profiles::delete_profile_in_table(&mut table, "broken").expect("delete broken");
         assert_eq!(removed.mode, "embedded");
         crate::profiles::set_default_profile_in_table(&mut table, "ok").expect("switch default");
-        assert!(
-            crate::profiles::set_default_profile_in_table(&mut table, "gone").is_err(),
-            "unknown profile must not become the default"
+        assert_eq!(
+            crate::profiles::set_default_profile_in_table(&mut table, "gone")
+                .expect_err("unknown profile must not become the default")
+                .code,
+            crate::error::CliErrorCode::ProfileNotFound.as_str()
         );
         super::save_config_table(&path, &table).expect("save repaired table");
 

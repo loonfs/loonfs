@@ -3,6 +3,7 @@
 use super::*;
 use crate::namespace::control::load_current_manifest_with_hint;
 use loonfs_test_support::stores::MetadataMapStore;
+use std::assert_matches;
 
 async fn discover_during_collection(start: ManifestNo, block_next_manifest: bool) {
     let directory = tempdir().expect("directory");
@@ -123,10 +124,10 @@ async fn discovery_still_rejects_a_missing_manifest_when_the_hint_has_not_advanc
     let error = load_current_manifest(&store, &namespace_id)
         .await
         .expect_err("an unchanged hint cannot explain a missing manifest");
-    assert!(matches!(
+    assert_matches!(
         error,
         crate::control_object::ControlObjectLoadError::Codec { .. }
-    ));
+    );
 }
 
 #[tokio::test]
@@ -201,10 +202,13 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             blocked.release();
         }
     );
-    assert!(matches!(outcome, Err(CoreError::OutcomeUnknown {
-        object_key: actual_key,
-        ..
-    }) if actual_key == object_key));
+    assert_matches!(
+        outcome,
+        Err(CoreError::OutcomeUnknown {
+            object_key: actual_key,
+            ..
+        }) if actual_key == object_key
+    );
     assert_eq!(blocked.inner().remaining(), 0);
     assert_eq!(recorded.counts().create_if_absent_puts, 1);
     assert_eq!(recorded.counts().compare_and_swaps, 0);

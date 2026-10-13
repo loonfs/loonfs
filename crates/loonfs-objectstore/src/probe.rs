@@ -740,6 +740,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use loonfs_types::{EffectiveLimit, Page};
+    use std::assert_matches;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1044,14 +1045,14 @@ mod tests {
 
         assert!(accepted_a_stale_swap.load(Ordering::SeqCst));
         assert!(!StoreProbeResponse::from(report.clone()).all_passed());
-        assert!(matches!(
+        assert_matches!(
             outcome(&report, "compare_and_swap_rejects_stale"),
             StoreProbeOutcome::Failed { message } if message.contains("does not enforce")
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             outcome(&report, "compare_and_swap_missing_object_rejected"),
             StoreProbeOutcome::Failed { .. }
-        ));
+        );
         // A failed check ends that check, not the run: everything after it
         // still reports, and the run still cleans up after itself.
         assert_eq!(
@@ -1232,10 +1233,10 @@ mod tests {
         let report = run_store_contract_probe(&store, &ProbeRunId::generate()).await;
 
         assert!(!StoreProbeResponse::from(report.clone()).all_passed());
-        assert!(matches!(
+        assert_matches!(
             outcome(&report, "head_reports_last_modified"),
             StoreProbeOutcome::Failed { message } if message.contains("unix epoch")
-        ));
+        );
     }
 
     #[tokio::test]
@@ -1247,10 +1248,10 @@ mod tests {
 
         let report = run_store_contract_probe(&store, &ProbeRunId::generate()).await;
 
-        assert!(matches!(
+        assert_matches!(
             outcome(&report, "stored_checksum_readback"),
             StoreProbeOutcome::Failed { .. }
-        ));
+        );
         assert!(!StoreProbeResponse::from(report).all_passed());
     }
 }

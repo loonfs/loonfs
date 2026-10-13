@@ -786,6 +786,7 @@ fn take_slice<'a>(
 mod tests {
     use super::*;
     use crate::{ChangeSeq, InodeId, InodeKind};
+    use std::assert_matches;
 
     #[test]
     fn decoded_byte_accounting_includes_closed_and_open_blocks() {
@@ -944,15 +945,12 @@ mod tests {
         let error = builder
             .push(&key_a, &filter_a, &row_a)
             .expect_err("descending key should be rejected");
-        assert!(matches!(
-            error,
-            SegmentBlockCodecError::RowKeysOutOfOrder { .. }
-        ));
+        assert_matches!(error, SegmentBlockCodecError::RowKeysOutOfOrder { .. });
 
         let error = SegmentBlocksBuilder::default()
             .build()
             .expect_err("empty segment should be rejected");
-        assert!(matches!(error, SegmentBlockCodecError::EmptySegment));
+        assert_matches!(error, SegmentBlockCodecError::EmptySegment);
     }
 
     #[test]
@@ -1048,12 +1046,10 @@ mod tests {
         let error = builder
             .push(&key_low, &filter_low, &row_low)
             .expect_err("a descending key across a block boundary should be rejected");
-        assert!(
-            matches!(
-                &error,
-                SegmentBlockCodecError::RowKeysOutOfOrder { previous, offered }
-                    if previous == &key_high && offered == &key_low
-            ),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::RowKeysOutOfOrder { previous, offered }
+                if previous == &key_high && offered == &key_low,
             "unexpected error: {error}"
         );
     }
@@ -1079,30 +1075,21 @@ mod tests {
         corrupted[target] ^= 0xff;
         let error = decode_data_block(section(&corrupted, &index[0].block), &index[0].block)
             .expect_err("corrupted data block should fail");
-        assert!(matches!(
-            error,
-            SegmentBlockCodecError::ChecksumMismatch { .. }
-        ));
+        assert_matches!(error, SegmentBlockCodecError::ChecksumMismatch { .. });
 
         let mut corrupted = built.bytes.clone();
         let target = crate::usize_from_u64(built.index.offset) + 3;
         corrupted[target] ^= 0xff;
         let error = decode_index_block(section(&corrupted, &built.index), &built.index)
             .expect_err("corrupted index should fail");
-        assert!(matches!(
-            error,
-            SegmentBlockCodecError::ChecksumMismatch { .. }
-        ));
+        assert_matches!(error, SegmentBlockCodecError::ChecksumMismatch { .. });
 
         let mut corrupted = built.bytes.clone();
         let target = crate::usize_from_u64(built.filter.offset) + 12;
         corrupted[target] ^= 0xff;
         let error = decode_filter_block(section(&corrupted, &built.filter), &built.filter)
             .expect_err("corrupted filter should fail");
-        assert!(matches!(
-            error,
-            SegmentBlockCodecError::ChecksumMismatch { .. }
-        ));
+        assert_matches!(error, SegmentBlockCodecError::ChecksumMismatch { .. });
     }
 
     #[test]
@@ -1169,10 +1156,10 @@ mod tests {
             payload.resize(12 + crate::usize_from_u64(bit_len.div_ceil(8)), 0xff);
             let mut bytes = Vec::new();
             let handle = append_section(&mut bytes, &payload, false).expect("filter section");
-            assert!(matches!(
+            assert_matches!(
                 decode_filter_block(&bytes, &handle),
                 Err(SegmentBlockCodecError::Malformed(_))
-            ));
+            );
         }
     }
 
@@ -1278,8 +1265,9 @@ mod tests {
 
         let error =
             decode_data_block(&bytes, &handle).expect_err("descending rows should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("row-key order")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("row-key order"),
             "unexpected error: {error}"
         );
     }
@@ -1306,11 +1294,11 @@ mod tests {
         let handle = append_section(&mut bytes, &payload, true).expect("append section");
         let error = decode_data_block(&bytes, &handle)
             .expect_err("a partial utf-8 prefix should be rejected");
-        assert!(matches!(
+        assert_matches!(
             &error,
             SegmentBlockCodecError::Malformed(message)
                 if message == "shared prefix exceeds previous key"
-        ));
+        );
     }
 
     #[test]
@@ -1323,8 +1311,9 @@ mod tests {
 
         let error =
             decode_index_block(&bytes, &handle).expect_err("descending index should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("key order")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("key order"),
             "unexpected error: {error}"
         );
     }
@@ -1336,8 +1325,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("descending block offsets should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("does not start where")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("does not start where"),
             "unexpected error: {error}"
         );
     }
@@ -1349,8 +1339,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("overlapping block ranges should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("does not start where")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("does not start where"),
             "unexpected error: {error}"
         );
     }
@@ -1362,8 +1353,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("a gap between block ranges should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("does not start where")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("does not start where"),
             "unexpected error: {error}"
         );
     }
@@ -1375,8 +1367,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("an overflowing single range should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows"),
             "unexpected error: {error}"
         );
     }
@@ -1391,8 +1384,9 @@ mod tests {
 
         let error = decode_index_block(&bytes, &handle)
             .expect_err("a trailing overflowing range should be rejected");
-        assert!(
-            matches!(&error, SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows")),
+        assert_matches!(
+            &error,
+            SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows"),
             "unexpected error: {error}"
         );
     }

@@ -78,7 +78,8 @@ mod tests {
                 serde_json::Value::from(naming.as_str())
             );
         }
-        assert!(serde_json::from_str::<NamespaceNaming>("\"labels\"").is_err());
+        serde_json::from_str::<NamespaceNaming>("\"labels\"")
+            .expect_err("`labels` should be rejected");
     }
 
     #[test]
