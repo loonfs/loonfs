@@ -1,7 +1,6 @@
 //! Contract route composition without host operational routes.
 
 use super::fixtures::{test_app, test_options, TestAppOptions};
-use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use std::sync::Arc;
@@ -16,8 +15,8 @@ async fn binding_routes_exclude_host_routes_and_preserve_maintenance_admission()
     )
     .await
     .expect("binding state");
-    for maintenance in [JobMode::ServeOnly, JobMode::Disabled] {
-        Arc::make_mut(&mut state.options).maintenance = maintenance;
+    for serves_maintenance in [true, false] {
+        Arc::make_mut(&mut state.options).serves_maintenance = serves_maintenance;
         let router = crate::router(state.clone());
         for path in ["/health", "/readiness", "/metrics"] {
             let response = router
@@ -72,7 +71,7 @@ async fn binding_routes_exclude_host_routes_and_preserve_maintenance_admission()
         let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error");
         assert_eq!(
             error.code,
-            if maintenance.serves() {
+            if serves_maintenance {
                 loonfs_types::ErrorCode::NamespaceNotFound
             } else {
                 loonfs_types::ErrorCode::RouteNotFound
@@ -90,7 +89,7 @@ async fn binding_routes_exclude_host_routes_and_preserve_maintenance_admission()
             .expect("response");
         assert_eq!(
             response.status(),
-            if maintenance.serves() {
+            if serves_maintenance {
                 StatusCode::NOT_FOUND
             } else {
                 StatusCode::UNAUTHORIZED

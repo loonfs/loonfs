@@ -37,7 +37,7 @@ use loonfs_types::format::wal::{
 use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
-    CommitId, ContentId, ContentRef, ContentRefKind, HexDigest, InodeId, InodeKind, ManifestNo,
+    ChecksumHex, CommitId, ContentId, ContentRef, ContentRefKind, InodeId, InodeKind, ManifestNo,
     MetadataSegmentId, NameKey, NamespaceId, NamespaceNaming, PinId, PrincipalId, PrincipalScope,
     RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
 };
@@ -142,7 +142,7 @@ fn sample_crc_content_ref() -> ContentRef {
         size_bytes: 11_534_336,
         checksum: Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: HexDigest::parse("bbb7305bdf118bcb").expect("hex digest"),
+            value: ChecksumHex::parse("bbb7305bdf118bcb").expect("a lowercase hex checksum"),
         },
     }
 }
@@ -159,7 +159,7 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
             size_bytes: 4_096,
             checksum: Checksum {
                 algorithm: ChecksumAlgorithm::Crc32c,
-                value: HexDigest::parse("1a2b3c4d").expect("hex digest"),
+                value: ChecksumHex::parse("1a2b3c4d").expect("a lowercase hex checksum"),
             },
         },
     ];
@@ -2137,7 +2137,7 @@ fn segment_section<'a>(
     bytes: &'a [u8],
     handle: &loonfs_types::format::segment_blocks::BlockHandle,
 ) -> &'a [u8] {
-    let start = usize::try_from(handle.offset).expect("the offset should fit usize");
+    let start = loonfs_types::usize_from_u64(handle.offset);
     &bytes[start..start + handle.stored_bytes as usize]
 }
 

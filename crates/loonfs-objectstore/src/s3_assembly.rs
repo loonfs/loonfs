@@ -193,10 +193,9 @@ impl S3RequestSigner {
         tail: &[Bytes],
         part: &ByteRange,
     ) -> Result<Bytes> {
-        let mut bytes = Vec::with_capacity(
-            usize::try_from(part.end_exclusive - part.start_inclusive)
-                .expect("a planned part should fit usize"),
-        );
+        let mut bytes = Vec::with_capacity(loonfs_types::usize_from_u64(
+            part.end_exclusive - part.start_inclusive,
+        ));
         let mut start = 0;
         for ((source, range), etag) in sources.iter().zip(ranges).zip(etags) {
             let end = start + range.end_exclusive - range.start_inclusive;
@@ -230,10 +229,8 @@ impl S3RequestSigner {
             let first = start.max(part.start_inclusive);
             let last = end.min(part.end_exclusive);
             if first < last {
-                let first = usize::try_from(first - start)
-                    .expect("a range inside the piece should fit usize");
-                let last = usize::try_from(last - start)
-                    .expect("a range inside the piece should fit usize");
+                let first = loonfs_types::usize_from_u64(first - start);
+                let last = loonfs_types::usize_from_u64(last - start);
                 bytes.extend_from_slice(&piece[first..last]);
             }
             start = end;

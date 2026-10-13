@@ -31,11 +31,11 @@ pub(crate) fn client(
     grep_service: GrepService,
     store_kind: ConfiguredObjectStoreKind,
     inline_content: InlineContentPolicy,
-    retry: bool,
+    no_retry: bool,
 ) -> Result<Client, CliError> {
     let options = Arc::new(BindingConfig {
         grep: JobMode::ServeAndMaintain,
-        maintenance: JobMode::ServeAndMaintain,
+        serves_maintenance: true,
         snapshot_policy: loonfs::SnapshotPolicy::default(),
         max_download_bytes: None,
         max_upload_bytes: None,
@@ -89,7 +89,7 @@ pub(crate) fn client(
             server_url: "http://embedded.invalid".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
-            retry,
+            disable_transient_retry: no_retry,
             ca_cert_path: None,
         },
         service,

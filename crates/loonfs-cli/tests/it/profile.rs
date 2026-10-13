@@ -286,14 +286,15 @@ fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
         &["put", payload, "/flag.txt", "--actor-id", "flag-system"],
     ));
 
-    for (environment, flag, param, source) in [
+    for (environment, flag, code, param, source) in [
         (
             "environment-service",
             Some(" bad"),
+            "invalid_usage",
             Some("--actor-id"),
             "--actor-id",
         ),
-        (" bad", None, None, "LOONFS_ACTOR_ID"),
+        (" bad", None, "invalid_request", None, "LOONFS_ACTOR_ID"),
     ] {
         let mut args = vec!["--json", "put", payload, "/invalid.txt"];
         if let Some(flag) = flag {
@@ -302,7 +303,7 @@ fn mutation_actor_precedence_is_flag_then_environment_then_profile() {
         let output = harness.run_with_env(&[("LOONFS_ACTOR_ID", environment)], &args);
         assert_failure(&output);
         let error = json_error(&output);
-        assert_eq!(error["code"], "invalid_request");
+        assert_eq!(error["code"], code);
         assert_eq!(error["param"].as_str(), param);
         assert!(error["message"].as_str().expect("message").contains(source));
     }
@@ -1394,7 +1395,8 @@ fn namespace_resolution_uses_flag_before_environment() {
 }
 
 #[test]
-fn namespace_resolution_gives_invalid_environment_the_flag_error_code() {
+fn an_invalid_namespace_flag_is_a_usage_error_and_an_invalid_environment_value_is_a_request_error()
+{
     let harness = Harness::new();
     harness.add_embedded_profile("default");
 
@@ -1402,12 +1404,10 @@ fn namespace_resolution_gives_invalid_environment_the_flag_error_code() {
         harness.run_with_env(&[("LOONFS_NAMESPACE", "bad/name")], &["--json", "changes"]);
     let from_flag = harness.run(&["--json", "changes", "--namespace", "bad/name"]);
 
-    assert_failure(&from_environment);
-    assert_failure(&from_flag);
-    assert_eq!(
-        json_error(&from_environment)["code"],
-        json_error(&from_flag)["code"]
-    );
+    assert_eq!(from_environment.status.code(), Some(1));
+    assert_eq!(json_error(&from_environment)["code"], "invalid_request");
+    assert_eq!(from_flag.status.code(), Some(2));
+    assert_eq!(json_error(&from_flag)["code"], "invalid_usage");
 }
 
 #[test]

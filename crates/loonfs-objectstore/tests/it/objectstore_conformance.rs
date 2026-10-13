@@ -614,9 +614,7 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
     let key = stored_checksum_test_key();
     let _ = store.delete(&key).await;
 
-    let payload: Vec<u8> = (0..1_000_003usize)
-        .map(|index| u8::try_from(index % 241).expect("a remainder below 241 should fit u8"))
-        .collect();
+    let payload: Vec<u8> = (0..241_u8).cycle().take(1_000_003).collect();
     store
         .put(
             &key,
@@ -675,8 +673,9 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
     let _ = store.delete(&key).await;
 
     let payload_len = 3 * loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
-    let payload: Vec<u8> = (0..payload_len)
-        .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
+    let payload: Vec<u8> = (0..251_u8)
+        .cycle()
+        .take(loonfs_types::usize_from_u64(payload_len))
         .collect();
     let expected = Checksum::crc64nvme(&payload);
 

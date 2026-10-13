@@ -30,7 +30,7 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
     TestOptions {
         binding: BindingConfig {
             grep: JobMode::ServeAndMaintain,
-            maintenance: JobMode::ServeOnly,
+            serves_maintenance: true,
             snapshot_policy: SnapshotPolicy {
                 max_ttl_ms: 86_400_000,
                 max_lifetime_ms: 604_800_000,

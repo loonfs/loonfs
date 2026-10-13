@@ -909,10 +909,8 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 
     // Oversized and full of matches: were it ever fetched and scanned, it
     // would flood the results instead of being skipped.
-    let oversized_bytes = b"needle\n".repeat(
-        usize::try_from(MAX_INDEX_GRAMS_FILE_BYTES).expect("the test value should fit usize") / 7
-            + 1,
-    );
+    let oversized_bytes =
+        b"needle\n".repeat(loonfs_types::usize_from_u64(MAX_INDEX_GRAMS_FILE_BYTES) / 7 + 1);
     assert!(oversized_bytes.len() as u64 > MAX_INDEX_GRAMS_FILE_BYTES);
     let blobs_before_bravo = content_blob_keys(&store).await;
     namespace

@@ -1568,7 +1568,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
             server_url: format!("http://{addr}"),
             auth_token: auth_token.map(Into::into),
             request_timeout_ms: None,
-            retry: true,
+            disable_transient_retry: false,
             ca_cert_path: None,
         })
         .expect("valid client config");
@@ -1957,7 +1957,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".into()),
         request_timeout_ms: None,
-        retry: true,
+        disable_transient_retry: false,
         ca_cert_path: None,
     })
     .expect("valid client config");
@@ -2015,17 +2015,16 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
 
 /// A payload with a distinct byte at every offset, so bytes landing in the
 /// wrong order or twice cannot go unnoticed.
-fn distinct_bytes(len: u64) -> Vec<u8> {
-    (0..len)
-        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
-        .collect()
+fn distinct_bytes(len: usize) -> Vec<u8> {
+    (0..251_u8).cycle().take(len).collect()
 }
 
 /// What the write path is allowed to hold at once, and what it is asked to
 /// carry: three internal parts' worth, so a path that materializes its
 /// payload is caught by more than a rounding error.
 const MEMORY_BOUND_PART_BYTES: u64 = loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
-const MEMORY_BOUND_PAYLOAD_BYTES: u64 = 3 * MEMORY_BOUND_PART_BYTES + 4_096;
+const MEMORY_BOUND_PAYLOAD_BYTES: usize =
+    3 * loonfs_types::usize_from_u64(MEMORY_BOUND_PART_BYTES) + 4_096;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_proxied_upload_route_never_holds_the_whole_payload() {
@@ -2052,7 +2051,7 @@ async fn the_proxied_upload_route_never_holds_the_whole_payload() {
 
     let peaks = watched.peaks();
     assert_eq!(
-        peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES,
+        peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64,
         "every payload byte crossed the store boundary exactly once"
     );
     assert!(
@@ -2103,9 +2102,9 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
         .await
         .expect("stream a multi-part payload into the store");
 
-    assert_eq!(stored, MEMORY_BOUND_PAYLOAD_BYTES);
+    assert_eq!(stored, MEMORY_BOUND_PAYLOAD_BYTES as u64);
     let peaks = watched.peaks();
-    assert_eq!(peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES);
+    assert_eq!(peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64);
     assert!(
         peaks.largest_buffer_bytes <= MEMORY_BOUND_PART_BYTES,
         "no single buffer may exceed one part: largest was {}",
@@ -2322,7 +2321,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         request_timeout_ms: None,
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
-        retry: false,
+        disable_transient_retry: true,
         ca_cert_path: None,
     };
     let config_for_busy = client_config.clone();
@@ -2412,7 +2411,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         request_timeout_ms: None,
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
-        retry: false,
+        disable_transient_retry: true,
         ca_cert_path: None,
     };
     let config_for_busy = client_config.clone();
@@ -2605,7 +2604,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".into()),
         request_timeout_ms: None,
-        retry: true,
+        disable_transient_retry: false,
         ca_cert_path: None,
     })
     .expect("valid client config");
@@ -2825,7 +2824,7 @@ async fn start_server_with_config(store: SharedObjectStore, config: TestOptions)
             server_url: format!("http://{}", addr),
             auth_token: Some("test-token".into()),
             request_timeout_ms: None,
-            retry: true,
+            disable_transient_retry: false,
             ca_cert_path: None,
         })
         .expect("valid client config"),
@@ -3397,7 +3396,7 @@ mod direct_download {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".into()),
             request_timeout_ms: None,
-            retry: true,
+            disable_transient_retry: false,
             ca_cert_path: None,
         })
         .expect("valid client config")
@@ -3452,8 +3451,9 @@ mod direct_download {
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/big.bin").expect("target");
         // Past the cap by enough that a truncation would show, and cheap.
-        let payload: Vec<u8> = (0..PROXY_CAP_BYTES * 3)
-            .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
+        let payload: Vec<u8> = (0..251_u8)
+            .cycle()
+            .take(loonfs_types::usize_from_u64(PROXY_CAP_BYTES * 3))
             .collect();
         client
             .put_file_with_options(
@@ -3543,10 +3543,8 @@ mod direct_download {
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/pinned.bin").expect("target");
-        let first =
-            vec![b'a'; usize::try_from(PROXY_CAP_BYTES).expect("the cap should fit usize") * 2];
-        let second =
-            vec![b'b'; usize::try_from(PROXY_CAP_BYTES).expect("the cap should fit usize") * 2];
+        let first = vec![b'a'; loonfs_types::usize_from_u64(PROXY_CAP_BYTES) * 2];
+        let second = vec![b'b'; loonfs_types::usize_from_u64(PROXY_CAP_BYTES) * 2];
         client
             .put_file_with_options(
                 &target,
@@ -3653,7 +3651,7 @@ mod direct_download {
                 server_url: "http://127.0.0.1".to_owned(),
                 auth_token: Some("test-token".into()),
                 request_timeout_ms: None,
-                retry: true,
+                disable_transient_retry: false,
                 ca_cert_path: None,
             },
             service,
@@ -3734,18 +3732,13 @@ mod direct_download {
             .await
             .expect("open the grant");
         download
-            .fold_resumed_prefix(
-                &payload[..usize::try_from(held).expect("the held prefix should fit usize")],
-            )
+            .fold_resumed_prefix(&payload[..loonfs_types::usize_from_u64(held)])
             .expect("fold the held prefix");
         let mut received = Vec::new();
         while let Some(chunk) = download.next_chunk().await.expect("read the grant") {
             received.extend_from_slice(&chunk);
         }
-        assert_eq!(
-            received,
-            payload[usize::try_from(held).expect("the held prefix should fit usize")..]
-        );
+        assert_eq!(received, payload[loonfs_types::usize_from_u64(held)..]);
 
         for start_offset in [payload.len() as u64, payload.len() as u64 + 1] {
             let past = DownloadOptions {
@@ -4020,8 +4013,11 @@ mod direct_download {
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
         // Large enough that the client looks for a direct transport at all,
         // and far past the proxy cap, so nothing else could carry it.
-        let payload: Vec<u8> = (0..loonfs_client::MIN_STREAMING_PUT_BYTES)
-            .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
+        let payload: Vec<u8> = (0..251_u8)
+            .cycle()
+            .take(loonfs_types::usize_from_u64(
+                loonfs_client::MIN_STREAMING_PUT_BYTES,
+            ))
             .collect();
 
         client
@@ -4080,8 +4076,11 @@ mod direct_download {
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
         // Large enough that the client looks for a direct transport at all,
         // and far past the proxy cap, so nothing else could carry it.
-        let payload: Vec<u8> = (0..loonfs_client::MIN_STREAMING_PUT_BYTES)
-            .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
+        let payload: Vec<u8> = (0..251_u8)
+            .cycle()
+            .take(loonfs_types::usize_from_u64(
+                loonfs_client::MIN_STREAMING_PUT_BYTES,
+            ))
             .collect();
 
         client
@@ -4134,11 +4133,8 @@ mod direct_download {
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/enormous.bin").expect("target");
-        let payload = vec![
-            7u8;
-            usize::try_from(loonfs_client::MIN_STREAMING_PUT_BYTES)
-                .expect("the threshold should fit usize")
-        ];
+        let payload =
+            vec![7u8; loonfs_types::usize_from_u64(loonfs_client::MIN_STREAMING_PUT_BYTES)];
 
         let error = client
             .put_file_with_options(
@@ -4171,13 +4167,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
     let plain = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let ns = namespace_id("demo");
     let seed_writer = bootstrap_namespace(&plain, "runtime-writer", &ns).await;
-    let payload = vec![
-        42;
-        usize::try_from(loonfs::CONTENT_READ_CHUNK_BYTES)
-            .expect("the chunk should fit usize")
-            * 3
-            + 17
-    ];
+    let payload = vec![42; loonfs_types::usize_from_u64(loonfs::CONTENT_READ_CHUNK_BYTES) * 3 + 17];
     write_file_bytes(
         &seed_writer,
         &ns,
@@ -4243,8 +4233,7 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
                 &entry.content_ref().expect("file").content_id,
             );
             let mut changed = payload.clone();
-            changed[usize::try_from(loonfs::CONTENT_READ_CHUNK_BYTES)
-                .expect("the chunk should fit usize")] ^= 1;
+            changed[loonfs_types::usize_from_u64(loonfs::CONTENT_READ_CHUNK_BYTES)] ^= 1;
             plain
                 .put_overwrite(&key, changed.into())
                 .await

@@ -110,8 +110,10 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
 ) -> Result<WholeSegment> {
     let whole_handle = BlockHandle {
         offset: 0,
-        stored_bytes: u32::try_from(object_bytes)
-            .expect("a whole-segment load should fit one u32-sized handle"),
+        stored_bytes: u32::try_from(object_bytes).expect(
+            "callers load a whole segment only at or below `MAX_WHOLE_SEGMENT_LOAD_BYTES`, so its \
+             size should fit u32",
+        ),
         decoded_bytes: 0,
         crc32c: 0,
     };
@@ -326,8 +328,10 @@ pub(crate) async fn load_data_block_span<S: ObjectStore + ?Sized>(
             .expect("a span should fit the byte limit or contain one u32-sized block");
         let bytes = load_index_section_bytes(store, object_key, &handle).await?;
         for entry in &entries[start..cursor] {
-            let offset = usize::try_from(entry.block.offset - handle.offset)
-                .expect("a block inside the loaded span should fit usize");
+            let offset = usize::try_from(entry.block.offset - handle.offset).expect(
+                "a span stops at `MAX_BULK_LOAD_BYTES` or at one block, so a block's offset in \
+                 it should fit usize",
+            );
             let stored = &bytes[offset..offset + entry.block.stored_bytes as usize];
             let block = decode_data_block_rows::<IndexRow>(stored, &entry.block)
                 .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?;
@@ -399,8 +403,7 @@ mod tests {
         }
         let built = builder.build().expect("build segment");
         let entries = decode_index_block(
-            &built.bytes
-                [usize::try_from(built.index.offset).expect("the test value should fit usize")..],
+            &built.bytes[loonfs_types::usize_from_u64(built.index.offset)..],
             &built.index,
         )
         .expect("decode index");

@@ -211,10 +211,7 @@ impl Client {
             SendPolicy::Retry => {
                 let deadline = OperationDeadline::start(
                     self.timer.as_ref(),
-                    self.transport_retry
-                        .as_ref()
-                        .unwrap_or(&DEFAULT)
-                        .operation_deadline,
+                    self.transport_retry.operation_deadline,
                 );
                 self.send_with_retry(request, body, Some(deadline)).await
             }
@@ -236,12 +233,14 @@ impl Client {
                 Err(attempt) => attempt,
             };
             let retryable = retryable_transport_failure(attempt.transport, &attempt.error);
-            let Some(policy) = self.transport_retry.as_ref().filter(|_| retryable) else {
+            if !self.transport_retry_enabled || !retryable {
                 return Err(attempt.error);
-            };
-            let Some(backoff) =
-                next_transport_retry_backoff(policy, &mut retries, deadline.as_ref())
-            else {
+            }
+            let Some(backoff) = next_transport_retry_backoff(
+                &self.transport_retry,
+                &mut retries,
+                deadline.as_ref(),
+            ) else {
                 return Err(attempt.error);
             };
             transport_delay(backoff).await;

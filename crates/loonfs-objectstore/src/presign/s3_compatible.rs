@@ -576,7 +576,8 @@ pub(crate) fn base64_crc64nvme(checksum: &Checksum) -> Result<String> {
     checksum
         .validate()
         .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
-    let raw = hex_decode_bytes(checksum.value.as_str()).expect("a hex digest should decode");
+    let raw = hex_decode_bytes(checksum.value.as_str())
+        .expect("a checksum spelled in lowercase hex should decode");
     Ok(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 

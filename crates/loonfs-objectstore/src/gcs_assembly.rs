@@ -131,10 +131,7 @@ impl GcsRequestSigner {
             },
         )
         .boxed();
-        let mut reader = PartReader::new(
-            body,
-            usize::try_from(READ_BYTES).expect("the read size should fit usize"),
-        );
+        let mut reader = PartReader::new(body, loonfs_types::usize_from_u64(READ_BYTES));
         let head = reader.next_part().await?.unwrap_or_default();
         self.put_if_absent(temporary, head, reader, 1).await
     }
@@ -334,7 +331,7 @@ impl GcsRequestSigner {
             temporary.push((name.clone(), self.temporary_cleanup(&name)));
             let mut reader = PartReader::new(
                 stream::iter(tail.into_iter().map(Ok)).boxed(),
-                usize::try_from(READ_BYTES).expect("the read size should fit usize"),
+                loonfs_types::usize_from_u64(READ_BYTES),
             );
             let head = reader.next_part().await?.unwrap_or_default();
             let metadata = self.put_if_absent(&name, head, reader, 1).await?;

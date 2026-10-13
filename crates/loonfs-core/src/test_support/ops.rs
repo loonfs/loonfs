@@ -292,12 +292,10 @@ pub(crate) async fn append_wal_commit<S: ObjectStore + ?Sized>(
             .expect("fingerprint"),
             committed_at_ms: 0,
             message: None,
-            deltas: deltas
-                .into_iter()
-                .enumerate()
-                .map(|(index, delta)| WalCommitDelta {
-                    semantic_operation_index: u32::try_from(index)
-                        .expect("the test value should fit u32"),
+            deltas: (0_u32..)
+                .zip(deltas)
+                .map(|(semantic_operation_index, delta)| WalCommitDelta {
+                    semantic_operation_index,
                     delta,
                 })
                 .collect(),

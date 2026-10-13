@@ -41,7 +41,9 @@ pub enum JobMode {
     Disabled,
     /// Serve requests without doing the background work.
     ServeOnly,
-    /// Do the background work without serving requests.
+    /// Do the background work without serving requests. Grep is the one
+    /// exception: a grep maintainer also serves the routes that enable,
+    /// disable, and report the index it maintains.
     MaintainOnly,
     /// Serve requests and do the background work.
     ServeAndMaintain,
@@ -65,7 +67,7 @@ pub struct BindingConfig {
     pub grep: JobMode,
     /// Whether this binding serves the maintenance API group. The host runs
     /// any background maintenance itself.
-    pub maintenance: JobMode,
+    pub serves_maintenance: bool,
     pub snapshot_policy: SnapshotPolicy,
     /// Largest content a service-proxied read returns, or `None` for no limit.
     pub max_download_bytes: Option<u64>,

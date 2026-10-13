@@ -102,6 +102,11 @@ pub enum CoreError {
          verification covers the whole object, so all of them are needed first"
     )]
     ResumePrefixIncomplete { start_offset: u64, folded: u64 },
+    /// A resumed read refused prefix bytes: they ran past the resume offset,
+    /// or they arrived after the read fetched content or reached its end.
+    /// None of them was folded.
+    #[error(transparent)]
+    ResumedPrefix(#[from] loonfs_types::ResumedPrefixError),
     #[error("expected file at `{target}` but found `{kind}`")]
     ExpectedFile { target: String, kind: InodeKind },
     #[error("expected directory at `{target}` but found `{kind}`")]
@@ -411,6 +416,7 @@ impl CoreError {
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
+            | CoreError::ResumedPrefix(_)
             | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
             CoreError::CheckpointNotFound { .. } => ErrorCode::CheckpointNotFound,
             CoreError::SnapshotNotFound { .. } => ErrorCode::SnapshotNotFound,
@@ -515,6 +521,7 @@ impl CoreError {
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
+            | CoreError::ResumedPrefix(_)
             | CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::RootMutationForbidden

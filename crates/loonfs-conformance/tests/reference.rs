@@ -125,7 +125,7 @@ fn configured_client(server_url: &str, auth_token: Option<&str>) -> Client {
         server_url: server_url.to_owned(),
         auth_token: auth_token.map(Into::into),
         request_timeout_ms: None,
-        retry: true,
+        disable_transient_retry: false,
         ca_cert_path: None,
     })
     .expect("valid conformance client")
@@ -599,9 +599,9 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     assert_eq!(chunks.len(), expected.part_count);
     let claims = chunks
         .iter()
-        .enumerate()
-        .map(|(index, chunk)| UploadPartChecksumClaim {
-            part_number: u32::try_from(index).expect("the test value should fit u32") + 1,
+        .zip(1_u32..)
+        .map(|(chunk, part_number)| UploadPartChecksumClaim {
+            part_number,
             checksum: Checksum::compute(checksum_algorithm, chunk),
         })
         .collect::<Vec<_>>();
@@ -979,8 +979,7 @@ async fn run_append(harness: &Harness, case: &Case) {
         .expect("open the resumed download");
     stream
         .fold_resumed_prefix(
-            &[content, appended].concat()[..usize::try_from(expected.resume_offset)
-                .expect("the test value should fit usize")],
+            &[content, appended].concat()[..loonfs_types::usize_from_u64(expected.resume_offset)],
         )
         .expect("fold the held prefix");
     let mut rest = Vec::new();
@@ -993,8 +992,8 @@ async fn run_append(harness: &Harness, case: &Case) {
     }
     assert_eq!(
         rest,
-        appended[usize::try_from(expected.resume_offset - expected.previous_size_bytes)
-            .expect("the test value should fit usize")..]
+        appended
+            [loonfs_types::usize_from_u64(expected.resume_offset - expected.previous_size_bytes)..]
     );
 
     let refused = client

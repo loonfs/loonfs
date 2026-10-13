@@ -312,17 +312,13 @@ impl<S: ObjectStore> FileContentStream<S> {
 
     /// Adds already-downloaded prefix bytes to a resumed read's checksum.
     ///
-    /// Bytes must be supplied in order before fetching new chunks, and a call
-    /// after the stream has fetched content or reached its end panics.
-    /// Incorrect bytes cause checksum verification to fail at the end of the
-    /// stream.
+    /// Bytes must be supplied in order before fetching new chunks. A prefix
+    /// that runs past the start offset, or that arrives after the stream has
+    /// fetched content or reached its end, is refused with an
+    /// `invalid_request` error. Incorrect bytes cause checksum verification to
+    /// fail at the end of the stream.
     pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<()> {
-        self.verifier.fold_resumed_prefix(bytes).map_err(|overrun| {
-            CoreError::ResumeOffsetOutOfRange {
-                start_offset: overrun.prefix_bytes,
-                size_bytes: overrun.size_bytes,
-            }
-        })
+        Ok(self.verifier.fold_resumed_prefix(bytes)?)
     }
 
     /// The authoritative metadata entry for a path read. Inode-only reads
@@ -383,7 +379,9 @@ impl<S: ObjectStore> FileContentStream<S> {
                 actual: self.next_offset + bytes.len() as u64,
             });
         }
-        self.verifier.update(&bytes);
+        self.verifier.update(&bytes).expect(
+            "a chunk below the content size arrives before `completion` finishes the verifier",
+        );
         self.next_offset += bytes.len() as u64;
         Ok(Some(bytes))
     }
@@ -999,9 +997,7 @@ mod tests {
     }
 
     fn payload(len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
-            .collect()
+        (0..251_u8).cycle().take(len).collect()
     }
 
     fn test_entry() -> PathEntry {
@@ -1204,7 +1200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_prefix_longer_than_the_content_is_refused() {
+    async fn a_prefix_past_the_start_offset_is_refused() {
         let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(2 * TEST_CHUNK_BYTES);
@@ -1216,17 +1212,19 @@ mod tests {
         let mut stream = open_stream_at(&store, &content_ref, held as u64)
             .await
             .expect("open stream");
-        let overlong = payload(bytes.len() + 1);
+        // Shorter than the content, but one byte past where the read resumes.
+        let overlong = &bytes[..held + 1];
         let err = stream
-            .fold_resumed_prefix(&overlong)
-            .expect_err("a prefix past the end of the content");
+            .fold_resumed_prefix(overlong)
+            .expect_err("a prefix past the start offset");
+        assert_eq!(err.code(), loonfs_types::ErrorCode::InvalidRequest);
         assert!(
             matches!(
                 err,
-                CoreError::ResumeOffsetOutOfRange {
+                CoreError::ResumedPrefix(loonfs_types::ResumedPrefixError::PastStartOffset {
+                    prefix_bytes,
                     start_offset,
-                    size_bytes,
-                } if start_offset == overlong.len() as u64 && size_bytes == bytes.len() as u64
+                }) if prefix_bytes == overlong.len() as u64 && start_offset == held as u64
             ),
             "unexpected error: {err}"
         );
@@ -1238,8 +1236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "should arrive before the stream fetches content")]
-    async fn a_prefix_offered_after_a_fetch_panics() {
+    async fn a_prefix_offered_after_a_fetch_is_refused() {
         let (_temp_dir, store) = test_store();
         let bytes = payload(2 * TEST_CHUNK_BYTES);
         let content_ref = content_ref(&bytes);
@@ -1249,12 +1246,20 @@ mod tests {
             .await
             .expect("open stream");
         stream.next_chunk().await.expect("chunk").expect("a chunk");
-        let _ = stream.fold_resumed_prefix(&bytes[..8]);
+        let err = stream
+            .fold_resumed_prefix(&bytes[..8])
+            .expect_err("a prefix after a fetch");
+        assert!(
+            matches!(
+                err,
+                CoreError::ResumedPrefix(loonfs_types::ResumedPrefixError::AfterFetch)
+            ),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
-    #[should_panic(expected = "should arrive before the read reaches its end")]
-    async fn a_prefix_offered_after_the_end_panics() {
+    async fn a_prefix_offered_after_the_end_is_refused() {
         let (_temp_dir, store) = test_store();
         // Empty content reaches its verdict without fetching, which leaves
         // only the finished-stream guard between this fold and the digest.
@@ -1265,7 +1270,16 @@ mod tests {
             .await
             .expect("open stream");
         assert!(stream.next_chunk().await.expect("verified end").is_none());
-        let _ = stream.fold_resumed_prefix(b"");
+        let err = stream
+            .fold_resumed_prefix(b"")
+            .expect_err("a prefix after the end");
+        assert!(
+            matches!(
+                err,
+                CoreError::ResumedPrefix(loonfs_types::ResumedPrefixError::AfterEnd)
+            ),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

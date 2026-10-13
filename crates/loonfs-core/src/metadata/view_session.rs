@@ -159,47 +159,20 @@ impl MetadataViewSessionCounters {
     }
 }
 
-/// A session cache entry: what a lookup found, or that it found nothing.
-#[derive(Debug, Clone)]
-enum Cached<T> {
-    Absent,
-    Present(T),
-}
-
-impl<T> Cached<T> {
-    fn into_option(self) -> Option<T> {
-        match self {
-            Self::Absent => None,
-            Self::Present(value) => Some(value),
-        }
-    }
-}
-
-impl<T> From<Option<T>> for Cached<T> {
-    fn from(value: Option<T>) -> Self {
-        value.map_or(Self::Absent, Self::Present)
-    }
-}
-
-/// Wraps preloaded lookups as cache entries.
-fn cached<K, T>(loaded: Vec<(K, Option<T>)>) -> impl Iterator<Item = (K, Cached<T>)> {
-    loaded
-        .into_iter()
-        .map(|(key, value)| (key, Cached::from(value)))
-}
-
 /// One loaded-view session with memoized visibility reads.
 pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     base: MetadataView<'a, 'store, S>,
-    inode_at_seq_cache: HashMap<InodeId, Cached<InodeRecord>>,
-    visible_inode_cache: HashMap<InodeId, Cached<InodeRecord>>,
-    bound_child_cache: HashMap<ParentNameCacheKey, Cached<DirentryBindingRecord>>,
-    latest_parent_binding_cache: HashMap<InodeId, Cached<DirentryBindingRecord>>,
-    latest_revision_head_cache: HashMap<InodeId, Cached<RevisionRecord>>,
+    // In each cache below whose value is an `Option`, `None` caches an
+    // absence: the lookup ran and found nothing, so it isn't read again.
+    inode_at_seq_cache: HashMap<InodeId, Option<InodeRecord>>,
+    visible_inode_cache: HashMap<InodeId, Option<InodeRecord>>,
+    bound_child_cache: HashMap<ParentNameCacheKey, Option<DirentryBindingRecord>>,
+    latest_parent_binding_cache: HashMap<InodeId, Option<DirentryBindingRecord>>,
+    latest_revision_head_cache: HashMap<InodeId, Option<RevisionRecord>>,
     attributes_cache: HashMap<InodeId, AttributesProjection>,
-    access_row_cache: HashMap<InodeId, Cached<AccessRevisionRecord>>,
-    active_tombstone_cache: HashMap<InodeId, Cached<SubtreeTombstoneRecord>>,
-    covering_tombstone_cache: HashMap<InodeId, Cached<SubtreeTombstoneRecord>>,
+    access_row_cache: HashMap<InodeId, Option<AccessRevisionRecord>>,
+    active_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
+    covering_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
     counters: MetadataViewSessionCounters,
 }
 
@@ -224,21 +197,21 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.counters
     }
 
-    fn cached_inode_at_seq(&self, inode_id: InodeId) -> Option<Cached<InodeRecord>> {
+    fn cached_inode_at_seq(&self, inode_id: InodeId) -> Option<Option<InodeRecord>> {
         self.inode_at_seq_cache.get(&inode_id).cloned()
     }
 
     fn cached_active_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
-    ) -> Option<Cached<SubtreeTombstoneRecord>> {
+    ) -> Option<Option<SubtreeTombstoneRecord>> {
         self.active_tombstone_cache.get(&root_inode_id).cloned()
     }
 
     fn cached_latest_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
-    ) -> Option<Cached<DirentryBindingRecord>> {
+    ) -> Option<Option<DirentryBindingRecord>> {
         self.latest_parent_binding_cache
             .get(&child_inode_id)
             .cloned()
@@ -248,7 +221,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-    ) -> Option<Cached<DirentryBindingRecord>> {
+    ) -> Option<Option<DirentryBindingRecord>> {
         self.bound_child_cache
             .get(&ParentNameCacheKey {
                 parent_inode_id,
@@ -260,7 +233,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     fn cached_latest_revision_head_of_visible(
         &self,
         inode_id: InodeId,
-    ) -> Option<Cached<RevisionRecord>> {
+    ) -> Option<Option<RevisionRecord>> {
         self.latest_revision_head_cache.get(&inode_id).cloned()
     }
 
@@ -428,14 +401,14 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             if let Some(binding) = latest.as_ref().filter(|binding| binding.is_bound()) {
                 child_inode_ids.push(binding.child_inode_id);
                 self.latest_parent_binding_cache
-                    .insert(binding.child_inode_id, Cached::Present(binding.clone()));
+                    .insert(binding.child_inode_id, Some(binding.clone()));
             }
             self.bound_child_cache.insert(
                 ParentNameCacheKey {
                     parent_inode_id,
                     name_key: group.name_key.clone(),
                 },
-                Cached::from(latest),
+                latest,
             );
         }
         child_inode_ids.sort_unstable();
@@ -452,7 +425,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .counters
             .list_preload_child_lookups
             .saturating_add(loaded.len() as u64);
-        self.active_tombstone_cache.extend(cached(loaded));
+        self.active_tombstone_cache.extend(loaded);
         Ok(())
     }
 
@@ -484,7 +457,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 base.inode_at_seq(inode_id),
                 async {
                     if let Some(binding) = parent_bindings.get(&inode_id) {
-                        Ok(binding.clone().into_option())
+                        Ok(binding.clone())
                     } else {
                         base.latest_parent_binding_for_child(inode_id).await
                     }
@@ -495,14 +468,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         .await?;
 
         for (inode_id, (inode, binding, tombstones)) in lookups {
-            self.inode_at_seq_cache
-                .insert(inode_id, Cached::from(inode));
-            self.latest_parent_binding_cache
-                .insert(inode_id, Cached::from(binding));
+            self.inode_at_seq_cache.insert(inode_id, inode);
+            self.latest_parent_binding_cache.insert(inode_id, binding);
             let active_tombstone =
                 super::rows::active_tombstone_from_records(tombstones.iter().cloned(), visible_seq);
             self.active_tombstone_cache
-                .insert(inode_id, Cached::from(active_tombstone));
+                .insert(inode_id, active_tombstone);
         }
         Ok(())
     }
@@ -539,7 +510,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 
             if let Some(binding) = pending_binding.take() {
                 self.latest_parent_binding_cache
-                    .insert(current_inode_id, Cached::Present(binding));
+                    .insert(current_inode_id, Some(binding));
             }
             let preload_revision =
                 is_leaf_wave && preload_leaf_revision == LeafRevisionPreload::Preload;
@@ -551,19 +522,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         return Ok(None);
                     }
                     match self.cached_inode_at_seq(current_inode_id) {
-                        Some(inode) => Ok(inode.into_option()),
+                        Some(inode) => Ok(inode),
                         None => base.inode_at_seq(current_inode_id).await,
                     }
                 },
                 async {
                     match self.cached_active_subtree_tombstone(current_inode_id) {
-                        Some(tombstone) => Ok(tombstone.into_option()),
+                        Some(tombstone) => Ok(tombstone),
                         None => base.active_subtree_tombstone(current_inode_id).await,
                     }
                 },
                 async {
                     match self.cached_latest_parent_binding_for_child(current_inode_id) {
-                        Some(binding) => Ok(binding.into_option()),
+                        Some(binding) => Ok(binding),
                         None => base.latest_parent_binding_for_child(current_inode_id).await,
                     }
                 },
@@ -576,7 +547,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         name_key: name_key.clone(),
                     };
                     let binding = match self.cached_bound_child(current_inode_id, name_key) {
-                        Some(binding) => binding.into_option(),
+                        Some(binding) => binding,
                         None => base.bound_child(current_inode_id, name_key).await?,
                     };
                     Ok(Some((cache_key, binding)))
@@ -586,29 +557,27 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         return Ok(None);
                     }
                     match self.cached_latest_revision_head_of_visible(current_inode_id) {
-                        Some(revision) => Ok(revision.into_option()),
+                        Some(revision) => Ok(revision),
                         None => base.latest_revision_record(current_inode_id).await,
                     }
                 },
             )?;
 
             if is_root_path {
-                self.inode_at_seq_cache
-                    .insert(current_inode_id, Cached::from(inode));
+                self.inode_at_seq_cache.insert(current_inode_id, inode);
             }
             self.active_tombstone_cache
-                .insert(current_inode_id, Cached::from(tombstone));
+                .insert(current_inode_id, tombstone);
             self.latest_parent_binding_cache
-                .insert(current_inode_id, Cached::from(parent_binding));
+                .insert(current_inode_id, parent_binding);
             if preload_revision {
                 self.latest_revision_head_cache
-                    .insert(current_inode_id, Cached::from(revision));
+                    .insert(current_inode_id, revision);
             }
             let Some((cache_key, bound)) = bound_child else {
                 break;
             };
-            self.bound_child_cache
-                .insert(cache_key, Cached::from(bound.clone()));
+            self.bound_child_cache.insert(cache_key, bound.clone());
             let Some(binding) = bound.filter(DirentryBindingRecord::is_bound) else {
                 break;
             };
@@ -622,22 +591,20 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn visible_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>> {
         self.counters.visible_inode_calls = self.counters.visible_inode_calls.saturating_add(1);
         if let Some(cached) = self.visible_inode_cache.get(&inode_id).cloned() {
-            return Ok(cached.into_option());
+            return Ok(cached);
         }
 
         let visible = visibility::visible_inode(self, inode_id).await?;
-        self.visible_inode_cache
-            .insert(inode_id, Cached::from(visible.clone()));
+        self.visible_inode_cache.insert(inode_id, visible.clone());
         Ok(visible)
     }
 
     pub(crate) async fn inode_at_seq(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>> {
         if let Some(cached) = self.cached_inode_at_seq(inode_id) {
-            return Ok(cached.into_option());
+            return Ok(cached);
         }
         let inode = self.base.inode_at_seq(inode_id).await?;
-        self.inode_at_seq_cache
-            .insert(inode_id, Cached::from(inode.clone()));
+        self.inode_at_seq_cache.insert(inode_id, inode.clone());
         Ok(inode)
     }
 
@@ -653,11 +620,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     ) -> Result<Option<RevisionRecord>> {
         self.counters.latest_revision_calls = self.counters.latest_revision_calls.saturating_add(1);
         if let Some(cached) = self.cached_latest_revision_head_of_visible(inode_id) {
-            return Ok(cached.into_option());
+            return Ok(cached);
         }
         let revision = self.base.latest_revision_record(inode_id).await?;
         self.latest_revision_head_cache
-            .insert(inode_id, Cached::from(revision.clone()));
+            .insert(inode_id, revision.clone());
         Ok(revision)
     }
 
@@ -677,7 +644,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         let loaded =
             preload_inode_groups(&pending, |inode_id| base.latest_revision_record(inode_id))
                 .await?;
-        self.latest_revision_head_cache.extend(cached(loaded));
+        self.latest_revision_head_cache.extend(loaded);
         Ok(())
     }
 
@@ -696,7 +663,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         let loaded =
             preload_inode_groups(&pending, |inode_id| base.latest_access_revision(inode_id))
                 .await?;
-        self.access_row_cache.extend(cached(loaded));
+        self.access_row_cache.extend(loaded);
         Ok(())
     }
 
@@ -706,11 +673,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     ) -> Result<Option<AccessRevisionRecord>> {
         self.counters.access_row_calls = self.counters.access_row_calls.saturating_add(1);
         if let Some(cached) = self.access_row_cache.get(&inode_id).cloned() {
-            return Ok(cached.into_option());
+            return Ok(cached);
         }
         let access = self.base.latest_access_revision(inode_id).await?;
-        self.access_row_cache
-            .insert(inode_id, Cached::from(access.clone()));
+        self.access_row_cache.insert(inode_id, access.clone());
         Ok(access)
     }
 
@@ -799,7 +765,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindingRecord>> {
         if let Some(cached) = self.cached_latest_parent_binding_for_child(child_inode_id) {
-            return Ok(cached.into_option());
+            return Ok(cached);
         }
         self.counters.direntry_child_scan_calls =
             self.counters.direntry_child_scan_calls.saturating_add(1);
@@ -809,7 +775,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .latest_parent_binding_for_child(child_inode_id)
             .await?;
         self.latest_parent_binding_cache
-            .insert(child_inode_id, Cached::from(latest.clone()));
+            .insert(child_inode_id, latest.clone());
         Ok(latest)
     }
 
@@ -820,12 +786,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.counters.covering_tombstone_calls =
             self.counters.covering_tombstone_calls.saturating_add(1);
         if let Some(cached) = self.covering_tombstone_cache.get(&inode_id).cloned() {
-            return Ok(cached.into_option());
+            return Ok(cached);
         }
 
         let tombstone = visibility::covering_subtree_tombstone(self, inode_id).await?;
         self.covering_tombstone_cache
-            .insert(inode_id, Cached::from(tombstone.clone()));
+            .insert(inode_id, tombstone.clone());
         Ok(tombstone)
     }
 
@@ -845,12 +811,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>> {
         if let Some(cached) = self.cached_active_subtree_tombstone(root_inode_id) {
-            return Ok(cached.into_option());
+            return Ok(cached);
         }
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
         let tombstone = self.base.active_subtree_tombstone(root_inode_id).await?;
         self.active_tombstone_cache
-            .insert(root_inode_id, Cached::from(tombstone.clone()));
+            .insert(root_inode_id, tombstone.clone());
         Ok(tombstone)
     }
 
@@ -864,12 +830,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             name_key: name_key.clone(),
         };
         if let Some(cached) = self.cached_bound_child(parent_inode_id, name_key) {
-            return Ok(cached.into_option());
+            return Ok(cached);
         }
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
         let binding = self.base.bound_child(parent_inode_id, name_key).await?;
-        self.bound_child_cache
-            .insert(cache_key, Cached::from(binding.clone()));
+        self.bound_child_cache.insert(cache_key, binding.clone());
         Ok(binding)
     }
 }

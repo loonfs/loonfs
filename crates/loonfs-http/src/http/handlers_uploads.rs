@@ -858,7 +858,8 @@ mod completion_body_tests {
     fn maximum_multipart_completion_fits_the_completion_body_cap() {
         let checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: loonfs_types::HexDigest::parse("f".repeat(64)).expect("hex digest"),
+            value: loonfs_types::ChecksumHex::parse("f".repeat(64))
+                .expect("a lowercase hex checksum"),
         };
         let quoted_etag = format!("\"{}\"", "e".repeat(254));
         assert_eq!(quoted_etag.len(), 256);
@@ -892,12 +893,14 @@ mod completion_body_tests {
     fn maximum_part_signing_request_fits_the_control_body_cap() {
         let checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: loonfs_types::HexDigest::parse("f".repeat(64)).expect("hex digest"),
+            value: loonfs_types::ChecksumHex::parse("f".repeat(64))
+                .expect("a lowercase hex checksum"),
         };
         let request = SignUploadPartsRequest {
-            parts: (1..=loonfs::MAX_SIGNED_PARTS_PER_REQUEST)
+            parts: (1_u32..)
+                .take(loonfs::MAX_SIGNED_PARTS_PER_REQUEST)
                 .map(|part_number| UploadPartChecksumClaim {
-                    part_number: u32::try_from(part_number).expect("the test value should fit u32"),
+                    part_number,
                     checksum: checksum.clone(),
                 })
                 .collect(),

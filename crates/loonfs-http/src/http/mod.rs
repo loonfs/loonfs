@@ -425,7 +425,7 @@ pub fn router(state: BindingState) -> Router {
             get(get_upload),
         )
         .route("/v0/namespaces/{namespace_id}/changes", get(list_changes));
-    if state.options.maintenance.serves() {
+    if state.options.serves_maintenance {
         authenticated = authenticated
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/diagnostics",

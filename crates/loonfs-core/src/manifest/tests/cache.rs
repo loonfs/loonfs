@@ -1203,7 +1203,7 @@ async fn segment_object_bytes(
 }
 
 fn stored_block_bytes(object: &Bytes, handle: &BlockHandle) -> Bytes {
-    let start = usize::try_from(handle.offset).expect("the test value should fit usize");
+    let start = loonfs_types::usize_from_u64(handle.offset);
     object.slice(start..start + handle.stored_bytes as usize)
 }
 

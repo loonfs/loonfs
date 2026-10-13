@@ -79,7 +79,7 @@ impl BloomLevel {
         std::array::from_fn(|index| {
             let position = first.wrapping_add((index as u64).wrapping_mul(step))
                 % (self.bits.len() as u64 * 8);
-            usize::try_from(position).expect("a bit position inside the filter should fit usize")
+            loonfs_types::usize_from_u64(position)
         })
     }
 

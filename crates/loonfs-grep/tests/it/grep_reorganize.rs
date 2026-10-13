@@ -75,8 +75,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
     let store: SharedObjectStore = recording.clone();
     let (expected_rows, built) = many_block_segment();
     let index = decode_index_block(
-        &built.bytes
-            [usize::try_from(built.index.offset).expect("the test value should fit usize")..],
+        &built.bytes[loonfs_types::usize_from_u64(built.index.offset)..],
         &built.index,
     )
     .expect("decode input index");
@@ -152,8 +151,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
                 );
             }
             for entry in index.iter().step_by(2) {
-                let start =
-                    usize::try_from(entry.block.offset).expect("the test value should fit usize");
+                let start = loonfs_types::usize_from_u64(entry.block.offset);
                 let block = decode_data_block_rows::<IndexRow>(
                     &built.bytes[start..start + entry.block.stored_bytes as usize],
                     &entry.block,
@@ -237,14 +235,12 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
             .expect("read output")
             .expect("output exists");
         let index = decode_index_block(
-            &bytes[usize::try_from(segment.index_block.offset)
-                .expect("the test value should fit usize")..],
+            &bytes[loonfs_types::usize_from_u64(segment.index_block.offset)..],
             &segment.index_block,
         )
         .expect("decode output index");
         for entry in index {
-            let start =
-                usize::try_from(entry.block.offset).expect("the test value should fit usize");
+            let start = loonfs_types::usize_from_u64(entry.block.offset);
             let block = decode_data_block_rows::<IndexRow>(
                 &bytes[start..start + entry.block.stored_bytes as usize],
                 &entry.block,

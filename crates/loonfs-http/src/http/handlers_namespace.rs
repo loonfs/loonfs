@@ -170,7 +170,7 @@ pub(super) async fn get_capabilities(
     // the routes this router mounts. Serving searches and maintaining their
     // index remain separately deployable.
     capabilities.api_groups = vec![API_GROUP_FILESYSTEM_V0.to_owned()];
-    if state.options.maintenance.serves() {
+    if state.options.serves_maintenance {
         capabilities
             .api_groups
             .push(API_GROUP_MAINTENANCE_V0.to_owned());
@@ -178,7 +178,7 @@ pub(super) async fn get_capabilities(
     set_feature(
         &mut capabilities,
         FEATURE_MAINTENANCE_GREP_INDEX,
-        state.options.maintenance.serves() && state.options.grep.maintains(),
+        state.options.serves_maintenance && state.options.grep.maintains(),
     );
     if state.options.grep.serves() {
         let pagination = PaginationPolicy::default();

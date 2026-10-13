@@ -1498,10 +1498,8 @@ async fn install_synthetic_bindings_base(
         count.is_power_of_two(),
         "the scrambling multiplier is only a permutation over a power of two"
     );
-    let mut binds =
-        Vec::with_capacity(usize::try_from(count).expect("the test value should fit usize"));
-    let mut unbinds =
-        Vec::with_capacity(usize::try_from(count).expect("the test value should fit usize"));
+    let mut binds = Vec::with_capacity(loonfs_types::usize_from_u64(count));
+    let mut unbinds = Vec::with_capacity(loonfs_types::usize_from_u64(count));
     for index in 0..count {
         let parent = InodeId(1_000);
         // Odd multiplier, power-of-two modulus: a bijection, so every name is

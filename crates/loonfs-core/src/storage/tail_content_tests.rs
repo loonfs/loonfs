@@ -61,12 +61,8 @@ async fn fixture<S: ObjectStore>(
     let mut extents = Vec::new();
     let mut offset = 0;
     let mut crc = Checksum::crc64nvme(&[]);
-    for (index, &length) in lengths.iter().enumerate() {
-        let bytes = Bytes::from(vec![
-            b'a' + u8::try_from(index)
-                .expect("the test value should fit u8");
-            length
-        ]);
+    for (index, &length) in (0_u8..).zip(lengths) {
+        let bytes = Bytes::from(vec![b'a' + index; length]);
         let extent = ContentExtent {
             owner_namespace_id: owner.clone(),
             content_id: if shared && index == 0 {
@@ -302,7 +298,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let bytes = Bytes::from(
             [
                 b"aaaaaa".as_slice(),
-                &b"zzzz"[..usize::try_from(size).expect("the test value should fit usize") - 6],
+                &b"zzzz"[..loonfs_types::usize_from_u64(size) - 6],
             ]
             .concat(),
         );
@@ -327,7 +323,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let operations = store.snapshot();
         assert!(
             matches!(operations.last(), Some(RecordedOperation::Assemble { sources, bytes, .. })
-            if *bytes == 10 - usize::try_from(size).expect("the test value should fit usize") && sources.len() == usize::from(size == 10))
+            if *bytes == 10 - loonfs_types::usize_from_u64(size) && sources.len() == usize::from(size == 10))
         );
     }
 }

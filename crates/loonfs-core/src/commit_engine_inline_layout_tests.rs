@@ -92,19 +92,16 @@ async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
     assert_eq!(first.layout.extents.len(), 1);
     assert_eq!(first.layout.extents[0].object, ExtentObject::Whole);
     for (revision, added, expected_lengths) in [
-        (2, 10, vec![100, 10]),
+        (2_u8, 10, vec![100, 10]),
         (3, 3, vec![100, 10, 3]),
         (4, 2, vec![100, 15]),
     ] {
         let start = bytes.len();
-        bytes.resize(
-            start + added,
-            b'b' + u8::try_from(revision).expect("the test value should fit u8"),
-        );
+        bytes.resize(start + added, b'b' + revision);
         let reference = commit_piece(
             &store,
             &namespace_id,
-            (inode_id, RevisionNo(revision)),
+            (inode_id, RevisionNo(u64::from(revision))),
             &original.content_id,
             &bytes,
             start,
@@ -141,7 +138,7 @@ async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
             ) == (revision == 4)
         );
         assert_eq!(
-            read_file(&store, &namespace_id, RevisionNo(revision)).await,
+            read_file(&store, &namespace_id, RevisionNo(u64::from(revision))).await,
             bytes
         );
     }
@@ -521,16 +518,13 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     let namespace_id = engine.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
-    for (revision, added) in [(2, 10), (3, 3)] {
+    for (revision, added) in [(2_u8, 10), (3, 3)] {
         let offset = bytes.len();
-        bytes.resize(
-            offset + added,
-            b'b' + u8::try_from(revision).expect("the test value should fit u8"),
-        );
+        bytes.resize(offset + added, b'b' + revision);
         commit_piece(
             &store,
             &namespace_id,
-            (inode_id, RevisionNo(revision)),
+            (inode_id, RevisionNo(u64::from(revision))),
             &original.content_id,
             &bytes,
             offset,

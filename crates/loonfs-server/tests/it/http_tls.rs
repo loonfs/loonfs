@@ -68,7 +68,7 @@ async fn a_client_without_the_certificate_authority_is_refused_at_the_handshake(
         server_url: harness.server_url.clone(),
         auth_token: harness.auth_token.clone().map(Into::into),
         request_timeout_ms: None,
-        retry: false,
+        disable_transient_retry: true,
         ca_cert_path: None,
     })
     .expect("valid client config");

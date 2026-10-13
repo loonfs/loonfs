@@ -693,7 +693,7 @@ mod tests {
             server_url: "ftp://example.com".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
-            retry: true,
+            disable_transient_retry: false,
             ca_cert_path: None,
         })
         .expect_err("ftp scheme must be rejected");
@@ -716,7 +716,7 @@ mod tests {
             server_url: "https://example.com".to_owned(),
             auth_token: Some(raw_token.into()),
             request_timeout_ms: None,
-            retry: true,
+            disable_transient_retry: false,
             ca_cert_path: None,
         };
 
@@ -743,7 +743,7 @@ mod tests {
                 server_url: "https://example.com".to_owned(),
                 auth_token: None,
                 request_timeout_ms: None,
-                retry: true,
+                disable_transient_retry: false,
                 ca_cert_path: Some(display.clone()),
             })
             .expect_err("unusable ca bundle");
@@ -825,7 +825,7 @@ mod tests {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,
                 request_timeout_ms: None,
-                retry: true,
+                disable_transient_retry: false,
                 ca_cert_path: None,
             },
             transport.clone(),
@@ -844,7 +844,7 @@ mod tests {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,
                 request_timeout_ms: None,
-                retry: false,
+                disable_transient_retry: true,
                 ca_cert_path: None,
             },
             transport.clone(),
@@ -863,7 +863,7 @@ mod tests {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,
                 request_timeout_ms: None,
-                retry: true,
+                disable_transient_retry: false,
                 ca_cert_path: None,
             },
             transport.clone(),

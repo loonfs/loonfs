@@ -165,7 +165,12 @@ pub(crate) fn unix_ms(object_key: &str, time: SystemTime) -> Result<u64> {
     let duration = time
         .duration_since(UNIX_EPOCH)
         .map_err(|err| before_unix_epoch(object_key, err))?;
-    Ok(u64::try_from(duration.as_millis()).expect("unix milliseconds should fit u64"))
+    u64::try_from(duration.as_millis()).map_err(|_| {
+        ObjectStoreError::transport(
+            object_key,
+            "system time is past the largest unix millisecond".to_owned(),
+        )
+    })
 }
 
 fn before_unix_epoch(object_key: &str, error: SystemTimeError) -> ObjectStoreError {

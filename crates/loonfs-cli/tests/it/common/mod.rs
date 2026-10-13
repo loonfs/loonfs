@@ -47,8 +47,9 @@ pub(super) fn events_of_kind(output: &Output, kind: &str) -> Vec<Value> {
 /// A payload large enough to require several download chunks.
 pub(super) fn multi_chunk_payload() -> Vec<u8> {
     let len = 3 * loonfs::CONTENT_READ_CHUNK_BYTES + 1_024;
-    (0..len)
-        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
+    (0..251_u8)
+        .cycle()
+        .take(loonfs_types::usize_from_u64(len))
         .collect()
 }
 

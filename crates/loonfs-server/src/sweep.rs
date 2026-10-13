@@ -1,6 +1,6 @@
 //! Session ticks and the daily listing pass share namespace visits.
 
-use crate::config::{validated_usize, ServerConfig, ServerConfigError};
+use crate::config::{ServerConfig, ServerConfigError};
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::metrics::{
     CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder, RESULT_ERROR, RESULT_OK,
@@ -172,7 +172,7 @@ impl Sweep {
                 },
                 grep,
                 namespaces,
-                max_concurrent_visits: validated_usize(config.max_concurrent_maintenance),
+                max_concurrent_visits: config.max_concurrent_maintenance,
                 tick_interval: Duration::from_millis(config.tick_interval_ms),
                 metadata_retry_interval_ms: config.maintenance_interval_ms,
                 collection_interval_ms: config.gc_interval_ms,
@@ -180,7 +180,7 @@ impl Sweep {
                 idle_session_close_after_ms: config.idle_session_close_after_ms,
                 visiting: Mutex::default(),
                 backoff: Mutex::default(),
-                slots: Semaphore::new(validated_usize(config.max_concurrent_maintenance)),
+                slots: Semaphore::new(config.max_concurrent_maintenance),
                 page_limit: EffectiveLimit::new(
                     NonZeroU32::new(MAX_NAMESPACE_IDS_PER_PAGE)
                         .expect("the namespace page limit should be nonzero"),

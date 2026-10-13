@@ -104,10 +104,11 @@ pub struct Client {
     /// Replay-safe requests use the smaller of this value and the time left in
     /// the total retry budget.
     request_timeout: Option<Duration>,
-    /// Attempt count, delay, and total duration limits for replay-safe
-    /// requests, or `None` when the client doesn't retry (see
-    /// [`ClientConfig::retry`]).
-    transport_retry: Option<TransportRetryPolicy>,
+    /// Whether the client retries eligible network and server errors (see
+    /// [`ClientConfig::disable_transient_retry`]).
+    transport_retry_enabled: bool,
+    /// Attempt count, delay, and total duration limits for replay-safe requests.
+    transport_retry: TransportRetryPolicy,
     /// Monotonic clock used for inactivity and retry limits.
     timer: Arc<dyn transport::MonotonicTimer>,
     /// Capability document cache, shared by clones and filled on first use.
@@ -163,7 +164,8 @@ impl Client {
             auth_token: config.auth_token,
             transport: BoxCloneSyncService::new(service),
             request_timeout,
-            transport_retry: config.retry.then_some(DEFAULT),
+            transport_retry_enabled: !config.disable_transient_retry,
+            transport_retry: DEFAULT,
             timer: Arc::new(StdMonotonicTimer::default()),
             capabilities: Arc::new(OnceLock::new()),
         })

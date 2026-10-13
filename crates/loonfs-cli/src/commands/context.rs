@@ -110,14 +110,19 @@ pub(crate) async fn resolve_profile_context(
     kind: CommandKind,
     config_path: &Path,
     explicit_profile: Option<&str>,
-    retry: bool,
+    no_retry: bool,
     subject: Option<&SubjectSelectorArgs>,
 ) -> Result<CommandContext, CommandFailure> {
     let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let (context, _) =
-        resolve_profile_context_from_config(kind, &loaded.config, explicit_profile, retry, subject)
-            .await?;
+    let (context, _) = resolve_profile_context_from_config(
+        kind,
+        &loaded.config,
+        explicit_profile,
+        no_retry,
+        subject,
+    )
+    .await?;
     Ok(context)
 }
 
@@ -125,12 +130,12 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
     kind: CommandKind,
     config: &'a CliConfig,
     explicit_profile: Option<&'a str>,
-    retry: bool,
+    no_retry: bool,
     subject: Option<&SubjectSelectorArgs>,
 ) -> Result<(CommandContext, &'a crate::config::ProfileConfig), CommandFailure> {
     let (profile_name, profile) = crate::profiles::resolve_profile(config, explicit_profile)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mut target = ResolvedTarget::resolve(profile_name, profile, retry)
+    let mut target = ResolvedTarget::resolve(profile_name, profile, no_retry)
         .await
         .map_err(|error| fail(kind, Some(profile_name.to_owned()), None, error))?;
     let mode = target.mode_str().to_owned();
@@ -148,7 +153,7 @@ pub(crate) async fn resolve_profile_context_from_config<'a>(
             resolve_subject(
                 profile,
                 &actor,
-                selector.subject_id.as_deref(),
+                selector.subject_id.as_ref(),
                 selector.principal_scope.as_deref(),
                 selector.principals.as_deref(),
             )
@@ -202,17 +207,17 @@ async fn resolve_command_context_with_actor(
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let profile_name = profile_name.to_owned();
     let mut resolved_target =
-        ResolvedTarget::resolve(&profile_name, profile, target.request.retry())
+        ResolvedTarget::resolve(&profile_name, profile, target.request.no_retry)
             .await
             .map_err(|error| fail(kind, Some(profile_name.clone()), None, error))?;
     let mode = resolved_target.mode_str().to_owned();
     let attribute = |error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error);
-    let actor = resolve_actor(profile, actor.and_then(|actor| actor.actor_id.as_deref()))
+    let actor = resolve_actor(profile, actor.and_then(|actor| actor.actor_id.as_ref()))
         .map_err(attribute)?;
     let subject = resolve_subject(
         profile,
         &actor,
-        target.subject.subject_id.as_deref(),
+        target.subject.subject_id.as_ref(),
         target.subject.principal_scope.as_deref(),
         target.subject.principals.as_deref(),
     )
@@ -220,7 +225,7 @@ async fn resolve_command_context_with_actor(
     if let Some(subject) = &subject {
         resolved_target.scope_to_subject(subject);
     }
-    let namespace = resolve_namespace(&profile_name, profile, target.namespace.as_deref())
+    let namespace = resolve_namespace(&profile_name, profile, target.namespace.as_ref())
         .map_err(attribute)?
         .namespace;
 
@@ -383,7 +388,7 @@ impl UndeleteHint {
     pub(crate) fn new(
         context: &CommandContext,
         location: &ConfigLocation,
-        explicit_profile: Option<&str>,
+        explicit_profile: bool,
     ) -> Self {
         let mut context_flags =
             format!(" --namespace {}", shell_quote(context.namespace().as_str()));
@@ -391,7 +396,7 @@ impl UndeleteHint {
         // exactly the profile this run used whenever `--profile` went
         // unspelled; spelling it means the default may be some other profile,
         // and then the hint has to say which one it meant.
-        if explicit_profile.is_some() {
+        if explicit_profile {
             context_flags.push_str(&format!(
                 " --profile {}",
                 shell_quote(&context.profile_name)

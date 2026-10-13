@@ -674,8 +674,7 @@ impl MultipartWrite<'_> {
         upload_id: &provider_store::MultipartId,
         bytes: &Bytes,
     ) -> Result<ObjectMetadata> {
-        let part_size = usize::try_from(self.store.multipart_geometry.part_bytes)
-            .expect("a multipart part should fit usize");
+        let part_size = loonfs_types::usize_from_u64(self.store.multipart_geometry.part_bytes);
         let part_count = bytes.len().div_ceil(part_size);
         let mut part_ids: Vec<Option<PartId>> = vec![None; part_count];
         let mut in_flight = FuturesUnordered::new();
@@ -945,8 +944,7 @@ impl ObjectStore for ProviderObjectStore {
             async move {
                 let mut parts = PartReader::new(
                     stream::once(async { Ok(bytes) }).boxed(),
-                    usize::try_from(self.multipart_geometry.part_bytes)
-                        .expect("a multipart part should fit usize"),
+                    loonfs_types::usize_from_u64(self.multipart_geometry.part_bytes),
                 );
                 let head = parts.next_part().await?.unwrap_or_default();
                 controller
@@ -976,8 +974,7 @@ impl ObjectStore for ProviderObjectStore {
         self.validate_compare_token(key, &mode)?;
         let mut reader = PartReader::new(
             body,
-            usize::try_from(self.multipart_geometry.part_bytes)
-                .expect("a multipart part should fit usize"),
+            loonfs_types::usize_from_u64(self.multipart_geometry.part_bytes),
         );
         let head = reader.next_part().await?.unwrap_or_else(Bytes::new);
         if reader.exhausted() {
@@ -1014,8 +1011,7 @@ impl ObjectStore for ProviderObjectStore {
             }
             let mut reader = PartReader::new(
                 body,
-                usize::try_from(self.multipart_geometry.part_bytes)
-                    .expect("a multipart part should fit usize"),
+                loonfs_types::usize_from_u64(self.multipart_geometry.part_bytes),
             );
             let head = reader.next_part().await?.unwrap_or_default();
             self.put_parts(
@@ -2774,9 +2770,7 @@ mod tests {
     }
 
     fn multipart_payload(len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
-            .collect()
+        (0..251_u8).cycle().take(len).collect()
     }
 
     fn script_part(

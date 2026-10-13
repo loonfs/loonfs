@@ -374,7 +374,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
         .expect("get object")
         .expect("object exists")
         .to_vec();
-    bytes[usize::try_from(index[64].block.offset).expect("the test value should fit usize")] ^= 1;
+    bytes[loonfs_types::usize_from_u64(index[64].block.offset)] ^= 1;
     store
         .put_overwrite(&key, Bytes::from(bytes))
         .await
@@ -457,8 +457,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
             .expect("read segment")
             .expect("segment")
             .to_vec();
-        bytes[usize::try_from(index[2].block.offset).expect("the test value should fit usize")] ^=
-            1;
+        bytes[loonfs_types::usize_from_u64(index[2].block.offset)] ^= 1;
         store
             .put_overwrite(&key, Bytes::from(bytes))
             .await

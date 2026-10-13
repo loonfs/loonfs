@@ -668,8 +668,9 @@ async fn multipart_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -> CheckR
     // The smallest payload with a middle part, which is where a provider's
     // own rules about non-final part sizes bite.
     let payload_len = PROVIDER_MULTIPART_THRESHOLD_BYTES + PROVIDER_MULTIPART_PART_BYTES + 4096;
-    let payload: Vec<u8> = (0..payload_len)
-        .map(|index| u8::try_from(index % 251).expect("a remainder below 251 should fit u8"))
+    let payload: Vec<u8> = (0..251_u8)
+        .cycle()
+        .take(loonfs_types::usize_from_u64(payload_len))
         .collect();
 
     let metadata = ok_optional(

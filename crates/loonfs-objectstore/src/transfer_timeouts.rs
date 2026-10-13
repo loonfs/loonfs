@@ -349,12 +349,7 @@ mod tests {
         store
             .put_opts(
                 &object_store::path::Path::from("wal/0000000001"),
-                vec![
-                    0u8;
-                    usize::try_from(PROVIDER_MIN_TRANSFER_BODY_BYTES)
-                        .expect("the test value should fit usize")
-                ]
-                .into(),
+                vec![0u8; loonfs_types::usize_from_u64(PROVIDER_MIN_TRANSFER_BODY_BYTES)].into(),
                 object_store::PutOptions {
                     mode: object_store::PutMode::Create,
                     ..Default::default()
@@ -423,11 +418,8 @@ mod tests {
         let error = service
             .call(request_with_body(vec![
                 0u8;
-                usize::try_from(
+                loonfs_types::usize_from_u64(
                     PROVIDER_MIN_TRANSFER_BODY_BYTES - 1
-                )
-                .expect(
-                    "the cutoff should fit usize"
                 )
             ]))
             .await

@@ -120,8 +120,9 @@ pub struct RootAccess {
     /// The root's boundary flag and direct grants, which are empty before the
     /// root has an access row.
     pub access: AccessState,
-    /// The row's access revision, or `None` before the root has an access row.
-    pub access_revision_no: Option<loonfs_types::AccessRevisionNo>,
+    /// The row's access revision, which is 0 before the root has an access
+    /// row. Commit validation treats a missing row as revision 0 too.
+    pub access_revision_no: loonfs_types::AccessRevisionNo,
 }
 
 /// A namespace-scoped core API.
@@ -272,14 +273,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                     boundary: false,
                     grants: loonfs_types::AccessGrants::default(),
                 },
-                access_revision_no: None,
+                access_revision_no: loonfs_types::AccessRevisionNo(0),
             },
             |row| RootAccess {
                 access: AccessState {
                     boundary: row.boundary,
                     grants: row.grants,
                 },
-                access_revision_no: Some(row.access_revision_no),
+                access_revision_no: row.access_revision_no,
             },
         ))
     }

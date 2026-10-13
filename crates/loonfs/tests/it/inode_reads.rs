@@ -292,11 +292,7 @@ async fn stat_inode_and_stat_path_have_the_same_point_lookup_request_count() {
 async fn a_resumed_inode_stream_reads_only_the_rest_in_the_asked_chunks() {
     let temp_dir = tempdir().expect("tempdir");
     let (_fs, namespace) = writable_namespace(temp_dir.path(), "inode-stream-resume-test").await;
-    let bytes: Vec<u8> = (0..4 * 1024 + 17)
-        .map(|offset: usize| {
-            u8::try_from(offset % 251).expect("a remainder below 251 should fit u8")
-        })
-        .collect();
+    let bytes: Vec<u8> = (0..251_u8).cycle().take(4 * 1024 + 17).collect();
     namespace
         .put_file("/data.bin", &bytes, &loonfs_test_support::test_actor())
         .await

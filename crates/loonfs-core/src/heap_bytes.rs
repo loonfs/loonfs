@@ -20,8 +20,8 @@ use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion, ChangeSeq,
-    Checksum, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName, HexDigest, InodeId,
-    MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, WriterId,
+    Checksum, ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef, DisplayName,
+    InodeId, MetadataSegmentId, NameKey, NamespaceId, PinId, PrincipalId, PrincipalScope, WriterId,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
@@ -144,7 +144,7 @@ text_heap_bytes!(
     CommitId,
     ContentId,
     DisplayName,
-    HexDigest,
+    ChecksumHex,
     MetadataSegmentId,
     NameKey,
     NamespaceId,

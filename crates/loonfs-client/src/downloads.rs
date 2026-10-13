@@ -48,6 +48,9 @@ pub struct DirectDownloadStream {
     expected: ContentRef,
     target: String,
     verifier: ContentVerifier,
+    /// The first error a read returned. The stream is over once it fails,
+    /// so every later read returns it again.
+    failed: Option<ClientError>,
 }
 
 enum NextRange {
@@ -71,24 +74,37 @@ impl DirectDownloadStream {
     /// Adds existing prefix bytes to the checksum for a resumed download.
     ///
     /// The caller must provide bytes in order from the start of the revision,
-    /// before the first [`Self::next_chunk`]; a call after that panics. A
-    /// prefix that runs past the end of the revision is refused. Incorrect
-    /// prefix bytes cause final checksum verification to fail.
+    /// before the first [`Self::next_chunk`]. A prefix that runs past the
+    /// start offset, or that arrives after the stream has fetched content or
+    /// reached its end, is refused. Incorrect prefix bytes cause final
+    /// checksum verification to fail.
     pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<()> {
-        self.verifier.fold_resumed_prefix(bytes).map_err(|overrun| {
-            ClientError::Http(format!("download of `{}`: {overrun}", self.target))
+        self.verifier.fold_resumed_prefix(bytes).map_err(|refused| {
+            ClientError::Http(format!("download of `{}`: {refused}", self.target))
         })
     }
 
     /// Returns the next response-body chunk, or `None` once the complete
-    /// revision has passed its length and checksum checks. After a failed
-    /// check, every later call returns the same failure.
+    /// revision has passed its length and checksum checks. After a read
+    /// fails, whether a range open, a body read, or a check, every later call
+    /// returns the same error.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
         self.verifier
             .ensure_resumed_prefix_complete()
             .map_err(|incomplete| {
                 ClientError::Http(format!("download of `{}`: {incomplete}", self.target))
             })?;
+        if let Some(error) = &self.failed {
+            return Err(error.clone());
+        }
+        let read = self.read_next_chunk().await;
+        if let Err(error) = &read {
+            self.failed = Some(error.clone());
+        }
+        read
+    }
+
+    async fn read_next_chunk(&mut self) -> Result<Option<Bytes>> {
         loop {
             let polled = tokio::select! {
                 biased;
@@ -105,7 +121,12 @@ impl DirectDownloadStream {
                         )));
                     }
                     self.range_remaining -= length;
-                    self.verifier.update(&chunk);
+                    self.verifier.update(&chunk).map_err(|after_end| {
+                        ClientError::Protocol(format!(
+                            "direct read of `{}`: {after_end}",
+                            self.target
+                        ))
+                    })?;
                     return Ok(Some(chunk));
                 }
                 Some(Err(error)) => {
@@ -406,6 +427,7 @@ impl Client {
             expected: content_ref.clone(),
             target,
             verifier: ContentVerifier::new(content_ref, start_offset),
+            failed: None,
         };
         stream.request_next_range();
         Ok(stream)

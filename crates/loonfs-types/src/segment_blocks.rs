@@ -101,8 +101,7 @@ impl BuiltSegmentBlocks {
     /// Encodes a small stored filter for an inline segment descriptor.
     pub fn inline_filter_hex(&self) -> Option<String> {
         (self.filter.stored_bytes <= DEFAULT_MAX_INLINE_FILTER_BYTES).then(|| {
-            let start = usize::try_from(self.filter.offset)
-                .expect("a built segment's offsets should index its in-memory bytes");
+            let start = crate::usize_from_u64(self.filter.offset);
             crate::format::hex::hex_encode_bytes(
                 &self.bytes[start..start + self.filter.stored_bytes as usize],
             )
@@ -803,7 +802,7 @@ mod tests {
             "completed blocks are already compressed"
         );
         let built = builder.build().expect("finish segment");
-        let start = usize::try_from(built.index.offset).expect("the offset should fit usize");
+        let start = crate::usize_from_u64(built.index.offset);
         let end = start + built.index.stored_bytes as usize;
         let index = decode_index_block(&built.bytes[start..end], &built.index).expect("index");
         assert_eq!(
@@ -846,7 +845,7 @@ mod tests {
     }
 
     fn section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
-        let start = usize::try_from(handle.offset).expect("the offset should fit usize");
+        let start = crate::usize_from_u64(handle.offset);
         &bytes[start..start + handle.stored_bytes as usize]
     }
 
@@ -1076,8 +1075,7 @@ mod tests {
             decode_index_block(section(&built.bytes, &built.index), &built.index).expect("index");
 
         let mut corrupted = built.bytes.clone();
-        let target =
-            usize::try_from(index[0].block.offset).expect("the offset should fit usize") + 3;
+        let target = crate::usize_from_u64(index[0].block.offset) + 3;
         corrupted[target] ^= 0xff;
         let error = decode_data_block(section(&corrupted, &index[0].block), &index[0].block)
             .expect_err("corrupted data block should fail");
@@ -1087,7 +1085,7 @@ mod tests {
         ));
 
         let mut corrupted = built.bytes.clone();
-        let target = usize::try_from(built.index.offset).expect("the offset should fit usize") + 3;
+        let target = crate::usize_from_u64(built.index.offset) + 3;
         corrupted[target] ^= 0xff;
         let error = decode_index_block(section(&corrupted, &built.index), &built.index)
             .expect_err("corrupted index should fail");
@@ -1097,8 +1095,7 @@ mod tests {
         ));
 
         let mut corrupted = built.bytes.clone();
-        let target =
-            usize::try_from(built.filter.offset).expect("the offset should fit usize") + 12;
+        let target = crate::usize_from_u64(built.filter.offset) + 12;
         corrupted[target] ^= 0xff;
         let error = decode_filter_block(section(&corrupted, &built.filter), &built.filter)
             .expect_err("corrupted filter should fail");
@@ -1169,10 +1166,7 @@ mod tests {
             let mut payload = Vec::new();
             payload.extend_from_slice(&n_hashes.to_le_bytes());
             payload.extend_from_slice(&bit_len.to_le_bytes());
-            payload.resize(
-                12 + usize::try_from(bit_len.div_ceil(8)).expect("the filter should fit usize"),
-                0xff,
-            );
+            payload.resize(12 + crate::usize_from_u64(bit_len.div_ceil(8)), 0xff);
             let mut bytes = Vec::new();
             let handle = append_section(&mut bytes, &payload, false).expect("filter section");
             assert!(matches!(

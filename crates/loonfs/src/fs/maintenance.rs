@@ -1002,10 +1002,7 @@ impl crate::Namespace<crate::Writable> {
                 boundary: root.access.boundary,
                 grants,
                 expected_inode_id: Some(loonfs_types::ROOT_INODE_ID),
-                expected_access_revision_no: Some(
-                    root.access_revision_no
-                        .unwrap_or(loonfs_types::AccessRevisionNo(0)),
-                ),
+                expected_access_revision_no: Some(root.access_revision_no),
             },
         );
         let commit = self

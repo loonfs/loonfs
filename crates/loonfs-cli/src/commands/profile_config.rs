@@ -203,8 +203,8 @@ pub(super) struct CreateProfileSpec {
 
 #[derive(Debug, Clone)]
 struct CreateActorSpec {
-    id: Option<String>,
-    subject_id: Option<String>,
+    id: Option<ActorId>,
+    subject_id: Option<SubjectId>,
     principal_scope: Option<String>,
     principals: Option<String>,
 }
@@ -459,8 +459,8 @@ pub(super) fn build_profile_from_create_spec(
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
     let actor = ProfileActor {
-        actor_id: parse_profile_actor_id(spec.actor.id.as_deref())?,
-        subject_id: parse_profile_subject_id(spec.actor.subject_id.as_deref())?,
+        actor_id: spec.actor.id,
+        subject_id: spec.actor.subject_id,
         principal_scope: parse_profile_principal_scope(spec.actor.principal_scope.as_deref())?,
         principals: parse_profile_principals(spec.actor.principals.as_deref())?,
     };
@@ -919,26 +919,6 @@ fn remote_profile(
     })
 }
 
-fn parse_profile_actor_id(id: Option<&str>) -> Result<Option<ActorId>, CliError> {
-    id.map(|id| {
-        ActorId::parse(id).map_err(|error| {
-            CliError::invalid_request(format!("invalid `--actor-id`: {error}"))
-                .with_param("--actor-id")
-        })
-    })
-    .transpose()
-}
-
-fn parse_profile_subject_id(id: Option<&str>) -> Result<Option<SubjectId>, CliError> {
-    id.map(|id| {
-        SubjectId::parse(id).map_err(|error| {
-            CliError::invalid_request(format!("invalid `--subject-id`: {error}"))
-                .with_param("--subject-id")
-        })
-    })
-    .transpose()
-}
-
 fn parse_profile_principal_scope(
     principal_scope: Option<&str>,
 ) -> Result<Option<PrincipalScope>, CliError> {
@@ -984,17 +964,6 @@ fn validate_profile_subject_fields(
         )
         .with_param("--principals")),
         (Some(_), Some(_)) | (None, None) => Ok(()),
-    }
-}
-
-fn updated_actor(
-    current: Option<ActorId>,
-    args: &CreateActorSpec,
-) -> Result<Option<ActorId>, CliError> {
-    if args.id.is_none() {
-        Ok(current)
-    } else {
-        parse_profile_actor_id(args.id.as_deref())
     }
 }
 
@@ -1076,9 +1045,8 @@ pub(super) fn apply_update_flags(
             )?;
             Ok(ProfileConfig::Embedded {
                 store,
-                actor_id: updated_actor(actor, &spec.actor)?,
-                subject_id: parse_profile_subject_id(spec.actor.subject_id.as_deref())?
-                    .or(subject_id),
+                actor_id: spec.actor.id.clone().or(actor),
+                subject_id: spec.actor.subject_id.clone().or(subject_id),
                 principal_scope: updated_principal_scope,
                 principals: updated_principals,
                 default_namespace,
@@ -1098,9 +1066,8 @@ pub(super) fn apply_update_flags(
             },
             CreateProviderSpec::Remote(args),
         ) => {
-            let updated_actor = updated_actor(actor.clone(), &spec.actor)?;
-            let updated_subject_id = parse_profile_subject_id(spec.actor.subject_id.as_deref())?
-                .or_else(|| subject_id.clone());
+            let updated_actor = spec.actor.id.clone().or_else(|| actor.clone());
+            let updated_subject_id = spec.actor.subject_id.clone().or_else(|| subject_id.clone());
             let updated_principal_scope =
                 parse_profile_principal_scope(spec.actor.principal_scope.as_deref())?
                     .or_else(|| principal_scope.clone());

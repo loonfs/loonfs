@@ -890,8 +890,7 @@ mod direct_multipart {
         session: &Session,
     ) -> Vec<CompletedUploadPart> {
         let mut parts = Vec::new();
-        for (index, chunk) in session.payload.chunks(PART.len()).enumerate() {
-            let part_number = u32::try_from(index).expect("the test value should fit u32") + 1;
+        for (part_number, chunk) in (1_u32..).zip(session.payload.chunks(PART.len())) {
             let etag = store
                 .upload_part(&session.provider_upload_id, part_number, chunk)
                 .expect("upload part");

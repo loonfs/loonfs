@@ -62,8 +62,7 @@ impl ContentLocation {
                     )));
                 }
                 let bytes = piece.bytes.slice(
-                    ..usize::try_from((end - offset).min(piece.bytes.len() as u64))
-                        .expect("a range inside the piece should fit usize"),
+                    ..loonfs_types::usize_from_u64((end - offset).min(piece.bytes.len() as u64)),
                 );
                 offset += bytes.len() as u64;
                 pieces.push(bytes);
@@ -191,10 +190,8 @@ impl ContentLocation {
         for piece in &self.pieces {
             let piece_end = offset + piece.len() as u64;
             if offset < end && piece_end > start {
-                let first = usize::try_from(start.max(offset) - offset)
-                    .expect("a range inside the piece should fit usize");
-                let last = usize::try_from(end.min(piece_end) - offset)
-                    .expect("a range inside the piece should fit usize");
+                let first = loonfs_types::usize_from_u64(start.max(offset) - offset);
+                let last = loonfs_types::usize_from_u64(end.min(piece_end) - offset);
                 parts.push(piece.slice(first..last));
             }
             offset = piece_end;

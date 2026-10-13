@@ -4,7 +4,7 @@
 //! output remains available for results or file content. Event and field names
 //! are part of the CLI contract.
 
-use crate::args::{Cli, RuntimeBehavior};
+use crate::args::RuntimeBehavior;
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::io::{IsTerminal, Write};
 use std::sync::Mutex;
@@ -25,10 +25,10 @@ pub(crate) enum ProgressMode {
 
 impl ProgressMode {
     /// Selects the progress mode from CLI flags and terminal detection.
-    pub(crate) fn detect(cli: &Cli) -> Self {
-        if cli.no_progress {
+    pub(crate) fn detect(no_progress: bool, json: bool) -> Self {
+        if no_progress {
             Self::Off
-        } else if cli.json {
+        } else if json {
             Self::Events
         } else if std::io::stderr().is_terminal() {
             Self::Human

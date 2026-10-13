@@ -35,7 +35,7 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
             server_url: "http://127.0.0.1".to_owned(),
             auth_token: Some("test-token".into()),
             request_timeout_ms: None,
-            retry: true,
+            disable_transient_retry: false,
             ca_cert_path: None,
         },
         service,

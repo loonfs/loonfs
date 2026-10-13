@@ -910,8 +910,9 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
     harness: &crate::common::TestServer,
     namespace: &str,
 ) {
-    let payload: Vec<u8> = (0..4 * PROXY_CAP_BYTES)
-        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
+    let payload: Vec<u8> = (0..251_u8)
+        .cycle()
+        .take(loonfs_types::usize_from_u64(4 * PROXY_CAP_BYTES))
         .collect();
     let target = NamespacePath::parse(namespace, "/cap-bound.bin").expect("cap-bound target");
 
@@ -1000,8 +1001,9 @@ async fn cloudflare_r2_direct_multipart_real_provider_round_trip() {
 /// A payload with a distinct byte at every offset, so a part landing in the
 /// wrong place or twice cannot go unnoticed.
 fn multipart_payload(part_size: usize, parts: usize) -> Vec<u8> {
-    (0..part_size * parts + 4_096)
-        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
+    (0..251_u8)
+        .cycle()
+        .take(part_size * parts + 4_096)
         .collect()
 }
 
@@ -1057,9 +1059,9 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     let chunks: Vec<&[u8]> = payload.chunks(part_size).collect();
     let claims: Vec<UploadPartChecksumClaim> = chunks
         .iter()
-        .enumerate()
-        .map(|(index, chunk)| UploadPartChecksumClaim {
-            part_number: u32::try_from(index).expect("the test value should fit u32") + 1,
+        .zip(1_u32..)
+        .map(|(chunk, part_number)| UploadPartChecksumClaim {
+            part_number,
             checksum: Checksum::compute(checksum_algorithm, chunk),
         })
         .collect();
@@ -1267,8 +1269,9 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
 async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer, namespace: &str) {
     // Three parts and a bit at the deployment's geometry, so the pass
     // crosses a wave boundary and ends on a short part.
-    let payload: Vec<u8> = (0..3 * MULTIPART_PART_SIZE + 4_096)
-        .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
+    let payload: Vec<u8> = (0..251_u8)
+        .cycle()
+        .take(3 * MULTIPART_PART_SIZE + 4_096)
         .collect();
 
     let file = tempfile::NamedTempFile::new().expect("temp file for the one-pass put");

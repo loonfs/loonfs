@@ -815,9 +815,7 @@ fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
     assert_success(&harness.run(&["use", "demo"]));
 
     // Above the inline threshold, so the bytes live in a content object.
-    let payload: Vec<u8> = (0..=64 * 1024)
-        .map(|index| u8::try_from(index % 256).expect("a remainder below 256 should fit u8"))
-        .collect();
+    let payload: Vec<u8> = (0..=u8::MAX).cycle().take(64 * 1024 + 1).collect();
     let local = harness.temp_dir.path().join("source.bin");
     fs::write(&local, &payload).expect("write payload");
     assert_success(&harness.run(&["put", local.to_str().expect("utf-8 path"), "/doc.bin"]));

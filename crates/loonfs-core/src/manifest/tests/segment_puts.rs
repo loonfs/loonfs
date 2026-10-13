@@ -57,7 +57,7 @@ async fn seed_tail(store: &LocalFsStore, namespace_id: &NamespaceId) {
 }
 
 fn section<'a>(bytes: &'a [u8], handle: &BlockHandle) -> &'a [u8] {
-    let start = usize::try_from(handle.offset).expect("the test value should fit usize");
+    let start = loonfs_types::usize_from_u64(handle.offset);
     &bytes[start..start + handle.stored_bytes as usize]
 }
 

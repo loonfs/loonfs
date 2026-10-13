@@ -773,7 +773,7 @@ pub(crate) async fn run_filesystem_trash(
     let PagedListing::Collected(response) = listing else {
         return Ok(context.output(kind, CommandData::StreamedToStdout));
     };
-    let hint = UndeleteHint::new(&context, location, args.target.profile.profile.as_deref());
+    let hint = UndeleteHint::new(&context, location, args.target.profile.profile.is_some());
     let recovery_commands = response
         .entries
         .iter()
@@ -1252,7 +1252,7 @@ pub(crate) async fn run_filesystem_rm(
     // working even if the enclosing directories are renamed before the
     // paste.
     let recovery_command =
-        UndeleteHint::new(&context, location, args.target.profile.profile.as_deref())
+        UndeleteHint::new(&context, location, args.target.profile.profile.is_some())
             .command(deleted_inode, result.committed_seq);
 
     Ok(context.output(

@@ -15,9 +15,7 @@ use crate::profiles::set_default_namespace;
 use crate::prompt::prompt_line;
 use crate::resolve::{load_cli_config, resolve_actor, resolve_namespace};
 use loonfs_client::CreateNamespaceOptions;
-use loonfs_types::{
-    AccessGrants, AccessRights, NamespaceAccess, NamespaceId, NamespaceNaming, PrincipalScope,
-};
+use loonfs_types::{AccessGrants, AccessRights, NamespaceAccess, NamespaceNaming, PrincipalScope};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -51,15 +49,14 @@ async fn run_namespace_show(
         kind,
         &loaded.config,
         explicit_profile,
-        args.target.request.retry(),
+        args.target.request.no_retry,
         Some(&args.target.subject),
     )
     .await?;
     let explicit_namespace = args
         .namespace_id
         .as_ref()
-        .map(NamespaceId::as_str)
-        .or(args.target.namespace.as_deref());
+        .or(args.target.namespace.as_ref());
     let namespace_id = resolve_namespace(&context.profile_name, profile, explicit_namespace)
         .map_err(|error| context.fail(kind, error))?
         .namespace;
@@ -86,11 +83,11 @@ async fn run_namespace_create(
         kind,
         &loaded.config,
         explicit_profile,
-        args.request.retry(),
+        args.request.no_retry,
         None,
     )
     .await?;
-    let actor_id = resolve_actor(profile, args.actor.actor_id.as_deref())
+    let actor_id = resolve_actor(profile, args.actor.actor_id.as_ref())
         .map_err(|error| context.fail(kind, error))?;
     let namespace_id = args.namespace_id.clone();
     let access = namespace_access(&args).map_err(|error| context.fail(kind, error))?;
@@ -151,7 +148,7 @@ async fn run_namespace_delete(
         kind,
         config_path,
         explicit_profile,
-        args.request.retry(),
+        args.request.no_retry,
         Some(&args.subject),
     )
     .await?;
@@ -211,11 +208,11 @@ async fn run_namespace_fork(
         kind,
         &loaded.config,
         explicit_profile,
-        args.request.retry(),
+        args.request.no_retry,
         Some(&args.subject),
     )
     .await?;
-    let actor_id = resolve_actor(profile, args.actor.actor_id.as_deref())
+    let actor_id = resolve_actor(profile, args.actor.actor_id.as_ref())
         .map_err(|error| context.fail(kind, error))?;
     let source_namespace_id = args.source_namespace_id.clone();
     let new_namespace_id = args.new_namespace_id.clone();
@@ -247,7 +244,7 @@ pub(crate) async fn run_namespace_use(
         kind,
         &loaded.config,
         explicit_profile,
-        args.request.retry(),
+        args.request.no_retry,
         None,
     )
     .await?;

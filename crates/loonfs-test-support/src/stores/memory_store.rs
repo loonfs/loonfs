@@ -78,12 +78,11 @@ impl ObjectStore for MemoryStore {
                         object_key: key.to_owned(),
                     });
                 }
-                let end = usize::try_from(range.end_exclusive.min(object.bytes.len() as u64))
-                    .expect("the test value should fit usize");
-                Bytes::from(object.bytes).slice(
-                    usize::try_from(range.start_inclusive).expect("the test value should fit usize")
-                        ..end,
-                )
+                let end = loonfs_types::usize_from_u64(
+                    range.end_exclusive.min(object.bytes.len() as u64),
+                );
+                Bytes::from(object.bytes)
+                    .slice(loonfs_types::usize_from_u64(range.start_inclusive)..end)
             }
             None => Bytes::from(object.bytes),
         };

@@ -49,18 +49,18 @@ fn deadline_client(transport: &crate::scripted_transport::ScriptedTransport) -> 
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
-            retry: true,
+            disable_transient_retry: false,
             ca_cert_path: None,
         },
         transport.clone(),
     )
     .expect("valid client config");
-    client.transport_retry = Some(TransportRetryPolicy {
+    client.transport_retry = TransportRetryPolicy {
         max_retries: 1,
         initial_backoff: Duration::ZERO,
         max_backoff: Duration::ZERO,
         operation_deadline: Duration::from_millis(100),
-    });
+    };
     client.timer = Arc::new(ExpiredAfterFirstRead::default());
     client
 }
@@ -176,7 +176,7 @@ where
             server_url: "http://127.0.0.1".to_owned(),
             auth_token: Some("test-token".into()),
             request_timeout_ms,
-            retry: false,
+            disable_transient_retry: true,
             ca_cert_path: None,
         },
         service,
@@ -218,11 +218,9 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
         ]))
         .expect("principals"),
     });
-    client.transport_retry = Some(TransportRetryPolicy {
-        initial_backoff: Duration::ZERO,
-        max_backoff: Duration::ZERO,
-        ..DEFAULT
-    });
+    client.transport_retry_enabled = true;
+    client.transport_retry.initial_backoff = Duration::ZERO;
+    client.transport_retry.max_backoff = Duration::ZERO;
     let request = client
         .post("http://127.0.0.1/commits")
         .header("Loonfs-Actor", "actor");

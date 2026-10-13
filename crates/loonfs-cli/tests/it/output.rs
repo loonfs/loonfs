@@ -374,6 +374,44 @@ fn json_covers_command_lines_the_parser_rejects() {
 }
 
 #[test]
+fn an_invalid_id_flag_exits_2_with_invalid_usage_before_any_lookup() {
+    let harness = Harness::new();
+
+    for (arguments, param) in [
+        (
+            vec!["--json", "ls", "--namespace", "bad/name", "/"],
+            "--namespace",
+        ),
+        (
+            vec!["--json", "ls", "--subject-id", "a,b", "/"],
+            "--subject-id",
+        ),
+        (
+            vec!["--json", "put", "local.txt", "/x", "--actor-id", " bad"],
+            "--actor-id",
+        ),
+        (
+            vec![
+                "--json",
+                "profile",
+                "update",
+                "local",
+                "default",
+                "--actor-id",
+                " bad",
+            ],
+            "--actor-id",
+        ),
+    ] {
+        let output = harness.run(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let error = &parse_json(&output.stderr)["error"];
+        assert_eq!(error["code"], "invalid_usage", "{arguments:?}");
+        assert_eq!(error["param"], param, "{arguments:?}");
+    }
+}
+
+#[test]
 fn unused_global_selectors_are_invalid_usage() {
     let harness = Harness::new();
 

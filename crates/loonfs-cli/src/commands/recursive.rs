@@ -620,13 +620,12 @@ mod tests {
     /// A file of two transfer parts and a bit: enough that holding it whole
     /// would show up plainly against holding one part of it, and enough that
     /// the end of the payload is discovered rather than computed.
-    const LARGE_FILE_BYTES: u64 = 2 * PROVIDER_MULTIPART_PART_BYTES + 4_096;
+    const LARGE_FILE_BYTES: usize =
+        2 * loonfs_types::usize_from_u64(PROVIDER_MULTIPART_PART_BYTES) + 4_096;
     const SMALL_FILE: &[u8] = b"small enough to hold";
 
     fn payload(len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|offset| u8::try_from(offset % 251).expect("a remainder below 251 should fit u8"))
-            .collect()
+        (0..251_u8).cycle().take(len).collect()
     }
 
     /// A run nobody is watching: the accounting still happens, it is just
@@ -900,8 +899,7 @@ mod tests {
 
         let tree = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(tree.path().join("docs")).expect("create tree dirs");
-        let large =
-            payload(usize::try_from(LARGE_FILE_BYTES).expect("the test file should fit usize"));
+        let large = payload(LARGE_FILE_BYTES);
         std::fs::write(tree.path().join("docs/big.bin"), &large).expect("write large file");
         std::fs::write(tree.path().join("small.txt"), SMALL_FILE).expect("write small file");
 
@@ -933,7 +931,7 @@ mod tests {
         let peaks = watched.peaks();
         assert_eq!(
             peaks.total_bytes,
-            LARGE_FILE_BYTES + SMALL_FILE.len() as u64,
+            (LARGE_FILE_BYTES + SMALL_FILE.len()) as u64,
             "every payload byte crossed the store boundary exactly once"
         );
         assert!(

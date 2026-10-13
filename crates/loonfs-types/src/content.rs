@@ -1,6 +1,6 @@
 //! Immutable content references and their checksums.
 
-use crate::hex::{hex_decode_bytes, hex_encode_bytes};
+use crate::hex::{hex_encode_bytes, is_lower_hex_byte, HexDecodeError};
 use crate::ids::{string_id, validation_error, ContentId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -66,28 +66,38 @@ impl fmt::Display for ChecksumAlgorithm {
 }
 
 validation_error!(
-    HexDigestValidationError,
-    "invalid hex digest {value:?}: {reason}"
+    ChecksumHexValidationError,
+    "invalid checksum {value:?}: {reason}"
 );
 
 string_id! {
-    /// Digest bytes spelled in lowercase hexadecimal, two characters per byte.
-    HexDigest,
-    error = HexDigestValidationError,
-    validate = validate_hex_digest,
+    /// A checksum's bytes spelled in lowercase hexadecimal, two characters per
+    /// byte.
+    ChecksumHex,
+    error = ChecksumHexValidationError,
+    validate = validate_checksum_hex,
 }
 
-impl HexDigest {
-    /// Spells digest bytes in lowercase hexadecimal.
+impl ChecksumHex {
+    /// Spells checksum bytes in lowercase hexadecimal.
     pub fn encode(bytes: &[u8]) -> Self {
         Self(hex_encode_bytes(bytes))
     }
 }
 
-fn validate_hex_digest(value: &str) -> Result<(), HexDigestValidationError> {
-    hex_decode_bytes(value)
-        .map(|_| ())
-        .map_err(|error| HexDigestValidationError::new(value, error.to_string()))
+/// Checks the lowercase hexadecimal spelling without decoding it, so the check
+/// allocates nothing.
+fn validate_checksum_hex(value: &str) -> Result<(), ChecksumHexValidationError> {
+    let error = if !value.len().is_multiple_of(2) {
+        HexDecodeError::OddLength {
+            length: value.len(),
+        }
+    } else if let Some(byte) = value.bytes().find(|&byte| !is_lower_hex_byte(byte)) {
+        HexDecodeError::InvalidByte { byte }
+    } else {
+        return Ok(());
+    };
+    Err(ChecksumHexValidationError::new(value, error.to_string()))
 }
 
 /// A checksum algorithm and its canonical lowercase hexadecimal value.
@@ -102,7 +112,7 @@ pub struct Checksum {
     pub algorithm: ChecksumAlgorithm,
     /// The canonical lowercase hexadecimal checksum without a prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub value: HexDigest,
+    pub value: ChecksumHex,
 }
 
 impl Checksum {
@@ -151,7 +161,7 @@ impl Checksum {
         let bytes = combined.to_be_bytes();
         Some(Checksum {
             algorithm: self.algorithm,
-            value: HexDigest::encode(&bytes[8 - self.algorithm.value_bytes()..]),
+            value: ChecksumHex::encode(&bytes[8 - self.algorithm.value_bytes()..]),
         })
     }
 
@@ -264,23 +274,22 @@ impl ContentVerifier {
 
     /// Folds in held bytes from below the start offset, in order.
     ///
-    /// A prefix that runs past the end of the content is refused, and none of
-    /// it is folded. A call after the first fetched chunk or after
-    /// [`Self::finish`] panics.
-    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), ResumedPrefixOverrunError> {
-        assert_eq!(
-            self.fetched_bytes, 0,
-            "a resumed prefix should arrive before the stream fetches content"
-        );
+    /// A prefix that runs past the start offset, or that arrives after the
+    /// first fetched chunk or after [`Self::finish`], is refused, and none of
+    /// it is folded.
+    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<(), ResumedPrefixError> {
+        if self.fetched_bytes > 0 {
+            return Err(ResumedPrefixError::AfterFetch);
+        }
         let prefix_bytes = self.prefix_bytes.saturating_add(bytes.len() as u64);
-        let size_bytes = self.expected_bytes;
-        let digest = self
-            .digest()
-            .expect("a resumed prefix should arrive before the read reaches its end");
-        if prefix_bytes > size_bytes {
-            return Err(ResumedPrefixOverrunError {
+        let start_offset = self.start_offset;
+        let Some(digest) = self.digest() else {
+            return Err(ResumedPrefixError::AfterEnd);
+        };
+        if prefix_bytes > start_offset {
+            return Err(ResumedPrefixError::PastStartOffset {
                 prefix_bytes,
-                size_bytes,
+                start_offset,
             });
         }
         digest.update(bytes);
@@ -299,13 +308,12 @@ impl ContentVerifier {
         })
     }
 
-    /// Folds in the next fetched chunk, in order. A call after
-    /// [`Self::finish`] panics.
-    pub fn update(&mut self, chunk: &[u8]) {
-        self.digest()
-            .expect("a fetched chunk should arrive before the read reaches its end")
-            .update(chunk);
+    /// Folds in the next fetched chunk, in order. A chunk that arrives after
+    /// [`Self::finish`] is refused.
+    pub fn update(&mut self, chunk: &[u8]) -> Result<(), ChunkAfterEndError> {
+        self.digest().ok_or(ChunkAfterEndError)?.update(chunk);
         self.fetched_bytes += chunk.len() as u64;
+        Ok(())
     }
 
     /// Compares everything folded in with the reference the first time it's
@@ -363,15 +371,30 @@ pub struct ContentMismatchError {
     pub actual: Checksum,
 }
 
-/// Describes a resumed prefix that runs past the end of the content.
+/// Why a resumed prefix was refused. None of the refused bytes are folded.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("a resumed prefix of {prefix_bytes} bytes runs past the end of {size_bytes}-byte content")]
-pub struct ResumedPrefixOverrunError {
-    /// Prefix length the refused bytes would have reached.
-    pub prefix_bytes: u64,
-    /// Byte length of the content.
-    pub size_bytes: u64,
+#[non_exhaustive]
+pub enum ResumedPrefixError {
+    /// The prefix would run past the offset the read resumes at.
+    #[error("a resumed prefix of {prefix_bytes} bytes runs past the resume offset {start_offset}")]
+    PastStartOffset {
+        /// Prefix length the refused bytes would have reached.
+        prefix_bytes: u64,
+        /// Offset the read fetches from.
+        start_offset: u64,
+    },
+    /// The prefix arrived after the read fetched content.
+    #[error("a resumed prefix must arrive before the read fetches content")]
+    AfterFetch,
+    /// The prefix arrived after the read reached its end.
+    #[error("a resumed prefix must arrive before the read reaches its end")]
+    AfterEnd,
 }
+
+/// Describes a fetched chunk that arrived after the read reached its end.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("a fetched chunk arrived after the read reached its end")]
+pub struct ChunkAfterEndError;
 
 /// Describes a resumed read asked for content before its whole prefix was
 /// folded in.
@@ -414,7 +437,7 @@ impl Crc64Nvme {
     pub fn finish(self) -> Checksum {
         Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: HexDigest::encode(&self.digest.sum64().to_be_bytes()),
+            value: ChecksumHex::encode(&self.digest.sum64().to_be_bytes()),
         }
     }
 }
@@ -450,7 +473,7 @@ impl Crc32c {
     pub fn finish(self) -> Checksum {
         Checksum {
             algorithm: ChecksumAlgorithm::Crc32c,
-            value: HexDigest::encode(&self.crc.to_be_bytes()),
+            value: ChecksumHex::encode(&self.crc.to_be_bytes()),
         }
     }
 }
@@ -522,8 +545,8 @@ impl ContentRef {
 #[cfg(test)]
 mod tests {
     use super::{
-        Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentRef, ContentRefKind,
-        ContentRefValidationError, HexDigest, StreamingChecksum,
+        Checksum, ChecksumAlgorithm, ChecksumHex, ChecksumValidationError, ContentRef,
+        ContentRefKind, ContentRefValidationError, StreamingChecksum,
     };
     use crate::ids::ContentId;
 
@@ -634,7 +657,7 @@ mod tests {
         );
         content_ref.checksum = Checksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: HexDigest::parse("0".repeat(64)).expect("hex digest"),
+            value: ChecksumHex::parse("0".repeat(64)).expect("a lowercase hex checksum"),
         };
         assert!(matches!(
             content_ref.validate(),
@@ -652,7 +675,7 @@ mod tests {
         ] {
             let checksum = |len: usize| Checksum {
                 algorithm,
-                value: HexDigest::parse("a".repeat(len)).expect("hex digest"),
+                value: ChecksumHex::parse("a".repeat(len)).expect("a lowercase hex checksum"),
             };
             checksum(width).validate().expect("exact width");
             assert!(matches!(
@@ -671,7 +694,7 @@ mod tests {
         for value in ["A".repeat(16), "a".repeat(15), "g".repeat(16)] {
             let document = serde_json::json!({ "algorithm": "crc64nvme", "value": value });
             let error = serde_json::from_value::<Checksum>(document).expect_err("not hex pairs");
-            assert!(error.to_string().contains("invalid hex digest"), "{error}");
+            assert!(error.to_string().contains("invalid checksum"), "{error}");
         }
     }
 
@@ -700,9 +723,7 @@ mod tests {
 
     #[test]
     fn a_streamed_checksum_agrees_with_the_whole_payload_at_once() {
-        let payload: Vec<u8> = (0..4096u32)
-            .map(|byte| u8::try_from(byte % 256).expect("a remainder below 256 should fit u8"))
-            .collect();
+        let payload: Vec<u8> = (0..=u8::MAX).cycle().take(4096).collect();
         for expected in [Checksum::crc64nvme(&payload), Checksum::crc32c(&payload)] {
             let mut streaming = StreamingChecksum::for_algorithm(expected.algorithm);
             for chunk in payload.chunks(97) {

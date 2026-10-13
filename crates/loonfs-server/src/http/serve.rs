@@ -3,7 +3,7 @@
 
 use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
-use crate::config::{validated_usize, MemorySizing, ServerConfig, ServerConfigError};
+use crate::config::{MemorySizing, ServerConfig, ServerConfigError};
 use crate::local_cache::FoyerStoredMetadataBlockCache;
 use crate::sweep::Sweep;
 use axum::body::Body;
@@ -194,10 +194,8 @@ pub async fn app(
             runtime.read_only(),
             maintenance.clone(),
             loonfs_grep::GrepStepBudget::new(
-                std::num::NonZeroUsize::new(validated_usize(
-                    config.grep.worker.max_concurrent_steps,
-                ))
-                .expect("validated grep step limit should be nonzero"),
+                std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
+                    .expect("validated grep step limit should be nonzero"),
             ),
         )
     });
@@ -227,16 +225,16 @@ pub async fn app(
         .transpose()?;
     let options = Arc::new(BindingConfig {
         grep: config.grep.mode,
-        maintenance: config.maintenance,
+        serves_maintenance: config.maintenance.serves(),
         snapshot_policy: loonfs::SnapshotPolicy {
             max_ttl_ms: config.snapshot_max_ttl_ms,
             max_lifetime_ms: config.snapshot_max_lifetime_ms,
-            max_live_per_namespace: validated_usize(config.snapshot_max_live_per_namespace),
+            max_live_per_namespace: config.snapshot_max_live_per_namespace,
         },
         max_download_bytes: Some(config.max_download_bytes),
         max_upload_bytes: Some(config.max_upload_bytes),
-        max_concurrent_uploads: validated_usize(config.max_concurrent_uploads),
-        max_concurrent_downloads: validated_usize(config.max_concurrent_downloads),
+        max_concurrent_uploads: config.max_concurrent_uploads,
+        max_concurrent_downloads: config.max_concurrent_downloads,
         inline_content: config.inline_content.effective_policy(),
         content_token_secret: config.content_token_secret.clone(),
         request_deadline_ms: config.request_deadline_ms,
@@ -249,14 +247,14 @@ pub async fn app(
     });
     let binding = BindingState {
         request_limit: Some(loonfs_http::RequestLimit::new(
-            std::num::NonZeroUsize::new(validated_usize(config.max_in_flight_requests))
+            std::num::NonZeroUsize::new(config.max_in_flight_requests)
                 .expect("validated request limit should be nonzero"),
         )),
         upload_permits: Arc::new(Semaphore::new(
-            validated_usize(config.max_concurrent_uploads).min(Semaphore::MAX_PERMITS),
+            config.max_concurrent_uploads.min(Semaphore::MAX_PERMITS),
         )),
         download_permits: Arc::new(Semaphore::new(
-            validated_usize(config.max_concurrent_downloads).min(Semaphore::MAX_PERMITS),
+            config.max_concurrent_downloads.min(Semaphore::MAX_PERMITS),
         )),
         options,
         runtime: runtime.clone(),
@@ -485,7 +483,7 @@ where
     let (router, state) = app(config, AppConfig::default()).await?;
     let listener = super::connection_limit::ConnectionLimit::new(
         listener,
-        validated_usize(max_connections),
+        max_connections,
         state.binding.metrics.recorder().as_ref(),
     );
     serve_and_settle(

@@ -297,7 +297,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".into()),
         request_timeout_ms: None,
-        retry: true,
+        disable_transient_retry: false,
         ca_cert_path: None,
     })
     .expect("valid client config");
@@ -816,9 +816,9 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: loonfs_test_support::ids::writer_id(writer_id),
-        max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS as u64,
-        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS as u64,
-        max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS as u64,
+        max_concurrent_reads: loonfs::DEFAULT_MAX_CONCURRENT_READS,
+        max_concurrent_folds: loonfs::DEFAULT_MAX_CONCURRENT_FOLDS,
+        max_concurrent_compactions: loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS,
         publication: Default::default(),
         inline_content: Default::default(),
         metadata_cache: MetadataCacheConfig::default(),

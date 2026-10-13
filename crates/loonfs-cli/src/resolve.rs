@@ -42,12 +42,11 @@ pub(crate) fn load_cli_config(config_path: &std::path::Path) -> Result<LoadedCon
 pub(crate) fn resolve_namespace(
     profile_name: &str,
     profile: &ProfileConfig,
-    explicit_namespace: Option<&str>,
+    explicit_namespace: Option<&NamespaceId>,
 ) -> Result<ResolvedNamespace, CliError> {
     if let Some(namespace) = explicit_namespace {
         return Ok(ResolvedNamespace {
-            namespace: parse_namespace_id(namespace)
-                .map_err(|error| error.with_param("--namespace"))?,
+            namespace: namespace.clone(),
         });
     }
     if let Some(namespace) = non_empty_env(NAMESPACE_ENV) {
@@ -64,13 +63,15 @@ pub(crate) fn resolve_namespace(
 
 pub(crate) fn resolve_actor(
     profile: &ProfileConfig,
-    explicit_id: Option<&str>,
+    explicit_id: Option<&ActorId>,
 ) -> Result<ActorId, CliError> {
     if let Some(id) = explicit_id {
-        return parse_actor_id("--actor-id", id);
+        return Ok(id.clone());
     }
     if let Some(id) = non_empty_env(ACTOR_ID_ENV) {
-        return parse_actor_id(ACTOR_ID_ENV, &id);
+        return ActorId::parse(&id).map_err(|error| {
+            named_cli_input_error(ACTOR_ID_ENV, format!("invalid `{ACTOR_ID_ENV}`: {error}"))
+        });
     }
     Ok(profile
         .actor_id()
@@ -84,7 +85,7 @@ pub(crate) fn resolve_actor(
 pub(crate) fn resolve_subject(
     profile: &ProfileConfig,
     actor_id: &ActorId,
-    explicit_subject_id: Option<&str>,
+    explicit_subject_id: Option<&SubjectId>,
     explicit_principal_scope: Option<&str>,
     explicit_principals: Option<&str>,
 ) -> Result<Option<Subject>, CliError> {
@@ -157,32 +158,28 @@ pub(crate) fn resolve_subject(
         (Some(principal_scope), false) => principal_scope,
         (None, true) => return Ok(None),
     };
-    let environment_subject_id = non_empty_env(SUBJECT_ID_ENV);
-    let (name, subject_id) = if let Some(value) = explicit_subject_id {
-        ("--subject-id", Some(value))
+    let subject_id = if let Some(subject_id) = explicit_subject_id {
+        subject_id.clone()
+    } else if let Some(value) = non_empty_env(SUBJECT_ID_ENV) {
+        SubjectId::parse(&value).map_err(|error| {
+            named_cli_input_error(
+                SUBJECT_ID_ENV,
+                format!("invalid `{SUBJECT_ID_ENV}`: {error}"),
+            )
+        })?
     } else {
-        (SUBJECT_ID_ENV, environment_subject_id.as_deref())
-    };
-    let subject_id = match subject_id {
-        Some(value) => SubjectId::parse(value)
-            .map_err(|error| named_cli_input_error(name, format!("invalid `{name}`: {error}")))?,
-        None => match profile.subject_id() {
+        match profile.subject_id() {
             Some(subject_id) => subject_id,
             None => SubjectId::parse(actor_id.as_str()).map_err(|error| {
                 named_cli_input_error("subject_id", format!("invalid subject_id: {error}"))
             })?,
-        },
+        }
     };
     Ok(Some(Subject {
         principal_scope,
         subject_id,
         principals,
     }))
-}
-
-fn parse_actor_id(name: &str, value: &str) -> Result<ActorId, CliError> {
-    ActorId::parse(value)
-        .map_err(|error| named_cli_input_error(name, format!("invalid `{name}`: {error}")))
 }
 
 fn named_cli_input_error(name: &str, message: String) -> CliError {
@@ -236,13 +233,13 @@ impl ResolvedTarget {
     pub(crate) async fn resolve(
         profile_name: &str,
         profile: &ProfileConfig,
-        retry: bool,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         profile.validate_store(profile_name)?;
         match profile {
             ProfileConfig::Embedded {
                 store, writer_id, ..
-            } => Self::embedded(store, writer_id.as_deref(), retry).await,
+            } => Self::embedded(store, writer_id.as_deref(), no_retry).await,
             ProfileConfig::Remote {
                 server_url,
                 auth_token,
@@ -252,7 +249,7 @@ impl ResolvedTarget {
                 server_url,
                 auth_token.as_ref(),
                 ca_cert_path.as_deref(),
-                retry,
+                no_retry,
             ),
         }
     }
@@ -278,7 +275,7 @@ impl ResolvedTarget {
     pub(crate) async fn embedded(
         store_config: &StoreConfig,
         writer_id: Option<&str>,
-        retry: bool,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         // One command drives the runtime, its maintenance, and grep from one
         // Tokio runtime, so they deliberately share one provider client.
@@ -291,7 +288,7 @@ impl ResolvedTarget {
             writer_id,
             store_config.kind(),
             loonfs::InlineContentPolicy::default(),
-            retry,
+            no_retry,
         )
         .await?;
         target.journal_identity =
@@ -312,7 +309,7 @@ impl ResolvedTarget {
         writer_id: Option<&str>,
         store_kind: loonfs_objectstore::ConfiguredObjectStoreKind,
         inline_content: loonfs::InlineContentPolicy,
-        retry: bool,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
@@ -352,7 +349,7 @@ impl ResolvedTarget {
             GrepService::new(grep_block_cache),
             store_kind,
             inline_content,
-            retry,
+            no_retry,
         )?;
         Ok(Self {
             client,
@@ -367,13 +364,13 @@ impl ResolvedTarget {
         server_url: &str,
         auth_token: Option<&SecretString>,
         ca_cert_path: Option<&str>,
-        retry: bool,
+        no_retry: bool,
     ) -> Result<Self, CliError> {
         let client = Client::new(remote_client_config(
             server_url,
             auth_token,
             ca_cert_path,
-            retry,
+            no_retry,
         ))
         .map_err(|error| CliError::invalid_config(error.to_string()))?;
         Ok(Self {

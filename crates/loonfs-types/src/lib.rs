@@ -32,6 +32,7 @@ mod retry;
 mod secret;
 mod segment_blocks;
 mod wal;
+mod widths;
 
 pub mod api {
     //! HTTP API request and response shapes, one module per protocol version.
@@ -115,10 +116,10 @@ pub use commit_identity::{
     semantic_commit_fingerprint, CommitFingerprint, InlineContentIdentity, SemanticFingerprintError,
 };
 pub use content::{
-    Checksum, ChecksumAlgorithm, ChecksumValidationError, ContentMismatchError, ContentRef,
-    ContentRefKind, ContentRefValidationError, ContentVerifier, Crc32c, Crc64Nvme, HexDigest,
-    HexDigestValidationError, ResumedPrefixIncompleteError, ResumedPrefixOverrunError,
-    StreamingChecksum,
+    Checksum, ChecksumAlgorithm, ChecksumHex, ChecksumHexValidationError, ChecksumValidationError,
+    ChunkAfterEndError, ContentMismatchError, ContentRef, ContentRefKind,
+    ContentRefValidationError, ContentVerifier, Crc32c, Crc64Nvme, ResumedPrefixError,
+    ResumedPrefixIncompleteError, StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
@@ -150,6 +151,7 @@ pub use retry::{
     TransportRetryPolicy,
 };
 pub use secret::SecretString;
+pub use widths::usize_from_u64;
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `api::v0`; add here only what most consumers touch.

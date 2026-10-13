@@ -39,7 +39,9 @@ use base64::Engine as _;
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
 use loonfs_types::SecretString;
-use loonfs_types::{Checksum, ChecksumAlgorithm, HexDigest, OperationDeadline, StreamingChecksum};
+use loonfs_types::{
+    Checksum, ChecksumAlgorithm, ChecksumHex, OperationDeadline, StreamingChecksum,
+};
 use object_store::aws::AmazonS3Builder;
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::future::Future;
@@ -728,7 +730,7 @@ fn base64_checksum(algorithm: ChecksumAlgorithm, value: &str) -> Option<Checksum
         .ok()?;
     (raw.len() == algorithm.value_bytes()).then(|| Checksum {
         algorithm,
-        value: HexDigest::encode(&raw),
+        value: ChecksumHex::encode(&raw),
     })
 }
 
@@ -896,7 +898,7 @@ mod tests {
                         .split_once('-').expect("bounds");
                     let first: usize = first.parse().expect("first");
                     let end = last.parse::<usize>().expect("last") + 1;
-                    assert!(end - first <= usize::try_from(crate::assembly::READ_BYTES).expect("the test value should fit usize"));
+                    assert!(end - first <= loonfs_types::usize_from_u64(crate::assembly::READ_BYTES));
                     assert_eq!(request.headers()[http::header::IF_MATCH], "\"base\"");
                     ("get", response.body(Bytes::copy_from_slice(&self.base[first..end])))
                 }
@@ -1174,8 +1176,7 @@ mod tests {
             let length = if kind == ConfiguredObjectStoreKind::CloudflareR2 {
                 64 * 1024 * 1024
             } else {
-                usize::try_from(crate::assembly::READ_BYTES)
-                    .expect("the test value should fit usize")
+                loonfs_types::usize_from_u64(crate::assembly::READ_BYTES)
             };
             let base = vec![b'a'; length];
             let tail = Bytes::from_static(b"tail");

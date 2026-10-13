@@ -758,7 +758,7 @@ mod tests {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,
                 request_timeout_ms: None,
-                retry: true,
+                disable_transient_retry: false,
                 ca_cert_path: None,
             },
             transport.clone(),

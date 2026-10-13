@@ -4,8 +4,8 @@ use crate::progress::ProgressMode;
 use crate::render::OutputFormat;
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use loonfs_types::{
-    AccessRevisionNo, AttributesRevisionNo, ChangeSeq, CommitId, InodeId, NamespaceId, PinId,
-    PrincipalId, PublicOrdinalRangeError, RevisionNo,
+    AccessRevisionNo, ActorId, AttributesRevisionNo, ChangeSeq, CommitId, InodeId, NamespaceId,
+    PinId, PrincipalId, PublicOrdinalRangeError, RevisionNo, SubjectId,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -100,11 +100,11 @@ pub(crate) struct Cli {
     /// Namespace to run against. Precedence is `--namespace`,
     /// `LOONFS_NAMESPACE`, then the profile default.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
-    pub(crate) namespace: Option<String>,
+    pub(crate) namespace: Option<NamespaceId>,
     /// Subject ID to act as. Precedence is `--subject-id`,
     /// `LOONFS_SUBJECT_ID`, the profile, then the actor ID.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
-    pub(crate) subject_id: Option<String>,
+    pub(crate) subject_id: Option<SubjectId>,
     /// Principal scope for an ACL namespace or a subject's principal IDs.
     /// Subject precedence is the flag, `LOONFS_PRINCIPAL_SCOPE`, then the profile.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
@@ -418,9 +418,9 @@ pub(crate) enum ProfileCreateCommand {
 pub(crate) struct ProfileCreateActorArgs {
     /// Actor ID to save in the profile. Defaults to loonfs-cli when unset.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub actor_id: Option<String>,
+    pub actor_id: Option<ActorId>,
     #[arg(from_global)]
-    pub subject_id: Option<String>,
+    pub subject_id: Option<SubjectId>,
     #[arg(from_global)]
     pub principal_scope: Option<String>,
     #[arg(from_global)]
@@ -557,9 +557,9 @@ pub(crate) enum ProfileUpdateCommand {
 pub(crate) struct ProfileUpdateActorArgs {
     /// Actor ID to save in the profile.
     #[arg(long)]
-    pub actor_id: Option<String>,
+    pub actor_id: Option<ActorId>,
     #[arg(from_global)]
-    pub subject_id: Option<String>,
+    pub subject_id: Option<SubjectId>,
     #[arg(from_global)]
     pub principal_scope: Option<String>,
     #[arg(from_global)]
@@ -690,17 +690,10 @@ pub(crate) struct RequestBehaviorArgs {
     pub no_retry: bool,
 }
 
-impl RequestBehaviorArgs {
-    /// The client's `retry` setting, which `--no-retry` turns off.
-    pub(crate) fn retry(&self) -> bool {
-        !self.no_retry
-    }
-}
-
 #[derive(Debug, Args, Clone)]
 pub(crate) struct SubjectSelectorArgs {
     #[arg(from_global)]
-    pub subject_id: Option<String>,
+    pub subject_id: Option<SubjectId>,
     #[arg(from_global)]
     pub principal_scope: Option<String>,
     #[arg(from_global)]
@@ -714,7 +707,7 @@ pub(crate) struct TargetSelectorArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     #[arg(from_global)]
-    pub namespace: Option<String>,
+    pub namespace: Option<NamespaceId>,
     #[command(flatten)]
     pub request: RequestBehaviorArgs,
 }
@@ -724,7 +717,7 @@ pub(crate) struct ActorSelectorArgs {
     /// Actor ID for this mutation.
     /// Overrides the environment and profile. Defaults to loonfs-cli.
     #[arg(long)]
-    pub actor_id: Option<String>,
+    pub actor_id: Option<ActorId>,
 }
 
 #[derive(Debug, Args)]
@@ -1554,7 +1547,7 @@ impl RuntimeBehavior {
             // `interactive` needs: a `put` fed by a pipe still has a
             // terminal to draw on, and `--no-input` says nothing about
             // whether anyone is watching.
-            progress: ProgressMode::detect(cli),
+            progress: ProgressMode::detect(cli.no_progress, cli.json),
         }
     }
 }
@@ -1852,7 +1845,10 @@ mod tests {
 
     fn assert_selected_target(cli: &Cli, profile: &str, namespace: &str) {
         assert_eq!(cli.profile.as_deref(), Some(profile));
-        assert_eq!(cli.namespace.as_deref(), Some(namespace));
+        assert_eq!(
+            cli.namespace.as_ref().map(NamespaceId::as_str),
+            Some(namespace)
+        );
         let target = match &cli.command {
             TopLevelCommand::Configured(Command::Ls(args)) => Some(&args.target),
             TopLevelCommand::Configured(Command::Maintenance {
@@ -1865,7 +1861,10 @@ mod tests {
         }
         .expect("test command should accept profile and namespace selectors");
         assert_eq!(target.profile.profile.as_deref(), Some(profile));
-        assert_eq!(target.namespace.as_deref(), Some(namespace));
+        assert_eq!(
+            target.namespace.as_ref().map(NamespaceId::as_str),
+            Some(namespace)
+        );
     }
 
     #[test]
