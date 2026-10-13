@@ -233,7 +233,7 @@ pub use options::{
     UpdateAttributesOptions,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
-pub use trace::{payload_kind, TraceMode};
+pub use trace::{payload_class, TraceMode};
 
 /// Result type used by the embedded runtime.
 pub type Result<T> = std::result::Result<T, Error>;

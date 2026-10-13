@@ -166,7 +166,7 @@ fn new(config: S3CompatibleConfig) -> Result<(ProviderObjectStore, DirectTransfe
             object_store_endpoint_url(&config.bucket, endpoint, config.force_path_style)
         })
         .transpose()?;
-    let request_signer = Arc::new(S3CompatiblePresigner::new_with_credentials(
+    let request_signer = Arc::new(S3CompatiblePresigner::with_credentials(
         S3PresignerConfig {
             bucket: config.bucket.clone(),
             region: config.region.clone(),
@@ -1017,7 +1017,7 @@ mod tests {
         kind: ConfiguredObjectStoreKind,
         provider: &ScriptedProvider,
     ) -> S3RequestSigner {
-        let request_signer = S3CompatiblePresigner::new_with_credentials(
+        let request_signer = S3CompatiblePresigner::with_credentials(
             S3PresignerConfig {
                 bucket: "bucket".to_owned(),
                 region: "us-east-1".to_owned(),

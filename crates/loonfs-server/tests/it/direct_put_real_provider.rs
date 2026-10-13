@@ -5,9 +5,7 @@
 use crate::common::{start_server, test_config};
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_client::{
-    Client, ClientError, DownloadOptions, NamespacePath, PayloadSource, PutFileStreamOptions,
-};
+use loonfs_client::{Client, ClientError, DownloadOptions, NamespacePath, PayloadSource};
 use loonfs_objectstore::{
     AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
 };
@@ -1284,10 +1282,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
                 .await
                 .expect("open the payload file"),
             &loonfs_test_support::test_actor(),
-            &PutFileStreamOptions {
-                options: put_options("one-pass-file"),
-                ..PutFileStreamOptions::default()
-            },
+            &put_options("one-pass-file"),
         )
         .await
         .expect("a file streams straight into object storage");
@@ -1317,10 +1312,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
             &piped,
             source,
             &loonfs_test_support::test_actor(),
-            &PutFileStreamOptions {
-                options: put_options("one-pass-piped"),
-                ..PutFileStreamOptions::default()
-            },
+            &put_options("one-pass-piped"),
         )
         .await
         .expect("a source of unknown length uploads the same way");

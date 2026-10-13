@@ -17,10 +17,10 @@ struct BloomLevel {
 
 impl BloomFilter {
     pub(crate) fn new(expected_entries: u64, seed: u64) -> Option<Self> {
-        Self::new_with_max_bytes(expected_entries, seed, MAX_BLOOM_FILTER_BYTES)
+        Self::with_max_bytes(expected_entries, seed, MAX_BLOOM_FILTER_BYTES)
     }
 
-    pub(crate) fn new_with_max_bytes(
+    pub(crate) fn with_max_bytes(
         expected_entries: u64,
         seed: u64,
         max_bytes: usize,
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn the_byte_limit_counts_all_levels_and_refuses_growth_without_losing_keys() {
-        let mut filter = BloomFilter::new_with_max_bytes(2, 42, 30).expect("filter");
+        let mut filter = BloomFilter::with_max_bytes(2, 42, 30).expect("filter");
         for key in 0_u64..14 {
             filter.insert(&key.to_le_bytes()).expect("insert");
         }

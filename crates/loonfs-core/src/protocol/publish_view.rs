@@ -15,13 +15,13 @@ use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::wal::ProjectedWalTail;
 use crate::wal::{replay_discovered_tail, TailChunk, ValidatedWalTail, WalObjectError};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::ClaimedWriter;
+use loonfs_types::format::control::AcquiredWriter;
 use loonfs_types::{CommitId, NamespaceId};
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
-    pub(super) claimed_writer: ClaimedWriter,
+    pub(super) acquired_writer: AcquiredWriter,
     /// The tip observation starts with this load rather than a retained view.
     pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
@@ -166,7 +166,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     segment_cache: Option<&'a MetadataSegmentCache>,
     namespace_id: &NamespaceId,
-    claimed_writer: ClaimedWriter,
+    acquired_writer: AcquiredWriter,
     cached_projection: Option<PublishTailProjection>,
     acquired_anchor: Option<NamespaceReadAnchor>,
 ) -> Result<PublishMetadataView<'a, S>> {
@@ -189,7 +189,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             anchor.read_state.clone(),
         ),
     };
-    ensure_writer_not_fenced(&head, &claimed_writer)?;
+    ensure_writer_not_fenced(&head, &acquired_writer)?;
     if head.status.is_deleted() {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -210,7 +210,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
         .then_some(projection.position.wal_tail_objects);
     Ok(PublishMetadataView {
         head,
-        claimed_writer,
+        acquired_writer,
         tail_discovered,
         manifest_segments,
         projection,

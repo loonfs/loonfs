@@ -179,9 +179,7 @@ mod tests {
                     NamespaceNaming::CaseInsensitive,
                     &display_name,
                 ),
-                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
-                    display_name,
-                },
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id: InodeId(child),
                 child_kind: if matches!(child, 4 | 7 | 8) {
                     InodeKind::File
@@ -316,9 +314,7 @@ mod tests {
                     NamespaceNaming::CaseInsensitive,
                     &display_name,
                 ),
-                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
-                    display_name,
-                },
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
                 child_inode_id,
                 child_kind: InodeKind::Directory,
                 child_created_by: ActorId::loonfs(),

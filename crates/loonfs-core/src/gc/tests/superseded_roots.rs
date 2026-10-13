@@ -217,7 +217,7 @@ async fn a_recent_successor_roots_its_predecessor_even_when_it_is_no_longer_curr
         .cloned()
         .collect();
     assert!(!dropped.is_empty());
-    crate::namespace::writer_epoch::claim_writer_epoch(&store, &namespace_id, &context(1_000))
+    crate::namespace::writer_epoch::acquire_writer_epoch(&store, &namespace_id, &context(1_000))
         .await
         .expect("supersede the compaction manifest");
     let current = load_current_manifest(&store, &namespace_id)

@@ -95,7 +95,7 @@ impl Writer {
             .await
             .expect("create");
         Self {
-            engine: NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone()),
+            engine: NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone()),
             directory,
             store,
             context,

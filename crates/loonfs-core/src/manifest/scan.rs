@@ -7,7 +7,7 @@ use super::error::ManifestLoadError;
 use super::load::{load_segment_filter, SessionBlockMemo};
 use super::runs::{MetadataFamilySegments, MetadataRunManifest, MANIFEST_ROW_FAMILIES};
 use super::scan_load::{ScanDescriptor, ScanLoader};
-use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::in_flight::STORE_READ_WAVE;
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use futures::future::try_join_all;
@@ -334,7 +334,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
                 .map_or(lower_bound, |(key, _)| key.as_str());
             if iterators.is_empty() && rows.len() < limit {
                 if let Some(candidate) =
-                    descriptors.as_slice()[..descriptors.len().min(STORE_READS_IN_FLIGHT)].last()
+                    descriptors.as_slice()[..descriptors.len().min(STORE_READ_WAVE)].last()
                 {
                     open_through = open_through.max(&candidate.descriptor.min_row_key);
                 }
@@ -417,7 +417,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataSegments<'_, S> {
             return Ok(descriptors);
         };
         let mut admitted = Vec::with_capacity(descriptors.len());
-        for chunk in descriptors.chunks(STORE_READS_IN_FLIGHT) {
+        for chunk in descriptors.chunks(STORE_READ_WAVE) {
             let checks =
                 try_join_all(chunk.iter().map(|descriptor| {
                     self.segment_filter_admits(descriptor.descriptor, filter_probe)

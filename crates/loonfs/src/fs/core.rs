@@ -246,9 +246,9 @@ impl RuntimeCore {
             actor.writer_id.clone(),
             self.inner.config.execution_budget.content_writes(),
         )
-        .wall_clock(self.inner.wall_clock.clone())
-        .metadata_run_policy(self.inner.config.metadata_run_policy)
-        .metadata_segment_cache(self.metadata_segment_cache())
+        .with_wall_clock(self.inner.wall_clock.clone())
+        .with_metadata_run_policy(self.inner.config.metadata_run_policy)
+        .with_metadata_segment_cache(self.metadata_segment_cache())
     }
 }
 

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 
 #[derive(Debug, Clone, Copy)]
-enum KeyKind {
+enum KeyClass {
     Content = 0,
     Other = 1,
 }
@@ -40,7 +40,7 @@ struct RequestCounts {
 }
 
 impl RequestCounts {
-    fn operations(self, class: KeyKind) -> OperationCounts {
+    fn operations(self, class: KeyClass) -> OperationCounts {
         self.by_class[class as usize]
     }
 }
@@ -79,12 +79,12 @@ impl RequestLog {
         let content = self.content.counts();
         let other = self.other.counts();
         let mut counts = RequestCounts::default();
-        counts.by_class[KeyKind::Content as usize] = OperationCounts {
+        counts.by_class[KeyClass::Content as usize] = OperationCounts {
             head: content.heads,
             get: content.gets + content.gets_with_metadata,
             put: content.puts,
         };
-        counts.by_class[KeyKind::Other as usize] = OperationCounts {
+        counts.by_class[KeyClass::Other as usize] = OperationCounts {
             head: other.heads,
             get: other.gets + other.gets_with_metadata,
             put: other.puts,
@@ -198,7 +198,7 @@ fn assert_content_counts(
     bytes_read: usize,
 ) {
     assert_eq!(
-        counts.operations(KeyKind::Content),
+        counts.operations(KeyClass::Content),
         OperationCounts { head, get, put }
     );
     assert_eq!(counts.content_get_bytes, bytes_read);
@@ -539,7 +539,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .expect("upload content");
     let upload_counts = harness.recording.snapshot();
     assert_eq!(
-        upload_counts.operations(KeyKind::Content),
+        upload_counts.operations(KeyClass::Content),
         OperationCounts {
             head: 0,
             get: 0,
@@ -617,7 +617,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
     assert_eq!(completed.response.content_ref(), Some(&content_ref));
     let completion_counts = harness.recording.snapshot();
     assert_eq!(
-        completion_counts.operations(KeyKind::Content),
+        completion_counts.operations(KeyClass::Content),
         OperationCounts {
             head: 1,
             get: 0,
@@ -985,8 +985,8 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     assert_eq!(duplicate_receipt, primary_receipt);
     let completed_counts = recording.snapshot();
     assert_eq!(
-        completed_counts.operations(KeyKind::Content),
-        primary_counts.operations(KeyKind::Content)
+        completed_counts.operations(KeyClass::Content),
+        primary_counts.operations(KeyClass::Content)
     );
     assert_eq!(
         completed_counts.content_get_bytes,

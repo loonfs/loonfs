@@ -2454,7 +2454,7 @@ async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTr
 
 #[tokio::test]
 async fn provider_age_reserves_the_clock_margin_before_deletion() {
-    use crate::limits::GC_SAFETY_WINDOW_MS;
+    use crate::limits::GC_SAFETY_MARGIN_MS;
 
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("clock-margin").expect("namespace");
@@ -2481,8 +2481,8 @@ async fn provider_age_reserves_the_clock_margin_before_deletion() {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
         ..Default::default()
     };
-    let publication_bound = GC_MIN_GRACE_WINDOW_MS - GC_SAFETY_WINDOW_MS;
-    let now_ms = provider_stamp + publication_bound - 1 + GC_SAFETY_WINDOW_MS;
+    let publication_bound = GC_MIN_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
+    let now_ms = provider_stamp + publication_bound - 1 + GC_SAFETY_MARGIN_MS;
     let retained = gc_namespace(&store, None, &namespace_id, &options, &context(now_ms))
         .await
         .expect("pass before cutoff");

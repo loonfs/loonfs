@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::in_flight::STORE_READ_WAVE;
 use crate::metadata::LeafRevisionPreload;
 use crate::namespace::read_anchor::load_read_anchor;
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
@@ -96,7 +96,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
     bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let files = 4 * STORE_READS_IN_FLIGHT;
+    let files = 4 * STORE_READ_WAVE;
     for file in 0..files {
         write_file_bytes(
             &inner,
@@ -158,7 +158,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
     let concurrency = store.reads();
     assert!(concurrency.peak_in_flight > 1, "{concurrency:?}");
     assert!(
-        concurrency.peak_in_flight <= STORE_READS_IN_FLIGHT,
+        concurrency.peak_in_flight <= STORE_READ_WAVE,
         "{concurrency:?}"
     );
 }

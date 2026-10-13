@@ -70,7 +70,7 @@ async fn ticks_leave_active_sessions_alone_and_fold_idle_tails_then_cost_nothing
         server.tick_after(1).await;
         assert!(!store.take().is_empty(), "unfinished metadata is retried");
         assert!(server.wal_tail_objects(&namespace_id).await > 0);
-        server.tick_after(config.idle_fold_timeout_ms).await;
+        server.tick_after(config.idle_fold_after_ms).await;
         assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
         assert!(held.metadata_caught_up());
         store.reset();
@@ -192,7 +192,7 @@ async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval(
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_timeout_ms = 0;
+    config.idle_fold_after_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("fenced-compactor");
     server
@@ -260,7 +260,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(Some(GrepWorkerConfig::default()));
-    config.idle_fold_timeout_ms = 0;
+    config.idle_fold_after_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let moved = namespace_id("moved");
     let quiet = namespace_id("quiet");
@@ -339,7 +339,7 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(Some(GrepWorkerConfig::default()));
-    config.idle_fold_timeout_ms = 0;
+    config.idle_fold_after_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.sweep.inner.namespaces;
     let namespace_id = namespace_id("idle-close");
@@ -363,7 +363,7 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
         .writer_epoch;
     store.reset();
     server
-        .tick_after(config.idle_session_timeout_ms - config.tick_interval_ms)
+        .tick_after(config.idle_session_close_after_ms - config.tick_interval_ms)
         .await;
     assert_eq!(
         namespaces.held_ids().len(),
@@ -383,7 +383,9 @@ async fn quiet_sessions_close_only_after_the_idle_threshold_and_all_callers_rele
     server.tick_after(1).await;
     assert_eq!(namespaces.held_ids().len(), 1);
     assert!(store.take().is_empty());
-    server.tick_after(config.idle_session_timeout_ms + 1).await;
+    server
+        .tick_after(config.idle_session_close_after_ms + 1)
+        .await;
     server.sweep.tick().await;
     store.reset();
     server.sweep.tick().await;
@@ -426,8 +428,8 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(None);
-    config.idle_session_timeout_ms = 1;
-    config.idle_fold_timeout_ms = 60_000;
+    config.idle_session_close_after_ms = 1;
+    config.idle_fold_after_ms = 60_000;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.sweep.inner.namespaces;
     let aborted = namespace_id("aborted-upload");
@@ -470,7 +472,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     assert!(server.wal_tail_objects(&unfolded).await > 0);
     store.reset();
     server
-        .tick_after(config.idle_fold_timeout_ms - config.tick_interval_ms - 1)
+        .tick_after(config.idle_fold_after_ms - config.tick_interval_ms - 1)
         .await;
     assert!(
         store.take().is_empty(),

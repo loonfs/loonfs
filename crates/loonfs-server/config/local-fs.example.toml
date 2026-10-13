@@ -103,7 +103,7 @@ memory_limit_bytes = 4294967296
 # 1800000 (30 minutes). Each held session keeps its publisher, engine state,
 # head position, and queue capacities. A write after close opens a new session
 # whose first publish acquires a new writer epoch.
-#idle_session_timeout_ms = 1800000
+#idle_session_close_after_ms = 1800000
 
 # Minimum interval between checks for a successor to a cached manifest, in
 # milliseconds. Zero checks on every read. Defaults to 1000.
@@ -113,7 +113,7 @@ memory_limit_bytes = 4294967296
 # tail that is below the fold thresholds, in milliseconds. The maintenance
 # sweep and explicit `metadata` requests use the same period. Zero turns the
 # rule off. Defaults to 900000 (15 minutes).
-#idle_fold_timeout_ms = 900000
+#idle_fold_after_ms = 900000
 
 # Direct-put needs no configuration. It is offered only where the adapter can
 # presign a create-only PUT and report a durable checksum, and the endpoint is

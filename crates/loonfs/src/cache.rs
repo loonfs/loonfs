@@ -263,7 +263,7 @@ impl RuntimeCore {
         });
         (
             self.reader_engine(namespace_id)
-                .authorization_head(self.runtime_read_context(live)),
+                .with_authorization_head(self.runtime_read_context(live)),
             read_context,
         )
     }

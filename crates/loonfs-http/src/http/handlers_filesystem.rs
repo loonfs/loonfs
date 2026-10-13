@@ -22,7 +22,7 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    payload_kind, ChangeSeq, DownloadOptions, ErrorCode, InodeId, ListOptions, Namespace, PinId,
+    payload_class, ChangeSeq, DownloadOptions, ErrorCode, InodeId, ListOptions, Namespace, PinId,
     ReadOnly, ReadView, StatOptions, TraceMode,
 };
 #[cfg(feature = "openapi")]
@@ -573,7 +573,7 @@ pub(super) async fn create_commit(
             .map(|content_ref| content_ref.size_bytes)
             .fold(0, u64::saturating_add);
         Some((
-            payload_kind(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
+            payload_class(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
             content_preparation_for_puts(
                 &state.namespaces,
                 &namespace,

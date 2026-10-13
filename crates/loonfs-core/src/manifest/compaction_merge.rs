@@ -6,7 +6,7 @@ use super::index_block_load::load_segment_index_for_compaction;
 use super::streaming_compaction::manifest_load_failure;
 use super::validate::validate_manifest_row_seq_range;
 use crate::error::Result;
-use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::in_flight::STORE_READ_WAVE;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
@@ -334,7 +334,7 @@ where
         .iter_mut()
         .filter(|iterator| iterator.needs_fill())
         .collect();
-    for wave in hungry.chunks_mut(STORE_READS_IN_FLIGHT) {
+    for wave in hungry.chunks_mut(STORE_READ_WAVE) {
         futures::future::try_join_all(
             wave.iter_mut()
                 .map(|iterator| Box::pin(iterator.fill(loader, max_decoded_bytes))),
@@ -395,7 +395,7 @@ mod tests {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("name key"),
-            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("display name"),
             },
             child_inode_id: InodeId(42),
@@ -417,7 +417,7 @@ mod tests {
             child_created_at_ms: 4_200,
             committed_seq: ChangeSeq(bind_seq + 1),
             delta_index: 0,
-            state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         })
     }
 

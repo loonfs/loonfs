@@ -226,7 +226,7 @@ impl Maintenance {
 
     /// Folds the WAL tail at the WAL object threshold, at the inline byte
     /// threshold when the writer knows the count, or once the tail's newest
-    /// commit is `idle_fold_timeout_ms` old on this handle's wall clock. Then
+    /// commit is `idle_fold_after_ms` old on this handle's wall clock. Then
     /// runs one bounded compaction step. A fold waits for a fold permit from
     /// the runtime's execution budget, and a step that finds work waits for
     /// a compaction permit from it.
@@ -270,7 +270,7 @@ impl Maintenance {
         let wal_caught_up = match response.wal_fold {
             WalFoldStepOutcome::Folded { .. } => true,
             WalFoldStepOutcome::NotNeeded => {
-                options.idle_fold_timeout_ms == 0 || status.wal_tail_newest_commit_at_ms.is_none()
+                options.idle_fold_after_ms == 0 || status.wal_tail_newest_commit_at_ms.is_none()
             }
             WalFoldStepOutcome::AlreadyPublished { .. }
             | WalFoldStepOutcome::RetriesExhausted { .. } => false,

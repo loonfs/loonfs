@@ -6,7 +6,7 @@ use super::{
     DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     TombstoneRowAction,
 };
-use loonfs_types::format::manifest::DirentryBindingStatus;
+use loonfs_types::format::manifest::DirentryBindingState;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta};
 use loonfs_types::{ActorId, ChangeSeq, CommitId};
 
@@ -98,7 +98,7 @@ impl MetadataState {
                     child_created_at_ms: *child_created_at_ms,
                     committed_seq,
                     delta_index: *delta_index,
-                    state: DirentryBindingStatus::Bound {
+                    state: DirentryBindingState::Bound {
                         display_name: display_name.clone(),
                     },
                 });
@@ -122,7 +122,7 @@ impl MetadataState {
                     child_created_at_ms: *child_created_at_ms,
                     committed_seq,
                     delta_index: *delta_index,
-                    state: DirentryBindingStatus::Unbound,
+                    state: DirentryBindingState::Unbound,
                 });
             }
             WalDelta::AppendFileRevision {

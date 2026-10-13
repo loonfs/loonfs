@@ -131,7 +131,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "grep_gc",
     "head_drift",
     "head_seq",
-    "idle_session_timeout_ms",
+    "idle_session_close_after_ms",
     "include_attributes",
     "inode_binding",
     "inode_id",
@@ -3647,7 +3647,7 @@ mod direct_download {
                 Ok(response.map(|body| Body::new(body.map_err(TransportError::body))))
             }
         });
-        let client = Client::new_with_transport(
+        let client = Client::with_transport(
             ClientConfig {
                 server_url: "http://127.0.0.1".to_owned(),
                 auth_token: Some("test-token".into()),

@@ -1121,7 +1121,7 @@ mod tests {
 
     use super::*;
     use crate::metrics::{
-        DefaultMetricsRecorder, KeyKind, MetricValue, MetricsSnapshot, ObjectStoreOperation,
+        DefaultMetricsRecorder, KeyClass, MetricValue, MetricsSnapshot, ObjectStoreOperation,
         ObjectStoreResultKind, PutModeKind, VecObjectStoreMetricsRecorder,
     };
 
@@ -1130,13 +1130,13 @@ mod tests {
         result: ObjectStoreResultKind,
         attempts: u32,
     ) -> ObjectStoreMetricSample {
-        classified_sample(operation, result, KeyKind::Content, attempts)
+        classified_sample(operation, result, KeyClass::Content, attempts)
     }
 
     fn classified_sample(
         operation: ObjectStoreOperation,
         result: ObjectStoreResultKind,
-        key_class: KeyKind,
+        key_class: KeyClass,
         attempts: u32,
     ) -> ObjectStoreMetricSample {
         ObjectStoreMetricSample {
@@ -1342,10 +1342,10 @@ mod tests {
         let bridge = instruments.object_store_recorder().expect("bridge");
 
         for (result, key_class) in [
-            (ObjectStoreResultKind::Ok, KeyKind::WalObject),
-            (ObjectStoreResultKind::NotFound, KeyKind::WalObject),
-            (ObjectStoreResultKind::NotFound, KeyKind::WalObject),
-            (ObjectStoreResultKind::Ok, KeyKind::NamespaceManifest),
+            (ObjectStoreResultKind::Ok, KeyClass::WalObject),
+            (ObjectStoreResultKind::NotFound, KeyClass::WalObject),
+            (ObjectStoreResultKind::NotFound, KeyClass::WalObject),
+            (ObjectStoreResultKind::Ok, KeyClass::NamespaceManifest),
         ] {
             bridge.record(classified_sample(
                 ObjectStoreOperation::Get,

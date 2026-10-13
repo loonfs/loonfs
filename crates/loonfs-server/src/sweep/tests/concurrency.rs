@@ -24,7 +24,7 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_timeout_ms = 0;
+    config.idle_fold_after_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -99,7 +99,7 @@ async fn a_publish_during_metadata_maintenance_stays_due() {
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_timeout_ms = 0;
+    config.idle_fold_after_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -156,7 +156,7 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         ));
         let mut config = sweep_config(None);
         config.max_concurrent_maintenance = slots;
-        config.idle_fold_timeout_ms = 0;
+        config.idle_fold_after_ms = 0;
         let server = SweepServer::start(store.clone(), &config, 0).await;
         server
             .runtime
@@ -277,7 +277,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_timeout_ms = 0;
+    config.idle_fold_after_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime

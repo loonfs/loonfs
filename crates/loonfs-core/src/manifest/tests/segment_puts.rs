@@ -5,7 +5,7 @@ use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::manifest::row::manifest_rows_for_family;
 use crate::manifest::runs::MANIFEST_ROW_FAMILIES;
 use crate::namespace::control::load_current_manifest;
-use crate::namespace::writer_epoch::claim_writer_epoch;
+use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::test_support::ops::{create, write_file_bytes};
 use crate::time::StdMonotonicTimer;
 use crate::MutationContext;
@@ -39,7 +39,7 @@ async fn seed_tail(store: &LocalFsStore, namespace_id: &NamespaceId) {
     create(store, namespace_id, &context)
         .await
         .expect("namespace");
-    claim_writer_epoch(store, namespace_id, &context)
+    acquire_writer_epoch(store, namespace_id, &context)
         .await
         .expect("writer");
     for index in 0..36 {

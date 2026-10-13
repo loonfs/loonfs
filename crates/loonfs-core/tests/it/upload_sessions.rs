@@ -1266,7 +1266,7 @@ mod direct_multipart {
     #[tokio::test]
     async fn a_refused_assembly_stays_open_without_object_evidence() {
         let temp_dir = tempdir().expect("tempdir");
-        let store = FakeMultipartStore::new_with_enforcement(
+        let store = FakeMultipartStore::with_enforcement(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             MultipartChecksumEnforcement::Precondition,
         );

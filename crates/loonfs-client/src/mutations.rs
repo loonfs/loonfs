@@ -2,9 +2,7 @@
 
 use super::*;
 use crate::transport::SendPolicy;
-use crate::uploads::staging::{
-    PreparedContent, PreparedContentKind, PutFileStreamOptions, UploadContinuity,
-};
+use crate::uploads::staging::{PreparedContent, PreparedContentKind, UploadContinuity};
 use loonfs_types::options::{AccessState, AttributeChanges};
 use loonfs_types::ActorId;
 
@@ -86,7 +84,7 @@ impl Client {
         source: PayloadSource,
         actor: &ActorId,
     ) -> Result<Commit> {
-        self.put_file_stream_with_options(spec, source, actor, &PutFileStreamOptions::default())
+        self.put_file_stream_with_options(spec, source, actor, &PutFileOptions::default())
             .await
     }
 
@@ -103,30 +101,43 @@ impl Client {
     /// At every size, retain [`Self::prepare_content_stream`]'s result and retry with
     /// [`Self::put_file_prepared_with_options`], the same commit ID, and
     /// unchanged options.
-    ///
-    /// A journal in `options` records the complete commit request before
-    /// submission for every transport. Multipart uploads also record session
-    /// geometry and parts. Save the request and actor and replay them with
-    /// [`Self::commit`] after an interruption; it carries the inline bytes or
-    /// uploaded reference and commit ID.
-    ///
-    /// A resumed multipart attempt still receives the source from the
-    /// beginning because the final checksum covers the complete object.
     pub async fn put_file_stream_with_options(
         &self,
         spec: &NamespacePath,
         source: PayloadSource,
         actor: &ActorId,
-        options: &PutFileStreamOptions<'_>,
+        options: &PutFileOptions,
+    ) -> Result<Commit> {
+        self.put_file_stream_continuing(spec, source, actor, options, UploadContinuity::default())
+            .await
+    }
+
+    /// Writes a stream with optional multipart resume state.
+    ///
+    /// The journal records the complete commit request before submission for
+    /// every transport. Multipart uploads also record session geometry and parts.
+    /// Save the request and actor and replay them with [`Self::commit`] after an
+    /// interruption; it carries the inline bytes or uploaded reference and commit ID.
+    ///
+    /// A resumed multipart attempt still receives the source from the
+    /// beginning because the final checksum covers the complete object.
+    pub async fn put_file_stream_resumable(
+        &self,
+        spec: &NamespacePath,
+        source: PayloadSource,
+        actor: &ActorId,
+        options: &PutFileOptions,
+        journal: &dyn PutFileJournal,
+        resume: Option<&MultipartUploadResume>,
     ) -> Result<Commit> {
         self.put_file_stream_continuing(
             spec,
             source,
             actor,
-            &options.options,
+            options,
             UploadContinuity {
-                resume: options.resume,
-                journal: options.journal,
+                resume,
+                journal: Some(journal),
             },
         )
         .await
@@ -204,7 +215,7 @@ impl Client {
     /// Retry with a clone of the prepared content, the same explicit
     /// `options.commit.commit_id`, and unchanged options. A missing commit ID
     /// generates a new one on each call. Replay is bounded by server receipt
-    /// retention. For process recovery, pass a journal to [`Self::put_file_stream_with_options`]
+    /// retention. For process recovery, use [`Self::put_file_stream_resumable`]
     /// to save the full request before submission.
     pub async fn put_file_prepared_with_options(
         &self,
@@ -809,7 +820,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let max_attempts = DEFAULT.max_retries as usize + 1;
         let transport = crate::scripted_transport::failures(max_attempts);
-        let retrying = Client::new_with_transport(
+        let retrying = Client::with_transport(
             ClientConfig {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,
@@ -828,7 +839,7 @@ mod tests {
         assert_eq!(transport.attempts(), max_attempts);
 
         let transport = crate::scripted_transport::failures(1);
-        let single_shot = Client::new_with_transport(
+        let single_shot = Client::with_transport(
             ClientConfig {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,
@@ -847,7 +858,7 @@ mod tests {
     }
 
     fn retry_policy_client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-        Client::new_with_transport(
+        Client::with_transport(
             ClientConfig {
                 server_url: "http://example.invalid".to_owned(),
                 auth_token: None,

@@ -13,7 +13,7 @@ use loonfs_types::ManifestNo;
 async fn namespace_listing_costs_one_request_per_page() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = RecordingStore::new(
-        LocalFsStore::new_with_key_prefix(temp_dir.path(), Some("tenant-a")).expect("local store"),
+        LocalFsStore::with_key_prefix(temp_dir.path(), Some("tenant-a")).expect("local store"),
         KeyPredicate::any(),
     );
     let namespace_ids: Vec<_> = (0..6)

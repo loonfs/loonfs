@@ -21,7 +21,7 @@ pub type LatencyStore<S> = InterceptStore<S, LatencyInterceptor>;
 
 impl<S> InterceptStore<S, LatencyInterceptor> {
     pub fn new(inner: S, keys: KeyPredicate, latency: Duration) -> Self {
-        Self::new_with_interceptor(
+        Self::with_interceptor(
             inner,
             LatencyInterceptor {
                 keys,

@@ -7,7 +7,7 @@ mod output;
 mod summaries;
 
 use crate::args::CommandKind;
-use crate::commands::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorOutcome};
+use crate::commands::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
 use crate::config::ConfigSource;
 use crate::error::CliError;
 use loonfs_types::api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
@@ -36,7 +36,7 @@ pub(crate) use summaries::{
 mod tests {
     use super::{human_error, human_success, json_error, json_success, AttributeValue};
     use crate::args::CommandKind;
-    use crate::commands::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorOutcome};
+    use crate::commands::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
     use crate::config::{ProfileConfig, StoreConfig};
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
@@ -190,7 +190,7 @@ mod tests {
             data: CommandData::Doctor {
                 checks: vec![DoctorCheck {
                     name: "store_probe".to_owned(),
-                    status: DoctorOutcome::Failed,
+                    status: DoctorStatus::Failed,
                     message: "store probe probe_poison: 4 of 4 checks failed".to_owned(),
                     request_id: None,
                     store_probe: Some(StoreProbeResponse {
@@ -632,7 +632,7 @@ mod tests {
             data: CommandData::Doctor {
                 checks: vec![DoctorCheck {
                     name: "auth".to_owned(),
-                    status: DoctorOutcome::Failed,
+                    status: DoctorStatus::Failed,
                     message: "token rejected\ncheck the profile".to_owned(),
                     request_id: Some("req_doctor".to_owned()),
                     store_probe: None,

@@ -10,7 +10,7 @@ use crate::manifest::{HeadStateCache, MetadataSegmentCache};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
-use crate::namespace::writer_epoch::claim_writer;
+use crate::namespace::writer_epoch::acquire_writer;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
 use crate::protocol::{
@@ -23,7 +23,7 @@ use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
-use loonfs_types::format::control::ClaimedWriter;
+use loonfs_types::format::control::AcquiredWriter;
 use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
@@ -615,14 +615,14 @@ pub struct ResultingReadState {
 /// state treats each one-shot commit as a separate session.
 #[derive(Debug, Default)]
 pub enum WriterSessionStatus {
-    /// No epoch yet: the session's first publish claims one.
+    /// No epoch yet: the session's first publish acquires one.
     #[default]
-    Unclaimed,
-    /// Writer epoch claimed on the first publish and reused for the rest of
+    Unacquired,
+    /// Writer epoch acquired on the first publish and reused for the rest of
     /// the session.
-    Claimed(ClaimedWriter),
+    Acquired(AcquiredWriter),
     /// Permanent fencing record for this session. Later publishes return
-    /// `writer_fenced` without accessing the store. Claiming a new writer epoch
+    /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
     /// requires an explicit caller action.
     Fenced(WriterFence),
 }
@@ -674,7 +674,7 @@ impl NamespaceCommitEngine {
     /// An engine that keeps its WAL tail between units in a head-state cache
     /// of its own, as a runtime's engine does in the shared one.
     #[cfg(test)]
-    pub(crate) fn new_with_unshared_head_state(namespace_id: NamespaceId) -> Self {
+    pub(crate) fn with_unshared_head_state(namespace_id: NamespaceId) -> Self {
         Self::new(
             namespace_id,
             std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
@@ -860,19 +860,19 @@ impl NamespaceCommitEngine {
         &mut self,
         store: &S,
         context: &MutationContext,
-    ) -> Result<ClaimedWriter> {
-        let already_claimed = match &*self.lock_session() {
+    ) -> Result<AcquiredWriter> {
+        let already_acquired = match &*self.lock_session() {
             WriterSessionStatus::Fenced(fence) => {
                 return Err(CoreError::WriterFenced(fence.clone()))
             }
-            WriterSessionStatus::Claimed(claimed_writer) => Some(claimed_writer.clone()),
-            WriterSessionStatus::Unclaimed => None,
+            WriterSessionStatus::Acquired(acquired_writer) => Some(acquired_writer.clone()),
+            WriterSessionStatus::Unacquired => None,
         };
-        if let Some(claimed_writer) = already_claimed {
-            return Ok(claimed_writer);
+        if let Some(acquired_writer) = already_acquired {
+            return Ok(acquired_writer);
         }
-        let (claimed_writer, anchor) =
-            claim_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
+        let (acquired_writer, anchor) =
+            acquire_writer(store, &self.namespace_id, context, Arc::clone(&self.timer)).await?;
         self.acquired_anchor = Some(anchor);
         let mut session = self.lock_session();
         if let WriterSessionStatus::Fenced(fence) = &*session {
@@ -880,8 +880,8 @@ impl NamespaceCommitEngine {
             // the epoch. Preserve the fenced state.
             return Err(CoreError::WriterFenced(fence.clone()));
         }
-        *session = WriterSessionStatus::Claimed(claimed_writer.clone());
-        Ok(claimed_writer)
+        *session = WriterSessionStatus::Acquired(acquired_writer.clone());
+        Ok(acquired_writer)
     }
 
     /// Deletes the namespace using this writer session (format spec,
@@ -898,12 +898,12 @@ impl NamespaceCommitEngine {
         context: &MutationContext,
     ) -> Result<DeleteNamespaceResponse> {
         let deadline = Deadline::start(Arc::clone(&self.timer));
-        let claimed_writer = self.session_writer_epoch(store, context).await?;
+        let acquired_writer = self.session_writer_epoch(store, context).await?;
         let deleted = crate::namespace::delete::delete_namespace(
             store,
             &self.namespace_id,
             options,
-            claimed_writer,
+            acquired_writer,
             context,
             &deadline,
             crate::manifest::read_working_memory(self.segment_cache.as_deref()),
@@ -936,7 +936,7 @@ impl NamespaceCommitEngine {
         }
 
         let candidate_count = candidates.len();
-        let claimed_writer = match self.session_writer_epoch(store, context).await {
+        let acquired_writer = match self.session_writer_epoch(store, context).await {
             Ok(value) => value,
             Err(error) => {
                 return NamespaceCommitEnginePublishResult {
@@ -993,7 +993,7 @@ impl NamespaceCommitEngine {
             store,
             self.segment_cache.as_deref(),
             &self.namespace_id,
-            claimed_writer,
+            acquired_writer,
             cached_projection,
             acquired_anchor,
         )
@@ -1474,8 +1474,7 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        let mut engine_a =
-            NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone());
+        let mut engine_a = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
         let first = engine_a
             .publish_batch(
                 &store,
@@ -1630,9 +1629,8 @@ mod tests {
             .expect("bootstrap");
 
         let session = SharedWriterSessionStatus::default();
-        let mut engine_a1 =
-            NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
-                .writer_session(Arc::clone(&session));
+        let mut engine_a1 = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
+            .writer_session(Arc::clone(&session));
         engine_a1
             .publish_batch(
                 &store,
@@ -1740,7 +1738,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
+        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
             .monotonic_timer(timer.clone());
         for (name, advance_ms) in [
             ("alpha", 0),
@@ -1811,7 +1809,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
+        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
             .monotonic_timer(timer.clone());
         let first = publish_one(&mut engine, &store, &writer, "alpha").await;
         let basis = first
@@ -1891,7 +1889,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
+        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
             .monotonic_timer(timer.clone());
         publish_one(&mut engine, &store, &writer, "alpha").await;
         timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
@@ -1972,7 +1970,7 @@ mod tests {
             .await
             .expect("bootstrap");
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-        let mut engine = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone())
+        let mut engine = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone())
             .monotonic_timer(timer.clone())
             .segment_cache(Arc::new(MetadataSegmentCache::unshared(usize::MAX)));
         publish_one(&mut engine, store, &writer, "alpha").await;
@@ -2020,7 +2018,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = gated_store(&directory, KeyPredicate::new(|_| false));
         let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-        crate::namespace::writer_epoch::claim_writer_epoch(
+        crate::namespace::writer_epoch::acquire_writer_epoch(
             &store,
             &namespace_id,
             &context("writer-b"),

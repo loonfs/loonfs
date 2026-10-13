@@ -15,7 +15,7 @@ use super::super::streaming_compaction::{
     MetadataCompactionSpec, MetadataMergeReport,
 };
 use super::*;
-use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::in_flight::STORE_READ_WAVE;
 use crate::time::Deadline;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
@@ -1513,7 +1513,7 @@ async fn install_synthetic_bindings_base(
             crate::metadata::DirentryBindingRecord {
                 parent_inode_id: parent,
                 name_key: NameKey::parse(&name).expect("name key"),
-                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                 },
                 child_inode_id: InodeId(100_000 + index),
@@ -1534,7 +1534,7 @@ async fn install_synthetic_bindings_base(
                 child_created_at_ms: 4_200,
                 committed_seq: ChangeSeq(2),
                 delta_index: delta,
-                state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
+                state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
             },
         ));
     }
@@ -2027,7 +2027,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
     let expected_gets = input_bytes.div_ceil(ITERATOR_FETCH_TARGET_BYTES);
     assert!((expected_gets..=expected_gets + indexes.len()).contains(&data_gets));
     assert!(data_gets * 8 < old_gets);
-    assert!((2..=STORE_READS_IN_FLIGHT).contains(&store.reads().peak_in_flight));
+    assert!((2..=STORE_READ_WAVE).contains(&store.reads().peak_in_flight));
 
     let local = store.inner().inner();
     let mut actual = Vec::new();
@@ -2087,7 +2087,7 @@ async fn a_merge_reads_byte_sized_spans_concurrently_within_its_configured_decod
     assert_eq!(data_gets, iterators.len());
     assert!(decoded_bytes <= max_decoded_input_bytes);
     assert!(decoded_bytes > max_decoded_input_bytes / 2);
-    assert!(store.reads().peak_in_flight <= STORE_READS_IN_FLIGHT);
+    assert!(store.reads().peak_in_flight <= STORE_READ_WAVE);
 }
 
 #[tokio::test]
@@ -2125,7 +2125,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
 
     let reads = store.reads();
     assert!(
-        reads.peak_in_flight <= STORE_READS_IN_FLIGHT,
+        reads.peak_in_flight <= STORE_READ_WAVE,
         "the job overlapped {} reads at once",
         reads.peak_in_flight
     );
@@ -2184,7 +2184,7 @@ async fn a_merge_keeps_its_reads_and_its_decoded_blocks_bounded() {
     .await
     .expect("merge the window inside a step");
     assert!(
-        store.reads().peak_in_flight <= STORE_READS_IN_FLIGHT,
+        store.reads().peak_in_flight <= STORE_READ_WAVE,
         "the step's merge overlapped {} reads at once",
         store.reads().peak_in_flight
     );

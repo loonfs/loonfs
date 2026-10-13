@@ -499,8 +499,8 @@ impl loonfs::WallClock for FixedWallClock {
 
 #[tokio::test]
 async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_rule_off() {
-    let default_idle_ms = loonfs::MaintainMetadataOptions::default().idle_fold_timeout_ms;
-    for (idle_fold_timeout_ms, expected) in [
+    let default_idle_ms = loonfs::MaintainMetadataOptions::default().idle_fold_after_ms;
+    for (idle_fold_after_ms, expected) in [
         (0, loonfs_types::WalFoldStepOutcome::NotNeeded),
         (
             default_idle_ms,
@@ -536,7 +536,7 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
         writer.shutdown().await.expect("writer shutdown");
 
         let harness = start_server(loonfs_server::ServerConfig {
-            idle_fold_timeout_ms,
+            idle_fold_after_ms,
             maintenance: loonfs_server::JobMode::ServeOnly,
             ..test_config(store_root, "loonfs-server-idle", key_prefix)
         })
@@ -555,7 +555,7 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
         assert_eq!(
             upkeep(&response).wal_fold,
             expected,
-            "idle_fold_timeout_ms = {idle_fold_timeout_ms}"
+            "idle_fold_after_ms = {idle_fold_after_ms}"
         );
         harness.server.abort();
     }

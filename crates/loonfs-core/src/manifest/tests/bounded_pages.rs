@@ -25,7 +25,7 @@ fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow> {
             MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse(&name).expect("name"),
-                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                     display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
                 },
                 child_inode_id: InodeId(index as u64 + 2),
@@ -510,7 +510,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         };
         let name = format!("file-{index:06}-{}", "x".repeat(200));
         binding.name_key = NameKey::parse(&name).expect("name");
-        binding.state = loonfs_types::format::manifest::DirentryBindingStatus::Bound {
+        binding.state = loonfs_types::format::manifest::DirentryBindingState::Bound {
             display_name: loonfs_types::DisplayName::parse(&name).expect("display name"),
         };
     }

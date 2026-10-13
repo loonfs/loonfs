@@ -848,14 +848,14 @@ async fn upload_sessions_belong_to_their_subject() {
     let session = engine.begin_upload(Some(&ada)).await.expect("begin");
     assert_eq!(
         engine
-            .load_upload_status(&session.upload_id, Some(&bob))
+            .get_upload_status(&session.upload_id, Some(&bob))
             .await
             .expect_err("hidden session")
             .code(),
         ErrorCode::UploadNotFound
     );
     engine
-        .load_upload_status(&session.upload_id, Some(&ada))
+        .get_upload_status(&session.upload_id, Some(&ada))
         .await
         .expect("owner session");
     let unrestricted = NamespaceId::parse("unrestricted").expect("namespace");
@@ -865,7 +865,7 @@ async fn upload_sessions_belong_to_their_subject() {
     let engine = namespace_engine(&store, &unrestricted, &context);
     let session = engine.begin_upload(Some(&ada)).await.expect("begin");
     engine
-        .load_upload_status(&session.upload_id, None)
+        .get_upload_status(&session.upload_id, None)
         .await
         .expect("subject ignored");
 }
@@ -1195,7 +1195,7 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
     )
     .await;
     let head = read_context(&store, &namespace_id).await;
-    let viewer = read_engine(&store, &namespace_id, "viewer").authorization_head(head.clone());
+    let viewer = read_engine(&store, &namespace_id, "viewer").with_authorization_head(head.clone());
     assert_eq!(
         viewer
             .read_file("/team/file", &snapshot, None)
@@ -1212,7 +1212,8 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
             .code(),
         ErrorCode::Forbidden
     );
-    let finance = read_engine(&store, &namespace_id, "finance").authorization_head(head.clone());
+    let finance =
+        read_engine(&store, &namespace_id, "finance").with_authorization_head(head.clone());
     assert_eq!(
         finance
             .read_file("/team/file", &snapshot, None)
@@ -1221,7 +1222,7 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
             .bytes,
         b"body"
     );
-    let historian = read_engine(&store, &namespace_id, "historian").authorization_head(head);
+    let historian = read_engine(&store, &namespace_id, "historian").with_authorization_head(head);
     let listing = historian
         .list_path_page("/team", read_page(10), ListOptions::default(), &snapshot)
         .await

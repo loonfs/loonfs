@@ -76,7 +76,7 @@ pub struct BindingConfig {
     pub inline_content: InlineContentPolicy,
     pub content_token_secret: SecretString,
     pub request_deadline_ms: u64,
-    pub idle_fold_timeout_ms: u64,
+    pub idle_fold_after_ms: u64,
     pub store_kind: ConfiguredObjectStoreKind,
     pub auth_policy: AuthPolicy,
 }

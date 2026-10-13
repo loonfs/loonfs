@@ -162,7 +162,7 @@ impl<S> FaultInjectingObjectStore<S> {
                         op,
                         "put_lost_success_inner_failed",
                         Some(ObjectStoreFault::PutSucceedsButResponseLost),
-                        result_kind(&result),
+                        result_class(&result),
                     );
                     result
                 }
@@ -205,7 +205,7 @@ impl<S> FaultInjectingObjectStore<S> {
                 if result.is_ok() {
                     self.remember_successful_write(key);
                 }
-                self.push_trace(op, "put", None, result_kind(&result));
+                self.push_trace(op, "put", None, result_class(&result));
                 result
             }
         }
@@ -224,7 +224,7 @@ where
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let op = self.next_object_op(ObjectOperationKind::Head, key);
         let result = self.inner.head(key).await;
-        self.push_trace(op, "head", None, result_kind(&result));
+        self.push_trace(op, "head", None, result_class(&result));
         result
     }
 
@@ -270,7 +270,7 @@ where
                     op,
                     "get_corrupt_bytes",
                     Some(ObjectStoreFault::CorruptObjectBytes),
-                    result_kind(&result),
+                    result_class(&result),
                 );
                 result
             }
@@ -288,7 +288,7 @@ where
             }
             None => {
                 let result = self.inner.get(key, range).await;
-                self.push_trace(op, "get", None, result_kind(&result));
+                self.push_trace(op, "get", None, result_class(&result));
                 result
             }
         }
@@ -330,7 +330,7 @@ where
                     op,
                     "get_with_metadata_corrupt_bytes",
                     Some(ObjectStoreFault::CorruptObjectBytes),
-                    result_kind(&result),
+                    result_class(&result),
                 );
                 result
             }
@@ -348,7 +348,7 @@ where
             }
             None => {
                 let result = self.inner.get_with_metadata(key).await;
-                self.push_trace(op, "get_with_metadata", None, result_kind(&result));
+                self.push_trace(op, "get_with_metadata", None, result_class(&result));
                 result
             }
         }
@@ -379,7 +379,7 @@ where
         if result.is_ok() {
             self.remember_successful_write(key);
         }
-        self.push_trace(op, "put_streamed", None, result_kind(&result));
+        self.push_trace(op, "put_streamed", None, result_class(&result));
         result
     }
 
@@ -401,7 +401,7 @@ where
                 self.remember_successful_write(key);
                 SimEventOutcome::Ok
             }
-            Err(ImmutableWriteError::Transport { source, .. }) => error_result_kind(source),
+            Err(ImmutableWriteError::Transport { source, .. }) => error_result_class(source),
             Err(_) => SimEventOutcome::Error {
                 class: "precondition_failed".to_owned(),
             },
@@ -424,7 +424,7 @@ where
                 self.remember_successful_write(key);
                 SimEventOutcome::Ok
             }
-            Err(ImmutableWriteError::Transport { source, .. }) => error_result_kind(source),
+            Err(ImmutableWriteError::Transport { source, .. }) => error_result_class(source),
             Err(_) => SimEventOutcome::Error {
                 class: "precondition_failed".to_owned(),
             },
@@ -465,7 +465,7 @@ where
             }
             None => {
                 let result = self.inner.delete(key).await;
-                self.push_trace(op, "delete", None, result_kind(&result));
+                self.push_trace(op, "delete", None, result_class(&result));
                 result
             }
         }
@@ -494,7 +494,7 @@ where
                     op,
                     "list_omits_recent_object",
                     Some(ObjectStoreFault::ListOmitsRecentObject),
-                    result_kind(&result),
+                    result_class(&result),
                 );
                 result
             }
@@ -512,7 +512,7 @@ where
             }
             None => {
                 let result = self.inner.list_prefix(prefix).await;
-                self.push_trace(op, "list_prefix", None, result_kind(&result));
+                self.push_trace(op, "list_prefix", None, result_class(&result));
                 result
             }
         }
@@ -532,7 +532,7 @@ where
             .inner
             .list_child_prefixes(prefix, start_after, limit)
             .await;
-        self.push_trace(op, "list_child_prefixes", None, result_kind(&result));
+        self.push_trace(op, "list_child_prefixes", None, result_class(&result));
         result
     }
 
@@ -656,7 +656,7 @@ impl Stream for TracedListStream {
                 }
                 Poll::Ready(Some(Ok(key))) => return Poll::Ready(Some(Ok(key))),
                 Poll::Ready(Some(Err(error))) => {
-                    self.finish(error_result_kind(&error));
+                    self.finish(error_result_class(&error));
                     return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(None) => {
@@ -742,14 +742,14 @@ fn recent_key_for_prefix<'a>(prefix: &str, recent_writes: &'a [String]) -> Optio
         .map(String::as_str)
 }
 
-fn result_kind<T>(result: &Result<T, ObjectStoreError>) -> SimEventOutcome {
+fn result_class<T>(result: &Result<T, ObjectStoreError>) -> SimEventOutcome {
     match result {
         Ok(_) => SimEventOutcome::Ok,
-        Err(error) => error_result_kind(error),
+        Err(error) => error_result_class(error),
     }
 }
 
-fn error_result_kind(error: &ObjectStoreError) -> SimEventOutcome {
+fn error_result_class(error: &ObjectStoreError) -> SimEventOutcome {
     match error {
         ObjectStoreError::NotFound { .. } => SimEventOutcome::Error {
             class: "not_found".to_owned(),

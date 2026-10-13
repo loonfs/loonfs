@@ -536,7 +536,7 @@ fn capability_group(heading: &str, rows: &[String]) -> String {
 fn human_doctor(checks: &[DoctorCheck], mode: Option<&str>) -> String {
     let mut lines = Vec::new();
     for check in checks {
-        if check.status == DoctorOutcome::Failed {
+        if check.status == DoctorStatus::Failed {
             if let Some(response) = &check.store_probe {
                 let groups = store_probe_failure_group_lines(response);
                 if !groups.is_empty() {
@@ -546,7 +546,7 @@ fn human_doctor(checks: &[DoctorCheck], mode: Option<&str>) -> String {
                 }
             }
         }
-        if check.status == DoctorOutcome::Failed {
+        if check.status == DoctorStatus::Failed {
             lines.push(format!("{}: failed", check.name));
             let detail = single_line(&check.message);
             let request_id = request_id_suffix(check.request_id.as_deref(), mode);

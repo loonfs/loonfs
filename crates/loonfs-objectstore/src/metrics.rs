@@ -50,9 +50,9 @@ pub struct ObjectStoreMetricSample {
     /// Keys yielded by a listing before completion or drop; otherwise `None`.
     pub item_count: Option<u64>,
     /// Durable-family grouping derived without retaining the raw key.
-    pub key_class: KeyKind,
+    pub key_class: KeyClass,
     /// Read-range or listing shape when applicable; otherwise `None`.
-    pub range_class: Option<RangeKind>,
+    pub range_class: Option<RangeClass>,
     /// Requested conditional-write class for a put; otherwise `None`.
     pub put_mode: Option<PutModeKind>,
     /// Deployment-supplied provider label, or `None` when the wrapper was left unlabeled.
@@ -205,7 +205,7 @@ impl From<ObjectStoreErrorKind> for ObjectStoreResultKind {
 /// Groups durable keys into low-cardinality operational families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum KeyKind {
+pub enum KeyClass {
     /// Groups immutable whole-file byte objects.
     Content,
     /// Groups small control records not assigned a more specific class.
@@ -222,7 +222,7 @@ pub enum KeyKind {
     Unknown,
 }
 
-impl KeyKind {
+impl KeyClass {
     /// The label an aggregating recorder groups by. Identical to the serde
     /// name: one class has one spelling wherever it is reported.
     pub fn as_str(self) -> &'static str {
@@ -241,7 +241,7 @@ impl KeyKind {
 /// Classifies the shape of bytes requested by a get or listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RangeKind {
+pub enum RangeClass {
     /// Indicates a get without explicit range bounds.
     FullObject,
     /// Indicates bytes starting at zero or a prefix-listing operation.
@@ -728,7 +728,7 @@ impl<S> InstrumentedObjectStore<S> {
             .as_ref()
             .ok()
             .and_then(|body| body.as_ref().map(|body| body.bytes.len() as u64));
-        sample.range_class = Some(RangeKind::FullObject);
+        sample.range_class = Some(RangeClass::FullObject);
         self.record(sample);
     }
 
@@ -792,7 +792,7 @@ impl<S> InstrumentedObjectStore<S> {
             self.store_kind.clone(),
         );
         sample.item_count = listed.ok().map(|items| items as u64);
-        sample.range_class = Some(RangeKind::Prefix);
+        sample.range_class = Some(RangeClass::Prefix);
         self.record(sample);
     }
 
@@ -848,20 +848,22 @@ impl Drop for RecordedListStream {
     }
 }
 
-fn classify_key(key: &str) -> KeyKind {
+fn classify_key(key: &str) -> KeyClass {
     let Some(parsed) = parse_object_key(key) else {
-        return KeyKind::Unknown;
+        return KeyClass::Unknown;
     };
 
     match parsed.family() {
-        DurableObjectFamily::ContentBlob | DurableObjectFamily::TemporaryObject => KeyKind::Content,
-        DurableObjectFamily::WalObject => KeyKind::WalObject,
-        DurableObjectFamily::MetadataManifest | DurableObjectFamily::Hint => {
-            KeyKind::NamespaceManifest
+        DurableObjectFamily::ContentBlob | DurableObjectFamily::TemporaryObject => {
+            KeyClass::Content
         }
-        DurableObjectFamily::MetadataSegment => KeyKind::MetadataSegment,
-        DurableObjectFamily::Pin => KeyKind::GcControl,
-        DurableObjectFamily::UploadSession => KeyKind::Metadata,
+        DurableObjectFamily::WalObject => KeyClass::WalObject,
+        DurableObjectFamily::MetadataManifest | DurableObjectFamily::Hint => {
+            KeyClass::NamespaceManifest
+        }
+        DurableObjectFamily::MetadataSegment => KeyClass::MetadataSegment,
+        DurableObjectFamily::Pin => KeyClass::GcControl,
+        DurableObjectFamily::UploadSession => KeyClass::Metadata,
     }
 }
 
@@ -890,18 +892,18 @@ fn classify_immutable_write(
     }
 }
 
-fn classify_range(range: Option<&ByteRange>) -> RangeKind {
+fn classify_range(range: Option<&ByteRange>) -> RangeClass {
     let Some(range) = range else {
-        return RangeKind::FullObject;
+        return RangeClass::FullObject;
     };
     if range.start_inclusive == range.end_exclusive {
-        RangeKind::Empty
+        RangeClass::Empty
     } else if range.start_inclusive == 0 {
-        RangeKind::Prefix
+        RangeClass::Prefix
     } else if range.end_exclusive == u64::MAX {
-        RangeKind::Suffix
+        RangeClass::Suffix
     } else {
-        RangeKind::Bounded
+        RangeClass::Bounded
     }
 }
 

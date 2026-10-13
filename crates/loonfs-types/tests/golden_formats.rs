@@ -2085,7 +2085,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
         MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs"),
-            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs").expect("valid display name"),
             },
             child_inode_id: InodeId(2),
@@ -2098,7 +2098,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
         MetadataRow::DirentryBinding(loonfs_types::format::manifest::DirentryBindingRecord {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
-            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: loonfs_types::DisplayName::parse("docs-archive")
                     .expect("valid display name"),
             },
@@ -2120,7 +2120,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             committed_seq: ChangeSeq(8),
             delta_index: 0,
 
-            state: loonfs_types::format::manifest::DirentryBindingStatus::Unbound,
+            state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
         }),
     ];
     rows.extend(sample_inode_rows());
@@ -2981,12 +2981,12 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
 }
 
 fn sample_binding_rows() -> Vec<MetadataRow> {
-    use loonfs_types::format::manifest::{DirentryBindingRecord, DirentryBindingStatus};
+    use loonfs_types::format::manifest::{DirentryBindingRecord, DirentryBindingState};
     [
-        DirentryBindingStatus::Bound {
+        DirentryBindingState::Bound {
             display_name: loonfs_types::DisplayName::parse("Report.txt").expect("display name"),
         },
-        DirentryBindingStatus::Unbound,
+        DirentryBindingState::Unbound,
     ]
     .into_iter()
     .enumerate()

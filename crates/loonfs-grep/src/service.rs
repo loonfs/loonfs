@@ -54,7 +54,7 @@ pub(crate) const MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE: usize = 4096;
 ///
 /// Each probe may issue several small ranged reads, so this limit is lower
 /// than the whole-content read limit.
-pub(crate) const GREP_READS_IN_FLIGHT: usize = 16;
+pub(crate) const MAX_GREP_READ_IO: usize = 16;
 /// Commits one unindexed-tail page asks the change feed for. The tail is
 /// measured in files, not commits, so this is a transfer size rather than a
 /// budget: paging continues until the tail is exhausted or exceeds
@@ -68,7 +68,7 @@ pub(crate) const SCAN_DIRECTORY_PAGE_ENTRIES: usize = 1000;
 /// Indexed files are size-limited, so content reads may use more concurrency
 /// than posting probes. The per-page verification budget still caps the total
 /// number of content reads.
-pub(crate) const GREP_CONTENT_READS_IN_FLIGHT: usize = 32;
+pub(crate) const MAX_GREP_CONTENT_IO: usize = 32;
 
 /// Namespace-independent grep execution over a decoded-block cache.
 #[derive(Debug)]
@@ -421,7 +421,7 @@ async fn indexed_candidates<S: ObjectStore + ?Sized>(
         // streaming intersection would reduce memory but add probe-ordering
         // complexity, so it is deferred until measurements show this allocation matters.
         let mut set_postings = BTreeSet::new();
-        for chunk in probes.chunks(GREP_READS_IN_FLIGHT) {
+        for chunk in probes.chunks(MAX_GREP_READ_IO) {
             let batches = try_join_all(chunk.iter().map(|(gram_lookup, descriptor)| {
                 segment_postings_for_gram(store, block_cache, namespace_id, descriptor, gram_lookup)
             }))
@@ -482,7 +482,7 @@ impl GramLookup {
 /// copy when the descriptor carries one — no fetch at all — otherwise the
 /// cached filter block), then only the data blocks the segment index
 /// names for the gram's key range, loaded concurrently in chunks of
-/// [`GREP_READS_IN_FLIGHT`] (the cap applies per probe). Every fetched
+/// [`MAX_GREP_READ_IO`] (the cap applies per probe). Every fetched
 /// section resolves through the grep-private decoded-block cache.
 async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     store: &S,
@@ -521,7 +521,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     // instead of paying one round trip each; `try_join_all` returns them
     // in entry order and rows fold in that order, so assembly stays
     // deterministic even though the posting union is order-independent.
-    for chunk in entries[range].chunks(GREP_READS_IN_FLIGHT) {
+    for chunk in entries[range].chunks(MAX_GREP_READ_IO) {
         let blocks = try_join_all(chunk.iter().map(|entry| {
             load_data_block(
                 store,
@@ -867,7 +867,7 @@ impl<'plan, 'reads> PageWalk<'plan, 'reads> {
     async fn next_batch(&mut self) -> Result<Option<PageBatch>> {
         let mut candidates = Vec::new();
         let mut budget_exhausted = false;
-        while candidates.len() < GREP_CONTENT_READS_IN_FLIGHT {
+        while candidates.len() < MAX_GREP_CONTENT_IO {
             if self.resolved.is_empty() {
                 if self.next_candidate == self.ordered_candidates.len() {
                     break;

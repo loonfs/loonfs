@@ -56,11 +56,11 @@ impl LocalFsStore {
     /// does not claim atomic rename-replace support, or when the root cannot
     /// be created.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
-        Self::new_with_key_prefix(root, None)
+        Self::with_key_prefix(root, None)
     }
 
     /// Uses the selected algorithm for stored checksums and compare tokens.
-    pub fn new_with_checksum_algorithm(
+    pub fn with_checksum_algorithm(
         root: impl Into<PathBuf>,
         checksum_algorithm: ChecksumAlgorithm,
     ) -> Result<Self> {
@@ -72,7 +72,7 @@ impl LocalFsStore {
 
     /// Opens a local store whose keys are confined beneath `key_prefix`,
     /// matching how the provider adapters scope theirs.
-    pub fn new_with_key_prefix(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
+    pub fn with_key_prefix(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
         ensure_atomic_rename_replace()?;
         let root = root.into();
         std::fs::create_dir_all(&root).map_err(|err| {

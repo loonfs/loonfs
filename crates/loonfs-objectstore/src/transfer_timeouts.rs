@@ -31,16 +31,18 @@ use tokio::runtime::Handle;
 #[derive(Debug, Error)]
 pub(crate) enum TransferTimeoutError {
     #[error(
-        "request phase exceeded its transfer bound of {bound:?} \
-         (request body {request_body_bytes} bytes)"
+        "request phase exceeded its transfer bound of {}s \
+         (request body {request_body_bytes} bytes)",
+        .bound.as_secs_f64()
     )]
     RequestPhase {
         request_body_bytes: u64,
         bound: Duration,
     },
     #[error(
-        "response body stalled for {idle_bound:?} after {received_bytes} received bytes; \
-         aborting the transfer"
+        "response body stalled for {}s after {received_bytes} received bytes; \
+         aborting the transfer",
+        .idle_bound.as_secs_f64()
     )]
     ResponseBodyIdle {
         received_bytes: u64,
@@ -321,8 +323,7 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     async fn a_conditional_payload_put_is_one_request() {
         use crate::provider_object_store::{
-            provider_retry_config, PROVIDER_MAX_RETRY_BACKOFF,
-            PROVIDER_PUBLICATION_REQUEST_DEADLINE,
+            provider_retry_config, PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_PUBLICATION_REQUEST_BOUND,
         };
         use object_store::ObjectStore;
 
@@ -366,7 +367,7 @@ mod tests {
         // send the conditional put again.
         assert!(started.elapsed() >= Duration::from_secs(115));
         assert!(started.elapsed() < Duration::from_secs(230));
-        assert!(started.elapsed() <= PROVIDER_PUBLICATION_REQUEST_DEADLINE);
+        assert!(started.elapsed() <= PROVIDER_PUBLICATION_REQUEST_BOUND);
     }
 
     #[tokio::test(start_paused = true)]

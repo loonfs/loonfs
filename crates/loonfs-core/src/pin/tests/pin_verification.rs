@@ -175,7 +175,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let writer = claim_writer_epoch(&store, &namespace_id, &context)
+    let writer = acquire_writer_epoch(&store, &namespace_id, &context)
         .await
         .expect("writer");
     let current = load_current_manifest(&store, &namespace_id)

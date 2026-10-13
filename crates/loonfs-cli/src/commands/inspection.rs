@@ -1,7 +1,7 @@
 //! Commands for viewing deployment capabilities and checking configuration.
 
 use super::context::resolve_profile_context;
-use super::output::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorOutcome};
+use super::output::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
 use crate::args::{CapabilitiesArgs, CommandKind, DoctorArgs};
 use crate::config::{
     load_config, non_empty_env, resolve_config_location, ConfigSource, ProfileConfig, StoreConfig,
@@ -473,9 +473,9 @@ fn capability_document_check(result: Result<CapabilityDocument, CliError>) -> Do
 
 fn store_probe_check(response: StoreProbeResponse) -> DoctorCheck {
     let status = match store_probe_run_outcome(&response) {
-        StoreProbeRunOutcome::Failed { .. } => DoctorOutcome::Failed,
-        StoreProbeRunOutcome::Unsupported { .. } => DoctorOutcome::Warning,
-        StoreProbeRunOutcome::Passed => DoctorOutcome::Ok,
+        StoreProbeRunOutcome::Failed { .. } => DoctorStatus::Failed,
+        StoreProbeRunOutcome::Unsupported { .. } => DoctorStatus::Warning,
+        StoreProbeRunOutcome::Passed => DoctorStatus::Ok,
     };
     DoctorCheck {
         name: DoctorCheckName::StoreProbe.as_str().to_owned(),
@@ -530,7 +530,7 @@ fn check_from_backend_result<T>(
 fn ok(name: DoctorCheckName, message: impl Into<String>) -> DoctorCheck {
     DoctorCheck {
         name: name.as_str().to_owned(),
-        status: DoctorOutcome::Ok,
+        status: DoctorStatus::Ok,
         message: message.into(),
         request_id: None,
         store_probe: None,
@@ -540,7 +540,7 @@ fn ok(name: DoctorCheckName, message: impl Into<String>) -> DoctorCheck {
 fn skipped(name: DoctorCheckName, message: impl Into<String>) -> DoctorCheck {
     DoctorCheck {
         name: name.as_str().to_owned(),
-        status: DoctorOutcome::Skipped,
+        status: DoctorStatus::Skipped,
         message: message.into(),
         request_id: None,
         store_probe: None,
@@ -550,7 +550,7 @@ fn skipped(name: DoctorCheckName, message: impl Into<String>) -> DoctorCheck {
 fn failed(name: DoctorCheckName, error: CliError) -> DoctorCheck {
     DoctorCheck {
         name: name.as_str().to_owned(),
-        status: DoctorOutcome::Failed,
+        status: DoctorStatus::Failed,
         message: error.message,
         request_id: error.request_id,
         store_probe: None,
@@ -560,7 +560,7 @@ fn failed(name: DoctorCheckName, error: CliError) -> DoctorCheck {
 fn failed_message(name: DoctorCheckName, message: impl Into<String>) -> DoctorCheck {
     DoctorCheck {
         name: name.as_str().to_owned(),
-        status: DoctorOutcome::Failed,
+        status: DoctorStatus::Failed,
         message: message.into(),
         request_id: None,
         store_probe: None,
@@ -622,7 +622,7 @@ mod tests {
                 key_prefix: Some("tenant".to_owned()),
             };
             let failure = FailStore::new(
-                LocalFsStore::new_with_key_prefix(directory.path(), Some("tenant"))
+                LocalFsStore::with_key_prefix(directory.path(), Some("tenant"))
                     .expect("open scoped store"),
                 KeyPredicate::any(),
                 OperationSelector::List,
@@ -651,7 +651,7 @@ mod tests {
                 }]
             );
             if denied {
-                assert_eq!(check.status, DoctorOutcome::Failed);
+                assert_eq!(check.status, DoctorStatus::Failed);
                 assert_eq!(
                     check.message,
                     ObjectStoreError::PermissionDenied {
@@ -662,7 +662,7 @@ mod tests {
                 );
                 assert!(target.is_none());
             } else {
-                assert_eq!(check.status, DoctorOutcome::Ok);
+                assert_eq!(check.status, DoctorStatus::Ok);
                 assert_eq!(check.message, "listed the store (key prefix `tenant`)");
                 assert!(target.is_some());
             }
@@ -682,10 +682,10 @@ mod tests {
     fn capabilities_check_rejects_a_different_protocol_version() {
         assert_eq!(
             capability_document_check(Ok(capability_document(PROTOCOL_VERSION))).status,
-            DoctorOutcome::Ok
+            DoctorStatus::Ok
         );
         let failed = capability_document_check(Ok(capability_document("v-next")));
-        assert_eq!(failed.status, DoctorOutcome::Failed);
+        assert_eq!(failed.status, DoctorStatus::Failed);
         assert!(failed.message.contains("but this CLI expects"));
     }
 
@@ -708,7 +708,7 @@ mod tests {
     fn store_probe_failure_is_included_and_fails_doctor() {
         let response = probe_response(&[StoreProbeCheckOutcome::Failed]);
         let check = store_probe_check(response.clone());
-        assert_eq!(check.status, DoctorOutcome::Failed);
+        assert_eq!(check.status, DoctorStatus::Failed);
         assert_eq!(
             check.message,
             "store probe probe_test: 1 of 1 checks failed"
@@ -723,7 +723,7 @@ mod tests {
             StoreProbeCheckOutcome::Unsupported,
         ]);
         let check = store_probe_check(response.clone());
-        assert_eq!(check.status, DoctorOutcome::Warning);
+        assert_eq!(check.status, DoctorStatus::Warning);
         assert_eq!(
             check.message,
             "store probe probe_test: 1 of 2 checks are unsupported"
@@ -735,7 +735,7 @@ mod tests {
         );
 
         let passed = probe_response(&[StoreProbeCheckOutcome::Passed]);
-        assert_eq!(store_probe_check(passed.clone()).status, DoctorOutcome::Ok);
+        assert_eq!(store_probe_check(passed.clone()).status, DoctorStatus::Ok);
         assert_eq!(
             store_probe_summary_line(&passed),
             "store probe probe_test: 1 checks passed"

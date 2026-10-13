@@ -59,7 +59,7 @@ const GRAM_POSTING_BATCH_TARGET: usize = 256;
 /// Content reads and index segment writes the worker runs at once. Eight
 /// reads of files at the 8 MiB eligibility cap hold at most 64 MiB, the same
 /// as one backfill step's content budget.
-const GREP_WORKER_READS_IN_FLIGHT: usize = 8;
+const MAX_GREP_WORKER_IO: usize = 8;
 const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
@@ -894,7 +894,7 @@ async fn index_planned_unit(
         progress,
     } = planned;
     let mut postings: BTreeMap<Gram, Vec<GramPosting>> = BTreeMap::new();
-    for chunk in pending.chunks(GREP_WORKER_READS_IN_FLIGHT) {
+    for chunk in pending.chunks(MAX_GREP_WORKER_IO) {
         let contents = try_join_all(chunk.iter().map(|revision| {
             // Index eligibility is the worker's own read budget: content
             // past the cap was skipped before it was ever planned.
@@ -955,7 +955,7 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
         .collect();
     write_segments_in_waves(
         requests,
-        const { NonZeroUsize::new(GREP_WORKER_READS_IN_FLIGHT).unwrap() },
+        const { NonZeroUsize::new(MAX_GREP_WORKER_IO).unwrap() },
         |segment_rows| write_index_segment(store, namespace_id, run_no, segment_rows, level),
     )
     .await

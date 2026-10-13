@@ -374,8 +374,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
     config.maintenance = JobMode::ServeOnly;
 
     let failing = Arc::new(FailStore::new(
-        LocalFsStore::new_with_key_prefix(&store_root, Some(key_prefix))
-            .expect("build local store"),
+        LocalFsStore::with_key_prefix(&store_root, Some(key_prefix)).expect("build local store"),
         KeyPredicate::hint(
             &loonfs_types::NamespaceId::parse("faulty").expect("valid namespace id"),
         ),

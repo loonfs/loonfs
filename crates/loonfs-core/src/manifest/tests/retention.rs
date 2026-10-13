@@ -948,7 +948,7 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         .expect("checkpoint exists")
         .state;
 
-    let acquired = claim_writer_epoch(&store, &namespace_id, &context)
+    let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
         .await
         .expect("writer");
     crate::namespace::delete::delete_namespace(

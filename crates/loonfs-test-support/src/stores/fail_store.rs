@@ -95,7 +95,7 @@ impl<S> InterceptStore<S, FailInterceptor> {
         predicate: impl for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync + 'static,
         error: InjectedError,
     ) -> Self {
-        Self::new_with_interceptor(
+        Self::with_interceptor(
             inner,
             FailInterceptor {
                 predicate: Arc::new(predicate),

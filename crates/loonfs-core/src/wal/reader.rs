@@ -8,7 +8,7 @@ use super::{
     ValidatedWalObject, ValidatedWalTail, WalObjectError, WalTailLoadError, WalTailLoadRequest,
 };
 use crate::error::MetadataProjectionLoadError;
-use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::in_flight::STORE_READ_WAVE;
 use crate::metadata::MetadataState;
 use crate::namespace::state::NamespaceReadState;
 use futures::{stream, StreamExt};
@@ -160,7 +160,7 @@ pub(super) async fn load_wal_tail<S: ObjectStore + ?Sized>(
     );
     let mut loaded = stream::iter(request.base_wal_no.0..request.tip_wal_no.0)
         .map(|number| load_wal_object(store, request.namespace_id, WalNo(number + 1)))
-        .buffered(STORE_READS_IN_FLIGHT);
+        .buffered(STORE_READ_WAVE);
     let mut objects = Vec::new();
     while let Some(LoadedWalObject {
         object_key,

@@ -150,7 +150,7 @@ fn layout_segments(manifest: &crate::namespace::control::LoadedManifest) -> BTre
 async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments() {
     use crate::manifest::{compaction_step, fold_wal, CompactionStepOutcome};
     use crate::namespace::control::load_current_manifest;
-    use crate::namespace::writer_epoch::claim_writer_epoch;
+    use crate::namespace::writer_epoch::acquire_writer_epoch;
 
     for own_runs in [false, true] {
         let directory = tempdir().expect("directory");
@@ -199,7 +199,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                 }
             }
         } else {
-            claim_writer_epoch(&store, &namespace_id, &context(1_000))
+            acquire_writer_epoch(&store, &namespace_id, &context(1_000))
                 .await
                 .expect("supersede");
         }

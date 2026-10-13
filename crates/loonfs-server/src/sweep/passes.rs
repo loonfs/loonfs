@@ -53,13 +53,13 @@ impl Sweep {
                 return;
             }
             let metadata_caught_up = held.handle.metadata_caught_up();
-            let idle_fold_due = inner.metadata.idle_fold_timeout_ms != 0
+            let idle_fold_due = inner.metadata.idle_fold_after_ms != 0
                 && held
                     .handle
                     .last_published_at_ms()
                     .is_some_and(|published_at_ms| {
                         let fold_due_at_ms =
-                            published_at_ms.saturating_add(inner.metadata.idle_fold_timeout_ms);
+                            published_at_ms.saturating_add(inner.metadata.idle_fold_after_ms);
                         now_ms >= fold_due_at_ms
                             && held
                                 .metadata_retry_at_ms
@@ -112,17 +112,23 @@ impl Sweep {
         }
         if let Err(error) = inner
             .namespaces
-            .close_if_idle(namespace_id, seq, inner.idle_session_timeout_ms, |held| {
-                self.skipped(namespace_id)
-                    || held.handle.metadata_caught_up()
-                        && (inner.grep.is_none() || (!held.index_dirty && held.indexed_seq == seq))
-                        && (held.collected_seq == seq
-                            || inner
-                                .namespaces
-                                .now_ms()
-                                .saturating_sub(held.collected_at_ms)
-                                < inner.collection_interval_ms)
-            })
+            .close_if_idle(
+                namespace_id,
+                seq,
+                inner.idle_session_close_after_ms,
+                |held| {
+                    self.skipped(namespace_id)
+                        || held.handle.metadata_caught_up()
+                            && (inner.grep.is_none()
+                                || (!held.index_dirty && held.indexed_seq == seq))
+                            && (held.collected_seq == seq
+                                || inner
+                                    .namespaces
+                                    .now_ms()
+                                    .saturating_sub(held.collected_at_ms)
+                                    < inner.collection_interval_ms)
+                },
+            )
             .await
         {
             tracing::warn!(%namespace_id, error = %error, "idle session close failed");

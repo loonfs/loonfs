@@ -1131,7 +1131,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
 
 #[tokio::test]
 async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
-    use loonfs_core::limits::{GC_SAFETY_WINDOW_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
+    use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
 
     let directory = tempdir().expect("directory");
@@ -1173,7 +1173,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     context.now_ms += crate::GcOptions::default()
         .grace_window_ms
         .max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
-        + GC_SAFETY_WINDOW_MS;
+        + GC_SAFETY_MARGIN_MS;
     store.reset();
     let first = loonfs_core::gc_namespace(
         store.as_ref(),

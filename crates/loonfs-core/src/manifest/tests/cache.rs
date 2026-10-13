@@ -322,7 +322,7 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
         .into_iter()
         .filter_map(|row| match row {
             MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
-                state: loonfs_types::format::manifest::DirentryBindingStatus::Bound { display_name },
+                state: loonfs_types::format::manifest::DirentryBindingState::Bound { display_name },
                 ..
             }) => Some(display_name.as_str().to_owned()),
             _ => None,

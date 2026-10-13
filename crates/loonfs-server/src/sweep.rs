@@ -48,7 +48,7 @@ pub enum GarbageCollection {
 /// index, collection, or close. Quiet sessions cost no store requests.
 /// Metadata that remains unfinished waits `maintenance_interval_ms` before
 /// retrying. Collection requires a moved seq and `gc_interval_ms` elapsed.
-/// Quiet sessions close after `idle_session_timeout_ms` without an open,
+/// Quiet sessions close after `idle_session_close_after_ms` without an open,
 /// when no caller holds a handle. An open during close waits for its drain.
 ///
 /// The daily listing pass runs at start and every `full_sweep_interval_ms`,
@@ -73,7 +73,7 @@ struct SweepInner {
     metadata_retry_interval_ms: u64,
     collection_interval_ms: u64,
     full_interval: Duration,
-    idle_session_timeout_ms: u64,
+    idle_session_close_after_ms: u64,
     visiting: Mutex<HashSet<NamespaceId>>,
     /// Namespaces a terminal failure took out of the sweep, with the code of
     /// that failure. It holds at most one entry per namespace in the store and
@@ -143,7 +143,7 @@ impl Sweep {
                 store,
                 maintenance,
                 metadata: MaintainMetadataOptions {
-                    idle_fold_timeout_ms: config.idle_fold_timeout_ms,
+                    idle_fold_after_ms: config.idle_fold_after_ms,
                     ..MaintainMetadataOptions::default()
                 },
                 grep,
@@ -153,7 +153,7 @@ impl Sweep {
                 metadata_retry_interval_ms: config.maintenance_interval_ms,
                 collection_interval_ms: config.gc_interval_ms,
                 full_interval: Duration::from_millis(config.full_sweep_interval_ms),
-                idle_session_timeout_ms: config.idle_session_timeout_ms,
+                idle_session_close_after_ms: config.idle_session_close_after_ms,
                 visiting: Mutex::default(),
                 skipped: Mutex::default(),
                 slots: Semaphore::new(validated_usize(config.max_concurrent_maintenance)),

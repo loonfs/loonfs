@@ -71,11 +71,11 @@ impl<S> FakeMultipartStore<S> {
     /// Wraps `inner`, witnessing rather than enforcing the whole-object
     /// checksum at completion.
     pub fn new(inner: S) -> Self {
-        Self::new_with_enforcement(inner, MultipartChecksumEnforcement::Witness)
+        Self::with_enforcement(inner, MultipartChecksumEnforcement::Witness)
     }
 
     /// Wraps `inner` with an explicit completion-checksum behaviour.
-    pub fn new_with_enforcement(inner: S, enforcement: MultipartChecksumEnforcement) -> Self {
+    pub fn with_enforcement(inner: S, enforcement: MultipartChecksumEnforcement) -> Self {
         Self {
             inner,
             enforcement,

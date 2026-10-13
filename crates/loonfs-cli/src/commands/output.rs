@@ -72,14 +72,14 @@ pub(crate) struct TrashListing {
 /// Possible results for one `doctor` check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum DoctorOutcome {
+pub(crate) enum DoctorStatus {
     Ok,
     Warning,
     Failed,
     Skipped,
 }
 
-impl DoctorOutcome {
+impl DoctorStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
@@ -94,7 +94,7 @@ impl DoctorOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct DoctorCheck {
     pub name: String,
-    pub status: DoctorOutcome,
+    pub status: DoctorStatus,
     pub message: String,
     /// Request ID returned with a remote failure.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,7 +339,7 @@ impl CommandData {
             CommandData::TreeTransfer { failures, .. } => !failures.is_empty(),
             CommandData::Doctor { checks } => checks
                 .iter()
-                .any(|check| check.status == DoctorOutcome::Failed),
+                .any(|check| check.status == DoctorStatus::Failed),
             // A wait that ran out of budget renders where the index got to
             // — real data, not an error — and still exits nonzero, because
             // the caller asked for a target that was not reached.

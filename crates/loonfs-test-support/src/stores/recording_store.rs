@@ -51,7 +51,7 @@ pub type RecordingStore<S> = InterceptStore<S, RecordingInterceptor>;
 impl<S> InterceptStore<S, RecordingInterceptor> {
     /// Records every operation whose key matches `keys`.
     pub fn new(inner: S, keys: KeyPredicate) -> Self {
-        Self::new_with_interceptor(
+        Self::with_interceptor(
             inner,
             RecordingInterceptor {
                 keys,

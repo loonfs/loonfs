@@ -72,7 +72,7 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
     create(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let mut stale = NamespaceCommitEngine::new_with_unshared_head_state(namespace_id.clone());
+    let mut stale = NamespaceCommitEngine::with_unshared_head_state(namespace_id.clone());
     stale
         .publish_batch(
             &store,
@@ -187,7 +187,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .pop()
         .expect("result")
         .expect("publish inline content");
-    let claimed_writer = engine
+    let acquired_writer = engine
         .session_writer_epoch(&store, &context)
         .await
         .expect("acquired writer");
@@ -203,7 +203,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             DeleteNamespaceOptions {
                 expected_head_seq: Some(expected_head_seq),
             },
-            claimed_writer.clone(),
+            acquired_writer.clone(),
             &context,
             &deadline,
             Arc::default(),

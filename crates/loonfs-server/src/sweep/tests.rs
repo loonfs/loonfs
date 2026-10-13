@@ -593,7 +593,9 @@ async fn a_corrupt_namespace_is_counted_and_skipped_by_later_passes() {
 
     let namespaces = &server.sweep.inner.namespaces;
     drop(namespaces.open(&names[1]).await.expect("hold the session"));
-    server.tick_after(config.idle_session_timeout_ms + 1).await;
+    server
+        .tick_after(config.idle_session_close_after_ms + 1)
+        .await;
     assert!(
         namespaces.held_ids().is_empty(),
         "a skipped namespace's idle session still closes"

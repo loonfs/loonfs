@@ -254,7 +254,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         create(&store, &namespace_id, &context)
             .await
             .expect("bootstrap");
-        crate::namespace::writer_epoch::claim_writer_epoch(&store, &namespace_id, &context)
+        crate::namespace::writer_epoch::acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire");
         let current = load_current_manifest(&store, &namespace_id)
@@ -266,8 +266,8 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         let first = encode_manifest(payload.clone());
         if newer_head {
             let session = Arc::new(std::sync::Mutex::new(
-                crate::commit_engine::WriterSessionStatus::Claimed(
-                    loonfs_types::format::control::ClaimedWriter {
+                crate::commit_engine::WriterSessionStatus::Acquired(
+                    loonfs_types::format::control::AcquiredWriter {
                         writer_id: context.writer_id.clone(),
                         writer_epoch: current.state.envelope.payload().writer_epoch,
                     },

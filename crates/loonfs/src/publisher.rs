@@ -1428,7 +1428,7 @@ impl NamespacePublisher {
             max_wal_tail_objects: std::num::NonZeroU64::MAX,
             inline_content_fold_at_bytes: std::num::NonZeroUsize::MAX,
             // A remaining tail must stay unsettled for the host's idle fold.
-            idle_fold_timeout_ms: u64::MAX,
+            idle_fold_after_ms: u64::MAX,
             ..crate::MaintainMetadataOptions::default()
         };
         let seq = self.lock_state().last_published.map(|last| last.seq);

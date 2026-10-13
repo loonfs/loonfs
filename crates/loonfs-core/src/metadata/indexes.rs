@@ -267,7 +267,7 @@ mod tests {
         DirentryBindingRecord {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name).expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingStatus::Bound {
+            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
                 display_name: DisplayName::parse(name).expect("valid display name"),
             },
             child_inode_id: InodeId(child),
@@ -287,7 +287,7 @@ mod tests {
 
         let mut unbound = older.clone();
         unbound.committed_seq = ChangeSeq(20);
-        unbound.state = loonfs_types::format::manifest::DirentryBindingStatus::Unbound;
+        unbound.state = loonfs_types::format::manifest::DirentryBindingState::Unbound;
         indexes.record_binding(&unbound);
         indexes.record_binding(&newer);
         indexes.record_binding(&older);

@@ -172,13 +172,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Supplies the wall clock behind every timestamp this engine records.
-    pub fn wall_clock(mut self, wall_clock: Arc<dyn crate::time::WallClock>) -> Self {
+    pub fn with_wall_clock(mut self, wall_clock: Arc<dyn crate::time::WallClock>) -> Self {
         self.wall_clock = wall_clock;
         self
     }
 
     /// Sets the current head used to authorize historical reads.
-    pub fn authorization_head(mut self, head: RuntimeReadContext) -> Self {
+    pub fn with_authorization_head(mut self, head: RuntimeReadContext) -> Self {
         self.authorization_head = Some(head);
         self
     }
@@ -416,13 +416,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Sets the budgets this engine's WAL folds and compactions run under.
-    pub fn metadata_run_policy(mut self, policy: crate::manifest::MetadataRunPolicy) -> Self {
+    pub fn with_metadata_run_policy(mut self, policy: crate::manifest::MetadataRunPolicy) -> Self {
         self.run_policy = policy;
         self
     }
 
     /// Uses the runtime's metadata cache for folds during pin creation.
-    pub fn metadata_segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
+    pub fn with_metadata_segment_cache(mut self, segment_cache: Arc<MetadataSegmentCache>) -> Self {
         self.segment_cache = Some(segment_cache);
         self
     }
@@ -1306,12 +1306,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns an upload session. Completed uploads include new evidence so
     /// the caller can retry publication without uploading the content again.
-    pub async fn load_upload_status(
+    pub async fn get_upload_status(
         &self,
         upload_id: &UploadId,
         subject: Option<&Subject>,
     ) -> Result<UploadSessionView> {
-        crate::protocol::load_upload_status(
+        crate::protocol::get_upload_status(
             &self.store,
             &self.namespace_id,
             upload_id,
@@ -1593,7 +1593,7 @@ mod tests {
             evidence,
             ..
         } = reader
-            .load_upload_status(&begun.upload_id, None)
+            .get_upload_status(&begun.upload_id, None)
             .await
             .expect("reader engine reads upload status");
 

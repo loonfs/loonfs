@@ -43,14 +43,12 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
             inline_content: Default::default(),
             content_token_secret: "test-content-token-secret".into(),
             request_deadline_ms: 60_000,
-            idle_fold_timeout_ms: loonfs::MaintainMetadataOptions::default().idle_fold_timeout_ms,
+            idle_fold_after_ms: loonfs::MaintainMetadataOptions::default().idle_fold_after_ms,
             store_kind: ConfiguredObjectStoreKind::LocalFs,
             auth_policy: AuthPolicy::BearerToken("test-token".into()),
         },
         writer_id: WriterId::parse(writer_id).expect("writer id"),
-        store: Arc::new(
-            LocalFsStore::new_with_key_prefix(root, Some("http-tests")).expect("store"),
-        ),
+        store: Arc::new(LocalFsStore::with_key_prefix(root, Some("http-tests")).expect("store")),
     }
 }
 

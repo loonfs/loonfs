@@ -229,7 +229,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     }
     let wal = prepare_wal_object(
         namespace_id.clone(),
-        view.claimed_writer.writer_epoch,
+        view.acquired_writer.writer_epoch,
         &view.head,
         &accepted_commits,
     );
@@ -358,7 +358,7 @@ fn finish_batch_outcomes(slots: &[BatchOutcomeSlot]) -> Vec<Result<Commit>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::namespace::writer_epoch::claim_writer_epoch;
+    use crate::namespace::writer_epoch::acquire_writer_epoch;
     use crate::path::write::{CommitIntent, FilesystemOperation};
     use crate::protocol::load_publish_metadata_view;
     use crate::test_support::ops::create;
@@ -389,7 +389,7 @@ mod tests {
         create(&store, &namespace_id, &context)
             .await
             .expect("bootstrap");
-        let acquired = claim_writer_epoch(&store, &namespace_id, &context)
+        let acquired = acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
         let view = load_publish_metadata_view(&store, None, &namespace_id, acquired, None, None)
@@ -472,11 +472,11 @@ mod tests {
         create(&store, &namespace_id, &context)
             .await
             .expect("bootstrap namespace");
-        let claimed_writer = claim_writer_epoch(&store, &namespace_id, &context)
+        let acquired_writer = acquire_writer_epoch(&store, &namespace_id, &context)
             .await
             .expect("acquire writer");
         let mut view =
-            load_publish_metadata_view(&store, None, &namespace_id, claimed_writer, None, None)
+            load_publish_metadata_view(&store, None, &namespace_id, acquired_writer, None, None)
                 .await
                 .expect("load publish view");
 

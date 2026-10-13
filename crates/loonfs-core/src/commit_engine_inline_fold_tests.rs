@@ -429,8 +429,7 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     publish(&mut first, &store, &context, candidate.clone())
         .await
         .expect("publish");
-    let mut second =
-        NamespaceCommitEngine::new_with_unshared_head_state(first.namespace_id.clone());
+    let mut second = NamespaceCommitEngine::with_unshared_head_state(first.namespace_id.clone());
     publish(&mut second, &store, &context, candidate)
         .await
         .expect("replay");

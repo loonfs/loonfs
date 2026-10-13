@@ -20,7 +20,7 @@ async fn ticks_index_publishes_and_lifecycle_changes_then_cost_nothing() {
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(Some(GrepWorkerConfig::default()));
-    config.idle_fold_timeout_ms = 0;
+    config.idle_fold_after_ms = 0;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("index-changes");
     server
@@ -168,7 +168,9 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
     }));
     let server = SweepServer::start(store.clone(), &config, now_ms).await;
     server.enable_index(&namespace_id).await;
-    server.tick_after(config.idle_session_timeout_ms + 1).await;
+    server
+        .tick_after(config.idle_session_close_after_ms + 1)
+        .await;
     assert!(matches!(
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Backfilling { .. }
@@ -220,7 +222,7 @@ async fn pending_reorganization_keeps_an_idle_entry_settling() {
         max_files_per_step: 1,
         ..GrepWorkerConfig::default()
     }));
-    config.idle_fold_timeout_ms = 0;
+    config.idle_fold_after_ms = 0;
     let mut server = SweepServer::start(store.clone(), &config, 0).await;
     let policy = &mut Arc::get_mut(&mut server.sweep.inner)
         .expect("one sweep")
@@ -250,7 +252,9 @@ async fn pending_reorganization_keeps_an_idle_entry_settling() {
     }
     server.enable_index(&namespace_id).await;
     drop(held);
-    server.tick_after(config.idle_session_timeout_ms + 1).await;
+    server
+        .tick_after(config.idle_session_close_after_ms + 1)
+        .await;
     server.sweep.tick().await;
     let worker = server.grep_worker.as_ref().expect("worker");
     assert!(

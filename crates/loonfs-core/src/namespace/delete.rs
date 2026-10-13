@@ -7,7 +7,7 @@ use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::options::DeleteNamespaceOptions;
 use crate::time::Deadline;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ClaimedWriter, NamespaceStatus};
+use loonfs_types::format::control::{AcquiredWriter, NamespaceStatus};
 use loonfs_types::{DeleteNamespaceResponse, NamespaceId};
 
 #[allow(
@@ -18,20 +18,20 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     options: DeleteNamespaceOptions,
-    claimed_writer: ClaimedWriter,
+    acquired_writer: AcquiredWriter,
     context: &crate::context::MutationContext,
     deadline: &Deadline,
     pool: std::sync::Arc<crate::cache::ReadWorkingMemory>,
     content_writes: &tokio::sync::Semaphore,
 ) -> Result<DeleteNamespaceResponse> {
     update_manifest(store, namespace_id, deadline, |mut payload| {
-        let claimed_writer = &claimed_writer;
+        let acquired_writer = &acquired_writer;
         let pool = std::sync::Arc::clone(&pool);
         async move {
             let anchor = load_read_anchor(store, namespace_id).await?;
             let head = &anchor.read_state;
             super::control::ensure_namespace_live(head)?;
-            ensure_writer_not_fenced(head, claimed_writer)?;
+            ensure_writer_not_fenced(head, acquired_writer)?;
             if let Some(expected) = options.expected_head_seq {
                 if head.seq != expected {
                     return Err(CoreError::StaleHeadPrecondition {

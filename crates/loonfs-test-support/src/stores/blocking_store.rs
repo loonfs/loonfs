@@ -86,7 +86,7 @@ impl<S> InterceptStore<S, BlockingInterceptor> {
         inner: S,
         predicate: impl for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync + 'static,
     ) -> Self {
-        Self::new_with_interceptor(
+        Self::with_interceptor(
             inner,
             BlockingInterceptor {
                 predicate: Arc::new(predicate),

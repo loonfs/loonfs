@@ -86,8 +86,7 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 pub use downloads::{DirectDownloadStream, DownloadOptions};
 pub use namespace_path::NamespacePath;
 pub use uploads::staging::{
-    MultipartUploadResume, PreparedContent, PutFileJournal, PutFileStreamOptions,
-    MIN_STREAMING_PUT_BYTES,
+    MultipartUploadResume, PreparedContent, PutFileJournal, MIN_STREAMING_PUT_BYTES,
 };
 
 /// Async HTTP client for LoonFS.
@@ -141,13 +140,13 @@ impl Client {
     pub fn new(config: ClientConfig) -> Result<Self> {
         config.validate()?;
         let service = reqwest_transport::service(&config)?;
-        Self::new_with_transport(config, service)
+        Self::with_transport(config, service)
     }
 
     /// Creates a client for in-process hosts and tests using an HTTP service.
     /// Retries, timeouts, and identity headers apply the same way as with
     /// [`Client::new`].
-    pub fn new_with_transport<S>(config: ClientConfig, service: S) -> Result<Self>
+    pub fn with_transport<S>(config: ClientConfig, service: S) -> Result<Self>
     where
         S: Service<http::Request<Body>, Response = http::Response<Body>, Error = TransportError>
             + Clone

@@ -22,7 +22,7 @@ pub(crate) use self::publish_view::{
 pub(crate) use self::uploads::{
     abort_upload, begin_direct_multipart_upload_target, begin_direct_put_upload_target,
     begin_service_proxied_upload, complete_upload, complete_upload_for_mode,
-    direct_multipart_part_targets, load_upload_status, stage_owned_bytes, stage_owned_stream,
+    direct_multipart_part_targets, get_upload_status, stage_owned_bytes, stage_owned_stream,
     upload_content, upload_content_stream, AbandonedUpload,
 };
 pub use self::uploads::{

@@ -69,7 +69,7 @@ impl<'a> ContentSweep<'a> {
             shard_width += 1;
         }
         let expected_entries = live.content_layout_rows;
-        let Some(mut shared) = BloomFilter::new_with_max_bytes(expected_entries, seed, max_bytes)
+        let Some(mut shared) = BloomFilter::with_max_bytes(expected_entries, seed, max_bytes)
         else {
             tracing::info!(namespace_id = %namespace_id, shard_width, layout_views = 0, expected_entries,
                 "shared base filter exceeded its byte limit; skipped content sweep");

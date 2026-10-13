@@ -641,7 +641,7 @@ A node closes a session to hand a namespace off. Closing refuses new work at onc
 
 The reference server opens a namespace's session on the first request that writes to the namespace. Its maintenance sweep closes a session when all of these conditions are true:
 
-- The session's last open is older than `idle_session_timeout_ms`, which is 1800000 ms (30 minutes) by default.
+- The session's last open is older than `idle_session_close_after_ms`, which is 1800000 ms (30 minutes) by default.
 - No request has a clone of the session's handle.
 - The session is caught up. Metadata, and the grep index where it's maintained, are caught up with the session's published sequence. A session that never published through this process closes under the same idle rule. It has no published sequence to catch up with, but an enabled index has to finish building first.
 - Collection isn't due.

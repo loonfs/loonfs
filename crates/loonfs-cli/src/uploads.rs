@@ -48,21 +48,21 @@ enum UploadProgress {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourceIdentity {
     size_bytes: u64,
-    modified_at_ms: i128,
+    modified_ns: i128,
 }
 
 impl SourceIdentity {
-    /// Reads a file's length and its modification time in milliseconds.
+    /// Reads a file's length and full-precision modification time.
     pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
         let metadata = std::fs::metadata(path)?;
         let modified = metadata.modified()?;
-        let modified_at_ms = match modified.duration_since(std::time::UNIX_EPOCH) {
-            Ok(since) => since.as_millis() as i128,
-            Err(before) => -(before.duration().as_millis() as i128),
+        let modified_ns = match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(since) => since.as_nanos() as i128,
+            Err(before) => -(before.duration().as_nanos() as i128),
         };
         Ok(Self {
             size_bytes: metadata.len(),
-            modified_at_ms,
+            modified_ns,
         })
     }
 }
@@ -512,7 +512,6 @@ fn uploads_directory() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_client::PutFileStreamOptions;
     use loonfs_types::Checksum;
 
     struct InterruptedUpload<'a>(&'a UploadJournal);
@@ -574,15 +573,13 @@ mod tests {
         let journal = open(&path);
         let error = target
             .client
-            .put_file_stream_with_options(
+            .put_file_stream_resumable(
                 &spec,
                 loonfs_client::PayloadSource::reader(std::io::Cursor::new(b"retained content")),
                 &journal.actor_id(),
-                &PutFileStreamOptions {
-                    options: journal.options(),
-                    journal: Some(&InterruptedUpload(&journal)),
-                    resume: None,
-                },
+                &journal.options(),
+                &InterruptedUpload(&journal),
+                None,
             )
             .await
             .expect_err("interrupted before publication");
@@ -619,7 +616,7 @@ mod tests {
     fn source(size_bytes: u64) -> SourceIdentity {
         SourceIdentity {
             size_bytes,
-            modified_at_ms: 7,
+            modified_ns: 7,
         }
     }
     fn options() -> PutFileOptions {

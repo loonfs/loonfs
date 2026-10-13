@@ -400,7 +400,7 @@ mod shared_cache_tests {
             }))
             .expect("initialize provider");
         let bridge = ObjectStoreAwsCredentialProvider::new(source.clone());
-        let signer = S3CompatiblePresigner::new_with_credentials(
+        let signer = S3CompatiblePresigner::with_credentials(
             S3PresignerConfig {
                 bucket: "bucket".to_owned(),
                 region: "us-east-1".to_owned(),

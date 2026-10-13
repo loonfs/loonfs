@@ -65,29 +65,6 @@ pub trait PutFileJournal: Send + Sync {
     ) -> std::io::Result<()>;
 }
 
-/// Optional inputs for [`Client::put_file_stream_with_options`].
-#[derive(Clone, Default)]
-pub struct PutFileStreamOptions<'a> {
-    /// Destination behavior, commit settings, and expected file state.
-    pub options: PutFileOptions,
-    /// Records the attempt so a later process can resume or replay it.
-    pub journal: Option<&'a dyn PutFileJournal>,
-    /// Multipart state from an interrupted attempt, so its completed parts
-    /// aren't uploaded again.
-    pub resume: Option<&'a MultipartUploadResume>,
-}
-
-impl std::fmt::Debug for PutFileStreamOptions<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PutFileStreamOptions")
-            .field("options", &self.options)
-            .field("journal", &self.journal.map(|_| "configured"))
-            .field("resume", &self.resume)
-            .finish()
-    }
-}
-
 /// Optional multipart resume state and a journal for the complete PUT attempt.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct UploadContinuity<'a> {

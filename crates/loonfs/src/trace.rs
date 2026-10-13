@@ -59,7 +59,7 @@ pub(crate) use phase_event;
 
 /// Classifies a payload size into the low-cardinality `small`, `medium`, or
 /// `large` trace label.
-pub fn payload_kind(size_bytes: usize) -> &'static str {
+pub fn payload_class(size_bytes: usize) -> &'static str {
     match size_bytes {
         0..=16_383 => "small",
         16_384..=1_048_575 => "medium",
@@ -69,7 +69,7 @@ pub fn payload_kind(size_bytes: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{payload_kind, store_kind_label, TraceMode};
+    use super::{payload_class, store_kind_label, TraceMode};
     use loonfs_objectstore::ConfiguredObjectStoreKind;
 
     #[test]
@@ -97,10 +97,10 @@ mod tests {
 
     #[test]
     fn trace_helpers_classify_payloads_and_results() {
-        assert_eq!(payload_kind(0), "small");
-        assert_eq!(payload_kind(16_383), "small");
-        assert_eq!(payload_kind(16_384), "medium");
-        assert_eq!(payload_kind(1_048_575), "medium");
-        assert_eq!(payload_kind(1_048_576), "large");
+        assert_eq!(payload_class(0), "small");
+        assert_eq!(payload_class(16_383), "small");
+        assert_eq!(payload_class(16_384), "medium");
+        assert_eq!(payload_class(1_048_575), "medium");
+        assert_eq!(payload_class(1_048_576), "large");
     }
 }

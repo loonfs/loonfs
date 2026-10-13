@@ -124,7 +124,7 @@ impl Namespace<Writable> {
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
+        span.record("payload_class", crate::trace::payload_class(bytes.len()));
         let prepared_content = self.prepare_content_inner(bytes).await?;
         self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
             .await
@@ -197,7 +197,7 @@ impl Namespace<Writable> {
     pub async fn prepare_content(&self, bytes: &[u8]) -> Result<PreparedContent> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
+        span.record("payload_class", crate::trace::payload_class(bytes.len()));
         self.prepare_content_inner(bytes).await
     }
 
@@ -342,7 +342,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record(
             "payload_class",
-            crate::trace::payload_kind(
+            crate::trace::payload_class(
                 usize::try_from(prepared_content.content_ref().size_bytes).unwrap_or(usize::MAX),
             ),
         );
@@ -418,7 +418,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record(
             "payload_class",
-            crate::trace::payload_kind(
+            crate::trace::payload_class(
                 usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
             ),
         );
@@ -451,7 +451,7 @@ impl Namespace<Writable> {
         self.core.record_trace_context(&span);
         span.record(
             "payload_class",
-            crate::trace::payload_kind(
+            crate::trace::payload_class(
                 usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
             ),
         );
@@ -572,7 +572,7 @@ impl Namespace<Writable> {
     ) -> Result<Commit> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
-        span.record("payload_class", crate::trace::payload_kind(bytes.len()));
+        span.record("payload_class", crate::trace::payload_class(bytes.len()));
         self.commit_one(
             actor,
             &options.commit,

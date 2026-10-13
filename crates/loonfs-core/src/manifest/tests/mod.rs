@@ -52,7 +52,7 @@ use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{load_current_manifest, load_namespace_read_state};
 use crate::namespace::state::NamespaceReadState;
-use crate::namespace::writer_epoch::claim_writer_epoch;
+use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::read::{
     load_current_metadata_view, stat_current_files_by_inode, CurrentFile, CurrentFileState,
 };
@@ -221,7 +221,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> crate::error::Result<loonfs_types::NamespaceMetadata> {
     let summary = create(store, namespace_id, context).await?;
-    claim_writer_epoch(store, namespace_id, context)
+    acquire_writer_epoch(store, namespace_id, context)
         .await
         .expect("acquire fixture writer");
     fold::fold_wal(store, namespace_id)
