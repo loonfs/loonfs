@@ -2,7 +2,7 @@
 
 This guide describes how LoonFS code is written. Each rule is a design decision, recorded with an explanation and usually an example from the codebase. When you run into a case that no rule covers, use the closest decision and its explanation to decide, instead of guessing.
 
-The specs in `docs/specs/` define the durable formats and the API, and they take precedence over this guide.
+The specs in `docs/specs/` define the durable formats and the API, and they take precedence over this guide. [CODE_MAP.md](CODE_MAP.md) describes how the crates fit together and where code lives.
 
 ## Goals
 
@@ -63,18 +63,11 @@ Three kinds of failure can happen, and the code responds to each kind differentl
 
 - **Return the error for a terminal state, without retry or recovery code.** A fenced writer, a corrupt namespace, and a permission failure are terminal, which means that retrying can't change them. A transient transport failure is retried, with a count and a deadline. For example, when a read finds a metadata segment missing, `fs/read_result.rs` checks whether a newer manifest has been published. If one has, the read was stale rather than corrupt, and LoonFS retries it once. Otherwise, the corruption error stands.
 
-- **Contain a panic only where the containment is named and tested.** There are three such places:
-  - The publisher catches a panic in background work (publishing, folding, compaction, and deletion) in `crates/loonfs/src/publisher.rs`, so that a library doesn't take down the process that embeds it.
-  - When a handler panics, `catch_handler_panic` in `loonfs-http` returns a 500 with the error envelope.
-  - The server's maintenance sweep contains a panic in each visit to a namespace, and counts it as a `server_error` failure.
-
-  A contained panic is counted, and the writer session stays open. Ending the session wouldn't fix anything, because a panic is a bug, and the same bug would panic again in the next session.
+- **Contain a panic only in the places that the code map lists**, each of which has a test. A contained panic is counted, and the writer session stays open. Ending the session wouldn't fix anything, because a panic is a bug, and the same bug would panic again in the next session.
 
 - **Treat a poisoned lock as a bug**, with `expect("... lock should not be poisoned")`. (A mutex is poisoned when a thread panics with the mutex locked.) Only a component that contains panics by design (the publisher registry) recovers the lock, with `into_inner` through one helper, because it has to stay usable after a contained panic.
 
 - **Don't hold a `std::sync::Mutex` across a call into a trait object, a callback, or the metrics recorder.** Code that the lock's owner doesn't control might panic, which poisons the lock, or take the same lock, which deadlocks. Fix a lock that does this before you add an `expect` for its poisoning.
-
-- **Back off a maintenance call that keeps failing.** When a call in the server's maintenance sweep fails on a namespace, the sweep waits one tick before it tries that call on that namespace again, doubles the wait after each failure in a row, up to one hour, and clears the wait after a success. It logs the first failure at `error!` and the recovery at `info!`, and the gauge `loonfs.maintenance.sweep_backoff_entries` counts the calls that are waiting. A retry on every tick would fill the logs with the same failure.
 
 - **Never cap a decoded value below the limit the writer enforces**, because then LoonFS could write an object it can't read back. For example, the writer and the reader share one constant for the WAL object size cap.
 
@@ -139,7 +132,7 @@ This section describes which integer, ID, path, and time types to use.
 
 - **Never put a `usize` in a wire, durable, or sidecar shape**, because its width depends on the platform. Convert a value to `usize` once, when it's loaded.
 
-- **Narrow integers with `try_from` or a named conversion, not `as`.** `as` can widen a value (`usize as u64`), but it truncates without saying so when it narrows, and the truncation lint is on. Convert a `u64` to a `usize` with `usize_from_u64`. A `const` assertion in the same module fails the build on a target where `usize` isn't 64 bits, so the conversion can't truncate. In tests, define a constant of the narrow type instead of converting at each use.
+- **Narrow integers with `try_from` or a named conversion, not `as`.** `as` can widen a value (`usize as u64`), but it truncates without saying so when it narrows, and the truncation lint is on. Convert a `u64` to a `usize` with `usize_from_u64`. A `const` assertion in the same module fails the build on a target where `usize` isn't 64 bits, so the conversion can't truncate.
 
 - **Define every ID, sequence, and validated string as a newtype** with `string_id!` or `numeric_id!`. Both macros generate the same methods for each type (`parse`, `as_str`, serde, `Ord`, `Hash`), so one kind of ID can't be passed as another. `parse()` is the one constructor that can fail. Numeric IDs are transparent (`pub u64`), because they're ordinals used in key arithmetic.
 
@@ -168,20 +161,13 @@ LoonFS puts a limit on everything, so that the worst case is known in advance, a
 
 - **Don't use recursion in protocol code**, because the depth of a recursion depends on the input, and a stack overflow aborts the process. Recursion over a parsed tree (a regex or a TOML document) is allowed when the parser enforces a named depth limit.
 
-- **Define each limit in one of three places:**
-  - A process-wide resource bound goes in the runtime's `ExecutionBudget`, and core receives it by reference.
+- **Put each limit where its scope is:**
+  - A process-wide resource budget goes in the runtime's `ExecutionBudget`, and core receives it by reference.
   - A bound on what a surface admits (request bytes, connections) goes in the host's config.
   - An extension (grep) defines its own budget.
-
-  No other code defines a limit.
-
-- **Define a bound in `limits.rs` when more than one module uses it**, or when a spec or a proof refers to it. A constant that only one module uses stays next to that module's code, with a doc comment.
+  - A constant goes in `limits.rs` when more than one module uses it, or when a spec or a proof refers to it. Otherwise it stays next to the code that uses it, with a doc comment.
 
 - **Keep fan-out constants separate from limits.** A fan-out constant sets how many requests one operation keeps in flight. Bound it by the budget's caps on operations, and write the product of the two next to it. Use one idiom for fan-out, a sliding window (`buffered`, `buffer_unordered`, `try_for_each_concurrent`), and one suffix for the constant, `*_IN_FLIGHT`. A sliding window starts a request whenever one finishes, while lockstep waves wait for each wave's slowest request.
-
-- **When something grows with use, grow it by doubling, and cap it with a constant.** For example, a chain's extents merge by the doubling rule, so each extent is at least twice as large as the next, and `MAX_LAYOUT_EXTENTS` caps their number.
-
-- **Cap every count that work grows with.** Checkpoints per namespace, open writer sessions, and manifest segments all have caps.
 
 - **Stream a listing instead of collecting it.** A pass that lists objects processes them as the listing arrives, and never keeps the whole listing in memory. Any state that it keeps across the listing has a bound that doesn't depend on the listing's length, because a listing grows with the namespace.
 
@@ -193,7 +179,7 @@ LoonFS puts a limit on everything, so that the worst case is known in advance, a
 
 - **Read the clock and entropy only through boundary functions.** Wall-clock time enters through named functions, each with a function-scoped allow whose reason has the form "<what boundary this is> so <why determinism survives>". `loonfs-core/src/time.rs::current_time_ms` is one of them. Write the reason in the attribute, `#[allow(clippy::disallowed_methods, reason = "...")]`, and use `#[expect]` where the lint is certain to fire, so that a stale allow warns. Production code has no file-scoped allow, because it would let every function in the file read the clock. Entropy goes through `ids::generated_id(prefix)`.
 
-- **Make timers named configuration, not ambient sleeps.** For example, the publisher waits its configured interval between attempts to swap the namespace head. There's no delay to collect a larger batch.
+- **Make timers named configuration, not ambient sleeps.** For example, the publisher waits its configured interval between attempts to swap the namespace head.
 
 - **Use the injected timer.** Core and extensions take the runtime's `MonotonicTimer`, and `StdMonotonicTimer::default()` appears only in builders.
 
@@ -216,23 +202,17 @@ Each span word has one meaning. These are the easiest to confuse:
 
 This section describes where work can be spawned, and which locks, atomics, and channels to use.
 
-- **Don't spawn tasks in core.** Core builds concurrency from the operation's own futures (`try_join`, `select!`, `buffer_unordered`), so dropping the operation cancels its work. A future doesn't run until something polls it, so a stored future makes no progress on its own. HTTP handlers, the CLI, and extensions don't spawn either. For example, the collector streams its sweep decisions through `try_buffer_unordered`, and the manifest builder polls its pending puts in `run`.
-
-- **Run spawned work on the handle's runtime**, through a `Handle` that the handle keeps from the runtime it was opened in. LoonFS never builds a private runtime. The one exception is the object-store IO runtime, which exists so that provider connection pools aren't tied to a caller's runtime (a caller's runtime can shut down while the store is in use).
-
-- **Spawn work only from an owner, and register every task so that drain can wait for it.** The owners are the publisher registry and a host's scheduler, and a task is spawned by the component that will wait for it. `LoonFs::drain` waits for folds, then for the compactions they started, and counts panics, so a shutdown leaves no background work running. The one detached task is provider-internal cleanup (aborting an abandoned multipart upload). It runs on the store's IO runtime, and it's best effort, because the provider's lifecycle rules and the collector reclaim whatever it misses.
+- **Build concurrency from the operation's own futures** (`try_join`, `select!`, `buffer_unordered`), so that dropping the operation cancels its work. A future doesn't run until something polls it, so a stored future makes no progress on its own. Spawn a task only from one of the owners that the code map lists.
 
 - **Apply a result only if the attempt that produced it is still current**, so that a slow attempt can't overwrite the result of a newer one. For example, a compaction can't publish if a newer compactor has claimed the namespace since it started.
 
 - **Use `#[async_trait]` only on a trait boundary with more than one implementation**, because it boxes every future it returns. Concrete types use native async functions.
 
-- **Don't count the time a response waits for the caller against a transport timer.** A total or inactivity timer doesn't run while a response body waits for the caller to read it, because that time measures the caller, not the peer.
-
 Use these synchronization primitives:
 
 | Primitive | Use it |
 | --- | --- |
-| `std::sync::Mutex` | By default. Unlock it before any `.await`, because a task suspended with it locked can deadlock another task on the same thread, and before any call into a trait object, a callback, or the metrics recorder. |
+| `std::sync::Mutex` | By default. Unlock it before any `.await`, because a task suspended with it locked can deadlock another task on the same thread. |
 | `tokio::sync::Mutex` | Only when a lock has to stay locked across an `.await`, with a comment that says why |
 | `Relaxed` atomics | For statistics |
 | `Acquire` and `Release` atomics | For flags, with a comment |
@@ -253,8 +233,6 @@ This section describes how to design for object storage, where the slowest resou
 
 - **Make each decision with one round trip.** A record refers directly to everything it doesn't contain, so a reader never has to find something through a chain of earlier records (a "lookup by lineage"). For example, a revision delta includes the layout of the bytes it references. The one lookup by lineage is an append to the same chain, whose delta includes no layout, because the chain's existing layout already covers the earlier bytes.
 
-- **Identify an immutable object by the checksum that the store records for it.** Content objects are immutable, and LoonFS uses the stored full-object checksum for read verification, appends, assembly, uploads, and content references. No writer digest is stored next to an object. A writer never deletes an immutable key, even when its own verification fails. The collector deletes unreferenced objects after the grace window, so every deletion goes through the path that checks references.
-
 - **Read what a provider supports from the store or the presigned URL issuer**, never from a constant in core, because providers differ. `checksum_algorithm` and `max_content_bytes` are the models, and provider multipart geometry is defined in the object-store crate.
 
 - **Fail configuration instead of emulating a missing feature.** A provider that can't meet a contract fails configuration and reports why, and no fallback path stands in for the missing feature, because a fallback would change an operation's cost or guarantees without the operator knowing. A contract can still let the adapter choose its mechanism (one request or many), as `assemble` does, and that isn't a fallback.
@@ -265,34 +243,21 @@ This section describes how to design for object storage, where the slowest resou
 
 - **Keep the serialized path small.** Commits are serialized through one ordered WAL, so anything on that path slows every commit. Uploads, downloads, compaction, garbage collection, and indexing stay off it.
 
-## Durable formats and the wire
+## Formats and the wire
 
-This section summarizes the rules for durable objects and the HTTP API. `docs/specs/format.md` and `docs/specs/api.md` are normative.
+`docs/specs/format.md` and `docs/specs/api.md` define the durable formats and the API. This section describes how the code expresses them.
 
-- **Encode control objects and manifests as JSON, and bulk immutable payloads as CBOR compressed with zstd.** Byte strings use `serde_bytes`, so CBOR stores them as byte strings rather than arrays of integers.
-
-- **Accept exactly one version of each durable family.** Each family has its own `format_version`, and a decoder rejects any other version before it interprets the payload. There's no compatibility path, because a reader that accepts more than one version has two decode paths to keep correct, and a process that misread an object could write its misreading into the next manifest or segment. Envelope checksums cover the payload bytes as stored, so a reader on another version computes the same checksum, and it never reports a version difference as corruption.
-
-- **Reject unknown fields everywhere except in wire responses.** Wire requests set `deny_unknown_fields`, every durable family rejects unknown fields (mutable and immutable alike), and config structs reject them. Wire responses accept them.
+- **Reject unknown fields everywhere except in wire responses.** Wire requests set `deny_unknown_fields`, every durable family rejects unknown fields (mutable and immutable alike), and config structs reject them. Wire responses accept them, so that an older client keeps working when the server adds a field.
 
 - **Tag enums with `kind`, and write field names in `snake_case`.** Internally tagged enums use `tag = "kind"` by default, and a union can tag on its domain word where that reads better (`mode`, `status`, `outcome`, or `inode_kind`). Field names and enum values are `snake_case`. ID fields end in `_id`, and actor fields end in `_by` and are paired with an `_at_ms` field (`committed_by` and `committed_at_ms`).
 
-- **Build every object key in one module.** `loonfs-objectstore::keys` builds every object key and prefix, and an extension builds its prefix through it. No other code builds a key with `format!`.
+- **Use `serde_bytes` for byte strings**, so that CBOR stores them as byte strings rather than arrays of integers.
 
-- **Encode opaque tokens with one codec**, with golden fixtures. The codec writes a JSON document as unpadded base64url. The tokens are cursors, binding versions, and content tokens.
+- **Change a shape, its spec, and the spec-locked artifacts in the same pull request.** The spec-locked artifacts are the golden fixtures (`UPDATE_GOLDEN=1`), the spec-table sync tests, and `openapi.json`. They're how a reviewer sees a format change.
 
-- **Update the spec-locked artifacts in the same change as a shape.** The spec-locked artifacts are the golden fixtures (`UPDATE_GOLDEN=1`), the spec-table sync tests, and `openapi.json`. They're how a reviewer sees a format change, so a change to a wire or durable shape updates them too.
-
-- **Follow the API grammar:**
-  - Resources are nouns, and operations are `verb_noun`. Handler names become `operationId`s, so a handler's name is its operation's name, with no `_handler` or `handle_`. SDK method names come from the SDK naming table, not from operation IDs.
-  - Every list uses one page shape (`cursor`, `limit`, `next_cursor`), except the change feed, which pages by `after_seq`, the one typed cursor.
-  - There's one error envelope (`code`, `message`, `param`), and a precondition error reports `expected_*` and `actual_*` values.
-  - Commits are idempotent by commit ID.
-  - An absent field is left out, never sent as `null`.
+- **Follow the API grammar in `api.md`.** Handler names become `operationId`s, so a handler's name is its operation's name, with no `_handler` or `handle_`.
 
 - **Write config files in `snake_case` throughout**, including store kinds.
-
-Why do requests reject unknown fields while responses accept them? An unknown field in a request is usually a mistake, such as a misspelled precondition, and ignoring it would run a different request from the one the caller meant. A response gains fields when the server is upgraded, and accepting them keeps older clients working. Durable objects reject them, even immutable ones, because folds and compaction encode objects again, and would drop a field that a reader ignored.
 
 ## Developer experience
 
@@ -360,7 +325,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   | `Error` | An error enum | `CoreError` |
   | `Id` | An identifier newtype | `NamespaceId` |
 
-  A Rust name that mirrors a serialized field, a label, or a span keeps that spelling until the format changes, as `DirentryBindingState`, `KeyClass`, and `payload_class` do. Other type names don't use `Class`, `Classification`, `Category`, `Verdict`, or `Step`, and there are no `*Result` structs, because `Result` is each crate's alias. `LoonFs`, `Namespace`, `ReadView`, and `Maintenance` are the only handle types, and new public capability goes on one of them.
+  A Rust name that mirrors a serialized field, a label, or a span keeps that spelling until the format changes, as `DirentryBindingState`, `KeyClass`, and `payload_class` do. Other type names don't use `Class`, `Classification`, `Category`, `Verdict`, or `Step`, and there are no `*Result` structs, because `Result` is each crate's alias.
 
 - **Put the bound at the start of a name and the unit at the end.** A byte quantity ends in `_bytes`. A count ends in the plural noun it counts (`_rows`, `_objects`), and `_count` is for a computed tally. `len` is used for the std method and nothing else. A bound is written `<scope>_max_<noun>_<unit>` (`max_content_bytes`, `AWS_S3_MAX_DIRECT_PUT_BYTES`). Each quantity has one unit and one name.
 
@@ -374,19 +339,7 @@ Why a closed set of verbs? Naming drift usually doesn't come from carelessness. 
 
 This section describes where code goes, and how large a module or a function can be.
 
-Define a type in the lowest crate whose vocabulary it belongs to, and re-export it from higher crates instead of defining a copy:
-
-| Crate | Role |
-| --- | --- |
-| `loonfs-types` | Vocabulary: IDs, paths, wire shapes, and durable codecs. It has no internal dependencies. |
-| `loonfs-objectstore` | The storage boundary: `ObjectStore`, keys, providers, and `StoreConfig`. |
-| `loonfs-core` | The protocol engine: metadata, commits, replay, and maintenance. |
-| `loonfs` | The runtime: handles, caching, background work, and the publisher. Surfaces reach core through this crate and no other. |
-| `loonfs-http` | The HTTP surface, shared by the server and the conformance server. |
-| `loonfs-server`, `loonfs-cli`, `loonfs-client` | Surfaces. The server never imports core. |
-| `loonfs-grep` | An extension. Core has no code for grep, and grep's copies of core helpers are deliberate. |
-| `loonfs-model` | The independent implementation (the "model oracle") that tests compare core against. It never shares code with core. |
-| `loonfs-sim`, `loonfs-conformance`, `loonfs-test-support` | Harness contracts and test support. |
+- **Define a type in the lowest crate whose vocabulary it belongs to**, and re-export it from higher crates instead of defining a copy. The code map lists the crates.
 
 - **Implement each rule, constant, mapping, and helper once**, in one place that every caller uses, because when a rule has two copies, a change to one can miss the other. The two deliberate duplications are the model oracle and grep.
 
@@ -441,8 +394,6 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
 
 - **Allow `clippy::panic` in test code through `clippy.toml`**, not file by file. The root of each integration test binary keeps one `clippy::panic` allow, with a reason, because `allow-panic-in-tests` doesn't reach a helper function in an integration binary.
 
-- **Keep the model oracle separate from core.** It restates the visibility rules from scratch, on purpose, and it's never deduplicated against core, because an oracle that shared core's code would share its bugs, and the differential suite couldn't find them.
-
 ### Observability
 
 - **Open a root span for every public handle operation**, called `loonfs.<op>`, with an `operation` field equal to the method name. Internal stages are `loonfs.phase` spans, with a `phase` from a closed enum that `phase_span!` requires. Don't keep an `.entered()` guard across an `.await`, because the span would stay entered while the task is suspended, and it would collect other tasks' events.
@@ -458,7 +409,7 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
   | `info!` | One event per lifecycle event or batch |
   | `debug!` | One event per item |
 
-  Rate-limit a warning that can repeat for each item: log the first one, and then at most one per interval, with a `suppressed` count and the time since the last one logged (`since_ms`).
+  Don't log a failure that repeats, such as a retry, on every attempt. Log the first one, then at most one per interval, with a `suppressed` count and the time since the last one logged (`since_ms`), and log the recovery when the failure stops.
 
 - **Write CLI command output to stdout and diagnostics to stderr.** Output goes through `render`, and diagnostics go through tracing, so a script can read the output without filtering out log lines. The two exceptions are the byte stream of `cat` and the progress line.
 
@@ -475,6 +426,4 @@ Define a type in the lowest crate whose vocabulary it belongs to, and re-export 
 ### Git
 
 - **Write a commit message as one line, `type(scope): summary`**, with the summary in lowercase, starting with a verb, such as `fix(cli): rewrite the command help text`.
-
-- **Merge a change to durable or API behavior in the same pull request as its spec change**, its fixture change, and its `openapi.json` change.
 
