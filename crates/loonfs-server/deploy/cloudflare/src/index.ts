@@ -43,7 +43,7 @@ max_segment_bytes = 67108864
 max_head_state_bytes = 67108864
 
 [store]
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = ${JSON.stringify(bucket)}
 account_id = "${accountId}"
 endpoint_url = "https://${accountId}.r2.cloudflarestorage.com"

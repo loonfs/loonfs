@@ -663,11 +663,11 @@
         "description": "What the bounded compaction part of a maintenance pass did.",
         "discriminator": {
           "mapping": {
+            "bounded_merge_published": "#/components/schemas/CompactionStepOutcomeBoundedMergePublished",
             "fenced": "#/components/schemas/CompactionStepOutcomeFenced",
             "manifest_advanced": "#/components/schemas/CompactionStepOutcomeManifestAdvanced",
             "metadata_compaction_required": "#/components/schemas/CompactionStepOutcomeMetadataCompactionRequired",
-            "not_needed": "#/components/schemas/CompactionStepOutcomeNotNeeded",
-            "unit_published": "#/components/schemas/CompactionStepOutcomeUnitPublished"
+            "not_needed": "#/components/schemas/CompactionStepOutcomeNotNeeded"
           },
           "propertyName": "outcome"
         },
@@ -676,7 +676,7 @@
             "$ref": "#/components/schemas/CompactionStepOutcomeNotNeeded"
           },
           {
-            "$ref": "#/components/schemas/CompactionStepOutcomeUnitPublished"
+            "$ref": "#/components/schemas/CompactionStepOutcomeBoundedMergePublished"
           },
           {
             "$ref": "#/components/schemas/CompactionStepOutcomeMetadataCompactionRequired"
@@ -688,6 +688,21 @@
             "$ref": "#/components/schemas/CompactionStepOutcomeFenced"
           }
         ]
+      },
+      "CompactionStepOutcomeBoundedMergePublished": {
+        "description": "One family group was merged and a manifest published.",
+        "properties": {
+          "outcome": {
+            "enum": [
+              "bounded_merge_published"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
       },
       "CompactionStepOutcomeFenced": {
         "description": "A newer runtime holds the compactor epoch.",
@@ -740,21 +755,6 @@
           "outcome": {
             "enum": [
               "not_needed"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "outcome"
-        ],
-        "type": "object"
-      },
-      "CompactionStepOutcomeUnitPublished": {
-        "description": "One family group was merged and a manifest published.",
-        "properties": {
-          "outcome": {
-            "enum": [
-              "unit_published"
             ],
             "type": "string"
           }
@@ -963,6 +963,23 @@
         ],
         "type": "object"
       },
+      "CreateDownloadByInodeRequest": {
+        "additionalProperties": false,
+        "description": "The options for a download of a file inode's current revision.",
+        "properties": {
+          "snapshot_id": {
+            "$ref": "#/components/schemas/PinId",
+            "description": "Read the file revision captured by this snapshot."
+          },
+          "start_offset": {
+            "description": "The first byte the grant reads. Defaults to 0 and must be below the\nfile's size, except 0 for a file of zero bytes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "CreateDownloadByInodeResponse": {
         "description": "A short-lived capability to read one inode revision.",
         "properties": {
@@ -1083,6 +1100,19 @@
         "required": [
           "namespace_id"
         ],
+        "type": "object"
+      },
+      "CreateRevisionDownloadByInodeRequest": {
+        "additionalProperties": false,
+        "description": "The options for a download of one retained inode revision.",
+        "properties": {
+          "start_offset": {
+            "description": "The first byte the grant reads. Defaults to 0 and must be below the\nrevision's size, except 0 for a revision of zero bytes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "CreateSnapshotRequest": {
@@ -2788,6 +2818,7 @@
         },
         "required": [
           "built_through_seq",
+          "next_event_index",
           "status",
           "namespace_id",
           "next_run_no",
@@ -2984,23 +3015,23 @@
             },
             "type": "array"
           },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence this page was read at."
+          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace whose ordered commit stream was read."
           },
           "next_after_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Cursor to request when another page remains, absent at `through_seq`."
-          },
-          "through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Namespace head through which this page was evaluated."
+            "description": "Cursor to request when another page remains, absent on the page that\nreaches `head_seq`."
           }
         },
         "required": [
           "namespace_id",
           "after_seq",
-          "through_seq",
+          "head_seq",
           "changes"
         ],
         "type": "object"
@@ -3673,6 +3704,7 @@
         "required": [
           "method",
           "url",
+          "headers",
           "expires_at_ms",
           "kind"
         ],
@@ -5363,6 +5395,86 @@
         ],
         "x-fern-sdk-method-name": "delete",
         "x-loonfs-retry": "not_idempotent"
+      },
+      "get": {
+        "description": "Returns one existing pin as the checkpoint listing returns it, including an expired pin that collection has not deleted. A missing id returns checkpoint_not_found.",
+        "operationId": "get_checkpoint",
+        "parameters": [
+          {
+            "description": "Namespace id",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Checkpoint id",
+            "in": "path",
+            "name": "checkpoint_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Checkpoint"
+                }
+              }
+            },
+            "description": "Existing checkpoint"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid namespace or checkpoint id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace or checkpoint not found"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Retrieve checkpoint",
+        "tags": [
+          "maintenance"
+        ],
+        "x-fern-request-name": "GetCheckpointRequest",
+        "x-fern-sdk-group-name": [
+          "maintenance",
+          "checkpoints"
+        ],
+        "x-fern-sdk-method-name": "retrieve",
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/maintenance/namespaces/{namespace_id}/diagnostics": {
@@ -6454,7 +6566,7 @@
     "/v0/namespaces/{namespace_id}/filesystem/content": {
       "get": {
         "description": "Returns the current file bytes, a retained revision, or the revision captured by a live snapshot.",
-        "operationId": "get_file_bytes",
+        "operationId": "get_file_content",
         "parameters": [
           {
             "description": "Namespace id",
@@ -6567,7 +6679,7 @@
         "tags": [
           "filesystem"
         ],
-        "x-fern-request-name": "GetFileBytesRequest",
+        "x-fern-request-name": "GetFileContentRequest",
         "x-fern-sdk-group-name": [
           "files"
         ],
@@ -7727,7 +7839,7 @@
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content": {
       "get": {
         "description": "Reads and verifies the current revision of a visible file inode, wherever it is bound, or the revision a live snapshot captured. Unknown or hidden inodes answer `inode_not_found`.",
-        "operationId": "get_file_bytes_by_inode",
+        "operationId": "get_file_content_by_inode",
         "parameters": [
           {
             "description": "Namespace id",
@@ -7843,7 +7955,7 @@
         "tags": [
           "inodes"
         ],
-        "x-fern-request-name": "GetFileBytesByInodeRequest",
+        "x-fern-request-name": "GetFileContentByInodeRequest",
         "x-fern-sdk-group-name": [
           "inodes"
         ],
@@ -7853,7 +7965,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads": {
       "post": {
-        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound, or of the revision a live snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The request has no body and the response does not include a path.",
+        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound, or of the revision a live snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response does not include a path.",
         "operationId": "create_download_by_inode",
         "parameters": [
           {
@@ -7875,28 +7987,18 @@
               "pattern": "^ino_[1-9][0-9]*$",
               "type": "string"
             }
-          },
-          {
-            "description": "Use the file revision captured by this snapshot",
-            "in": "query",
-            "name": "snapshot_id",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/PinId"
-            }
-          },
-          {
-            "description": "First byte the capability reads. Defaults to 0 and must be below the file's size, except 0 for a file of zero bytes",
-            "in": "query",
-            "name": "start_offset",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "minimum": 0,
-              "type": "integer"
-            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDownloadByInodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -7958,6 +8060,16 @@
             },
             "description": "Namespace deleted or snapshot deleted or expired"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
+          },
           "501": {
             "content": {
               "application/json": {
@@ -7976,7 +8088,6 @@
         "tags": [
           "inodes"
         ],
-        "x-fern-request-name": "CreateDownloadByInodeRequest",
         "x-fern-sdk-group-name": [
           "inodes"
         ],
@@ -8117,7 +8228,7 @@
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content": {
       "get": {
         "description": "Reads and verifies one retained file revision by inode ID and revision number.",
-        "operationId": "get_file_revision_bytes_by_inode",
+        "operationId": "get_file_revision_content_by_inode",
         "parameters": [
           {
             "description": "Namespace id",
@@ -8233,7 +8344,7 @@
         "tags": [
           "inodes"
         ],
-        "x-fern-request-name": "GetFileRevisionBytesByInodeRequest",
+        "x-fern-request-name": "GetFileRevisionContentByInodeRequest",
         "x-fern-sdk-group-name": [
           "inodes"
         ],
@@ -8243,7 +8354,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads": {
       "post": {
-        "description": "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The request has no body and the response does not include a path.",
+        "description": "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response does not include a path.",
         "operationId": "create_revision_download_by_inode",
         "parameters": [
           {
@@ -8274,19 +8385,18 @@
             "schema": {
               "$ref": "#/components/schemas/RevisionNo"
             }
-          },
-          {
-            "description": "First byte the capability reads. Defaults to 0 and must be below the revision's size, except 0 for a revision of zero bytes",
-            "in": "query",
-            "name": "start_offset",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "minimum": 0,
-              "type": "integer"
-            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRevisionDownloadByInodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -8348,6 +8458,16 @@
             },
             "description": "Namespace deleted"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
+          },
           "501": {
             "content": {
               "application/json": {
@@ -8366,7 +8486,6 @@
         "tags": [
           "inodes"
         ],
-        "x-fern-request-name": "CreateRevisionDownloadByInodeRequest",
         "x-fern-sdk-group-name": [
           "inodes"
         ],
@@ -8667,6 +8786,95 @@
         ],
         "x-fern-sdk-method-name": "delete",
         "x-loonfs-retry": "not_idempotent"
+      },
+      "get": {
+        "description": "Returns one live snapshot, as the snapshot listing returns it. A missing id, or the id of a pin that isn't a snapshot, returns snapshot_not_found, and an expired snapshot returns snapshot_gone.",
+        "operationId": "get_snapshot",
+        "parameters": [
+          {
+            "description": "Namespace id",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Snapshot id",
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PinId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            },
+            "description": "Live snapshot"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid namespace or snapshot id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace or snapshot not found"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot expired"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Retrieve snapshot",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-request-name": "GetSnapshotRequest",
+        "x-fern-sdk-group-name": [
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "retrieve",
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend": {

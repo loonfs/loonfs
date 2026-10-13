@@ -514,10 +514,10 @@ Update options
   Shared:
     --key-prefix <prefix>
 
-  local-fs profile updates:
+  local_fs profile updates:
     --root <path>
 
-  aws-s3 profile updates:
+  aws_s3 profile updates:
     --bucket <name>
     --region <region>
     --credential-source <ambient|static>
@@ -527,7 +527,7 @@ Update options
     --endpoint-url <url>
     --force-path-style <true|false>
 
-  cloudflare-r2 profile updates:
+  cloudflare_r2 profile updates:
     --bucket <name>
     --account-id <id>
     --endpoint-url <url>
@@ -535,7 +535,7 @@ Update options
     --access-key-id <id>
     --secret-access-key <secret>
 
-  gcp-gcs profile updates:
+  gcp_gcs profile updates:
     --bucket <name>
     --service-account-key-path <path>
 

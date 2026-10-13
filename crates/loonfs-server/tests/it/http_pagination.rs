@@ -526,7 +526,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .await
         .expect("list first changes page");
     assert_eq!(first_page.after_seq, ChangeSeq(0));
-    assert_eq!(first_page.through_seq, ChangeSeq(2));
+    assert_eq!(first_page.head_seq, ChangeSeq(3));
     assert_eq!(first_page.next_after_seq, Some(ChangeSeq(2)));
     assert_eq!(first_page.changes.len(), 2);
 
@@ -540,7 +540,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .await
         .expect("list second changes page");
     assert_eq!(second_page.after_seq, ChangeSeq(2));
-    assert_eq!(second_page.through_seq, ChangeSeq(3));
+    assert_eq!(second_page.head_seq, ChangeSeq(3));
     assert_eq!(second_page.next_after_seq, None);
     assert_eq!(
         second_page

@@ -301,7 +301,7 @@ content_token_secret = "test-content-token-secret"
 writer_id = "{name}"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "{}"
 key_prefix = "{key_prefix}"
 {extra}"#,

@@ -100,6 +100,21 @@ impl Client {
             .await
     }
 
+    /// Returns one live snapshot. A missing id returns `snapshot_not_found`,
+    /// and an expired snapshot returns `snapshot_gone`.
+    pub async fn get_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &PinId,
+    ) -> Result<Snapshot> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
+            self.base_url
+        );
+        self.request_json::<(), Snapshot>(self.get(&url), None, SendPolicy::Retry)
+            .await
+    }
+
     /// Extends a snapshot's lifetime. Repeating the same request is safe.
     pub async fn extend_snapshot(
         &self,
@@ -880,7 +895,7 @@ mod tests {
         let feed = serde_json::json!({
             "namespace_id": "demo",
             "after_seq": 418,
-            "through_seq": 419,
+            "head_seq": 419,
             "changes": [{
                 "namespace_id": "demo",
                 "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",

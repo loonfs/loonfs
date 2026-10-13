@@ -2254,7 +2254,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         limit: 100,
         snapshot_id: snapshot.snapshot_id,
     });
-    assert.equal(feed.through_seq, expected.snapshot_head_seq);
+    assert.equal(feed.head_seq, expected.snapshot_head_seq);
     assert.equal(feed.next_after_seq, undefined);
     assert.deepEqual(
         feed.changes.map((change) => change.committed_seq),

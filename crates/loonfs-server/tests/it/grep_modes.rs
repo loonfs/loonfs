@@ -586,6 +586,39 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
 }
 
 #[tokio::test]
+async fn an_invalid_grep_pattern_reports_the_pattern_param() {
+    let temp_dir = tempdir().expect("store tempdir");
+    let (store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "bad-pattern").await;
+    let worker = grep_worker(&store, "bad-pattern-grep-worker").await;
+    worker.enable(&namespace_id).await.expect("enable grep");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let (router, server) = app(
+        test_config(temp_dir.path(), JobMode::ServeOnly),
+        AppConfig::default(),
+    )
+    .await
+    .expect("build app");
+
+    let response = send(
+        &router,
+        Method::GET,
+        &format!("{}?pattern=%28", query_path(&namespace_id)),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = response_json(response).await;
+    assert_eq!(error.code, "invalid_request");
+    assert_eq!(error.param.as_deref(), Some("pattern"));
+    server
+        .runtime
+        .shutdown()
+        .await
+        .expect("settle the server writer");
+}
+
+#[tokio::test]
 async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "maintain-only").await;
@@ -778,7 +811,7 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
         max_upload_bytes: 1024 * 1024,
         max_download_bytes: 1024 * 1024,
         snapshot_max_ttl_ms: 86_400_000,
-        snapshot_max_lifetime_ms: 604_800_000,
+        snapshot_max_age_ms: 604_800_000,
         snapshot_max_live_per_namespace: 16,
         max_in_flight_requests: 256,
         max_connections: 1024,

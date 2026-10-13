@@ -372,7 +372,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
         .expect("list changes");
     assert_eq!(changes.namespace_id, namespace);
     assert_eq!(changes.after_seq, ChangeSeq(0));
-    assert_eq!(changes.through_seq, commit.committed_seq);
+    assert_eq!(changes.head_seq, commit.committed_seq);
     assert_eq!(changes.changes.len(), 1);
     let change = &changes.changes[0];
     assert_eq!(change.committed_seq, commit.committed_seq);

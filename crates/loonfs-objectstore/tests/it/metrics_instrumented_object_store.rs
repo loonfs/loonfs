@@ -102,7 +102,7 @@ async fn records_put_success() {
     assert_eq!(sample.bytes_out, None);
     assert_eq!(sample.put_mode, Some(PutModeKind::CreateIfAbsent));
     assert_eq!(sample.key_class, KeyClass::NamespaceManifest);
-    assert_eq!(sample.store_kind.as_deref(), Some("local-fs"));
+    assert_eq!(sample.store_kind.as_deref(), Some("local_fs"));
     assert_eq!(sample.attempts, 1);
 }
 
@@ -448,7 +448,7 @@ where
     R: ObjectStoreMetricsRecorder,
 {
     InstrumentedObjectStore::new(LocalFsStore::new(root).expect("local fs store"), recorder)
-        .store_kind("local-fs")
+        .store_kind("local_fs")
 }
 
 #[derive(Debug, Default)]

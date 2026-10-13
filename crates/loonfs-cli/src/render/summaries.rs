@@ -122,6 +122,7 @@ pub(super) fn wal_fold_summary(outcome: &WalFoldStepOutcome) -> String {
             "wal fold ran out of attempts (head was at seq {})",
             observed_head_seq.0
         ),
+        WalFoldStepOutcome::Unknown => "wal fold outcome unknown to this CLI".to_owned(),
     }
 }
 
@@ -129,6 +130,7 @@ pub(super) fn wal_fold_summary(outcome: &WalFoldStepOutcome) -> String {
 pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
     match state {
         GrepIndexStatus::Disabled => "disabled".to_owned(),
+        GrepIndexStatus::Unknown => "status unknown to this CLI".to_owned(),
         GrepIndexStatus::Backfilling {
             captured_seq,
             cursor_inode_id,
@@ -169,6 +171,7 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwner) -> String {
             target_namespace_id,
         } => format!("fork -> {target_namespace_id}"),
         CheckpointOwner::Snapshot { name } => format!("snapshot {name}"),
+        CheckpointOwner::Unknown => "owner unknown to this CLI".to_owned(),
     }
 }
 

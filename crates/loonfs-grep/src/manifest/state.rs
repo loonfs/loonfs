@@ -24,8 +24,6 @@ pub struct GrepHint {
 /// each follows the conventions of its own surface: this record tags variants
 /// with `kind` and writes inode IDs as numbers, and the API response tags
 /// variants with `status` and writes inode IDs in their public `ino_` form.
-/// This record also always writes `next_event_index`, which the response omits
-/// when it is zero.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrepIndexStatus {

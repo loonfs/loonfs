@@ -78,19 +78,19 @@ mod tests {
         assert_eq!(TraceMode::Remote.as_str(), "remote");
         assert_eq!(
             store_kind_label(Some(ConfiguredObjectStoreKind::LocalFs)),
-            "local-fs"
+            "local_fs"
         );
         assert_eq!(
             store_kind_label(Some(ConfiguredObjectStoreKind::AwsS3)),
-            "aws-s3"
+            "aws_s3"
         );
         assert_eq!(
             store_kind_label(Some(ConfiguredObjectStoreKind::CloudflareR2)),
-            "cloudflare-r2"
+            "cloudflare_r2"
         );
         assert_eq!(
             store_kind_label(Some(ConfiguredObjectStoreKind::GcpGcs)),
-            "gcp-gcs"
+            "gcp_gcs"
         );
         assert_eq!(store_kind_label(None), "unknown");
     }

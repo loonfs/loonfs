@@ -637,6 +637,94 @@ fn undelete_rejects_deletions_from_the_same_commit() {
 }
 
 #[test]
+fn an_undelete_that_misses_the_active_deletion_reports_both_sequences() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "undelete-details-test");
+    let namespace_id = namespace_id("demo");
+    let actor = loonfs_test_support::test_actor();
+    fs.create_namespace_blocking(&namespace_id, &actor)
+        .expect("create namespace");
+    let namespace_writer = fs
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    fs.put_file_blocking(&namespace_id, "/docs/report.txt", b"draft", &actor)
+        .expect("put file");
+    let report = fs
+        .stat_path_blocking(&namespace_id, "/docs/report.txt")
+        .expect("stat report")
+        .inode_id;
+    let deletion = fs
+        .delete_path_blocking(&namespace_id, "/docs/report.txt", &actor)
+        .expect("delete report")
+        .committed_seq;
+
+    let later = ChangeSeq(100);
+    let error = block_on(namespace_writer.undelete_with_options(
+        report,
+        later,
+        &actor,
+        &undelete_at("/docs/again.txt"),
+    ))
+    .expect_err("no deletion of the report is at a later sequence");
+    let Error::Core(error) = &error else {
+        panic!("expected a core error, got {error:?}")
+    };
+    assert_eq!(error.code(), ErrorCode::NotDeleted);
+    let details = error.details().expect("mismatch details");
+    assert_eq!(
+        (
+            details.inode_id,
+            details.expected_deletion_seq,
+            details.actual_deletion_seq
+        ),
+        (Some(report), Some(later), Some(deletion))
+    );
+
+    fs.put_file_blocking(&namespace_id, "/docs/fresh.txt", b"fresh", &actor)
+        .expect("put fresh file");
+    let fresh = fs
+        .stat_path_blocking(&namespace_id, "/docs/fresh.txt")
+        .expect("stat fresh file");
+    let error = fs
+        .mutate_blocking(
+            &namespace_id,
+            CommitIntent {
+                preconditions: Vec::new(),
+                commit_id: CommitId::parse("same-commit-details").expect("valid commit id"),
+                actor_id: actor.clone(),
+                subject: None,
+                message: None,
+                operations: vec![
+                    FilesystemOperation::DeletePath {
+                        path: parse_mutation_path("/docs/fresh.txt").expect("valid mutation path"),
+                        behavior: DeleteDirectoryBehavior::Recursive,
+                        expected_inode_id: Some(fresh.inode_id),
+                    },
+                    FilesystemOperation::Undelete {
+                        inode_id: fresh.inode_id,
+                        deletion_seq: ChangeSeq(fresh.head_seq.0 + 1),
+                        destination_path: Some(
+                            parse_mutation_path("/docs/back.txt").expect("valid mutation path"),
+                        ),
+                        destination_parent_inode_id: None,
+                        destination_display_name: None,
+                    },
+                ],
+            },
+        )
+        .expect_err("an undelete can't target a deletion from its own commit");
+    let Error::Core(error) = &error else {
+        panic!("expected a core error, got {error:?}")
+    };
+    assert_eq!(error.code(), ErrorCode::NotDeleted);
+    let details = error.details().expect("same-commit details");
+    assert_eq!(details.inode_id, Some(fresh.inode_id));
+    assert_eq!(details.expected_deletion_seq, None);
+    assert_eq!(details.actual_deletion_seq, None);
+}
+
+#[test]
 fn delete_with_expected_inode_refuses_a_raced_rebinding() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "delete-expectation-test");

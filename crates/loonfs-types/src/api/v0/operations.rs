@@ -1178,6 +1178,9 @@ pub enum CheckpointOwner {
         /// A label that does not need to be unique.
         name: String,
     },
+    /// An owner kind added by a newer server, without its kind-specific fields.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One checkpoint resource described by its durable record.
@@ -1640,6 +1643,9 @@ pub enum WalFoldStepOutcome {
         /// Head sequence observed before the step ran.
         observed_head_seq: ChangeSeq,
     },
+    /// An outcome added by a newer server, without its outcome-specific fields.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What the bounded compaction part of a maintenance pass did.
@@ -1653,9 +1659,9 @@ pub enum CompactionStepOutcome {
     /// One family group was merged and a manifest published.
     #[cfg_attr(
         feature = "openapi",
-        schema(title = "CompactionStepOutcomeUnitPublished")
+        schema(title = "CompactionStepOutcomeBoundedMergePublished")
     )]
-    UnitPublished {},
+    BoundedMergePublished {},
     /// A family group's window is too large for one bounded merge. Run the
     /// `metadata_compaction` job, which compacts it by streaming.
     #[cfg_attr(
@@ -1672,6 +1678,9 @@ pub enum CompactionStepOutcome {
     /// A newer runtime holds the compactor epoch.
     #[cfg_attr(feature = "openapi", schema(title = "CompactionStepOutcomeFenced"))]
     Fenced {},
+    /// An outcome added by a newer server, without its outcome-specific fields.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The result of one maintenance job. The `kind` matches the request.
@@ -1756,6 +1765,9 @@ pub enum MetadataCompactionOutcome {
     Abandoned,
     /// Another process claimed the namespace compactor role; nothing was published.
     Fenced,
+    /// An outcome added by a newer server, without its outcome-specific fields.
+    #[serde(other)]
+    Unknown,
 }
 
 /// An empty request for one store contract probe.
@@ -2708,9 +2720,9 @@ mod tests {
             serde_json::json!({"outcome": "folded", "manifest_head_seq": 9})
         );
         assert_eq!(
-            serde_json::to_value(CompactionStepOutcome::UnitPublished {})
+            serde_json::to_value(CompactionStepOutcome::BoundedMergePublished {})
                 .expect("serialize compaction outcome"),
-            serde_json::json!({"outcome": "unit_published"})
+            serde_json::json!({"outcome": "bounded_merge_published"})
         );
         assert_eq!(
             serde_json::to_value(RunMaintenanceResponse::MetadataCompaction(
@@ -2741,6 +2753,44 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn a_wal_fold_outcome_from_a_newer_server_decodes_as_unknown() {
+        let outcome: WalFoldStepOutcome =
+            serde_json::from_value(serde_json::json!({"outcome": "deferred", "until_ms": 5}))
+                .expect("a newer outcome decodes");
+        assert_eq!(outcome, WalFoldStepOutcome::Unknown);
+    }
+
+    #[test]
+    fn a_compaction_step_outcome_from_a_newer_server_decodes_as_unknown() {
+        let outcome: CompactionStepOutcome =
+            serde_json::from_value(serde_json::json!({"outcome": "deferred", "until_ms": 5}))
+                .expect("a newer outcome decodes");
+        assert_eq!(outcome, CompactionStepOutcome::Unknown);
+    }
+
+    #[test]
+    fn a_metadata_compaction_outcome_from_a_newer_server_decodes_as_unknown() {
+        let outcome: MetadataCompactionOutcome =
+            serde_json::from_value(serde_json::json!({"outcome": "deferred", "until_ms": 5}))
+                .expect("a newer outcome decodes");
+        assert_eq!(outcome, MetadataCompactionOutcome::Unknown);
+    }
+
+    #[test]
+    fn a_checkpoint_owner_from_a_newer_server_decodes_as_unknown() {
+        let checkpoint: Checkpoint = serde_json::from_value(serde_json::json!({
+            "namespace_id": "demo",
+            "checkpoint_id": "pin_00000000000000000001-0000000000000001",
+            "owner": {"kind": "retention_policy", "policy_id": "nightly"},
+            "created_at_ms": 1,
+            "captured_seq": 3,
+            "manifest_no": 3
+        }))
+        .expect("a newer owner decodes");
+        assert_eq!(checkpoint.owner, CheckpointOwner::Unknown);
     }
 
     #[test]

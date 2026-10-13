@@ -2,53 +2,27 @@
 
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
-use super::handlers_filesystem::{
-    parse_optional_snapshot_id, read_target, reject_snapshot_with_revision,
-};
+use super::handlers_filesystem::{read_target, reject_snapshot_with_revision};
 use super::handlers_inodes::{parse_inode_id, InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::query_params::parse_revision_no;
-use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery};
+use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
-use loonfs::{DownloadOptions, ErrorCode};
+use loonfs::DownloadOptions;
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use loonfs_objectstore::ByteRange;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
     api::v0::{
-        CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse,
-        DownloadRange, ObjectTransferAccess,
+        CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
+        CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, DownloadRange,
+        ObjectTransferAccess,
     },
     FEATURE_DOWNLOADS_DIRECT_GET,
 };
 use std::time::Duration;
-
-/// The query of the inode download routes. A revision route takes
-/// `snapshot_id` only to refuse it with the error the path routes give.
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct InodeDownloadQuery {
-    snapshot_id: Option<String>,
-    start_offset: Option<String>,
-}
-
-impl InodeDownloadQuery {
-    fn options(&self) -> Result<DownloadOptions, ApiResponseError> {
-        let Some(value) = self.start_offset.as_deref() else {
-            return Ok(DownloadOptions::default());
-        };
-        let start_offset = value.parse().map_err(|_| {
-            ApiResponseError::new(
-                ErrorCode::InvalidRequest,
-                &format!("invalid start_offset `{value}`: expected a byte offset"),
-            )
-            .with_param("start_offset")
-        })?;
-        Ok(DownloadOptions { start_offset })
-    }
-}
 
 /// Issues a short-lived download URL for a file.
 ///
@@ -89,8 +63,17 @@ pub(super) async fn create_download(
 ) -> Result<Json<CreateDownloadResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
-    reject_snapshot_with_revision(request.snapshot_id.as_ref(), request.revision_no)?;
-    let target = read_target(runtime.namespace(&namespace_id), request.snapshot_id).await?;
+    reject_snapshot_with_revision(
+        request.snapshot_id.as_ref(),
+        request.revision_no,
+        "/revision_no",
+    )?;
+    let target = read_target(
+        runtime.namespace(&namespace_id),
+        request.snapshot_id,
+        "/snapshot_id",
+    )
+    .await?;
     let issuer = direct_get_issuer(&state)?;
 
     let options = DownloadOptions {
@@ -99,7 +82,10 @@ pub(super) async fn create_download(
     let download = target
         .create_download(request.path.as_str(), request.revision_no, &options)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_body_field_param("start_offset")
+        })?;
     let ranges = presigned_ranges(issuer, &download.ranges, download.start_offset).await?;
 
     Ok(Json(CreateDownloadResponse {
@@ -121,13 +107,12 @@ pub(super) async fn create_download(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
-        description = "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound, or of the revision a live snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The request has no body and the response does not include a path.",
+        description = "Authorizes a direct read of the current revision of a visible file inode, wherever it is bound, or of the revision a live snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response does not include a path.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("snapshot_id" = Option<loonfs_types::PinId>, Query, description = "Use the file revision captured by this snapshot"),
-            ("start_offset" = Option<u64>, Query, description = "First byte the capability reads. Defaults to 0 and must be below the file's size, except 0 for a file of zero bytes")
+            ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123")
         ),
+        request_body = CreateDownloadByInodeRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
             (status = 400, description = "Invalid inode ID, snapshot id, start_offset, or non-snapshot checkpoint, or start_offset at or past the file's size", body = ErrorResponse),
@@ -135,6 +120,7 @@ pub(super) async fn create_download(
             (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
             (status = 409, description = "Inode is not a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Direct download is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -145,20 +131,29 @@ pub(super) async fn create_download_by_inode(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
-    AppQuery(query): AppQuery<InodeDownloadQuery>,
-    NoBody: NoBody,
+    AppQuery(_): AppQuery<NoQuery>,
+    AppJson(request): AppJson<CreateDownloadByInodeRequest>,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
-    let options = query.options()?;
-    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(
+        runtime.namespace(&namespace_id),
+        request.snapshot_id,
+        "/snapshot_id",
+    )
+    .await?;
     let issuer = direct_get_issuer(&state)?;
+    let options = DownloadOptions {
+        start_offset: request.start_offset,
+    };
     let download = target
         .create_download_by_inode(inode_id, &options)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_body_field_param("start_offset")
+        })?;
     inode_download_response(issuer, namespace_id, download).await
 }
 
@@ -172,13 +167,13 @@ pub(super) async fn create_download_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         tag = "inodes",
         summary = "Begin revision download by inode",
-        description = "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The request has no body and the response does not include a path.",
+        description = "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response does not include a path.",
         params(
             ("namespace_id" = String, Path, description = "Namespace id"),
             ("inode_id" = String, Path, description = "File inode ID", pattern = r"^ino_[1-9][0-9]*$", example = "ino_123"),
-            ("revision_no" = loonfs_types::RevisionNo, Path, description = "Revision number"),
-            ("start_offset" = Option<u64>, Query, description = "First byte the capability reads. Defaults to 0 and must be below the revision's size, except 0 for a revision of zero bytes")
+            ("revision_no" = loonfs_types::RevisionNo, Path, description = "Revision number")
         ),
+        request_body = CreateRevisionDownloadByInodeRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
             (status = 400, description = "Invalid inode ID, revision number, or start_offset, start_offset at or past the revision's size, or a snapshot_id, which cannot be combined with a revision", body = ErrorResponse),
@@ -186,6 +181,7 @@ pub(super) async fn create_download_by_inode(
             (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
             (status = 409, description = "Inode is not a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Direct download is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -196,22 +192,25 @@ pub(super) async fn create_revision_download_by_inode(
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
-    AppQuery(query): AppQuery<InodeDownloadQuery>,
-    NoBody: NoBody,
+    AppQuery(_): AppQuery<NoQuery>,
+    AppJson(request): AppJson<CreateRevisionDownloadByInodeRequest>,
 ) -> Result<Json<CreateDownloadByInodeResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
-    let options = query.options()?;
-    let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no))?;
     let issuer = direct_get_issuer(&state)?;
+    let options = DownloadOptions {
+        start_offset: request.start_offset,
+    };
     let target = runtime
         .namespace(&namespace_id)
         .create_revision_download_by_inode_with_options(inode_id, revision_no, &options)
         .await
-        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(&namespace_id, error)
+                .with_body_field_param("start_offset")
+        })?;
     inode_download_response(issuer, namespace_id, target).await
 }
 

@@ -38,14 +38,14 @@ pub enum ConfiguredObjectStoreKind {
 }
 
 impl ConfiguredObjectStoreKind {
-    /// Returns the stable kebab-case label, matching the `kind` tag used in
+    /// Returns the stable snake_case label, matching the `kind` tag used in
     /// config files.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::LocalFs => "local-fs",
-            Self::AwsS3 => "aws-s3",
-            Self::CloudflareR2 => "cloudflare-r2",
-            Self::GcpGcs => "gcp-gcs",
+            Self::LocalFs => "local_fs",
+            Self::AwsS3 => "aws_s3",
+            Self::CloudflareR2 => "cloudflare_r2",
+            Self::GcpGcs => "gcp_gcs",
         }
     }
 }

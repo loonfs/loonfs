@@ -1,11 +1,11 @@
 //! Direct-download negotiation, grants, and verified response streams.
 
 use super::*;
-use crate::transport::{QueryBuilder, SendPolicy};
+use crate::transport::SendPolicy;
 use futures::future::BoxFuture;
 use futures::stream::Fuse;
 use futures::FutureExt as _;
-use loonfs_types::api::v0::DownloadRange;
+use loonfs_types::api::v0::{CreateDownloadByInodeRequest, DownloadRange};
 use loonfs_types::ContentVerifier;
 use std::collections::VecDeque;
 use std::task::{Context, Poll};
@@ -356,17 +356,13 @@ impl Client {
         url: String,
         options: &DownloadOptions,
     ) -> Result<CreateDownloadByInodeResponse> {
-        let mut query = QueryBuilder::new(url);
-        if let Some(snapshot_id) = &options.snapshot_id {
-            query.push("snapshot_id", snapshot_id.as_str());
-        }
-        if options.start_offset != 0 {
-            query.push("start_offset", options.start_offset);
-        }
-        let url = query.build();
-        self.request_json::<(), CreateDownloadByInodeResponse>(
+        let request = CreateDownloadByInodeRequest {
+            snapshot_id: options.snapshot_id.clone(),
+            start_offset: options.start_offset,
+        };
+        self.request_json::<_, CreateDownloadByInodeResponse>(
             self.post(&url),
-            None,
+            Some(&request),
             SendPolicy::Retry,
         )
         .await

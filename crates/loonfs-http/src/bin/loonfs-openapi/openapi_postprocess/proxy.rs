@@ -22,7 +22,7 @@ pub(crate) const PROXY_OPERATIONS: &[&str] = &[
     "delete_snapshot",
     "extend_snapshot",
     "get_capabilities",
-    "get_file_bytes",
+    "get_file_content",
     "get_path_entry",
     "get_upload",
     "grep",

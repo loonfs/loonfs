@@ -896,7 +896,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     )
     .await
     .expect("change feed reloads the stale head");
-    assert_eq!(changes.through_seq, ChangeSeq(1));
+    assert_eq!(changes.head_seq, ChangeSeq(1));
     assert!(changes.changes.is_empty());
 }
 

@@ -204,9 +204,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "metadata_compaction_required",
     "target_namespace_id",
     "captured_seq",
-    "through_seq",
     "ttl_ms",
-    "unit_published",
     "unrecognized_key",
     "update_access",
     "update_access_by_inode",
@@ -3040,7 +3038,7 @@ mod direct_download {
                         "/v0/namespaces/{namespace}/inodes/ino_{}/revisions/1/downloads",
                         entry.inode_id
                     ),
-                    String::new(),
+                    "{}".to_owned(),
                 )
             };
             recording.reset();
@@ -3146,6 +3144,8 @@ mod direct_download {
         .expect("app");
         let snapshot_id = "pin_00000000000000000001-0000000000000002";
         let route = "/v0/namespaces/demo/filesystem/downloads";
+        let inode_route = "/v0/namespaces/demo/inodes/ino_1/downloads";
+        let revision_route = "/v0/namespaces/demo/inodes/ino_1/revisions/1/downloads";
         for (uri, body, param) in [
             (
                 format!("{route}?snapshot_id={snapshot_id}"),
@@ -3155,7 +3155,27 @@ mod direct_download {
             (
                 route.to_owned(),
                 serde_json::json!({"path": "/report.txt", "revision_no": 1, "snapshot_id": snapshot_id}),
-                "revision_no",
+                "/revision_no",
+            ),
+            (
+                route.to_owned(),
+                serde_json::json!({"path": "report.txt"}),
+                "/path",
+            ),
+            (
+                format!("{inode_route}?start_offset=1"),
+                serde_json::json!({}),
+                "start_offset",
+            ),
+            (
+                inode_route.to_owned(),
+                serde_json::json!({"snapshot_id": "malformed"}),
+                "/snapshot_id",
+            ),
+            (
+                revision_route.to_owned(),
+                serde_json::json!({"snapshot_id": snapshot_id}),
+                "/snapshot_id",
             ),
         ] {
             let response = router
@@ -3180,6 +3200,99 @@ mod direct_download {
                 serde_json::from_slice(&bytes).expect("API error");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
             assert_eq!(error.param.as_deref(), Some(param));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn download_body_errors_report_json_pointer_params() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at(object_base_url),
+            put: None,
+            multipart: None,
+        };
+        let client = start(temp_dir.path(), "download-pointers", Some(transfers)).await;
+        let actor = loonfs_test_support::test_actor();
+        let namespace = namespace_id("demo");
+        client
+            .create_namespace(&namespace, &actor)
+            .await
+            .expect("namespace");
+        let path = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
+        client
+            .put_file(&path, b"report", &actor)
+            .await
+            .expect("put file");
+        let inode_id = client.stat(&path).await.expect("stat").inode_id;
+        let checkpoint_id = client
+            .create_checkpoint(
+                &namespace,
+                &loonfs_types::CreateCheckpointRequest {
+                    name: "not-a-snapshot".to_owned(),
+                    ttl_ms: None,
+                },
+            )
+            .await
+            .expect("checkpoint")
+            .checkpoint_id;
+        let past_end = DownloadOptions {
+            start_offset: 99,
+            ..DownloadOptions::default()
+        };
+        let at_checkpoint = DownloadOptions {
+            snapshot_id: Some(checkpoint_id),
+            ..DownloadOptions::default()
+        };
+
+        let cases = [
+            (
+                client
+                    .create_download_with_options(&path, &past_end)
+                    .await
+                    .map(drop),
+                "/start_offset",
+            ),
+            (
+                client
+                    .create_revision_download_with_options(&path, RevisionNo(1), &at_checkpoint)
+                    .await
+                    .map(drop),
+                "/revision_no",
+            ),
+            (
+                client
+                    .create_download_by_inode_with_options(&namespace, inode_id, &past_end)
+                    .await
+                    .map(drop),
+                "/start_offset",
+            ),
+            (
+                client
+                    .create_revision_download_by_inode_with_options(
+                        &namespace,
+                        inode_id,
+                        RevisionNo(1),
+                        &past_end,
+                    )
+                    .await
+                    .map(drop),
+                "/start_offset",
+            ),
+        ];
+        for (result, expected) in cases {
+            match result {
+                Err(ClientError::Api {
+                    status,
+                    code,
+                    param,
+                    ..
+                }) => {
+                    assert_eq!((status, code.as_str()), (400, "invalid_request"));
+                    assert_eq!(param.as_deref(), Some(expected));
+                }
+                other => panic!("expected invalid_request at `{expected}`, got {other:?}"),
+            }
         }
     }
 
@@ -3618,7 +3731,7 @@ mod direct_download {
                 ..
             }) => {
                 assert_eq!(code, ErrorCode::InvalidRequest.as_str());
-                assert_eq!(param.as_deref(), Some("start_offset"));
+                assert_eq!(param.as_deref(), Some("/start_offset"));
             }
             other => panic!("expected invalid_request for start_offset, got {other:?}"),
         }

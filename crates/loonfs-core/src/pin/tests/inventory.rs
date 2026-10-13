@@ -560,3 +560,66 @@ async fn a_refused_owner_writes_no_record_to_find() {
         .expect("list checkpoints");
     assert!(listed.checkpoints.is_empty());
 }
+
+#[tokio::test]
+async fn a_pin_read_by_id_matches_its_listed_row_and_a_snapshot_read_checks_liveness() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
+    let checkpoint_id = pin_named(&store, &namespace_id, "nightly", None, &context).await;
+    let expires_at_ms = context.now_ms + 10;
+    let snapshot = create::create_pin(
+        &store,
+        &namespace_id,
+        PinOwner::Snapshot {
+            name: "view".to_owned(),
+            expires_at_ms,
+        },
+        &context,
+        Default::default(),
+        None,
+        &tokio::sync::Semaphore::new(32),
+        crate::test_support::std_timer(),
+    )
+    .await
+    .expect("create snapshot");
+
+    let listed = list_all_checkpoints(&store, &namespace_id)
+        .await
+        .expect("list checkpoints");
+    assert_eq!(listed.checkpoints.len(), 2);
+    for row in &listed.checkpoints {
+        let read = crate::pin::get_checkpoint(&store, &namespace_id, &row.checkpoint_id)
+            .await
+            .expect("read checkpoint");
+        assert_eq!(&read, row);
+    }
+    let live = crate::pin::get_snapshot(&store, &namespace_id, &snapshot.pin_id, context.now_ms)
+        .await
+        .expect("read live snapshot");
+    assert_eq!(live.snapshot_id, snapshot.pin_id);
+    assert_eq!(live.expires_at_ms, expires_at_ms);
+
+    fn code<T: std::fmt::Debug>(result: crate::error::Result<T>) -> ErrorCode {
+        result.expect_err("refused").code()
+    }
+    assert_eq!(
+        code(
+            crate::pin::get_snapshot(&store, &namespace_id, &snapshot.pin_id, expires_at_ms).await
+        ),
+        ErrorCode::SnapshotGone
+    );
+    assert_eq!(
+        code(crate::pin::get_snapshot(&store, &namespace_id, &checkpoint_id, context.now_ms).await),
+        ErrorCode::SnapshotNotFound
+    );
+    let missing = PinId::parse("pin_00000000000000000009-0000000000000009").expect("pin id");
+    assert_eq!(
+        code(crate::pin::get_checkpoint(&store, &namespace_id, &missing).await),
+        ErrorCode::CheckpointNotFound
+    );
+}

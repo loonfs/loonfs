@@ -873,7 +873,7 @@ func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	previousRevision := loonfs.RevisionNo(expected.PreviousRevisionNo)
-	proxied := readSDKFileBytes(t, h.client, &loonfs.GetFileBytesRequest{
+	proxied := readSDKFileBytes(t, h.client, &loonfs.GetFileContentRequest{
 		NamespaceID: request.NamespaceID, Path: request.Path, RevisionNo: &previousRevision,
 	}, "read the previous revision through the server")
 	if !bytes.Equal(proxied, content) {
@@ -1712,7 +1712,7 @@ func runInodeAddressing(t *testing.T, h *harness, testCase conformanceCase) {
 	freshVersion := optionalString(renamed.BindingVersion)
 
 	readCurrent := func(label string) ([]byte, error) {
-		reader, err := h.client.Inodes.Content(ctx, &loonfs.GetFileBytesByInodeRequest{
+		reader, err := h.client.Inodes.Content(ctx, &loonfs.GetFileContentByInodeRequest{
 			NamespaceID: request.NamespaceID,
 			InodeID:     source.inodeID,
 		})
@@ -2137,7 +2137,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("current listing names = %v, want %v", names, expected.CurrentEntryNames)
 	}
 
-	capturedBytes := readSDKFileBytes(t, h.client, &loonfs.GetFileBytesRequest{
+	capturedBytes := readSDKFileBytes(t, h.client, &loonfs.GetFileContentRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
 		SnapshotID:  &snapshotID,
@@ -2145,7 +2145,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if !bytes.Equal(capturedBytes, []byte(request.CapturedContentUTF8)) {
 		t.Error("snapshot content did not match the captured payload")
 	}
-	currentBytes := readSDKFileBytes(t, h.client, &loonfs.GetFileBytesRequest{
+	currentBytes := readSDKFileBytes(t, h.client, &loonfs.GetFileContentRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
 	}, "read current content")
@@ -2163,8 +2163,8 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("list snapshot changes: %v", err)
 	}
-	if int64(feed.ThroughSeq) != expected.SnapshotHeadSeq {
-		t.Errorf("snapshot changes through_seq = %d, want %d", feed.ThroughSeq, expected.SnapshotHeadSeq)
+	if int64(feed.HeadSeq) != expected.SnapshotHeadSeq {
+		t.Errorf("snapshot changes head_seq = %d, want %d", feed.HeadSeq, expected.SnapshotHeadSeq)
 	}
 	if feed.NextAfterSeq != nil {
 		t.Errorf("snapshot changes next_after_seq = %d, want nil", *feed.NextAfterSeq)
@@ -2250,7 +2250,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 
 	revision := loonfs.RevisionNo(expected.CapturedRevisionNo)
-	_, err = h.client.Files.Content(ctx, &loonfs.GetFileBytesRequest{
+	_, err = h.client.Files.Content(ctx, &loonfs.GetFileContentRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
 		RevisionNo:  &revision,
@@ -2268,7 +2268,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 func readSDKFileBytes(
 	t *testing.T,
 	sdk *server.Client,
-	request *loonfs.GetFileBytesRequest,
+	request *loonfs.GetFileContentRequest,
 	label string,
 ) []byte {
 	t.Helper()

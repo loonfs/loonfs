@@ -66,7 +66,7 @@ pub(crate) struct CliConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ProfileConfig {
     Embedded {
         store: StoreConfig,
@@ -245,7 +245,7 @@ impl ProfileConfig {
             if let StoreConfig::LocalFs { root, .. } = store {
                 if !Path::new(root).is_absolute() {
                     return Err(CliError::invalid_config(format!(
-                        "profile `{name}` has a relative local-fs root `{root}`; \
+                        "profile `{name}` has a relative local_fs root `{root}`; \
                          set an absolute path with `loonfs profile update local {name} --root <path>`"
                     )));
                 }
@@ -357,7 +357,7 @@ fn profile_field_error(profile_name: &str, error: &ConfigFieldError) -> CliError
 /// both "which file" and "why that one". The serialized spellings are the
 /// `--json` surface: `flag`, `env`, `xdg`, `default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ConfigSource {
     /// The `--config` flag.
     Flag,
@@ -834,7 +834,7 @@ default_profile = "cloud"
 mode = "embedded"
 
 [profiles.cloud.store]
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 
@@ -872,7 +872,7 @@ config_version = 1
 mode = "embedded"
 
 [profiles.cloud.store]
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = "bucket"
 account_id = "account"
 endpoint_url = "https://account.r2.cloudflarestorage.com"
@@ -919,7 +919,7 @@ mode = "embedded"
 default_namespac = "typo"
 
 [profiles.local.store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/store"
 "#,
         )
@@ -934,7 +934,7 @@ config_version = 1
 mode = "embedded"
 
 [profiles.local.store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/store"
 key_prefiks = "typo"
 "#,
@@ -953,7 +953,7 @@ config_version = 1
 mode = "embedded"
 
 [profiles.cloud.store]
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = " "
 region = "us-east-1"
 
@@ -1260,7 +1260,7 @@ mode = "embedded"
 unknown_knob = true
 
 [profiles.broken.store]
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 
@@ -1274,7 +1274,7 @@ session_token = "degraded-session-token"
 mode = "embedded"
 
 [profiles.ok.store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/store"
 "#,
         )

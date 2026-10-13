@@ -95,7 +95,6 @@ pub enum ObjectTransferAccess {
         /// Full presigned URL.
         url: String,
         /// Headers that are covered by the signature and must be sent.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         headers: BTreeMap<String, String>,
         /// Expiration timestamp in Unix milliseconds.
         expires_at_ms: u64,
@@ -254,6 +253,9 @@ pub enum UploadSessionStatus {
         /// Unix-millisecond stamp of the abort.
         aborted_at_ms: u64,
     },
+    /// A status added by a newer server, without its status-specific fields.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Current view of one upload session.
@@ -277,7 +279,7 @@ impl UploadSession {
         match &self.status {
             UploadSessionStatus::Completed { content_ref, .. } => Some(content_ref),
             UploadSessionStatus::Open { content_ref, .. } => content_ref.as_ref(),
-            UploadSessionStatus::Aborted { .. } => None,
+            UploadSessionStatus::Aborted { .. } | UploadSessionStatus::Unknown => None,
         }
     }
 
@@ -285,7 +287,9 @@ impl UploadSession {
     pub const fn content_token(&self) -> Option<&ContentToken> {
         match &self.status {
             UploadSessionStatus::Completed { content_token, .. } => content_token.as_ref(),
-            UploadSessionStatus::Open { .. } | UploadSessionStatus::Aborted { .. } => None,
+            UploadSessionStatus::Open { .. }
+            | UploadSessionStatus::Aborted { .. }
+            | UploadSessionStatus::Unknown => None,
         }
     }
 }
@@ -298,6 +302,20 @@ mod tests {
     };
     use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn an_upload_status_from_a_newer_server_decodes_as_unknown() {
+        let session: UploadSession = serde_json::from_value(serde_json::json!({
+            "namespace_id": "demo",
+            "upload_id": "upl_00000000000000000000000000000001",
+            "mode": "service_proxied",
+            "status": "expiring",
+            "expiring_at_ms": 7
+        }))
+        .expect("a newer status decodes");
+        assert_eq!(session.status, UploadSessionStatus::Unknown);
+        assert_eq!(session.content_ref(), None);
+    }
 
     #[test]
     fn a_create_upload_body_without_a_mode_does_not_decode() {

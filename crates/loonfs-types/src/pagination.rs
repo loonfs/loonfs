@@ -218,7 +218,7 @@ impl PagedResponse for crate::api::v0::ListChangesResponse {
     }
 
     fn absorb(&mut self, mut later: Self) {
-        self.through_seq = later.through_seq;
+        self.head_seq = later.head_seq;
         self.next_after_seq = later.next_after_seq;
         self.changes.append(&mut later.changes);
     }

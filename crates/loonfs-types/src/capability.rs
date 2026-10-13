@@ -95,7 +95,7 @@ limit_keys! {
     /// Advisory limit: the largest snapshot TTL one request may ask for.
     LIMIT_SNAPSHOT_MAX_TTL_MS = "snapshot.max_ttl_ms";
     /// Advisory limit: the largest snapshot expiry measured from record creation.
-    LIMIT_SNAPSHOT_MAX_LIFETIME_MS = "snapshot.max_lifetime_ms";
+    LIMIT_SNAPSHOT_MAX_AGE_MS = "snapshot.max_age_ms";
     /// Advisory limit: the most live snapshots one namespace may hold.
     LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE = "snapshot.max_live_per_namespace";
     /// Advisory limit: the most path operations one commit may carry; a longer

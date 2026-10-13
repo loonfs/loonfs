@@ -30,9 +30,8 @@ use loonfs_types::{
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
     LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_SNAPSHOT_MAX_AGE_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE, LIMIT_SNAPSHOT_MAX_TTL_MS,
+    LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
@@ -153,8 +152,8 @@ pub(super) async fn get_capabilities(
         state.options.snapshot_policy.max_ttl_ms,
     );
     capabilities.limits.insert(
-        LIMIT_SNAPSHOT_MAX_LIFETIME_MS.to_owned(),
-        state.options.snapshot_policy.max_lifetime_ms,
+        LIMIT_SNAPSHOT_MAX_AGE_MS.to_owned(),
+        state.options.snapshot_policy.max_age_ms,
     );
     capabilities.limits.insert(
         LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE.to_owned(),
@@ -606,6 +605,48 @@ pub(super) async fn extend_snapshot(
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
+        get,
+        operation_id = "get_snapshot",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
+        tag = "namespaces",
+        summary = "Retrieve snapshot",
+        description = "Returns one live snapshot, as the snapshot listing returns it. A missing id, or the id of a pin that isn't a snapshot, returns snapshot_not_found, and an expired snapshot returns snapshot_gone.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("snapshot_id" = loonfs_types::PinId, Path, description = "Snapshot id")
+        ),
+        responses(
+            (status = 200, description = "Live snapshot", body = Snapshot),
+            (status = 400, description = "Invalid namespace or snapshot id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
+            (status = 410, description = "Snapshot expired", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn get_snapshot(
+    State(state): State<BindingState>,
+    SubjectHeaders(subject): SubjectHeaders,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
+) -> Result<Json<Snapshot>, ApiResponseError> {
+    let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let snapshot = runtime
+        .namespace(&namespace_id)
+        .get_snapshot(&snapshot_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    Ok(Json(snapshot))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
         delete,
         operation_id = "delete_snapshot",
         extensions(
@@ -764,6 +805,44 @@ pub(super) async fn list_checkpoints(
         .map_err(ApiResponseError::for_namespace(&namespace_id))
         .map_err(|error| error.with_invalid_request_param("cursor"))?;
     Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        operation_id = "get_checkpoint",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
+        tag = "maintenance",
+        summary = "Retrieve checkpoint",
+        description = "Returns one existing pin as the checkpoint listing returns it, including an expired pin that collection has not deleted. A missing id returns checkpoint_not_found.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("checkpoint_id" = String, Path, description = "Checkpoint id")
+        ),
+        responses(
+            (status = 200, description = "Existing checkpoint", body = Checkpoint),
+            (status = 400, description = "Invalid namespace or checkpoint id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or checkpoint not found", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn get_checkpoint(
+    State(state): State<BindingState>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
+) -> Result<Json<Checkpoint>, ApiResponseError> {
+    let checkpoint_id = parse_path_id::<PinId>("checkpoint_id", &checkpoint_id)?;
+    let checkpoint = state
+        .maintenance
+        .get_checkpoint(&namespace_id, &checkpoint_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    Ok(Json(checkpoint))
 }
 
 #[cfg_attr(

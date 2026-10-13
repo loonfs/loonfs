@@ -1254,7 +1254,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     .await
     .expect("list changes");
     assert_eq!(
-        changes.through_seq,
+        changes.head_seq,
         ChangeSeq(u64::try_from(boundary - 1).expect("data WAL objects"))
     );
 }

@@ -12,7 +12,8 @@ mod uploads;
 
 pub use commits::{Commit, DirectoryBinding, FilesystemChange, ListChangesResponse};
 pub use downloads::{
-    CreateDownloadByInodeResponse, CreateDownloadRequest, CreateDownloadResponse, DownloadRange,
+    CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
+    CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, DownloadRange,
 };
 pub use operations::{
     validate_access_precondition, validate_attributes_precondition, AdvanceRetentionRequest,

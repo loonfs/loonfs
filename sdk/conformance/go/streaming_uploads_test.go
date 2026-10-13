@@ -81,7 +81,7 @@ func TestStreamingUploads(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				session := map[string]any{"namespace_id": "demo", "upload_id": "upl_test", "mode": fixture.Mode}
-				access := map[string]any{"kind": "presigned_url", "method": "PUT", "url": "http://objects.test/object", "expires_at_ms": 2000000000000}
+				access := map[string]any{"kind": "presigned_url", "method": "PUT", "url": "http://objects.test/object", "headers": map[string]string{}, "expires_at_ms": 2000000000000}
 				var value any
 				switch {
 				case strings.HasSuffix(path, "/capabilities"):

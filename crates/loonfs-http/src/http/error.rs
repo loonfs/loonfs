@@ -81,6 +81,15 @@ impl ApiResponseError {
         }
     }
 
+    /// Reports a runtime `param` that is a field of the request body as that
+    /// field's JSON Pointer.
+    pub(super) fn with_body_field_param(mut self, field: &str) -> Self {
+        if self.body.param.as_deref() == Some(field) {
+            self.body.param = Some(format!("/{field}"));
+        }
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn message(&self) -> &str {
         &self.body.message

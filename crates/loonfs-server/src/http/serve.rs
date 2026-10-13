@@ -232,7 +232,7 @@ pub async fn app(
         serves_maintenance: config.maintenance.serves(),
         snapshot_policy: loonfs::SnapshotPolicy {
             max_ttl_ms: config.snapshot_max_ttl_ms,
-            max_lifetime_ms: config.snapshot_max_lifetime_ms,
+            max_age_ms: config.snapshot_max_age_ms,
             max_live_per_namespace: config.snapshot_max_live_per_namespace,
         },
         max_download_bytes: Some(config.max_download_bytes),

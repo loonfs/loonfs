@@ -64,6 +64,7 @@ for (const browser of [false, true])
                 kind: "presigned_url",
                 method: "PUT",
                 url: "http://objects.test/object",
+                headers: {},
                 expires_at_ms: 2000000000000,
             };
             const send: typeof fetch = async (input, init) => {

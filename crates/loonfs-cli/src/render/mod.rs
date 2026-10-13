@@ -383,7 +383,7 @@ mod tests {
                     ProfileSummary {
                         name: "default".to_owned(),
                         mode: "embedded".to_owned(),
-                        store_kind: Some("local-fs".to_owned()),
+                        store_kind: Some("local_fs".to_owned()),
                     },
                     ProfileSummary {
                         name: "prod".to_owned(),
@@ -426,27 +426,27 @@ mod tests {
         for (store, location) in [
             (
                 serde_json::json!({
-                    "kind": "aws-s3", "bucket": "files", "region": "us-east-1", "force_path_style": false,
+                    "kind": "aws_s3", "bucket": "files", "region": "us-east-1", "force_path_style": false,
                     "key_prefix": "team", "credentials": {
                         "kind": "static", "access_key_id": "secret-id", "secret_access_key": "secret-key"
                     }
                 }),
-                "aws-s3, bucket files, key prefix team",
+                "aws_s3, bucket files, key prefix team",
             ),
             (
                 serde_json::json!({
-                    "kind": "cloudflare-r2", "bucket": "files", "account_id": "account",
+                    "kind": "cloudflare_r2", "bucket": "files", "account_id": "account",
                     "endpoint_url": "https://account.r2.cloudflarestorage.com",
                     "credentials": { "kind": "static", "access_key_id": "secret-id", "secret_access_key": "secret-key" }
                 }),
-                "cloudflare-r2, bucket files",
+                "cloudflare_r2, bucket files",
             ),
             (
                 serde_json::json!({
-                    "kind": "gcp-gcs", "bucket": "files", "key_prefix": "team",
-                    "credentials": { "kind": "service-account-file", "path": "/private/key.json" }
+                    "kind": "gcp_gcs", "bucket": "files", "key_prefix": "team",
+                    "credentials": { "kind": "service_account_file", "path": "/private/key.json" }
                 }),
-                "gcp-gcs, bucket files, key prefix team",
+                "gcp_gcs, bucket files, key prefix team",
             ),
         ] {
             let profile = serde_json::json!({ "mode": "embedded", "store": store });

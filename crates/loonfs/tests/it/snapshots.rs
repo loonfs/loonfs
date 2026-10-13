@@ -149,7 +149,7 @@ async fn snapshot_extension_recovers_an_ambiguously_landed_record_write() {
             &snapshot.snapshot_id,
             u64::MAX,
             &SnapshotPolicy {
-                max_lifetime_ms: u64::MAX,
+                max_age_ms: u64::MAX,
                 ..SnapshotPolicy::default()
             },
         )

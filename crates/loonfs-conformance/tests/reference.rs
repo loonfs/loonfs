@@ -757,6 +757,7 @@ fn upload_status_name(status: &UploadSessionStatus) -> &'static str {
         UploadSessionStatus::Open { .. } => "open",
         UploadSessionStatus::Completed { .. } => "completed",
         UploadSessionStatus::Aborted { .. } => "aborted",
+        UploadSessionStatus::Unknown => "unknown",
     }
 }
 
@@ -2166,7 +2167,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         "list snapshot changes",
     )
     .await;
-    assert_eq!(feed.through_seq.0, expected.snapshot_head_seq);
+    assert_eq!(feed.head_seq.0, expected.snapshot_head_seq);
     assert_eq!(feed.next_after_seq, None);
     assert_eq!(
         feed.changes

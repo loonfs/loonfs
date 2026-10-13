@@ -229,9 +229,9 @@ pub struct ServerConfig {
     pub snapshot_max_ttl_ms: u64,
     /// Largest snapshot lifetime measured from its creation time. Extensions
     /// cannot pass this ceiling. Advertised as the
-    /// `snapshot.max_lifetime_ms` capability limit.
-    #[serde(default = "default_snapshot_max_lifetime_ms")]
-    pub snapshot_max_lifetime_ms: u64,
+    /// `snapshot.max_age_ms` capability limit.
+    #[serde(default = "default_snapshot_max_age_ms")]
+    pub snapshot_max_age_ms: u64,
     /// Maximum live snapshots per namespace. Advertised as
     /// the `snapshot.max_live_per_namespace` capability limit.
     #[serde(default = "default_snapshot_max_live_per_namespace")]
@@ -364,8 +364,8 @@ fn default_snapshot_max_ttl_ms() -> u64 {
     loonfs::SnapshotPolicy::default().max_ttl_ms
 }
 
-fn default_snapshot_max_lifetime_ms() -> u64 {
-    loonfs::SnapshotPolicy::default().max_lifetime_ms
+fn default_snapshot_max_age_ms() -> u64 {
+    loonfs::SnapshotPolicy::default().max_age_ms
 }
 
 fn default_snapshot_max_live_per_namespace() -> usize {
@@ -611,7 +611,7 @@ impl ServerConfig {
             ("shutdown_deadline_ms", self.shutdown_deadline_ms),
             ("max_download_bytes", self.max_download_bytes),
             ("snapshot_max_ttl_ms", self.snapshot_max_ttl_ms),
-            ("snapshot_max_lifetime_ms", self.snapshot_max_lifetime_ms),
+            ("snapshot_max_age_ms", self.snapshot_max_age_ms),
             (
                 "snapshot_max_live_per_namespace",
                 self.snapshot_max_live_per_namespace as u64,
@@ -647,10 +647,10 @@ impl ServerConfig {
                 }));
             }
         }
-        if self.snapshot_max_ttl_ms > self.snapshot_max_lifetime_ms {
+        if self.snapshot_max_ttl_ms > self.snapshot_max_age_ms {
             return Err(ServerConfigError::Field(ConfigFieldError::Invalid {
                 field: "snapshot_max_ttl_ms",
-                reason: "must not exceed `snapshot_max_lifetime_ms`".to_owned(),
+                reason: "must not exceed `snapshot_max_age_ms`".to_owned(),
             }));
         }
         for (field, value) in [
@@ -1064,7 +1064,7 @@ writer_id = "memory-test"
 content_token_secret = "test-secret"
 {settings}
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "unused"
 "#
         ))
@@ -1270,7 +1270,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 
@@ -1294,7 +1294,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1322,7 +1322,7 @@ writer_id = "loonfs-server"
 maintenance = "{spelling}"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -1346,7 +1346,7 @@ writer_id = "loonfs-server"
 background_maintenance = false
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1368,7 +1368,7 @@ writer_id = "loonfs-server"
 maintenance = "sometimes"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1394,7 +1394,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1413,7 +1413,7 @@ auth_token = "dev-token"
 writer_id = "   "
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1435,7 +1435,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = " "
 account_id = "account"
 endpoint_url = "https://example.com"
@@ -1461,7 +1461,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 endpoint_url = "ftp://example.com"
@@ -1481,7 +1481,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = "bucket"
 account_id = "account"
 endpoint_url = "not a url"
@@ -1509,12 +1509,12 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "gcp-gcs"
+kind = "gcp_gcs"
 bucket = " "
 key_prefix = "demo"
 
 [store.credentials]
-kind = "service-account-file"
+kind = "service_account_file"
 path = "/tmp/service-account.json"
 "#,
         );
@@ -1562,7 +1562,7 @@ auth_token = "   "
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1583,7 +1583,7 @@ bind = "{bind}"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -1604,7 +1604,7 @@ allow_remote_without_tls = true
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1620,7 +1620,7 @@ bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1638,7 +1638,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -1659,7 +1659,7 @@ allow_remote_without_tls = true
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1680,7 +1680,7 @@ cert_path = "/etc/loonfs/tls/server.crt"
 key_path = "/etc/loonfs/tls/server.key"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1708,7 +1708,7 @@ cert_path = "{cert_path}"
 key_path = "{key_path}"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -1732,7 +1732,7 @@ key_path = "/etc/loonfs/tls/server.key"
 client_ca_path = "/etc/loonfs/tls/clients.crt"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1755,7 +1755,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1771,7 +1771,7 @@ writer_id = "loonfs-server"
 max_upload_bytes = 0
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1788,7 +1788,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1805,7 +1805,7 @@ writer_id = "loonfs-server"
 {field} = 0
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -1893,7 +1893,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1956,7 +1956,7 @@ writer_id = "loonfs-server"
 {field} = 0
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -1975,7 +1975,7 @@ mode = "serve_and_maintain"
 max_content_bytes_per_step = 0
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -1998,7 +1998,7 @@ writer_id = "loonfs-server"
 {setting}
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -2017,7 +2017,7 @@ content_token_secret = "debug-content-token-secret"
 writer_id = "loonfs-server"
 
 [store]
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 key_prefix = "demo"
@@ -2050,7 +2050,7 @@ auth_token = "file-auth-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2118,7 +2118,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 
@@ -2157,7 +2157,7 @@ writer_id = "loonfs-server"
 lease_duration = 60000
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2168,7 +2168,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 key_prefiks = "typo"
 "#,
@@ -2183,7 +2183,7 @@ writer_id = "loonfs-server"
 max_head_state_byte = 2
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2198,7 +2198,7 @@ mode = "serve_and_maintain"
 max_files_per_stepp = 3
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2233,7 +2233,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2264,7 +2264,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2290,7 +2290,7 @@ max_segment_bytes = 16384
 max_head_state_bytes = 4096
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2320,7 +2320,7 @@ max_segment_bytes = 0
 max_head_state_bytes = 0
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2344,7 +2344,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2370,7 +2370,7 @@ memory_bytes = 67108864
 disk_bytes = 107374182400
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2398,7 +2398,7 @@ memory_bytes = 67108864
 disk_bytes = 107374182400
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2421,7 +2421,7 @@ memory_bytes = {memory_bytes}
 disk_bytes = {disk_bytes}
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -2445,7 +2445,7 @@ memory_bytes = 67108864
 disk_bytes = {disk_bytes}
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ))
@@ -2489,7 +2489,7 @@ disk_bytes = 107374182400
 block_bytes = 65536
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2507,7 +2507,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2527,7 +2527,7 @@ writer_id = "loonfs-server"
 [grep]
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2559,7 +2559,7 @@ writer_id = "loonfs-server"
 mode = "{spelling}"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -2585,7 +2585,7 @@ mode = "serve_and_maintain"
 {setting}
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             )))
@@ -2618,7 +2618,7 @@ max_files_per_step = 4096
 max_content_bytes_per_step = 536870912
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2656,7 +2656,7 @@ mode = "serve_and_maintain"
 max_files_per_step = 1024
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2691,7 +2691,7 @@ writer_id = "loonfs-server"
 mode = "serve_and_maintain"
 {key} = 1
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
             ));
@@ -2713,7 +2713,7 @@ writer_id = "loonfs-server"
 max_files_per_step = 4
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );
@@ -2739,7 +2739,7 @@ writer_id = "loonfs-server"
 max_head_state_bytes = -1
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
         );

@@ -62,7 +62,7 @@ memory_limit_bytes = 4294967296
 # Snapshot request ttl, total lifetime from creation, and live quota per
 # namespace. These are advertised through the matching `snapshot.*` limits.
 #snapshot_max_ttl_ms = 86400000
-#snapshot_max_lifetime_ms = 604800000
+#snapshot_max_age_ms = 604800000
 #snapshot_max_live_per_namespace = 16
 
 # Requests hold a slot through response completion; health and readiness are
@@ -118,7 +118,7 @@ memory_limit_bytes = 4294967296
 # Direct-put needs no configuration. It is offered only where the adapter can
 # presign a create-only PUT and report a durable checksum, and the endpoint is
 # a first-party AWS S3 or Cloudflare R2 domain, so it is unavailable on this
-# local-fs store.
+# local_fs store.
 # Clients gate on `filesystem.uploads.direct_put` in the capability document.
 
 # Optional node-local cache of encoded metadata blocks, on this machine's own
@@ -172,7 +172,7 @@ memory_limit_bytes = 4294967296
 #key_path = "/etc/loonfs/tls/server.key"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "./.loonfs-store"
 key_prefix = "local-demo"
 

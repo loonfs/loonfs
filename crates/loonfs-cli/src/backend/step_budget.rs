@@ -110,7 +110,7 @@ where
 
 fn lifecycle_stopped(lifecycle: &GrepIndexStatus) -> bool {
     match lifecycle {
-        GrepIndexStatus::Disabled => true,
+        GrepIndexStatus::Disabled | GrepIndexStatus::Unknown => true,
         GrepIndexStatus::Backfilling { .. } | GrepIndexStatus::Active { .. } => false,
     }
 }

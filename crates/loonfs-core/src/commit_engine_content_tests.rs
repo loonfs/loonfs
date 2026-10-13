@@ -661,7 +661,6 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
 async fn retained_evidence_minting_stops_at_the_upload_issuance_deadline() {
     use crate::content::mint_content_token;
     use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
-    use base64::Engine as _;
 
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -675,9 +674,10 @@ async fn retained_evidence_minting_stops_at_the_upload_issuance_deadline() {
     let deadline_ms = setup.now_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;
     for now_ms in [setup.now_ms, deadline_ms - 1] {
         let token = mint_content_token("secret", &evidence, now_ms).expect("eligible mint");
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(token.token.split_once('.').expect("signed token").0)
-            .expect("payload");
+        let payload = loonfs_types::format::hex::hex_decode_bytes(
+            token.token.split_once('.').expect("signed token").0,
+        )
+        .expect("payload");
         let payload: serde_json::Value = serde_json::from_slice(&payload).expect("token payload");
         let expires_at_ms = payload["expires_at_ms"].as_u64().expect("expiry");
         assert_eq!(expires_at_ms, now_ms + CONTENT_RECEIPT_TTL_MS);

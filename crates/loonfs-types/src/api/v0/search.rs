@@ -107,8 +107,7 @@ pub struct GrepResponse {
 /// because each follows the conventions of its own surface: this response tags
 /// variants with `status` and writes inode IDs in their public `ino_` form, and
 /// the durable record tags variants with `kind` and writes inode IDs as
-/// numbers. This response also omits a zero `next_event_index`, which the
-/// durable record always writes.
+/// numbers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -136,9 +135,11 @@ pub enum GrepIndexStatus {
         built_through_seq: ChangeSeq,
         /// The next change-event offset within `built_through_seq`, or zero when the
         /// whole commit is indexed.
-        #[serde(default, skip_serializing_if = "is_zero")]
         next_event_index: u32,
     },
+    /// A status added by a newer server, without its status-specific fields.
+    #[serde(other)]
+    Unknown,
 }
 
 impl GrepIndexStatus {
@@ -149,7 +150,7 @@ impl GrepIndexStatus {
     /// sequences.
     pub fn is_built_through(&self, target_seq: ChangeSeq) -> bool {
         match self {
-            Self::Disabled | Self::Backfilling { .. } => false,
+            Self::Disabled | Self::Backfilling { .. } | Self::Unknown => false,
             Self::Active {
                 built_through_seq,
                 next_event_index,
@@ -159,10 +160,6 @@ impl GrepIndexStatus {
             }
         }
     }
-}
-
-fn is_zero(value: &u32) -> bool {
-    *value == 0
 }
 
 /// The maintenance status of a namespace's grep index.
@@ -234,7 +231,7 @@ mod tests {
                 next_event_index: 0,
             })
             .expect("serialize active"),
-            serde_json::json!({"status": "active", "built_through_seq": 9}),
+            serde_json::json!({"status": "active", "built_through_seq": 9, "next_event_index": 0}),
             "an active index reports its watermark and no target"
         );
 
@@ -272,6 +269,20 @@ mod tests {
     }
 
     #[test]
+    fn a_grep_index_status_from_a_newer_server_decodes_as_unknown() {
+        let index: GrepIndex = serde_json::from_value(serde_json::json!({
+            "namespace_id": "demo",
+            "status": "rebuilding",
+            "rebuild_seq": 9,
+            "next_run_no": 3,
+            "reorganize_pending": false
+        }))
+        .expect("a newer status decodes");
+        assert_eq!(index.status, GrepIndexStatus::Unknown);
+        assert!(!index.status.is_built_through(ChangeSeq(0)));
+    }
+
+    #[test]
     fn grep_index_status_flattens_its_lifecycle() {
         assert_eq!(
             serde_json::to_value(GrepIndex {
@@ -288,6 +299,7 @@ mod tests {
                 "namespace_id": "demo",
                 "status": "active",
                 "built_through_seq": 12,
+                "next_event_index": 0,
                 "next_run_no": 3,
                 "reorganize_pending": false
             })

@@ -7,5 +7,5 @@ mode = "embedded"
 default_namespace = "demo"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/store"

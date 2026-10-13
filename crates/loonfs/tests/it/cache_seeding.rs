@@ -982,7 +982,7 @@ fn metadata_upkeep_offers_nothing_to_the_local_block_cache() {
         );
         fs.stat_path_blocking(&namespace_id, &format!("/docs/file-{index:02}.txt"))
             .expect("read folded file outside the maintenance window");
-        if step.compaction == (CompactionStepOutcome::UnitPublished {}) {
+        if step.compaction == (CompactionStepOutcome::BoundedMergePublished {}) {
             compacted = true;
             break;
         }

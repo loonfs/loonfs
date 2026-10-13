@@ -765,7 +765,7 @@ fn a_mutation_request_appears_in_change_feed() {
     let changes = fs
         .list_changes_blocking(&namespace_id, ChangeSeq(0))
         .expect("list changes");
-    assert_eq!(changes.through_seq, response.committed_seq);
+    assert_eq!(changes.head_seq, response.committed_seq);
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(changes.changes[0].commit_id, commit_id);
 }

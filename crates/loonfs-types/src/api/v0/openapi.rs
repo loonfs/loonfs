@@ -19,22 +19,22 @@ use utoipa::ToSchema;
 pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     let mut named = NamedSchemas::default();
     named.tagged::<CreateUploadBody>("mode", None);
-    named.tagged::<CheckpointOwner>("kind", None);
+    named.tagged::<CheckpointOwner>("kind", Some("unknown"));
     named.tagged::<CommitPrecondition>("kind", None);
     named.tagged::<FilesystemChange>("kind", Some("unknown"));
     named.tagged::<FilesystemOperation>("kind", None);
-    named.tagged::<MetadataCompactionOutcome>("outcome", None);
+    named.tagged::<MetadataCompactionOutcome>("outcome", Some("unknown"));
     named.tagged::<NamespaceAccess>("kind", None);
     named.tagged::<NamespaceAccessMode>("kind", None);
     named.tagged::<ObjectTransferAccess>("kind", None);
-    named.tagged::<CompactionStepOutcome>("outcome", None);
+    named.tagged::<CompactionStepOutcome>("outcome", Some("unknown"));
     named.tagged::<RunMaintenanceRequest>("kind", None);
     named.tagged::<RunMaintenanceResponse>("kind", None);
     named.tagged::<CompleteUploadBody>("mode", None);
-    named.tagged::<WalFoldStepOutcome>("outcome", None);
+    named.tagged::<WalFoldStepOutcome>("outcome", Some("unknown"));
     named.composite::<PathEntry, PathEntryKind>("inode_kind", Some("unknown"));
-    named.composite::<UploadSession, UploadSessionStatus>("status", None);
-    named.composite::<GrepIndex, GrepIndexStatus>("status", None);
+    named.composite::<UploadSession, UploadSessionStatus>("status", Some("unknown"));
+    named.composite::<GrepIndex, GrepIndexStatus>("status", Some("unknown"));
 
     // These are implementation fields flattened into the named payloads. The
     // document's reference-integrity test catches accidental independent reuse.

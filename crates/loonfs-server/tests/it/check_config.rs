@@ -24,7 +24,7 @@ content_token_secret = "check-config-secret"
 writer_id = "check-config-writer"
 {extra}
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "{}"
 "#,
         store_root.display()
@@ -174,7 +174,7 @@ fn check_config_accepts_a_valid_config_and_names_what_it_validated() {
     );
     assert_eq!(
         stdout.trim(),
-        "config ok: bind 127.0.0.1:9400, store local-fs, maintenance serve_and_maintain"
+        "config ok: bind 127.0.0.1:9400, store local_fs, maintenance serve_and_maintain"
     );
     // The documented caveat: constructing a local-fs store creates its root.
     assert!(store_root.is_dir(), "local-fs check creates the store root");
@@ -192,7 +192,7 @@ content_token_secret = "inline-content-secret"
 writer_id = "inline-config-writer"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "{}"
 "#,
         store_root.display()
@@ -209,7 +209,7 @@ root = "{}"
     );
     assert_eq!(
         stdout.trim(),
-        "config ok: bind 127.0.0.1:9400, store local-fs, maintenance serve_and_maintain"
+        "config ok: bind 127.0.0.1:9400, store local_fs, maintenance serve_and_maintain"
     );
     assert!(!stdout.contains("inline-config-token"), "{stdout}");
     assert!(!stdout.contains("inline-content-secret"), "{stdout}");
@@ -230,7 +230,7 @@ content_token_secret = "check-config-secret"
 writer_id = "check-config-writer"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/tmp/loonfs-check-config-unused"
 "#,
     )
@@ -354,7 +354,7 @@ fn check_config_leaves_no_cache_files_behind() {
     );
     assert_eq!(
         stdout.trim(),
-        "config ok: bind 127.0.0.1:9400, store local-fs, maintenance serve_and_maintain"
+        "config ok: bind 127.0.0.1:9400, store local_fs, maintenance serve_and_maintain"
     );
     assert!(
         std::fs::read_dir(&cache_root)
@@ -382,7 +382,7 @@ fn check_config_does_not_bind_the_port() {
     );
     assert_eq!(
         stdout.trim(),
-        format!("config ok: bind {bind}, store local-fs, maintenance serve_and_maintain")
+        format!("config ok: bind {bind}, store local_fs, maintenance serve_and_maintain")
     );
     drop(listener);
 }

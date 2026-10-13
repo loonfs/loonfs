@@ -98,7 +98,7 @@ default_profile = "dev"
 mode = "embedded"
 
 [profiles.dev.store]
-kind = "local-fs"
+kind = "local_fs"
 root = "./store"
 "#;
     harness.write_cli_config(original);
@@ -110,7 +110,7 @@ root = "./store"
             .output()
             .expect("run loonfs")
     };
-    let message = "profile `dev` has a relative local-fs root `./store`; set an absolute path with `loonfs profile update local dev --root <path>`";
+    let message = "profile `dev` has a relative local_fs root `./store`; set an absolute path with `loonfs profile update local dev --root <path>`";
     let listed = run(&["--json", "ls", "/"]);
     assert_failure(&listed);
     assert_eq!(json_error(&listed)["code"], "invalid_config");
@@ -186,7 +186,7 @@ fn profile_create_list_show_delete_work() {
     assert_eq!(
         stdout_string(&add_embedded),
         format!(
-            "created profile `default` (local-fs, root {})\ndefault profile: `default`\n",
+            "created profile `default` (local_fs, root {})\ndefault profile: `default`\n",
             harness.store_root("default").display()
         )
     );
@@ -348,7 +348,7 @@ unknown_knob = true
 mode = "embedded"
 
 [profiles.keeper.store]
-kind = "local-fs"
+kind = "local_fs"
 root = "{}"
 "#,
         harness.store_root("keeper").display()
@@ -873,7 +873,7 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
         ],
     );
     assert_success(&gcs);
-    assert_eq!(json_data(&gcs)["store"]["kind"], "gcp-gcs");
+    assert_eq!(json_data(&gcs)["store"]["kind"], "gcp_gcs");
 
     let local_fs = harness.run_with_env(
         ambient,
@@ -1053,7 +1053,7 @@ default_profile = "default"
 mode = "embedded"
 
 [profiles.default.store]
-kind = "local-fs"
+kind = "local_fs"
 root = "{}"
 "#,
         harness.store_root("default").display()
@@ -1109,7 +1109,7 @@ default_profile = "default"
 mode = "embedded"
 
 [profiles.default.store]
-kind = "local-fs"
+kind = "local_fs"
 root = ""
 "#,
     );
@@ -1137,7 +1137,7 @@ mode = "embedded"
 default_namespace = "bad/name"
 
 [profiles.default.store]
-kind = "local-fs"
+kind = "local_fs"
 root = "{}"
 "#,
         harness.store_root("default").display()
@@ -1511,7 +1511,7 @@ mode = "embedded"
 default_namespace = "demo"
 
 [profiles.broken.store]
-kind = "local-fs"
+kind = "local_fs"
 root = "{}"
 key_prefix = "../bad"
 "#,

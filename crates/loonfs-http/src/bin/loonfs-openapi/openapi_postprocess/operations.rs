@@ -51,7 +51,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         SdkName {
             group: &["inodes"],
             method: "createDownload",
-            request: Some("CreateDownloadByInodeRequest"),
+            request: None,
         },
     ),
     (
@@ -67,7 +67,7 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         SdkName {
             group: &["inodes"],
             method: "createRevisionDownload",
-            request: Some("CreateRevisionDownloadByInodeRequest"),
+            request: None,
         },
     ),
     (
@@ -151,27 +151,35 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
-        "get_file_bytes",
+        "get_checkpoint",
+        SdkName {
+            group: &["maintenance", "checkpoints"],
+            method: "retrieve",
+            request: Some("GetCheckpointRequest"),
+        },
+    ),
+    (
+        "get_file_content",
         SdkName {
             group: &["files"],
             method: "content",
-            request: Some("GetFileBytesRequest"),
+            request: Some("GetFileContentRequest"),
         },
     ),
     (
-        "get_file_bytes_by_inode",
+        "get_file_content_by_inode",
         SdkName {
             group: &["inodes"],
             method: "content",
-            request: Some("GetFileBytesByInodeRequest"),
+            request: Some("GetFileContentByInodeRequest"),
         },
     ),
     (
-        "get_file_revision_bytes_by_inode",
+        "get_file_revision_content_by_inode",
         SdkName {
             group: &["inodes"],
             method: "revisionContent",
-            request: Some("GetFileRevisionBytesByInodeRequest"),
+            request: Some("GetFileRevisionContentByInodeRequest"),
         },
     ),
     (
@@ -212,6 +220,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
             group: &["files"],
             method: "retrieve",
             request: Some("GetPathEntryRequest"),
+        },
+    ),
+    (
+        "get_snapshot",
+        SdkName {
+            group: &["snapshots"],
+            method: "retrieve",
+            request: Some("GetSnapshotRequest"),
         },
     ),
     (

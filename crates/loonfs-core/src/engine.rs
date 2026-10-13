@@ -1366,6 +1366,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<Page<loonfs_types::Checkpoint, CheckpointPageCursor>> {
         crate::pin::list_checkpoints_page(&self.store, &self.namespace_id, request).await
     }
+
+    /// Loads one existing checkpoint by id, as the listing returns it. An
+    /// expired record stays readable until garbage collection deletes it. A
+    /// missing pin returns `checkpoint_not_found`.
+    pub async fn get_checkpoint(&self, checkpoint_id: &PinId) -> Result<loonfs_types::Checkpoint> {
+        crate::pin::get_checkpoint(&self.store, &self.namespace_id, checkpoint_id).await
+    }
+
+    /// Loads one live snapshot by id. A missing id returns
+    /// `snapshot_not_found`, and a snapshot that expired at or before `now_ms`
+    /// returns `snapshot_gone`.
+    pub async fn get_snapshot(&self, snapshot_id: &PinId, now_ms: u64) -> Result<Snapshot> {
+        crate::pin::get_snapshot(&self.store, &self.namespace_id, snapshot_id, now_ms).await
+    }
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
@@ -1385,14 +1399,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         checkpoint_id: &PinId,
         requested_expires_at_ms: u64,
-        max_lifetime_ms: u64,
+        max_age_ms: u64,
     ) -> Result<Snapshot> {
         crate::pin::extend_snapshot_expiry(
             &self.store,
             &self.namespace_id,
             checkpoint_id,
             requested_expires_at_ms,
-            max_lifetime_ms,
+            max_age_ms,
             &self.mutation_context(),
             Arc::clone(&self.timer),
         )

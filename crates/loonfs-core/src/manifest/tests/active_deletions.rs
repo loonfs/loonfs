@@ -1112,6 +1112,6 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
             .collect::<Vec<_>>(),
         [ChangeSeq(8)]
     );
-    assert_eq!(second.through_seq, ChangeSeq(8));
+    assert_eq!(second.head_seq, ChangeSeq(8));
     assert_eq!(second.next_after_seq, None);
 }

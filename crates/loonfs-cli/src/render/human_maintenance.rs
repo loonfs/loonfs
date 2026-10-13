@@ -157,7 +157,7 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
             wal_fold_summary(&metadata.wal_fold),
             match metadata.compaction {
                 CompactionStepOutcome::NotNeeded {} => "compaction not needed",
-                CompactionStepOutcome::UnitPublished {} => "compacted one family group",
+                CompactionStepOutcome::BoundedMergePublished {} => "compacted one family group",
                 CompactionStepOutcome::MetadataCompactionRequired {} => {
                     "one family group needs the metadata_compaction job"
                 }
@@ -165,6 +165,7 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 CompactionStepOutcome::ManifestAdvanced {} => {
                     "another publisher advanced the manifest number, so compaction published nothing"
                 }
+                CompactionStepOutcome::Unknown => "compaction outcome unknown to this CLI",
             }
         ),
         RunMaintenanceResponse::MetadataCompaction(response) => {
@@ -186,6 +187,7 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 MetadataCompactionOutcome::Cancelled => "cancelled".to_owned(),
                 MetadataCompactionOutcome::Abandoned => "abandoned".to_owned(),
                 MetadataCompactionOutcome::Fenced => "fenced".to_owned(),
+                MetadataCompactionOutcome::Unknown => "outcome unknown to this CLI".to_owned(),
             };
             format!(
                 "metadata compaction for {}: {summary}",
@@ -230,8 +232,8 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
 pub(super) fn human_changes(response: &ListChangesResponse) -> String {
     let mut lines = vec![
         format!(
-            "changes for {} after seq {} (through seq {})",
-            response.namespace_id, response.after_seq.0, response.through_seq.0
+            "changes for {} after seq {} (head seq {})",
+            response.namespace_id, response.after_seq.0, response.head_seq.0
         ),
         "SEQ\tDATE\tEVENTS\tMESSAGE".to_owned(),
     ];

@@ -120,8 +120,8 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
         "snapshot-lifecycle",
     );
     config.snapshot_max_ttl_ms = 20_000;
-    config.snapshot_max_lifetime_ms = 20_000;
-    let max_lifetime_ms = config.snapshot_max_lifetime_ms;
+    config.snapshot_max_age_ms = 20_000;
+    let max_age_ms = config.snapshot_max_age_ms;
     let harness = start_server(config).await;
     let namespace = namespace_id("lifecycle");
     harness
@@ -160,10 +160,7 @@ async fn http_snapshots_lifecycle_is_live_extendable_and_releasable() {
     )
     .expect("extend snapshot");
     assert!(extended.expires_at_ms > created.expires_at_ms);
-    assert_eq!(
-        extended.expires_at_ms,
-        extended.created_at_ms + max_lifetime_ms
-    );
+    assert_eq!(extended.expires_at_ms, extended.created_at_ms + max_age_ms);
     let repeated = extend_snapshot(
         &harness.server_url,
         namespace.as_str(),
@@ -226,7 +223,7 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
         "snapshot-validation",
     );
     config.snapshot_max_ttl_ms = 1_000;
-    config.snapshot_max_lifetime_ms = 2_000;
+    config.snapshot_max_age_ms = 2_000;
     let harness = start_server(config).await;
     let namespace = namespace_id("validation");
     harness
@@ -604,5 +601,85 @@ async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
             other => panic!("expected an invalid cursor, got {other:?}"),
         }
     }
+    harness.server.abort();
+}
+
+#[tokio::test]
+async fn snapshot_and_checkpoint_retrieves_return_their_listed_rows() {
+    use loonfs_client::ClientError;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let config = test_config(
+        temp_dir.path().join("store"),
+        "pin-retrieve",
+        "pin-retrieve",
+    );
+    let harness = start_server(config).await;
+    let namespace = NamespaceId::parse("demo").expect("namespace id");
+    harness
+        .client
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let created = harness
+        .client
+        .create_snapshot(&namespace, "first", 5_000)
+        .await
+        .expect("create snapshot");
+
+    let listed = harness
+        .client
+        .list_snapshots(&namespace)
+        .page(first_page())
+        .await
+        .expect("list snapshots");
+    let retrieved = harness
+        .client
+        .get_snapshot(&namespace, &created.snapshot_id)
+        .await
+        .expect("retrieve snapshot");
+    assert_eq!(listed.snapshots, vec![retrieved]);
+    let checkpoints = harness
+        .client
+        .list_checkpoints(&namespace)
+        .page(first_page())
+        .await
+        .expect("list checkpoints");
+    let checkpoint = harness
+        .client
+        .get_checkpoint(&namespace, &created.snapshot_id)
+        .await
+        .expect("retrieve checkpoint");
+    assert_eq!(checkpoints.checkpoints, vec![checkpoint]);
+
+    harness
+        .client
+        .delete_snapshot(&namespace, &created.snapshot_id)
+        .await
+        .expect("delete snapshot");
+    let code = |error: ClientError| match error {
+        ClientError::Api { status, code, .. } => (status, code),
+        other => panic!("expected an API error, got {other:?}"),
+    };
+    assert_eq!(
+        code(
+            harness
+                .client
+                .get_snapshot(&namespace, &created.snapshot_id)
+                .await
+                .expect_err("a deleted snapshot is not found")
+        ),
+        (404, "snapshot_not_found".to_owned())
+    );
+    assert_eq!(
+        code(
+            harness
+                .client
+                .get_checkpoint(&namespace, &created.snapshot_id)
+                .await
+                .expect_err("a deleted pin is not found")
+        ),
+        (404, "checkpoint_not_found".to_owned())
+    );
     harness.server.abort();
 }

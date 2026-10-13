@@ -120,12 +120,9 @@ pub enum CommitValidationError {
     #[error("undelete target inode `{inode_id}` is not the root of a live deletion")]
     UndeleteTargetNotDeleted { inode_id: InodeId },
     #[error(
-        "undelete of inode `{inode_id}` targets a deletion at seq `{requested_seq}`, which is not from an earlier commit"
+        "undelete of inode `{inode_id}` targets a deletion made in the same commit, not an earlier one"
     )]
-    UndeleteTargetsCurrentCommit {
-        inode_id: InodeId,
-        requested_seq: ChangeSeq,
-    },
+    UndeleteTargetsCurrentCommit { inode_id: InodeId },
     #[error(
         "undelete of inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the active deletion is at seq `{active_seq}`"
     )]
@@ -242,16 +239,9 @@ impl CommitValidationError {
                 operand: CommitOperand::UndeleteTarget,
                 inode_id,
             }
-            | Self::UndeleteTargetNotDeleted { inode_id } => Some(ErrorDetails {
+            | Self::UndeleteTargetNotDeleted { inode_id }
+            | Self::UndeleteTargetsCurrentCommit { inode_id } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
-                ..ErrorDetails::default()
-            }),
-            Self::UndeleteTargetsCurrentCommit {
-                inode_id,
-                requested_seq,
-            } => Some(ErrorDetails {
-                inode_id: Some(*inode_id),
-                expected_deletion_seq: Some(*requested_seq),
                 ..ErrorDetails::default()
             }),
             Self::UndeleteSequenceMismatch {

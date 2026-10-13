@@ -655,7 +655,11 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
                 .request(method, &url)
                 .set("authorization", "Bearer test-token")
                 .set("Loonfs-Actor", "test-actor");
-            let result = request.call();
+            let result = if method == "POST" {
+                request.send_json(serde_json::json!({}))
+            } else {
+                request.call()
+            };
             let ureq::Error::Status(status, response) =
                 result.expect_err("malformed inode route should fail")
             else {

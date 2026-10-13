@@ -374,7 +374,7 @@ async fn run_maintenance_index_enable(
     let target_seq = match (args.no_wait, &response.status) {
         // Nothing to wait for: the caller opted out, or the index is
         // disabled, which enable would have changed if it could.
-        (true, _) | (_, GrepIndexStatus::Disabled) => None,
+        (true, _) | (_, GrepIndexStatus::Disabled | GrepIndexStatus::Unknown) => None,
         // A backfill already names the namespace sequence its checkpoint
         // captured, and reaching it is what completes the backfill.
         (_, GrepIndexStatus::Backfilling { captured_seq, .. }) => Some(*captured_seq),

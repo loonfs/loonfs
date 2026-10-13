@@ -87,17 +87,6 @@ fn post_json<T: DeserializeOwned>(url: &str, body: serde_json::Value) -> ApiResu
     })
 }
 
-fn post_empty<T: DeserializeOwned>(url: &str) -> ApiResult<T> {
-    retry_result_on_macos_teardown_einval(|| {
-        decode_json_response(
-            raw_agent()
-                .post(url)
-                .set("authorization", "Bearer test-token")
-                .call(),
-        )
-    })
-}
-
 fn decode_json_response<T: DeserializeOwned>(
     response: Result<ureq::Response, ureq::Error>,
 ) -> ApiResult<T> {
@@ -497,12 +486,12 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
         seen.extend(page.changes.iter().map(|change| change.committed_seq));
         match page.next_after_seq {
             Some(next) => {
-                assert_eq!(page.through_seq, next);
+                assert_eq!(page.head_seq, snapshot.captured_seq);
                 assert!(next < snapshot.captured_seq);
                 after_seq = next;
             }
             None => {
-                assert_eq!(page.through_seq, snapshot.captured_seq);
+                assert_eq!(page.head_seq, snapshot.captured_seq);
                 break;
             }
         }
@@ -523,7 +512,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     ))
     .expect("empty terminal page");
     assert!(empty.changes.is_empty());
-    assert_eq!(empty.through_seq, snapshot.captured_seq);
+    assert_eq!(empty.head_seq, snapshot.captured_seq);
     assert_eq!(empty.next_after_seq, None);
 
     let above = ChangeSeq(snapshot.captured_seq.0 + 1);
@@ -711,37 +700,50 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         "revision-rule",
         10_000,
     );
-    for result in [
-        get_bytes(&content_url(
-            &harness.server_url,
-            namespace.as_str(),
-            Some(live.snapshot_id.as_str()),
-            Some("1"),
-        ))
-        .map(|_| serde_json::Value::Null),
-        post_json::<serde_json::Value>(
-            &download_url(&harness.server_url, namespace.as_str()),
-            serde_json::json!({"path": "/keep.txt", "revision_no": 1, "snapshot_id": live.snapshot_id}),
+    for (result, param) in [
+        (
+            get_bytes(&content_url(
+                &harness.server_url,
+                namespace.as_str(),
+                Some(live.snapshot_id.as_str()),
+                Some("1"),
+            ))
+            .map(|_| serde_json::Value::Null),
+            "revision_no",
         ),
-        get_bytes(&format!(
-            "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/content?snapshot_id={}",
-            harness.server_url,
-            loonfs_types::public_inode_id::encode(inode_id),
-            live.snapshot_id
-        ))
-        .map(|_| serde_json::Value::Null),
-        post_empty::<serde_json::Value>(&format!(
-            "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/downloads?snapshot_id={}",
-            harness.server_url,
-            loonfs_types::public_inode_id::encode(inode_id),
-            live.snapshot_id
-        )),
+        (
+            post_json::<serde_json::Value>(
+                &download_url(&harness.server_url, namespace.as_str()),
+                serde_json::json!({"path": "/keep.txt", "revision_no": 1, "snapshot_id": live.snapshot_id}),
+            ),
+            "/revision_no",
+        ),
+        (
+            get_bytes(&format!(
+                "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/content?snapshot_id={}",
+                harness.server_url,
+                loonfs_types::public_inode_id::encode(inode_id),
+                live.snapshot_id
+            ))
+            .map(|_| serde_json::Value::Null),
+            "revision_no",
+        ),
+        (
+            post_json::<serde_json::Value>(
+                &format!(
+                    "{}/v0/namespaces/{namespace}/inodes/{}/revisions/1/downloads",
+                    harness.server_url,
+                    loonfs_types::public_inode_id::encode(inode_id),
+                ),
+                serde_json::json!({"snapshot_id": live.snapshot_id}),
+            ),
+            "/snapshot_id",
+        ),
     ] {
         let (status, error) = result.expect_err("revision and snapshot must conflict");
         assert_eq!(status, 400);
         assert_eq!(error.code, "invalid_request");
-        assert_eq!(error.param.as_deref(), Some("revision_no"));
-        assert!(error.message.contains("revision_no"));
+        assert_eq!(error.param.as_deref(), Some(param));
         assert!(error.message.contains("snapshot_id"));
     }
 

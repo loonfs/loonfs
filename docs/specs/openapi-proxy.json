@@ -2396,23 +2396,23 @@
             },
             "type": "array"
           },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Namespace head sequence this page was read at."
+          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace whose ordered commit stream was read."
           },
           "next_after_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Cursor to request when another page remains, absent at `through_seq`."
-          },
-          "through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Namespace head through which this page was evaluated."
+            "description": "Cursor to request when another page remains, absent on the page that\nreaches `head_seq`."
           }
         },
         "required": [
           "namespace_id",
           "after_seq",
-          "through_seq",
+          "head_seq",
           "changes"
         ],
         "type": "object"
@@ -2604,6 +2604,7 @@
         "required": [
           "method",
           "url",
+          "headers",
           "expires_at_ms",
           "kind"
         ],
@@ -3513,7 +3514,7 @@
     "/v0/namespace-aliases/{namespace_alias}/filesystem/content": {
       "get": {
         "description": "Returns the current file bytes, a retained revision, or the revision captured by a live snapshot.",
-        "operationId": "get_file_bytes",
+        "operationId": "get_file_content",
         "parameters": [
           {
             "description": "Application namespace alias",
@@ -3626,7 +3627,7 @@
         "tags": [
           "filesystem"
         ],
-        "x-fern-request-name": "GetFileBytesRequest",
+        "x-fern-request-name": "GetFileContentRequest",
         "x-fern-sdk-group-name": [
           "files"
         ],

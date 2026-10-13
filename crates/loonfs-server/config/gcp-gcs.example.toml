@@ -17,7 +17,7 @@ memory_limit_bytes = 4294967296
 #key_path = "/etc/loonfs/tls/server.key"
 
 [store]
-kind = "gcp-gcs"
+kind = "gcp_gcs"
 bucket = "your-bucket"
 # The provider client authenticates with this key, and its RSA private key
 # also signs the direct upload and download URLs handed to clients. The
@@ -27,5 +27,5 @@ bucket = "your-bucket"
 key_prefix = "loonfs-demo"
 
 [store.credentials]
-kind = "service-account-file"
+kind = "service_account_file"
 path = "/path/to/service-account.json"

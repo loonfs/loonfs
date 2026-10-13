@@ -97,7 +97,7 @@ function fakeFetch(
                             kind: "presigned_url",
                             method: "GET",
                             url: "http://objects.test/object",
-                            ...(fixture.range === null ? {} : { headers: { range: fixture.range } }),
+                            headers: fixture.range === null ? {} : { range: fixture.range },
                             expires_at_ms: 2000000000000,
                         },
                     },

@@ -594,12 +594,10 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
     );
     let sent = transport.sent();
     assert_eq!(sent.len(), 2);
-    assert!(
-        sent[0]
-            .url
-            .ends_with("/revisions/1/downloads?start_offset=10"),
-        "{sent:?}"
-    );
+    assert!(sent[0].url.ends_with("/revisions/1/downloads"), "{sent:?}");
+    let request: serde_json::Value =
+        serde_json::from_slice(&sent[0].body).expect("grant request body");
+    assert_eq!(request, serde_json::json!({"start_offset": held}));
     assert_eq!(
         sent[1].header("range"),
         Some("bytes=10-38"),

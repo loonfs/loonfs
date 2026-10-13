@@ -29,6 +29,32 @@ pub struct CreateDownloadRequest {
     pub start_offset: u64,
 }
 
+/// The options for a download of a file inode's current revision.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CreateDownloadByInodeRequest {
+    /// Read the file revision captured by this snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub snapshot_id: Option<PinId>,
+    /// The first byte the grant reads. Defaults to 0 and must be below the
+    /// file's size, except 0 for a file of zero bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub start_offset: u64,
+}
+
+/// The options for a download of one retained inode revision.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CreateRevisionDownloadByInodeRequest {
+    /// The first byte the grant reads. Defaults to 0 and must be below the
+    /// revision's size, except 0 for a revision of zero bytes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub start_offset: u64,
+}
+
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
@@ -189,6 +215,7 @@ mod tests {
                         "kind": "presigned_url",
                         "method": "GET",
                         "url": "https://bucket.example/object?X-Amz-Signature=abc",
+                        "headers": {},
                         "expires_at_ms": 1
                     }
                 }]
@@ -228,6 +255,7 @@ mod tests {
                         "kind": "presigned_url",
                         "method": "GET",
                         "url": "https://bucket.example/object?X-Amz-Signature=abc",
+                        "headers": {},
                         "expires_at_ms": 1
                     }
                 }]

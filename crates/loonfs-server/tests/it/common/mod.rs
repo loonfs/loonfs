@@ -329,7 +329,7 @@ pub(crate) fn test_config(
         max_upload_bytes: 256 * 1024 * 1024,
         max_download_bytes: 256 * 1024 * 1024,
         snapshot_max_ttl_ms: 86_400_000,
-        snapshot_max_lifetime_ms: 604_800_000,
+        snapshot_max_age_ms: 604_800_000,
         snapshot_max_live_per_namespace: 16,
         max_in_flight_requests: 256,
         max_connections: 1024,

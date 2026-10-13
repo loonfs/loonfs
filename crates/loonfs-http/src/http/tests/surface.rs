@@ -129,8 +129,6 @@ async fn a_post_route_without_a_request_body_rejects_a_body_and_accepts_none() {
     .await
     .expect("app");
     for uri in [
-        "/v0/namespaces/missing/inodes/ino_1/downloads",
-        "/v0/namespaces/missing/inodes/ino_1/revisions/1/downloads",
         "/v0/namespaces/missing/uploads/upl_00000000000000000000000000000001/abort",
         "/v0/maintenance/namespaces/missing/grep/index/enable",
         "/v0/maintenance/namespaces/missing/grep/index/disable",

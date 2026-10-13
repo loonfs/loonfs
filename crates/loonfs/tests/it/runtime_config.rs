@@ -30,7 +30,7 @@ fn builder_object_store_metrics_recorder_instruments_object_store() {
         .any(|sample| sample.operation == ObjectStoreOperation::Put));
     assert!(samples
         .iter()
-        .all(|sample| sample.store_kind.as_deref() == Some("local-fs")));
+        .all(|sample| sample.store_kind.as_deref() == Some("local_fs")));
 }
 
 #[test]

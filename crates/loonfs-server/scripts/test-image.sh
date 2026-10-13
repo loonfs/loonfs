@@ -135,7 +135,7 @@ writer_id = "loonfs-server-container-test"
 allow_remote_without_tls = true
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/var/lib/loonfs/store"
 CONFIG
 chmod 0644 "$WORK_DIR/config.toml"
@@ -167,7 +167,7 @@ FIRST_LOG_LINE="$(first_log_line "$FIRST_CONTAINER")"
   || fail "the first log line does not carry the startup message: $FIRST_LOG_LINE"
 [[ "$FIRST_LOG_LINE" == *"0.0.0.0:9400"* ]] \
   || fail "the startup line does not name the bind address: $FIRST_LOG_LINE"
-[[ "$FIRST_LOG_LINE" == *"local-fs"* ]] \
+[[ "$FIRST_LOG_LINE" == *"local_fs"* ]] \
   || fail "the startup line does not name the store kind: $FIRST_LOG_LINE"
 pass "the first log line is the startup line: $FIRST_LOG_LINE"
 

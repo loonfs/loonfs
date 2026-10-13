@@ -36,7 +36,7 @@ writer_id = "loonfs-server-1"
 allow_remote_without_tls = true
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/var/lib/loonfs/store"
 ```
 
@@ -176,7 +176,7 @@ docker build -f crates/loonfs-server/Dockerfile -t loonfs-server:dev .
 
 ## Running it on Kubernetes
 
-Before you start, install `kubectl` and Helm. Use a cloud object store with the published chart, because the chart doesn't create persistent storage for a `local-fs` store.
+Before you start, install `kubectl` and Helm. Use a cloud object store with the published chart, because the chart doesn't create persistent storage for a `local_fs` store.
 
 Create a namespace:
 
@@ -272,7 +272,7 @@ Before you run a server in production, check this list:
 - Require an auth token.
 - Use TLS in LoonFS or in a trusted proxy.
 - Keep secrets in a secret manager or a Kubernetes Secret.
-- Keep a `local-fs` store on durable storage that uid 10001 can write to.
+- Keep a `local_fs` store on durable storage that uid 10001 can write to.
 - Configure cloud buckets to remove incomplete multipart uploads.
 - Allow at least 660 seconds for graceful shutdown.
 - Set memory and open-file limits before you enable the local cache.

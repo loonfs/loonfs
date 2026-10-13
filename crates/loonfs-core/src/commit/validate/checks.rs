@@ -599,16 +599,12 @@ async fn validate_undelete_target<S: ObjectStore + ?Sized>(
                 operand: CommitOperand::UndeleteTarget,
                 inode_id,
             })?;
-    if deletion_seq >= committed_seq {
-        return Err(CommitValidationError::UndeleteTargetsCurrentCommit {
-            inode_id,
-            requested_seq: deletion_seq,
-        }
-        .into());
-    }
     let Some(active) = view.view().active_subtree_tombstone(inode_id).await? else {
         return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
     };
+    if active.committed_seq >= committed_seq {
+        return Err(CommitValidationError::UndeleteTargetsCurrentCommit { inode_id }.into());
+    }
     if active.committed_seq != deletion_seq {
         return Err(CommitValidationError::UndeleteSequenceMismatch {
             inode_id,

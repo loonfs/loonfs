@@ -9,13 +9,16 @@
 use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::inline_content::InlineContent;
-use base64::Engine as _;
 use loonfs_types::api::v0::ContentToken;
-use loonfs_types::{ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
+use loonfs_types::format::hex::{hex_decode_bytes, hex_encode_bytes};
+use loonfs_types::{
+    decode_token, encode_token, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, OpaqueToken,
+    OpaqueTokenError, UploadId,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const TOKEN_VERSION: &str = "vct4";
+const CONTENT_TOKEN_FORMAT_VERSION: u8 = 1;
 
 /// Evidence read from a durable upload session in its completed state.
 ///
@@ -168,11 +171,13 @@ impl PreparedContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ContentTokenPayload {
-    version: String,
     content_ref: ContentRef,
     expires_at_ms: u64,
+}
+
+impl OpaqueToken for ContentTokenPayload {
+    const KIND: &'static str = "content_token";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -215,14 +220,12 @@ pub fn mint_content_token(
         .checked_add(CONTENT_RECEIPT_TTL_MS)
         .ok_or(ContentTokenError::TimeOverflow)?;
     let payload = ContentTokenPayload {
-        version: TOKEN_VERSION.to_owned(),
         content_ref: evidence.content_ref.clone(),
         expires_at_ms,
     };
-    let payload_json = serde_json::to_vec(&payload)
+    let payload_part = encode_token(&payload, CONTENT_TOKEN_FORMAT_VERSION)
         .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
-    let payload_part = base64_url(&payload_json);
-    let signature_part = base64_url(&loonfs_objectstore::crypto::hmac_sha256(
+    let signature_part = hex_encode_bytes(&loonfs_objectstore::crypto::hmac_sha256(
         secret.as_bytes(),
         payload_part.as_bytes(),
     ));
@@ -242,25 +245,19 @@ pub fn verify_content_token(
         .token
         .split_once('.')
         .ok_or(ContentTokenError::Malformed)?;
-    let actual_signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(signature_part)
-        .map_err(|_| ContentTokenError::Malformed)?;
+    let actual_signature =
+        hex_decode_bytes(signature_part).map_err(|_| ContentTokenError::Malformed)?;
     let expected_signature =
         loonfs_objectstore::crypto::hmac_sha256(secret.as_bytes(), payload_part.as_bytes());
     if !loonfs_objectstore::crypto::constant_time_eq(&actual_signature, &expected_signature) {
         return Err(ContentTokenError::BadSignature);
     }
 
-    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_part)
-        .map_err(|_| ContentTokenError::Malformed)?;
-    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
-        .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
-    if payload.get("version").and_then(serde_json::Value::as_str) != Some(TOKEN_VERSION) {
-        return Err(ContentTokenError::Malformed);
-    }
-    let payload: ContentTokenPayload = serde_json::from_value(payload)
-        .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
+    let payload: ContentTokenPayload = decode_token(payload_part, CONTENT_TOKEN_FORMAT_VERSION)
+        .map_err(|error| match error {
+            OpaqueTokenError::InvalidJson(message) => ContentTokenError::Codec(message),
+            _ => ContentTokenError::Malformed,
+        })?;
     if payload.content_ref.owner_namespace_id != *catalog.namespace_id() {
         return Err(ContentTokenError::NamespaceMismatch);
     }
@@ -276,10 +273,6 @@ pub fn verify_content_token(
         payload.expires_at_ms,
         None,
     ))
-}
-
-fn base64_url(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[cfg(test)]
@@ -343,35 +336,38 @@ mod tests {
         assert!(!admission.admits(&other_namespace, &content, 1_000,));
     }
 
-    #[test]
-    fn token_encoding_signs_the_owner_and_rejects_the_previous_version() {
-        let namespace = NamespaceId::parse("demo").expect("namespace");
-        let content = ContentRef::blob_v1(
+    fn fixed_content(namespace: &NamespaceId) -> ContentRef {
+        ContentRef::blob_v1(
             namespace.clone(),
             ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
             b"hello",
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
-        );
-        let token = mint_content_token("secret", &evidence(&content), 1_000).expect("mint");
-        let (payload_part, _) = token.token.split_once('.').expect("signed token");
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload_part)
-            .expect("decode payload");
+        )
+    }
 
-        assert_eq!(
-            payload,
-            br#"{"version":"vct4","content_ref":{"kind":"blob_v1","owner_namespace_id":"demo","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}},"expires_at_ms":3601000}"#
-        );
-        let mut old_payload: serde_json::Value = serde_json::from_slice(&payload).expect("payload");
-        old_payload["version"] = serde_json::json!("vct3");
-        let payload_part =
-            super::base64_url(&serde_json::to_vec(&old_payload).expect("old payload"));
-        let signature = loonfs_objectstore::crypto::hmac_sha256(b"secret", payload_part.as_bytes());
-        let mut old_token = token;
-        old_token.token = format!("{payload_part}.{}", super::base64_url(&signature));
+    #[test]
+    fn a_content_token_matches_its_golden_bytes() {
+        let namespace = NamespaceId::parse("demo").expect("namespace");
+        let content = fixed_content(&namespace);
+        let token = mint_content_token("golden-secret", &evidence(&content), 1_000).expect("mint");
+
+        crate::test_support::assert_matches_golden_token("content_token.txt", &token.token);
+        let catalog = catalog_entry(namespace);
+        let prepared = verify_content_token("golden-secret", &catalog, &token, 1_000)
+            .expect("the golden token verifies");
+        assert_eq!(prepared.content_ref(), &content);
+    }
+
+    #[test]
+    fn a_content_token_in_the_earlier_base64_format_is_rejected() {
+        let namespace = NamespaceId::parse("demo").expect("namespace");
+        let token = ContentToken {
+            content_ref: fixed_content(&namespace),
+            token: "eyJ2ZXJzaW9uIjoidmN0NCIsImNvbnRlbnRfcmVmIjp7ImtpbmQiOiJibG9iX3YxIiwib3duZXJfbmFtZXNwYWNlX2lkIjoiZGVtbyIsImNvbnRlbnRfaWQiOiJjb25fMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJzaXplX2J5dGVzIjo1LCJjaGVja3N1bSI6eyJhbGdvcml0aG0iOiJjcmM2NG52bWUiLCJ2YWx1ZSI6IjMzNzc4NTcwMDY1MjQyNTcifX0sImV4cGlyZXNfYXRfbXMiOjM2MDEwMDB9.FiiwJZ3mu8b7T5ops2TFaNSTunQRlkiQrRdSgUvxn-w".to_owned(),
+        };
         let catalog = catalog_entry(namespace);
         assert_eq!(
-            verify_content_token("secret", &catalog, &old_token, 1_000),
+            verify_content_token("secret", &catalog, &token, 1_000),
             Err(ContentTokenError::Malformed)
         );
     }

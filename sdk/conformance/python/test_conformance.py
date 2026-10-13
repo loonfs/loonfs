@@ -1536,7 +1536,7 @@ def test_snapshots(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         limit=100,
         snapshot_id=snapshot.snapshot_id,
     )
-    assert feed.through_seq == expected.snapshot_head_seq
+    assert feed.head_seq == expected.snapshot_head_seq
     assert feed.next_after_seq is None
     assert [change.committed_seq for change in feed.changes] == (
         expected.snapshot_change_seqs
