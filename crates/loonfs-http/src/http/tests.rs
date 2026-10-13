@@ -2755,7 +2755,7 @@ async fn start_grep_error_server(
     writer_id: &str,
 ) -> TestHarness {
     let mut config = test_options(root, writer_id);
-    config.binding.grep = JobMode::ServeOnly;
+    config.grep = JobMode::ServeOnly;
     start_server_with_config(store, config).await
 }
 
@@ -2766,7 +2766,7 @@ async fn start_grep_maintenance_error_server(
     writer_id: &str,
 ) -> TestHarness {
     let mut config = test_options(root, writer_id);
-    config.binding.grep = JobMode::ServeAndMaintain;
+    config.grep = JobMode::ServeAndMaintain;
     start_server_with_config(store, config).await
 }
 

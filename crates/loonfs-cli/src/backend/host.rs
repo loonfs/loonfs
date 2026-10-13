@@ -7,7 +7,7 @@ use loonfs::{InlineContentPolicy, LoonFs, Maintenance, SharedObjectStore, Writab
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_http::{
-    AuthPolicy, BindingConfig, BindingState, HttpMetrics, JobMode, Namespaces,
+    AuthPolicy, BindingConfig, BindingState, GrepBinding, HttpMetrics, Namespaces,
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
 use loonfs_objectstore::ConfiguredObjectStoreKind;
@@ -33,7 +33,6 @@ pub(crate) fn client(
     no_retry: bool,
 ) -> Result<Client, CliError> {
     let options = Arc::new(BindingConfig {
-        grep: JobMode::ServeAndMaintain,
         serves_maintenance: true,
         snapshot_policy: loonfs::SnapshotPolicy::default(),
         max_download_bytes: None,
@@ -59,8 +58,10 @@ pub(crate) fn client(
         maintenance: host.maintenance.clone(),
         probe_store: host.runtime.object_store(),
         direct_transfers: None,
-        grep_worker: Some(host.grep_worker.clone()),
-        grep_service: Some(Arc::new(grep_service)),
+        grep: GrepBinding::ServeAndMaintain {
+            service: Arc::new(grep_service),
+            worker: host.grep_worker.clone(),
+        },
         metrics: HttpMetrics::new(),
     };
     let router = loonfs_http::router(state);
