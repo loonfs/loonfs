@@ -15,15 +15,12 @@ use loonfs_objectstore::{
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
-use loonfs_types::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId, WriterId};
+use loonfs_types::{AttributeInclusion, ErrorCode, ManifestNo, NamespaceId};
 use std::sync::Arc;
 use tempfile::tempdir;
 
 fn context() -> MutationContext {
-    MutationContext {
-        writer_id: WriterId::parse("writer").expect("writer"),
-        now_ms: 1_000,
-    }
+    crate::test_support::mutation_context("writer", 1_000)
 }
 
 #[test]

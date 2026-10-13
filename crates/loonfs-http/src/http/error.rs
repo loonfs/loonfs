@@ -26,9 +26,7 @@ pub(super) struct ApiResponseError {
 /// takes precedence over `body.code`; the caller supplies its correlation ID.
 pub fn api_error_response(code: ErrorCode, mut body: ApiError) -> Response {
     body.code = code.as_str().to_owned();
-    let mut error = ApiResponseError::new(code, &body.message);
-    error.body = Box::new(body);
-    error.into_response()
+    ApiResponseError::from_api_error(code, body).into_response()
 }
 
 impl ApiResponseError {

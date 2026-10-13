@@ -80,7 +80,7 @@ pub struct InterceptStore<S, I> {
 
 impl<S, I: Interceptor> InterceptStore<S, I> {
     /// Wraps `inner` with `interceptor`.
-    pub(super) fn with_interceptor(inner: S, interceptor: I) -> Self {
+    pub fn with_interceptor(inner: S, interceptor: I) -> Self {
         Self {
             inner: Arc::new(inner),
             interceptor: Arc::new(interceptor),
@@ -92,7 +92,8 @@ impl<S, I: Interceptor> InterceptStore<S, I> {
         &self.inner
     }
 
-    pub(crate) fn interceptor(&self) -> &I {
+    /// Returns the interceptor, for a test that reads the state it keeps.
+    pub fn interceptor(&self) -> &I {
         &self.interceptor
     }
 

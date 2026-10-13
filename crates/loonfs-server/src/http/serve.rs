@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
 
@@ -251,12 +251,8 @@ pub async fn app(
             std::num::NonZeroUsize::new(config.max_in_flight_requests)
                 .expect("validated request limit should be nonzero"),
         )),
-        upload_permits: Arc::new(Semaphore::new(
-            config.max_concurrent_uploads.min(Semaphore::MAX_PERMITS),
-        )),
-        download_permits: Arc::new(Semaphore::new(
-            config.max_concurrent_downloads.min(Semaphore::MAX_PERMITS),
-        )),
+        upload_permits: loonfs_http::transfer_permits(config.max_concurrent_uploads),
+        download_permits: loonfs_http::transfer_permits(config.max_concurrent_downloads),
         options,
         runtime: runtime.clone(),
         namespaces,

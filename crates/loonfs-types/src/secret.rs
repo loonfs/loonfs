@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// The placeholder printed in place of secret material.
-const REDACTED: &str = "<redacted>";
+pub const REDACTED: &str = "<redacted>";
 
 /// A secret string such as an access key, token, or signing secret.
 ///

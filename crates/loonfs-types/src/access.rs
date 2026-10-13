@@ -308,6 +308,38 @@ impl AccessRight {
     }
 }
 
+impl FromStr for AccessRight {
+    type Err = AccessRightsError;
+
+    /// Parses a right by its serialized name.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|right| right.as_str() == name)
+            .ok_or_else(|| AccessRightsError::UnknownRight {
+                name: name.to_owned(),
+            })
+    }
+}
+
+/// Why a list of right names does not form a set of rights.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum AccessRightsError {
+    /// A name is not one of the rights.
+    #[error("unknown access right {name:?}")]
+    UnknownRight {
+        /// The name that matched no right.
+        name: String,
+    },
+    /// A right is named twice.
+    #[error("duplicate right `{}`", .right.as_str())]
+    RepeatedRight {
+        /// The right named twice.
+        right: AccessRight,
+    },
+}
+
 /// A set of rights. Encoded as distinct names in `read`, `history`, `write`,
 /// `create`, `remove`, `share`, `manage`, `admin` order. Decoding accepts any
 /// order and rejects repeated names.
@@ -363,6 +395,30 @@ impl AccessRights {
     }
 }
 
+impl AccessRights {
+    /// Parses comma-separated right names, the form the CLI's `--grant`
+    /// takes, refusing a repeated right as the wire decoder does.
+    pub fn parse_list(names: &str) -> Result<Self, AccessRightsError> {
+        Self::from_distinct(
+            names
+                .split(',')
+                .map(str::parse::<AccessRight>)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    }
+
+    fn from_distinct(rights: Vec<AccessRight>) -> Result<Self, AccessRightsError> {
+        let mut set = Self::EMPTY;
+        for right in rights {
+            if set.contains(right) {
+                return Err(AccessRightsError::RepeatedRight { right });
+            }
+            set.insert(right);
+        }
+        Ok(set)
+    }
+}
+
 impl FromIterator<AccessRight> for AccessRights {
     fn from_iter<I: IntoIterator<Item = AccessRight>>(rights: I) -> Self {
         rights.into_iter().fold(Self::EMPTY, |mut set, right| {
@@ -381,17 +437,7 @@ impl Serialize for AccessRights {
 impl<'de> Deserialize<'de> for AccessRights {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let names = Vec::<AccessRight>::deserialize(deserializer)?;
-        let mut rights = Self::EMPTY;
-        for right in names {
-            if rights.contains(right) {
-                return Err(serde::de::Error::custom(format!(
-                    "duplicate right `{}`",
-                    right.as_str()
-                )));
-            }
-            rights.insert(right);
-        }
-        Ok(rights)
+        Self::from_distinct(names).map_err(serde::de::Error::custom)
     }
 }
 

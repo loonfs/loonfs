@@ -347,7 +347,7 @@ fn default_max_download_bytes() -> u64 {
     // Mirrors the upload default so anything the proxy accepted, the proxy
     // will serve back. Content ingested past this through `direct_put`
     // needs a raised limit to be read through the server.
-    256 * 1024 * 1024
+    default_max_upload_bytes()
 }
 
 fn default_snapshot_max_ttl_ms() -> u64 {

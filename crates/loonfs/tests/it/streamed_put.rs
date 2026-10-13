@@ -6,10 +6,10 @@
 //! released, so the peak is exact rather than sampled. No resident-size
 //! reading and no timing are involved.
 
-use crate::common::{open_runtime_async, TestRuntime};
+use crate::common::{namespace, open_runtime_async};
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs::{ByteStream, DestinationBehavior, NamespaceId, PutFileOptions, SharedObjectStore};
+use loonfs::{ByteStream, DestinationBehavior, PutFileOptions, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
 use loonfs_test_support::stores::BufferWatchStore;
@@ -35,15 +35,6 @@ fn streamed(payload: &[u8]) -> ByteStream {
         .map(Bytes::copy_from_slice)
         .collect();
     futures::stream::iter(chunks.into_iter().map(Ok)).boxed()
-}
-
-async fn namespace(runtime: &TestRuntime) -> NamespaceId {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    runtime
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    namespace_id
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

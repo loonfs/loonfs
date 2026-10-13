@@ -361,18 +361,18 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 }
 
-impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
-    /// Creates a read-only engine bound to `namespace_id`.
-    pub fn reader(
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
+    fn new(
         store: S,
         namespace_id: NamespaceId,
         content_writes: Arc<tokio::sync::Semaphore>,
+        mode: M,
     ) -> Self {
         Self {
             store,
             namespace_id,
             content_writes,
-            mode: ReadOnly,
+            mode,
             wall_clock: Arc::new(crate::time::SystemWallClock),
             subject: None,
             authorization_head: None,
@@ -386,6 +386,17 @@ impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
     }
 }
 
+impl<S: ObjectStore> NamespaceEngine<S, ReadOnly> {
+    /// Creates a read-only engine bound to `namespace_id`.
+    pub fn reader(
+        store: S,
+        namespace_id: NamespaceId,
+        content_writes: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
+        Self::new(store, namespace_id, content_writes, ReadOnly)
+    }
+}
+
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates a writable engine bound to `namespace_id` and `writer_id`.
     pub fn writer(
@@ -394,21 +405,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         writer_id: WriterId,
         content_writes: Arc<tokio::sync::Semaphore>,
     ) -> Self {
-        Self {
-            store,
-            namespace_id,
-            content_writes,
-            mode: Writable { writer_id },
-            wall_clock: Arc::new(crate::time::SystemWallClock),
-            subject: None,
-            authorization_head: None,
-            run_policy: crate::manifest::MetadataRunPolicy::default(),
-            segment_cache: None,
-            #[cfg(any(test, feature = "test-support"))]
-            compaction_row_budget: None,
-            #[cfg(any(test, feature = "test-support"))]
-            segment_row_budget: None,
-        }
+        Self::new(store, namespace_id, content_writes, Writable { writer_id })
     }
 
     /// Returns the writer id used for epoch acquisition and commit publication.

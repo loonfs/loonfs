@@ -3,6 +3,14 @@
 /// Shares the read request bound with tests outside this crate.
 pub const STORE_READ_WAVE: usize = crate::in_flight::STORE_READ_WAVE;
 
+/// Builds the context a test mutation runs under: `writer_id` at `now_ms`.
+pub fn mutation_context(writer_id: &str, now_ms: u64) -> crate::MutationContext {
+    crate::MutationContext {
+        writer_id: loonfs_types::WriterId::parse(writer_id).expect("a test writer id should parse"),
+        now_ms,
+    }
+}
+
 // These path-mutation helpers use dev-dependencies and are only needed by
 // in-crate checkpoint and planner tests.
 #[cfg(test)]

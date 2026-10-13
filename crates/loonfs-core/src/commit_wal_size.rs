@@ -7,8 +7,9 @@ use loonfs_types::format::wal::{
 };
 use loonfs_types::{
     AbsolutePath, AccessRight, FilesystemOperation, NamespaceNaming,
-    MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ATTRIBUTES_TOTAL_BYTES,
-    MAX_ATTRIBUTE_ENTRIES, MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
+    MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ACTOR_ID_BYTES,
+    MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES,
+    MAX_NAME_KEY_BYTES,
 };
 
 // CBOR u64 values use at most nine bytes; u32 values use five.
@@ -31,7 +32,7 @@ const BIND_BYTES: usize = delta_bytes(
         ("display_name", 0),
         ("child_inode_id", INTEGER_BYTES),
         ("child_kind", cbor_string_bytes("file".len())),
-        ("child_created_by", cbor_string_bytes(256)),
+        ("child_created_by", cbor_string_bytes(MAX_ACTOR_ID_BYTES)),
         ("child_created_at_ms", INTEGER_BYTES),
     ],
 );
@@ -43,7 +44,7 @@ const UNBIND_BYTES: usize = delta_bytes(
         ("display_name", 0),
         ("child_inode_id", INTEGER_BYTES),
         ("child_kind", cbor_string_bytes("file".len())),
-        ("child_created_by", cbor_string_bytes(256)),
+        ("child_created_by", cbor_string_bytes(MAX_ACTOR_ID_BYTES)),
         ("child_created_at_ms", INTEGER_BYTES),
         (
             "target",

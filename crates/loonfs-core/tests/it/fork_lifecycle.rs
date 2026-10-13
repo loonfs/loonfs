@@ -18,8 +18,8 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
-    RecordedOperation, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore, MetadataMapStore,
+    OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
     format::control::{decode_control_object, ControlObjectKind, PinOwner, PinPayload},
@@ -1017,13 +1017,13 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
     let context = mutation_context();
-    let store = InjectCreateFailureStore::new(
+    let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Prefix(format!("namespaces/{}/pins/", source_namespace_id.as_str())),
-        InjectedCreateFailure::PermissionDenied {
-            message: "injected source checkpoint failure",
-        },
+        KeyPredicate::prefix(format!("namespaces/{}/pins/", source_namespace_id.as_str())),
+        OperationSelector::PutCreateIfAbsent,
+        InjectedError::PermissionDenied("injected source checkpoint failure".to_owned()),
     );
+    store.fail_next(1);
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
@@ -1062,19 +1062,13 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
         loonfs_types::format::manifest::encode_namespace_manifest_json(foreign.clone())
             .map(|encoded| encoded.into_bytes())
             .expect("encode foreign head");
-    let store = InjectCreateFailureStore::new(
+    let store = LostCreateStore::new(
         inner,
-        KeyMatcher::Exact(metadata_manifest_object(
+        KeyPredicate::exact(metadata_manifest_object(
             &namespace_id,
             &loonfs_types::ManifestNo(1),
         )),
-        InjectedCreateFailure::PreconditionFailed {
-            write_attempted_object: false,
-            additional_writes: vec![(
-                metadata_manifest_object(&namespace_id, &loonfs_types::ManifestNo(1)),
-                foreign_bytes.clone(),
-            )],
-        },
+        foreign_bytes.clone(),
     );
 
     let error = bootstrap_namespace(&store, &namespace_id, &context)

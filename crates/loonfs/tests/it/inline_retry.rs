@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 fn namespace() -> NamespaceId {
-    NamespaceId::parse("inline-retry").expect("namespace")
+    loonfs_test_support::ids::namespace_id("inline-retry")
 }
 
 fn subject(name: &str) -> Subject {

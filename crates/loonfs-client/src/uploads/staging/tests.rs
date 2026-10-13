@@ -109,7 +109,7 @@ fn payload(len: usize) -> Vec<u8> {
 }
 
 fn namespace_id() -> NamespaceId {
-    NamespaceId::parse("demo").expect("valid namespace id")
+    loonfs_test_support::ids::namespace_id("demo")
 }
 
 fn spec() -> NamespacePath {

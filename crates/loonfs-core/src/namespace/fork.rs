@@ -5,7 +5,6 @@ use super::control::load_current_manifest_if_present;
 use super::create::publish_namespace;
 use crate::cache::MetadataSegmentCache;
 use crate::context::MutationContext;
-use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::manifest::{load_namespace_manifest_envelope, MetadataRunPolicy};
 use crate::pin::record::{delete_failed_pin, load_owned_pin, write_pin, PinOwnerKind};
@@ -76,8 +75,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         source_namespace_id,
         &source_record.pin_id.manifest_no(),
     )
-    .await
-    .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;
+    .await?;
     crate::manifest::ensure_manifest_reference_matches(
         "fork pin",
         &source_record.manifest(),

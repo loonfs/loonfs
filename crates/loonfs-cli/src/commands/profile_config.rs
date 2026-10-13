@@ -9,6 +9,7 @@ use crate::config::{absolute_env_path, validate_remote_client_config, ProfileCon
 use crate::error::CliError;
 use crate::prompt;
 use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
+use loonfs_types::config::non_blank;
 use loonfs_types::{ActorId, PrincipalId, PrincipalScope, PrincipalSet, SecretString, SubjectId};
 use std::path::{Path, PathBuf};
 
@@ -338,12 +339,6 @@ fn embedded_profile(store: StoreConfig, actor: ProfileActor) -> Result<ProfileCo
     })
 }
 
-/// An explicitly-blank flag value clears the field rather than storing the
-/// empty string, which would then fail profile validation.
-fn blank_to_none(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CredentialSource {
     Ambient,
@@ -389,7 +384,7 @@ fn build_aws_credentials(
                 "secret-access-key",
                 source,
             )?,
-            session_token: blank_to_none(session_token.cloned()).map(SecretString::from),
+            session_token: non_blank(session_token.cloned()).map(SecretString::from),
         }),
     }
 }
@@ -439,7 +434,9 @@ fn optional_field(
     source: FieldSource,
 ) -> Result<Option<String>, CliError> {
     if value.is_some() {
-        return Ok(blank_to_none(value.cloned()));
+        // An explicitly-blank flag value clears the field rather than storing
+        // the empty string, which would then fail profile validation.
+        return Ok(non_blank(value.cloned()));
     }
     match source {
         FieldSource::Fail => Ok(current.cloned()),
@@ -735,7 +732,7 @@ fn remote_profile(
         source,
     )?;
     let auth_token = if auth_token.is_some() {
-        blank_to_none(auth_token.cloned()).map(SecretString::from)
+        non_blank(auth_token.cloned()).map(SecretString::from)
     } else {
         match source {
             FieldSource::Fail => current.and_then(|value| value.2).cloned(),
@@ -1007,7 +1004,7 @@ fn updated_aws_credentials(
                 args.secret_access_key.as_ref(),
                 "secret-access-key",
             )?,
-            session_token: blank_to_none(args.session_token.clone()).map(SecretString::from),
+            session_token: non_blank(args.session_token.clone()).map(SecretString::from),
         }),
     }
 }

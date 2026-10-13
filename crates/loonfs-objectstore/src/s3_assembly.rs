@@ -3,8 +3,9 @@
 use super::{assembled_crc64nvme, S3RequestSigner, MULTIPART_CONTROL_TTL};
 use crate::assembly::{plan_parts, source_range, verify_expected, PartSizing, READ_BYTES};
 use crate::provider_object_store::{
-    StoredChecksumReader, MAX_PROVIDER_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
+    StoredChecksumReader, PROVIDER_MAX_MULTIPART_PARTS, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
+use crate::signed_request::signing_time;
 use crate::{
     AssemblySource, ByteRange, ConfiguredObjectStoreKind, ObjectMetadata, ObjectStoreError,
     PutMode, Result,
@@ -62,7 +63,7 @@ impl S3RequestSigner {
                 PartSizing::Varied
             },
         );
-        if plan.len() > MAX_PROVIDER_MULTIPART_PARTS {
+        if plan.len() > PROVIDER_MAX_MULTIPART_PARTS as usize {
             return Err(ObjectStoreError::InvalidContentRef(
                 "assembly exceeds the provider part limit".to_owned(),
             ));
@@ -167,7 +168,7 @@ impl S3RequestSigner {
     ) -> Result<ObjectMetadata> {
         let signed = self
             .request_signer
-            .presign_create_checked(key, expected, MULTIPART_CONTROL_TTL, Self::signing_time())
+            .presign_create_checked(key, expected, MULTIPART_CONTROL_TTL, signing_time())
             .await?;
         let size_bytes = bytes.len() as u64;
         let response = self.send_checked(key, signed, bytes.into()).await?;

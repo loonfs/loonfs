@@ -19,9 +19,9 @@ use crate::in_flight::STORE_READ_WAVE;
 use crate::time::Deadline;
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
-use loonfs_objectstore::ListedObject;
 use loonfs_test_support::stores::{
-    BlockingStore, ConcurrencyWatchStore, KeyPredicate, OperationSelector,
+    BlockingStore, ConcurrencyWatchStore, Intercept, InterceptStore, Interceptor, KeyPredicate,
+    OperationContext, OperationSelector, RecordedOperation, RecordingStore,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -1290,98 +1290,6 @@ fn assert_duplicate_row_key(error: &CoreError, duplicated_key: &str) {
 // Reverse-bind resolution cost
 // -------------------------------------------------------------------------
 
-/// Records every ranged read so a test can classify it against the manifest's
-/// descriptors: a read at a segment's filter offset is a filter read, one at
-/// its index offset is an index read, and anything else is data.
-#[derive(Debug)]
-struct ReadRecorderStore {
-    inner: LocalFsStore,
-    reads: Mutex<Vec<(String, u64, u64)>>,
-}
-
-impl ReadRecorderStore {
-    fn new(inner: LocalFsStore) -> Self {
-        Self {
-            inner,
-            reads: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn take_reads(&self) -> Vec<(String, u64, u64)> {
-        std::mem::take(&mut self.reads.lock().expect("read log"))
-    }
-}
-
-#[async_trait]
-impl ObjectStore for ReadRecorderStore {
-    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
-        self.inner.checksum_algorithm()
-    }
-
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        let result = self.inner.get(key, range.clone()).await;
-        if let Ok(Some(bytes)) = &result {
-            let start = range.as_ref().map_or(0, |range| range.start_inclusive);
-            self.reads
-                .lock()
-                .expect("read log")
-                .push((key.to_owned(), start, bytes.len() as u64));
-        }
-        result
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        let result = self.inner.get_with_metadata(key).await;
-        if let Ok(Some(body)) = &result {
-            self.reads
-                .lock()
-                .expect("read log")
-                .push((key.to_owned(), 0, body.bytes.len() as u64));
-        }
-        result
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_entries_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
-        self.inner.list_entries_from_stream(prefix, start_after)
-    }
-
-    async fn list_child_prefixes(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        limit: loonfs_types::EffectiveLimit,
-    ) -> Result<loonfs_types::Page<String, String>, ObjectStoreError> {
-        self.inner
-            .list_child_prefixes(prefix, start_after, limit)
-            .await
-    }
-}
-
 /// What one merge cost the store, by section.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct ReadProfile {
@@ -1398,9 +1306,29 @@ impl ReadProfile {
     }
 }
 
-/// Classifies a read log against the segment descriptors it touched.
-fn classify_reads(reads: &[(String, u64, u64)], descriptors: &[MetadataSegmentRef]) -> ReadProfile {
+/// Classifies a read log against the segment descriptors it touched. A read
+/// at a segment's filter offset is a filter read, one at its index offset is
+/// an index read, and anything else is data.
+fn classify_reads(
+    operations: &[RecordedOperation],
+    descriptors: &[MetadataSegmentRef],
+) -> ReadProfile {
     let mut profile = ReadProfile::default();
+    let reads = operations.iter().filter_map(|operation| match operation {
+        RecordedOperation::Get {
+            key,
+            range,
+            result_bytes,
+        } if *result_bytes > 0 => Some((
+            key,
+            range.as_ref().map_or(0, |range| range.start_inclusive),
+            *result_bytes as u64,
+        )),
+        RecordedOperation::GetWithMetadata { key, result_bytes } if *result_bytes > 0 => {
+            Some((key, 0, *result_bytes as u64))
+        }
+        _ => None,
+    });
     for (key, start, bytes) in reads {
         profile.stored_bytes += bytes;
         let Some(descriptor) = descriptors
@@ -1410,9 +1338,9 @@ fn classify_reads(reads: &[(String, u64, u64)], descriptors: &[MetadataSegmentRe
             profile.other_reads += 1;
             continue;
         };
-        if *start == descriptor.filter_block.offset {
+        if start == descriptor.filter_block.offset {
             profile.filter_reads += 1;
-        } else if *start == descriptor.index_block.offset {
+        } else if start == descriptor.index_block.offset {
             profile.index_reads += 1;
         } else {
             profile.data_reads += 1;
@@ -1624,7 +1552,10 @@ async fn a_step_contained_merge_reads_its_window_once() {
     )
     .await;
 
-    let store = ReadRecorderStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
     let group = MetadataFamilyGroup::Bindings;
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
@@ -1653,7 +1584,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
         .iter()
         .flat_map(|run| group_run_descriptors(run, group))
         .count();
-    let _ = store.take_reads();
+    store.reset();
 
     let merged = merge_group_in_step(
         &segments,
@@ -1667,7 +1598,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
     )
     .await
     .expect("merge the window");
-    let profile = classify_reads(&store.take_reads(), &descriptors);
+    let profile = classify_reads(&store.take(), &descriptors);
 
     // One index read and one span of data reads per segment. Data blocks are
     // fetched two at a time, so a segment costs at most its block count; the
@@ -1684,7 +1615,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
         merged.rows_read
     );
 
-    let _ = store.take_reads();
+    store.reset();
     let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
     let Ok(job) = run_compaction(
         &store,
@@ -1697,7 +1628,7 @@ async fn a_step_contained_merge_reads_its_window_once() {
     else {
         panic!("nothing cancelled this job");
     };
-    let profile = classify_reads(&store.take_reads(), &descriptors);
+    let profile = classify_reads(&store.take(), &descriptors);
     assert!((profile.requests() as u64) < job.rows_read / 8);
     assert!(job.peak_operator_rows <= 1);
 }
@@ -2616,30 +2547,27 @@ async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again
 /// That is the window the retry is for: the finalizer has reloaded the manifest
 /// and decided its swap, and a fold lands before its compare-and-swap does.
 #[derive(Debug)]
-struct FoldDuringFinalizationStore {
-    inner: LocalFsStore,
+struct FoldDuringFinalization {
+    folder: LocalFsStore,
     namespace_id: NamespaceId,
     folded: AtomicUsize,
 }
 
 #[async_trait]
-impl ObjectStore for FoldDuringFinalizationStore {
-    loonfs_test_support::delegate_object_store!(self => self.inner; except put);
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if loonfs_objectstore::layout::manifest_no_of(key).is_some()
+impl Interceptor for FoldDuringFinalization {
+    async fn before(&self, context: &OperationContext<'_>) -> Intercept {
+        let kind = context.kind();
+        let writes =
+            OperationSelector::Put.matches(kind) || OperationSelector::CompareAndSwap.matches(kind);
+        if writes
+            && loonfs_objectstore::layout::manifest_no_of(context.key()).is_some()
             && self.folded.fetch_add(1, Ordering::SeqCst) == 0
         {
-            super::super::fold::fold_wal(&self.inner, &self.namespace_id)
+            super::super::fold::fold_wal(&self.folder, &self.namespace_id)
                 .await
                 .expect("the competing fold must publish");
         }
-        self.inner.put(key, bytes, mode).await
+        Intercept::Continue
     }
 }
 
@@ -2687,11 +2615,14 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
     .await
     .expect("write a file the fold will publish");
 
-    let racing_store = FoldDuringFinalizationStore {
-        inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-        namespace_id: namespace_id.clone(),
-        folded: AtomicUsize::new(0),
-    };
+    let racing_store = InterceptStore::with_interceptor(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        FoldDuringFinalization {
+            folder: LocalFsStore::new(temp_dir.path()).expect("store"),
+            namespace_id: namespace_id.clone(),
+            folded: AtomicUsize::new(0),
+        },
+    );
     let manifest_no = match finalize_streaming_compaction(
         &racing_store,
         &namespace_id,
@@ -2705,7 +2636,7 @@ async fn a_fold_landing_during_finalization_is_retried_over() {
         other => panic!("the retry must publish, got {other:?}"),
     };
     assert!(
-        racing_store.folded.load(Ordering::SeqCst) > 1,
+        racing_store.interceptor().folded.load(Ordering::SeqCst) > 1,
         "the finalizer must have written a replacement manifest more than once"
     );
 
@@ -2924,10 +2855,7 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
     }
     let before = current_metadata_state(&store, &namespace).await;
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
-    assert_eq!(
-        spec.input_runs(),
-        super::super::compaction_step::MAX_COMPACTION_INPUT_RUNS
-    );
+    assert_eq!(spec.input_runs(), crate::limits::MAX_COMPACTION_INPUT_RUNS);
     let input = input_keys_now(&store, &namespace, &spec).await;
     let untouched = referenced_segment_keys(&store, &namespace)
         .await

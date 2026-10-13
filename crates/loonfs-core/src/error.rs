@@ -328,6 +328,12 @@ impl MetadataProjectionLoadError {
     }
 }
 
+impl From<ManifestLoadError> for CoreError {
+    fn from(error: ManifestLoadError) -> Self {
+        Self::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    }
+}
+
 impl From<PathError> for CoreError {
     fn from(error: PathError) -> Self {
         Self::InvalidPath(error.invalid_path_input().to_owned())

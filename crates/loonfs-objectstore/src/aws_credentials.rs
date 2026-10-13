@@ -5,7 +5,7 @@ use crate::ObjectStoreError;
 use async_trait::async_trait;
 use aws_config::default_provider::credentials::DefaultCredentialsChain;
 use aws_credential_types::provider::SharedCredentialsProvider;
-use loonfs_types::SecretString;
+use loonfs_types::{SecretString, REDACTED};
 use object_store::aws::AwsCredential;
 use object_store::client::CredentialProvider;
 use std::fmt;
@@ -28,11 +28,11 @@ pub(crate) struct AwsSigningCredentials {
 impl fmt::Debug for AwsSigningCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AwsSigningCredentials")
-            .field("access_key_id", &"<redacted>")
-            .field("secret_access_key", &"<redacted>")
+            .field("access_key_id", &REDACTED)
+            .field("secret_access_key", &REDACTED)
             .field(
                 "session_token",
-                &self.session_token.as_ref().map(|_| "<redacted>"),
+                &self.session_token.as_ref().map(|_| REDACTED),
             )
             .finish()
     }
@@ -104,7 +104,7 @@ impl StaticAwsCredentialsSource {
 impl fmt::Debug for StaticAwsCredentialsSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StaticAwsCredentialsSource")
-            .field("credentials", &"<redacted>")
+            .field("credentials", &REDACTED)
             .finish()
     }
 }

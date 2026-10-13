@@ -3,6 +3,7 @@
 #[path = "gcs_assembly.rs"]
 mod assembly;
 
+use crate::checksum_header::encode_base64_checksum;
 use crate::configured::ConfiguredObjectStoreKind;
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
@@ -13,14 +14,15 @@ use crate::provider_object_store::{
     map_provider_error, AbortUploadOnDrop, CompareToken, MultipartController, PartReader,
     StoredChecksumReader,
 };
-use crate::signed_request::{classify_signed_response, send, send_signed, SignedResponse};
+use crate::signed_request::{
+    classify_signed_response, send, send_signed, signing_time, SignedResponse,
+};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
     AssemblySource, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
     ProviderObjectStoreConfig,
 };
 use async_trait::async_trait;
-use base64::Engine as _;
 use bytes::Bytes;
 use futures::FutureExt;
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
@@ -28,13 +30,15 @@ use loonfs_types::{Checksum, ChecksumAlgorithm, StreamingChecksum};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 /// Root of the JSON API object resources.
 const GCS_JSON_OBJECTS: &str = "https://storage.googleapis.com/storage/v1/b";
 
 /// Root of the JSON API media and resumable uploads.
 const GCS_JSON_UPLOADS: &str = "https://storage.googleapis.com/upload/storage/v1/b";
+
+/// The header that carries an object's checksums, in requests and responses.
+const GCS_HASH_HEADER: &str = "x-goog-hash";
 
 /// Supplies explicit credentials and key scoping for the native Google Cloud Storage adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,13 +131,6 @@ pub(crate) fn gcp_gcs_with_issuers(
 }
 
 impl GcsRequestSigner {
-    // A V4 signature is dated, so this internally issued request enters wall
-    // time here. Nothing durable is derived from it.
-    #[allow(clippy::disallowed_methods)]
-    fn signing_time() -> SystemTime {
-        SystemTime::now()
-    }
-
     /// The JSON API path segment naming `key`'s object.
     fn object_name(&self, key: &str) -> Result<String> {
         scope_object_key(self.key_prefix.as_deref(), key).map(|name| percent_encode_segment(&name))
@@ -160,9 +157,9 @@ impl GcsRequestSigner {
 #[async_trait]
 impl StoredChecksumReader for GcsRequestSigner {
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        let signed =
-            self.request_signer
-                .presign_head(key, CHECKSUM_HEAD_TTL, Self::signing_time())?;
+        let signed = self
+            .request_signer
+            .presign_head(key, CHECKSUM_HEAD_TTL, signing_time())?;
         let response = send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
         let mut metadata = crate::signed_request::metadata_from_signed_head(
             key,
@@ -199,7 +196,7 @@ impl MultipartController for GcsRequestSigner {
             );
             let request = http::Request::post(url)
                 .header(CONTENT_TYPE, "application/octet-stream")
-                .header("x-goog-hash", crc32c_header(&checksum));
+                .header(GCS_HASH_HEADER, crc32c_header(&checksum));
             let response = self.send_authorized(key, request, head.into()).await?;
             return gcs_object(key, &response.body);
         }
@@ -257,7 +254,7 @@ impl MultipartController for GcsRequestSigner {
                     StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc32c),
                 )
                 .finish();
-                request = request.header("x-goog-hash", crc32c_header(&full));
+                request = request.header(GCS_HASH_HEADER, crc32c_header(&full));
             }
             let response = send(&self.http, key, request, chunk.into()).await?;
             if response.status.as_u16() != 308 {
@@ -299,12 +296,7 @@ fn precondition_failed_when_missing(error: ObjectStoreError) -> ObjectStoreError
 }
 
 fn crc32c_header(checksum: &Checksum) -> String {
-    let value =
-        u32::from_str_radix(checksum.value.as_str(), 16).expect("computed CRC-32C should be valid");
-    format!(
-        "crc32c={}",
-        base64::engine::general_purpose::STANDARD.encode(value.to_be_bytes())
-    )
+    format!("crc32c={}", encode_base64_checksum(checksum))
 }
 
 fn succeeded(key: &str, response: SignedResponse) -> Result<SignedResponse> {
@@ -360,7 +352,7 @@ fn gcs_object(key: &str, body: &[u8]) -> Result<ObjectMetadata> {
 /// crc32c that happened to follow an md5.
 fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<Checksum> {
     headers
-        .get_all("x-goog-hash")
+        .get_all(GCS_HASH_HEADER)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .find_map(stored_crc32c)

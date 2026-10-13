@@ -673,14 +673,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn control_object_kind_strings_round_trip_and_match_serde() {
-        for kind in ControlObjectKind::ALL {
-            assert_eq!(ControlObjectKind::parse(kind.as_str()), Some(kind));
-            let serialized = serde_json::to_value(kind).expect("serialize kind");
-            assert_eq!(serialized, serde_json::Value::from(kind.as_str()));
-        }
-        assert_eq!(ControlObjectKind::parse("not_a_kind"), None);
-    }
 }

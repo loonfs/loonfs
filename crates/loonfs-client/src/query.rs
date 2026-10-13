@@ -3,16 +3,33 @@
 use super::*;
 use crate::transport::{QueryBuilder, SendPolicy};
 
+/// A pager over grep matches.
+pub type GrepPager = loonfs_types::Pager<GrepResponse, ClientError>;
+
 impl Client {
     /// Content search over the namespace's grep index (query API group).
     /// Gate on the `query.grep` capability before calling against unknown
     /// deployments; the namespace must also have a materialized active
     /// grep manifest or the server answers `not_supported`.
-    pub async fn grep(
+    ///
+    /// The pager supplies each page's cursor, so `request.cursor` is not read.
+    pub fn grep(&self, namespace_id: &NamespaceId, request: &GrepRequest) -> GrepPager {
+        let client = self.clone();
+        let namespace_id = namespace_id.clone();
+        let request = request.clone();
+        loonfs_types::Pager::new(move |page| {
+            let client = client.clone();
+            let namespace_id = namespace_id.clone();
+            let request = request.clone();
+            async move { client.grep_page(&namespace_id, &request, page).await }
+        })
+    }
+
+    async fn grep_page(
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
-        limit: Option<u32>,
+        page: loonfs_types::PageRequest<String>,
     ) -> Result<GrepResponse> {
         let mut query = QueryBuilder::new(format!(
             "{}/v0/namespaces/{namespace_id}/grep",
@@ -28,7 +45,7 @@ impl Client {
         }
         query.push("allow_scan", request.allow_scan);
         query.push("allow_stale", request.allow_stale);
-        query.pagination(limit, request.cursor.as_deref());
+        query.pagination(Some(page.limit.get()), page.cursor.as_deref());
         let url = query.build();
         self.request_json::<(), _>(self.get(&url), None, SendPolicy::Retry)
             .await

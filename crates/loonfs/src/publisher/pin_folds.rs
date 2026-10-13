@@ -150,7 +150,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
 #[tokio::test]
 async fn creations_started_together_fold_one_at_a_time_at_a_limit_of_one() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(SegmentWriteWatch::new(temp_dir.path()));
+    let store = Arc::new(segment_write_watch(temp_dir.path()));
     let namespaces = (0..3)
         .map(|index| NamespaceId::parse(format!("pin-fold-{index}")).expect("namespace id"))
         .collect::<Vec<_>>();
@@ -161,10 +161,10 @@ async fn creations_started_together_fold_one_at_a_time_at_a_limit_of_one() {
     )
     .await;
     for namespace_id in &namespaces {
-        seed_unfolded_tail(&store.inner, namespace_id).await;
+        seed_unfolded_tail(store.inner(), namespace_id).await;
     }
 
-    store.peak_namespaces.store(0, AtomicOrdering::SeqCst);
+    store.reset_peak();
     let creations = namespaces
         .iter()
         .flat_map(|namespace_id| start_creations(&writer, namespace_id))
@@ -172,12 +172,12 @@ async fn creations_started_together_fold_one_at_a_time_at_a_limit_of_one() {
     finish(creations).await;
 
     assert_eq!(
-        store.peak_namespaces.load(AtomicOrdering::SeqCst),
+        store.peak_namespaces(),
         1,
         "one fold at a time, across every creation"
     );
     for namespace_id in &namespaces {
-        assert_eq!(wal_tail_objects(&store.inner, namespace_id).await, 0);
+        assert_eq!(wal_tail_objects(store.inner(), namespace_id).await, 0);
     }
     writer.shutdown().await.expect("shut down writer");
 }

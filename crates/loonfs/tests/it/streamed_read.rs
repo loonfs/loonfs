@@ -7,7 +7,7 @@
 //! control — it is supposed to hold the whole file, and the difference
 //! between the two numbers is the whole point of the streaming one.
 
-use crate::common::{open_runtime_async, store, TestRuntime};
+use crate::common::{namespace, open_runtime_async, store};
 use loonfs::{
     DestinationBehavior, ErrorCode, LoonFs, NamespaceId, PutFileOptions, ReadFileStreamOptions,
     ReadOnly, SharedObjectStore,
@@ -37,15 +37,6 @@ fn chunked() -> ReadFileStreamOptions {
         chunk_bytes: NonZeroU64::new(CHUNK_BYTES).expect("non-zero chunk size"),
         ..ReadFileStreamOptions::default()
     }
-}
-
-async fn namespace(runtime: &TestRuntime) -> NamespaceId {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    runtime
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    namespace_id
 }
 
 /// Writes the payload through a plain store, so only the read that follows

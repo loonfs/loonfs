@@ -34,7 +34,8 @@ pub enum OperationSelector {
 }
 
 impl OperationSelector {
-    pub(crate) fn matches(self, kind: &OperationKind<'_>) -> bool {
+    /// Reports whether `kind` is one of the operations this selector names.
+    pub fn matches(self, kind: &OperationKind<'_>) -> bool {
         match self {
             Self::Any => true,
             Self::Head => matches!(kind, OperationKind::Head),

@@ -1225,10 +1225,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn context(writer_id: &str) -> MutationContext {
-        MutationContext {
-            writer_id: loonfs_types::WriterId::parse(writer_id).expect("writer id"),
-            now_ms: 1_000,
-        }
+        crate::test_support::mutation_context(writer_id, 1_000)
     }
 
     fn create_dir_request(commit_id: &str, name: &str) -> CommitIntent {

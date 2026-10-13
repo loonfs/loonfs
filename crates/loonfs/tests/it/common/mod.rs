@@ -205,6 +205,16 @@ pub(crate) struct TestRuntime {
     namespaces: Mutex<HashMap<NamespaceId, Namespace<Writable>>>,
 }
 
+/// Creates the `demo` namespace on `runtime` and returns its id.
+pub(crate) async fn namespace(runtime: &TestRuntime) -> NamespaceId {
+    let namespace_id = loonfs_test_support::ids::namespace_id("demo");
+    runtime
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    namespace_id
+}
+
 pub(crate) fn runtime(root: &Path, writer_id: &str) -> TestRuntime {
     open_runtime(store(root), writer_id)
 }

@@ -7,28 +7,28 @@ use super::{
 use crate::aws_credentials::{
     aws_credentials_source, AwsSigningCredentials, SharedAwsCredentialsSource,
 };
+use crate::checksum_header::encode_base64_checksum;
 use crate::crypto::hmac_sha256;
 use crate::endpoint::{parse_endpoint_url, virtual_hosted_authority};
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
-    hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, unix_ms,
-    V4Endpoint, V4RequestParts, V4Scheme,
+    percent_encode_path, percent_encode_segment, presign_v4, signing_dates, unix_ms, V4Endpoint,
+    V4RequestParts, V4Scheme,
 };
 use crate::{ByteRange, ObjectStoreError, PutMode};
 use async_trait::async_trait;
-use base64::Engine as _;
-use loonfs_types::format::hex::hex_decode_bytes;
+use loonfs_types::format::hex::hex_encode_bytes;
 use loonfs_types::{Checksum, ChecksumAlgorithm};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
-const S3_IF_MATCH_HEADER: &str = "if-match";
+pub(crate) const S3_IF_MATCH_HEADER: &str = "if-match";
 const S3_COPY_SOURCE_HEADER: &str = "x-amz-copy-source";
 const S3_COPY_SOURCE_RANGE_HEADER: &str = "x-amz-copy-source-range";
 const S3_COPY_SOURCE_IF_MATCH_HEADER: &str = "x-amz-copy-source-if-match";
-const S3_CRC64NVME_CHECKSUM_HEADER: &str = "x-amz-checksum-crc64nvme";
+pub(crate) const S3_CRC64NVME_CHECKSUM_HEADER: &str = "x-amz-checksum-crc64nvme";
 const S3_CHECKSUM_ALGORITHM_HEADER: &str = "x-amz-checksum-algorithm";
 /// Requests a full-object checksum for multipart uploads.
 ///
@@ -421,7 +421,7 @@ impl S3CompatiblePresigner {
             },
             ttl,
             now,
-            |message| Ok(hex_lower(&hmac_sha256(&signing_key, message))),
+            |message| Ok(hex_encode_bytes(&hmac_sha256(&signing_key, message))),
         )?;
         // AWS also expires the capability when its session credentials expire.
         // Report that effective lifetime even when refresh returned the same
@@ -576,9 +576,7 @@ pub(crate) fn base64_crc64nvme(checksum: &Checksum) -> Result<String> {
     checksum
         .validate()
         .map_err(|error| invalid_direct_put_content(&error.to_string()))?;
-    let raw = hex_decode_bytes(checksum.value.as_str())
-        .expect("a checksum spelled in lowercase hex should decode");
-    Ok(base64::engine::general_purpose::STANDARD.encode(raw))
+    Ok(encode_base64_checksum(checksum))
 }
 
 fn invalid_direct_put_content(message: &str) -> ObjectStoreError {

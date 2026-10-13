@@ -11,7 +11,6 @@ use loonfs_objectstore::{
 use loonfs_types::WriterId;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 
 #[derive(Clone)]
 pub(super) struct TestOptions {
@@ -95,8 +94,8 @@ pub(super) async fn test_app(
     });
     let state = BindingState {
         request_limit: None,
-        upload_permits: Arc::new(Semaphore::new(options.max_concurrent_uploads)),
-        download_permits: Arc::new(Semaphore::new(options.max_concurrent_downloads)),
+        upload_permits: crate::transfer_permits(options.max_concurrent_uploads),
+        download_permits: crate::transfer_permits(options.max_concurrent_downloads),
         options,
         probe_store: runtime.object_store(),
         namespaces: Arc::new(Namespaces::new(runtime.clone())),

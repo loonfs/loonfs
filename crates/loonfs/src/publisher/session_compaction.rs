@@ -381,7 +381,7 @@ async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
 #[tokio::test]
 async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(SegmentWriteWatch::new(temp_dir.path()));
+    let store = Arc::new(segment_write_watch(temp_dir.path()));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .inline_content(fold_every_write())
@@ -392,7 +392,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     let mut sessions = Vec::new();
     for index in 0..4 {
         sessions.push(
-            session_one_fold_short(&writer, &store.inner, &format!("merge-bound-{index}")).await,
+            session_one_fold_short(&writer, store.inner(), &format!("merge-bound-{index}")).await,
         );
     }
 
@@ -410,7 +410,7 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
     for namespace in &sessions {
         namespace.wait_for_fold().await.expect("the fold settles");
     }
-    store.peak_namespaces.store(0, AtomicOrdering::SeqCst);
+    store.reset_peak();
     drop(permit);
     timeout(Duration::from_secs(60), writer.drain())
         .await
@@ -418,12 +418,12 @@ async fn a_runtime_runs_no_more_merges_at_once_than_its_compaction_limit() {
         .expect("drain");
 
     assert_eq!(
-        store.peak_namespaces.load(AtomicOrdering::SeqCst),
+        store.peak_namespaces(),
         1,
         "one merge at a time, across every session"
     );
     for namespace in &sessions {
-        let manifest = current_manifest(&store.inner, namespace.id()).await;
+        let manifest = current_manifest(store.inner(), namespace.id()).await;
         assert!(
             delta_runs(&manifest) < DEFAULT_MAX_DELTA_RUNS,
             "`{}` still has {} delta runs",

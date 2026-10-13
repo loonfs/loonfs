@@ -29,6 +29,21 @@ fn an_acl_namespace_is_created_shown_and_recovered() {
         "--principals",
         "prn_root",
     ]));
+    let repeated = harness.run(&[
+        "--json",
+        "access",
+        "set",
+        "/",
+        "--grant",
+        "team=read,read",
+        "--principal-scope",
+        "org",
+        "--principals",
+        "prn_root",
+    ]);
+    assert_failure(&repeated);
+    assert_eq!(json_error(&repeated)["code"], "invalid_request");
+    assert_eq!(json_error(&repeated)["param"], "--grant");
     assert_success(&harness.run(&[
         "access",
         "set",

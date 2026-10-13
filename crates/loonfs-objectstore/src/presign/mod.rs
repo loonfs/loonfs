@@ -19,5 +19,7 @@ pub use s3_compatible::{
 
 pub(crate) use gcs::stored_crc32c;
 pub(crate) use limits::CHECKSUM_HEAD_TTL;
-pub(crate) use s3_compatible::base64_crc64nvme;
+pub(crate) use s3_compatible::{
+    base64_crc64nvme, S3_CRC64NVME_CHECKSUM_HEADER, S3_IF_MATCH_HEADER,
+};
 pub(crate) use v4::percent_encode_segment;

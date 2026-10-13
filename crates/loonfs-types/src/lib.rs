@@ -83,13 +83,13 @@ pub mod format {
 }
 
 pub use access::{
-    AccessGrants, AccessGrantsError, AccessRevisionNo, AccessRight, AccessRights, PrincipalId,
-    PrincipalIdValidationError, PrincipalScope, PrincipalScopeValidationError, PrincipalSet,
-    PrincipalSetError, Subject, SubjectId, SubjectIdValidationError, SubjectPart,
-    SubjectPartsError, MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES,
-    MAX_SUBJECT_PRINCIPALS,
+    AccessGrants, AccessGrantsError, AccessRevisionNo, AccessRight, AccessRights,
+    AccessRightsError, PrincipalId, PrincipalIdValidationError, PrincipalScope,
+    PrincipalScopeValidationError, PrincipalSet, PrincipalSetError, Subject, SubjectId,
+    SubjectIdValidationError, SubjectPart, SubjectPartsError, MAX_ACCESS_GRANTS_PRINCIPAL_BYTES,
+    MAX_ACCESS_GRANT_ENTRIES, MAX_SUBJECT_PRINCIPALS,
 };
-pub use actor::{ActorId, ActorIdValidationError};
+pub use actor::{ActorId, ActorIdValidationError, MAX_ACTOR_ID_BYTES};
 pub use attributes::{
     AttributeKey, AttributeKeyValidationError, AttributeValue, AttributeValueValidationError,
     Attributes, AttributesError, AttributesRevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES,
@@ -154,7 +154,7 @@ pub use retry::{
     saturating_duration_ms, transport_retry_backoff, MonotonicTimer, OperationDeadline,
     StdMonotonicTimer, TransportRetryOutcome, TransportRetryPolicy,
 };
-pub use secret::SecretString;
+pub use secret::{SecretString, REDACTED};
 pub use widths::usize_from_u64;
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live

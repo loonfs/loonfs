@@ -12,6 +12,7 @@ use crate::object_store::Result;
 use crate::presign::limits::MAX_PRESIGN_TTL;
 use crate::presign::PresignedUrl;
 use crate::ObjectStoreError;
+use loonfs_types::format::hex::hex_encode_bytes;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -116,7 +117,7 @@ pub(crate) fn presign_v4(
         scheme.algorithm,
         scheme.signing_dates.timestamp,
         scheme.credential_scope,
-        hex_lower(&Sha256::digest(canonical_request.as_bytes()))
+        hex_encode_bytes(&Sha256::digest(canonical_request.as_bytes()))
     );
     let signature = sign(string_to_sign.as_bytes())?;
     let url = format!(
@@ -208,10 +209,6 @@ pub(crate) fn percent_encode_segment(value: &str) -> String {
 
 pub(crate) fn normalize_header_value(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-pub(crate) fn hex_lower(bytes: &[u8]) -> String {
-    loonfs_types::format::hex::hex_encode_bytes(bytes)
 }
 
 fn percent_encode_query(value: &str) -> String {

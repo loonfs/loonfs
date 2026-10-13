@@ -176,6 +176,31 @@ string_cursor_response!(
     snapshots
 );
 
+impl PagedResponse for crate::api::v0::GrepResponse {
+    type Item = crate::api::v0::GrepMatch;
+    type Cursor = String;
+
+    fn items_mut(&mut self) -> &mut Vec<Self::Item> {
+        &mut self.matches
+    }
+
+    fn items(&self) -> &[Self::Item] {
+        &self.matches
+    }
+
+    fn next_cursor(&self) -> Option<Self::Cursor> {
+        self.next_cursor.clone()
+    }
+
+    fn absorb(&mut self, mut later: Self) {
+        self.head_seq = later.head_seq;
+        self.built_through_seq = later.built_through_seq;
+        self.tail_scanned &= later.tail_scanned;
+        self.matches.append(&mut later.matches);
+        self.next_cursor = later.next_cursor;
+    }
+}
+
 impl PagedResponse for crate::api::v0::ListChangesResponse {
     type Item = crate::api::v0::Commit;
     type Cursor = ChangeSeq;

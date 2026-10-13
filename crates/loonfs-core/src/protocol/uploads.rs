@@ -1736,10 +1736,7 @@ mod tests {
     }
 
     fn context(now_ms: u64) -> MutationContext {
-        MutationContext {
-            writer_id: loonfs_types::WriterId::parse("upload-test").expect("writer id"),
-            now_ms,
-        }
+        crate::test_support::mutation_context("upload-test", now_ms)
     }
 
     /// One store with a namespace and one open, staged session in it.

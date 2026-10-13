@@ -17,7 +17,7 @@ use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MetadataMapStore, OperationSelector,
 };
 use loonfs_types::api::v0::CompleteUploadBody;
-use loonfs_types::{AbsolutePath, DestinationBehavior, WriterId};
+use loonfs_types::{AbsolutePath, DestinationBehavior};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
 
@@ -31,10 +31,7 @@ impl MonotonicTimer for PublicationTimer {
 }
 
 fn context(now_ms: u64) -> MutationContext {
-    MutationContext {
-        writer_id: WriterId::parse("writer").expect("writer id"),
-        now_ms,
-    }
+    crate::test_support::mutation_context("writer", now_ms)
 }
 
 async fn completed_upload<S: ObjectStore + ?Sized>(

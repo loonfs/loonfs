@@ -16,7 +16,7 @@
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
-use crate::common::{open_runtime_with_async, store, TestRuntime};
+use crate::common::{namespace, open_runtime_with_async, store, TestRuntime};
 use loonfs::{ContentRef, GcOptions, GcResponse, NamespaceId, PutFileOptions, SharedObjectStore};
 use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS};
 use loonfs_core::MutationContext;
@@ -65,15 +65,6 @@ async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: 
     )
     .await
     .expect("garbage collection")
-}
-
-async fn namespace(runtime: &TestRuntime) -> NamespaceId {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    runtime
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    namespace_id
 }
 
 fn content_key(content_ref: &ContentRef) -> String {

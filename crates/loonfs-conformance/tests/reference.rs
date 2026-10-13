@@ -144,7 +144,7 @@ where
 }
 
 fn namespace_id(value: &str) -> NamespaceId {
-    NamespaceId::parse(value).expect("valid fixture namespace")
+    loonfs_test_support::ids::namespace_id(value)
 }
 
 fn namespace_path(namespace_id: &str, path: &str) -> NamespacePath {

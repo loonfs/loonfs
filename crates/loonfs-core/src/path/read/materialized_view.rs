@@ -1276,10 +1276,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn context() -> MutationContext {
-        MutationContext {
-            writer_id: loonfs_types::WriterId::parse("reader-tests").expect("writer id"),
-            now_ms: 1,
-        }
+        crate::test_support::mutation_context("reader-tests", 1)
     }
 
     /// Bootstraps a namespace holding `/docs` with one annotated child

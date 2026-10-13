@@ -7,17 +7,19 @@
 use super::{
     DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest, PresignedUrl,
 };
+use crate::checksum_header::decode_base64_checksum;
 use crate::gcs::GcpGcsStoreConfig;
 use crate::keyspace::{normalize_key_prefix, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::v4::{
-    hex_lower, percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
+    percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
     V4RequestParts, V4Scheme,
 };
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use base64::Engine as _;
-use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumHex};
+use loonfs_types::format::hex::hex_encode_bytes;
+use loonfs_types::{Checksum, ChecksumAlgorithm, REDACTED};
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use std::collections::BTreeMap;
@@ -71,8 +73,8 @@ impl fmt::Debug for GcsV4Presigner {
         f.debug_struct("GcsV4Presigner")
             .field("bucket", &self.bucket)
             .field("key_prefix", &self.key_prefix)
-            .field("client_email", &"<redacted>")
-            .field("signing_key", &"<redacted>")
+            .field("client_email", &REDACTED)
+            .field("signing_key", &REDACTED)
             .finish()
     }
 }
@@ -195,7 +197,7 @@ impl GcsV4Presigner {
                     "service account key could not sign the request".to_owned(),
                 )
             })?;
-        Ok(hex_lower(&signature))
+        Ok(hex_encode_bytes(&signature))
     }
 }
 
@@ -253,16 +255,9 @@ pub(crate) fn stored_crc32c(header_value: &str) -> Option<Checksum> {
         let Some(encoded) = pair.trim().strip_prefix("crc32c=") else {
             continue;
         };
-        let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-            continue;
-        };
-        if raw.len() != ChecksumAlgorithm::Crc32c.value_bytes() {
-            continue;
+        if let Some(checksum) = decode_base64_checksum(ChecksumAlgorithm::Crc32c, encoded) {
+            return Some(checksum);
         }
-        return Some(Checksum {
-            algorithm: ChecksumAlgorithm::Crc32c,
-            value: ChecksumHex::encode(&raw),
-        });
     }
     None
 }

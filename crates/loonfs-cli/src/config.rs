@@ -4,7 +4,9 @@ use crate::error::CliError;
 use loonfs_client::ClientConfig;
 use loonfs_types::config::{validate_non_empty, ConfigFieldError};
 use loonfs_types::env::AUTH_TOKEN_ENV;
-use loonfs_types::{ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId};
+use loonfs_types::{
+    ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId, REDACTED,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -664,7 +666,7 @@ pub(crate) fn redacted_config_table(table: &toml::Table) -> toml::Table {
 
 fn redacted_config_value(key: Option<&str>, value: &toml::Value) -> toml::Value {
     if key.is_some_and(|key| SECRET_CONFIG_KEYS.contains(&key)) {
-        return toml::Value::String("<redacted>".to_owned());
+        return toml::Value::String(REDACTED.to_owned());
     }
     match value {
         toml::Value::Table(table) => toml::Value::Table(redacted_config_table(table)),

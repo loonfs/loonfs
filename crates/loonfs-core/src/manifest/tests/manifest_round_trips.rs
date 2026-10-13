@@ -425,8 +425,11 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
             .successor()
             .expect("next"),
     );
-    let store =
-        ConflictOnManifestCreateStore::new(inner, manifest_key, br#"{"bad":"json"}"#.to_vec());
+    let store = LostCreateStore::new(
+        inner,
+        KeyPredicate::exact(manifest_key),
+        br#"{"bad":"json"}"#.to_vec(),
+    );
     let error = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect_err("invalid winning manifest");

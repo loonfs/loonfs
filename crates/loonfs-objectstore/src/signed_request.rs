@@ -5,6 +5,7 @@ use crate::presign::PresignedUrl;
 use crate::ObjectStoreError;
 use loonfs_types::Checksum;
 use object_store::client::{HttpClient, HttpRequestBody};
+use std::time::SystemTime;
 
 const RETRYABLE_SIGNED_ERROR_CODES: &[&str] = &[
     "InternalError",
@@ -12,6 +13,16 @@ const RETRYABLE_SIGNED_ERROR_CODES: &[&str] = &[
     "ServiceUnavailable",
     "SlowDown",
 ];
+
+/// Returns the wall time a request this crate signs is dated with.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a V4 signature is dated, so an internally issued request enters wall time here; \
+              nothing durable is derived from it"
+)]
+pub(crate) fn signing_time() -> SystemTime {
+    SystemTime::now()
+}
 
 pub(crate) struct SignedResponse {
     pub(crate) status: http::StatusCode,

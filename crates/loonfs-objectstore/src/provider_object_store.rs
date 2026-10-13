@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::{BoxFuture, FutureExt};
 use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt, TryStreamExt};
-use loonfs_types::{Checksum, ChecksumAlgorithm};
+use loonfs_types::{Checksum, ChecksumAlgorithm, REDACTED};
 use loonfs_types::{EffectiveLimit, OperationDeadline, Page, TransportRetryPolicy};
 use object_store as provider_store;
 use provider_store::list::{PaginatedListOptions, PaginatedListStore};
@@ -81,15 +81,18 @@ pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 /// immutable write. A `put_streamed` write sends one part at a time.
 pub const PROVIDER_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 
-/// The smallest part AWS S3 and Cloudflare R2 accept anywhere but last, and
+/// The smallest part every supported provider accepts anywhere but last, and
 /// so the shortest base prefix a provider copies instead of receiving it
 /// again.
-pub const PROVIDER_MIN_COPIED_PART_BYTES: u64 = 5 * 1024 * 1024;
+pub const PROVIDER_MIN_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024;
+
+/// The largest part every supported provider accepts.
+pub const PROVIDER_MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Parts one provider multipart upload accepts. Every supported provider
 /// stops at 10,000, which with the part size sets the largest object a
 /// multipart write can produce.
-pub(crate) const MAX_PROVIDER_MULTIPART_PARTS: usize = 10_000;
+pub const PROVIDER_MAX_MULTIPART_PARTS: u32 = 10_000;
 
 /// Request-phase timeout for one HTTP attempt that carries a payload.
 ///
@@ -611,12 +614,12 @@ impl MultipartWrite<'_> {
         let mut parts = vec![self.upload_part(upload_id, 0, head).await?];
 
         while let Some(payload) = parts_reader.next_part().await? {
-            if parts.len() >= MAX_PROVIDER_MULTIPART_PARTS {
+            if parts.len() >= PROVIDER_MAX_MULTIPART_PARTS as usize {
                 return Err(ObjectStoreError::transport(
                     self.key,
                     format!(
                         "streamed payload needs more than the provider's \
-                         {MAX_PROVIDER_MULTIPART_PARTS}-part limit at this part size"
+                         {PROVIDER_MAX_MULTIPART_PARTS}-part limit at this part size"
                     ),
                 ));
             }
@@ -1447,7 +1450,7 @@ fn mask_query_param_values(message: &str, param: &str) -> String {
                     matches!(c, '&' | '"' | '\'' | ')' | '<' | '>' | ':' | ',') || c.is_whitespace()
                 })
                 .unwrap_or(message.len() - cursor);
-            out.push_str("<redacted>");
+            out.push_str(REDACTED);
             cursor += value_len;
         }
     }
@@ -1464,7 +1467,7 @@ fn mask_xml_element_text(message: &str, element: &str) -> String {
     while let Some(position) = rest.find(&open) {
         let text_start = position + open.len();
         out.push_str(&rest[..text_start]);
-        out.push_str("<redacted>");
+        out.push_str(REDACTED);
         rest = &rest[text_start..];
         match rest.find(&close) {
             Some(text_end) => rest = &rest[text_end..],
