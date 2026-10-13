@@ -260,7 +260,10 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                         finished = true;
                         break;
                     }
-                    assert_eq!(step.compaction, CompactionStepOutcome::UnitPublished {});
+                    assert_eq!(
+                        step.compaction,
+                        CompactionStepOutcome::BoundedMergePublished {}
+                    );
                     rebuilt = true;
                 }
                 assert!(rebuilt && finished, "metadata must rebuild and finish");

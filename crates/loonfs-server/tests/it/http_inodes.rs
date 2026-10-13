@@ -13,7 +13,8 @@ use loonfs_test_support::ids::{
 };
 use loonfs_types::PageRequest;
 use loonfs_types::{
-    ApiError, DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, InodeId, RevisionNo,
+    DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, ErrorResponse, InodeId,
+    RevisionNo,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -654,14 +655,18 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
                 .request(method, &url)
                 .set("authorization", "Bearer test-token")
                 .set("Loonfs-Actor", "test-actor");
-            let result = request.call();
+            let result = if method == "POST" {
+                request.send_json(serde_json::json!({}))
+            } else {
+                request.call()
+            };
             let ureq::Error::Status(status, response) =
                 result.expect_err("malformed inode route should fail")
             else {
                 panic!("expected status response")
             };
             assert_eq!(status, 400, "{method} {url}");
-            let error: ApiError = serde_json::from_reader(response.into_reader())
+            let error: ErrorResponse = serde_json::from_reader(response.into_reader())
                 .expect("decode malformed-inode error");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
             assert!(
@@ -691,7 +696,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
                 panic!("expected status response")
             };
             assert_eq!(status, 401, "{method} {url}");
-            let error: ApiError =
+            let error: ErrorResponse =
                 serde_json::from_reader(response.into_reader()).expect("decode unauthorized error");
             assert_eq!(error.code, ErrorCode::Unauthorized.as_str());
         }

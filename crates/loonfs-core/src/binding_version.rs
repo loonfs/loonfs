@@ -16,7 +16,7 @@ pub(crate) fn encode(position: DeltaPosition, namespace_id: &NamespaceId) -> Bin
         BINDING_VERSION_FORMAT_VERSION,
     )
     .expect("binding position should contain only serializable fields");
-    BindingVersion::parse(encoded).expect("opaque token encoder should emit lowercase hex")
+    BindingVersion::parse(encoded).expect("opaque token encoder should emit base64url")
 }
 
 pub(crate) fn decode(
@@ -45,3 +45,24 @@ impl OpaqueToken for BindingVersionEnvelope {
 #[derive(Debug, Error)]
 #[error("binding version is malformed or belongs to another namespace")]
 pub(crate) struct InvalidBindingVersion;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loonfs_types::ChangeSeq;
+
+    #[test]
+    fn a_binding_version_matches_its_golden_bytes() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let position = DeltaPosition {
+            seq: ChangeSeq(12),
+            delta_index: 3,
+        };
+        let token = encode(position, &namespace_id);
+        crate::test_support::assert_matches_golden_token("binding_version.txt", token.as_str());
+        assert_eq!(
+            decode(&token, &namespace_id).expect("decode binding version"),
+            position
+        );
+    }
+}

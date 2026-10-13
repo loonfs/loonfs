@@ -83,6 +83,7 @@ def stream_client(fixture, direct, body, asynchronous=False, range_body=None):
                 "kind": "presigned_url",
                 "method": "GET",
                 "url": "http://objects.test/object",
+                "headers": {},
                 "expires_at_ms": 2000000000000,
             }
             if signed:

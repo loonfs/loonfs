@@ -6,7 +6,7 @@
 #   docker build -f crates/loonfs-server/Dockerfile -t loonfs-server:dev .
 #
 # The image carries the server binary and nothing else. Mount a config file
-# and, for a local-fs store, the directory that store writes to.
+# and, for a local_fs store, the directory that store writes to.
 
 # The tag names no version on purpose. `rust-toolchain.toml` pins
 # `channel = "stable"`, and the rustup in this image honors that file, so the

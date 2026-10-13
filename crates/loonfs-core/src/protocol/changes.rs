@@ -37,7 +37,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         return Ok(ListChangesResponse {
             namespace_id: namespace_id.clone(),
             after_seq,
-            through_seq: head.seq,
+            head_seq: head.seq,
             next_after_seq: None,
             changes: Vec::new(),
         });
@@ -69,7 +69,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     Ok(ListChangesResponse {
         namespace_id: namespace_id.clone(),
         after_seq,
-        through_seq,
+        head_seq: head.seq,
         next_after_seq,
         changes,
     })
@@ -352,7 +352,7 @@ mod tests {
             .await
             .expect("the head is a valid cursor");
         assert!(caught_up.changes.is_empty());
-        assert_eq!(caught_up.through_seq, ChangeSeq(0));
+        assert_eq!(caught_up.head_seq, ChangeSeq(0));
 
         let error = engine
             .list_changes_after(ChangeSeq(1), limit, &context)
@@ -459,7 +459,7 @@ mod tests {
                         assert!(page.next_after_seq.is_some());
                     }
                     let last = page.changes.last().expect("nonempty page").committed_seq;
-                    assert_eq!(page.through_seq, last);
+                    assert_eq!(page.head_seq, expected.last().expect("published commits").0);
                     actual.extend(page.changes.into_iter().map(|commit| {
                         (commit.committed_seq, commit.commit_id, commit.events.len())
                     }));

@@ -7,7 +7,7 @@ use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_run_outcome, StoreProbeRunOutcome};
 use loonfs_types::api::v0::{
-    DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, SnapshotSummary,
+    DeleteSnapshotResponse, GrepIndex, ListChangesResponse, ListSnapshotsResponse, Snapshot,
     StoreProbeResponse,
 };
 use loonfs_types::{
@@ -185,9 +185,9 @@ pub(crate) enum CommandData {
     },
     NamespaceStatus(NamespaceMetadata),
     NamespaceDeleted(DeleteNamespaceResponse),
-    SnapshotCreated(SnapshotSummary),
+    SnapshotCreated(Snapshot),
     SnapshotsListed(ListSnapshotsResponse),
-    SnapshotExtended(SnapshotSummary),
+    SnapshotExtended(Snapshot),
     SnapshotDeleted(DeleteSnapshotResponse),
     CheckpointCreated(Checkpoint),
     CheckpointsListed(ListCheckpointsResponse),

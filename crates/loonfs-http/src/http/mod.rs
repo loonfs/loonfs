@@ -21,7 +21,7 @@ mod response_frames;
 #[cfg(test)]
 mod tests;
 
-pub use self::error::api_error_response;
+pub use self::error::error_response;
 
 #[cfg(feature = "openapi")]
 pub use self::openapi::openapi_document;
@@ -29,25 +29,25 @@ use crate::BindingState;
 
 use self::error::{ApiResponseError, ServedErrorCode};
 use self::extractors::{
-    acquire_download_permit, authorize, AppJson, AppPath, AppQuery, NamespaceIdPath, NoQuery,
-    OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
+    acquire_download_permit, authorize, AppJson, AppPath, AppQuery, NamespaceIdPath, NoBody,
+    NoQuery, OptionalAppJson, UploadBodyBytes, UploadBodyStream, UploadControlJson,
     MAX_COMPLETION_BODY_BYTES, MAX_JSON_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use self::handlers_downloads::{
     create_download, create_download_by_inode, create_revision_download_by_inode,
 };
 use self::handlers_filesystem::{
-    create_commit, get_file_bytes, get_path_entry, list_changes, list_file_revisions,
+    create_commit, get_file_content, get_path_entry, list_changes, list_file_revisions,
     list_path_entries, list_trash,
 };
 use self::handlers_inodes::{
-    get_file_bytes_by_inode, get_file_revision_bytes_by_inode, get_inode,
+    get_file_content_by_inode, get_file_revision_content_by_inode, get_inode,
     list_file_revisions_by_inode, list_inode_children,
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, create_snapshot, delete_checkpoint, delete_namespace,
-    delete_snapshot, extend_snapshot, fork_namespace, get_namespace, get_namespace_diagnostics,
-    list_checkpoints, list_snapshots, run_maintenance,
+    delete_snapshot, extend_snapshot, fork_namespace, get_checkpoint, get_namespace,
+    get_namespace_diagnostics, get_snapshot, list_checkpoints, list_snapshots, run_maintenance,
 };
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, get_grep_index, grep, grep_index_not_maintained,
@@ -60,7 +60,7 @@ use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, delete, get, post, put, MethodRouter};
+use axum::routing::{any, get, post, put, MethodRouter};
 use axum::{Extension, Router};
 use futures::FutureExt as _;
 use loonfs::ErrorCode;
@@ -109,7 +109,7 @@ const DEADLINE_EXEMPT_ROUTES: &[&str] = &[
 
 /// Assigns each request a correlation id: every response carries it as the
 /// `x-request-id` header, and error bodies repeat it as
-/// `ApiError.request_id` so a caller's log line and the server's trace can
+/// `ErrorResponse.request_id` so a caller's log line and the server's trace can
 /// be joined without header plumbing.
 async fn with_request_id(request: Request, next: Next) -> Response {
     let request_id = loonfs_types::generated_id("req");
@@ -336,7 +336,7 @@ pub fn router(state: BindingState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
-            delete(delete_snapshot),
+            get(get_snapshot).delete(delete_snapshot),
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/entries",
@@ -348,7 +348,7 @@ pub fn router(state: BindingState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/filesystem/content",
-            get(get_file_bytes),
+            get(get_file_content),
         )
         // The read this deployment authorizes rather than performs. It sits
         // beside the proxied read because it answers the same question
@@ -377,7 +377,7 @@ pub fn router(state: BindingState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
-            get(get_file_bytes_by_inode),
+            get(get_file_content_by_inode),
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
@@ -389,7 +389,7 @@ pub fn router(state: BindingState) -> Router {
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
-            get(get_file_revision_bytes_by_inode),
+            get(get_file_revision_content_by_inode),
         )
         .route(
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
@@ -465,7 +465,7 @@ pub fn router(state: BindingState) -> Router {
             )
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
-                delete(delete_checkpoint),
+                get(get_checkpoint).delete(delete_checkpoint),
             )
             .route(
                 "/v0/maintenance/namespaces/{namespace_id}/runs",

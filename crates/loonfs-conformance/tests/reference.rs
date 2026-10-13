@@ -15,16 +15,16 @@ use loonfs_test_support::ids::{first_page, page_limit};
 use loonfs_types::api::v0::{
     CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
     DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
-    ListSnapshotsResponse, ObjectTransferAccess, SnapshotSummary, UploadContentClaim, UploadMode,
+    ListSnapshotsResponse, ObjectTransferAccess, Snapshot, UploadContentClaim, UploadMode,
     UploadPartChecksumClaim, UploadSessionStatus,
 };
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::PageRequest;
 use loonfs_types::{
-    AccessGrants, ActorId, ApiError, AttributeKey, AttributeValue, AttributesRevisionNo,
-    BindingVersion, ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitPrecondition,
-    CommitRequest, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-    DestinationPrecondition, DisplayName, FilesystemOperation, NamespaceId, PathEntry, RevisionNo,
+    AccessGrants, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, BindingVersion,
+    ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitRequest,
+    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DestinationPrecondition, DisplayName,
+    ErrorResponse, FilesystemOperation, NamespaceId, PathEntry, RevisionNo,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
@@ -230,7 +230,7 @@ async fn run_upload_modes(harness: &Harness, case: &Case) {
             .create_upload(&request.namespace_id, &body)
             .await;
         if !expected_modes.contains(&body.mode()) {
-            assert_api_error(
+            assert_error_response(
                 &begin.expect_err("unsupported upload mode"),
                 &expected.unsupported,
             );
@@ -361,7 +361,7 @@ async fn run_error_contract(harness: &Harness, case: &Case) {
 
 async fn assert_raw_error(response: reqwest::Response, expected: &ErrorOutcome) {
     assert_eq!(response.status().as_u16(), expected.status);
-    let error: ApiError = response.json().await.expect("decode API error envelope");
+    let error: ErrorResponse = response.json().await.expect("decode API error envelope");
     assert_eq!(error.code, expected.code);
     assert_eq!(error.param.as_deref(), Some(expected.param.as_str()));
     assert!(error.request_id.is_some());
@@ -757,6 +757,7 @@ fn upload_status_name(status: &UploadSessionStatus) -> &'static str {
         UploadSessionStatus::Open { .. } => "open",
         UploadSessionStatus::Completed { .. } => "completed",
         UploadSessionStatus::Aborted { .. } => "aborted",
+        UploadSessionStatus::Unknown => "unknown",
     }
 }
 
@@ -1005,7 +1006,7 @@ async fn run_append(harness: &Harness, case: &Case) {
         )
         .await
         .expect_err("an empty append is refused");
-    assert_api_error(&refused, &expected.empty_append);
+    assert_error_response(&refused, &expected.empty_append);
 
     let empty_spec = namespace_path(&request.namespace_id, &request.empty_path);
     let empty_put = client
@@ -1447,7 +1448,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         )
         .await
         .expect_err("stale binding version must fail");
-    assert_api_error(&stale, &expected.stale_binding_version);
+    assert_error_response(&stale, &expected.stale_binding_version);
     let malformed = harness
         .raw_client
         .post(format!(
@@ -1709,7 +1710,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         )
         .await
         .expect_err("a stale binding precondition must fail");
-    assert_api_error(&stale, &expected.stale_binding_version);
+    assert_error_response(&stale, &expected.stale_binding_version);
     let occupied = harness
         .client
         .commit(
@@ -1725,7 +1726,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         )
         .await
         .expect_err("a bound name must fail its absence precondition");
-    assert_api_error(&occupied, &expected.occupied_name);
+    assert_error_response(&occupied, &expected.occupied_name);
     let copied = harness
         .client
         .commit(
@@ -1831,7 +1832,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         )
         .await
         .expect_err("an unrestricted namespace holds no access rows");
-    assert_api_error(&unrestricted, &expected.unrestricted_access);
+    assert_error_response(&unrestricted, &expected.unrestricted_access);
 
     let deletion = harness
         .client
@@ -1889,7 +1890,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         .read_file_by_inode(&namespace, source_inode_id)
         .await
         .expect_err("a deleted inode has no current content");
-    assert_api_error(&deleted, &expected.deleted_content);
+    assert_error_response(&deleted, &expected.deleted_content);
 
     let listing = harness
         .client
@@ -1989,7 +1990,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         "{}/v0/namespaces/{}/snapshots",
         harness.server_url, request.namespace_id
     );
-    let snapshot: SnapshotSummary = raw_success_json(
+    let snapshot: Snapshot = raw_success_json(
         harness
             .raw_client
             .post(&snapshots_url)
@@ -2166,7 +2167,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         "list snapshot changes",
     )
     .await;
-    assert_eq!(feed.through_seq.0, expected.snapshot_head_seq);
+    assert_eq!(feed.head_seq.0, expected.snapshot_head_seq);
     assert_eq!(feed.next_after_seq, None);
     assert_eq!(
         feed.changes
@@ -2176,7 +2177,7 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         expected.snapshot_change_seqs
     );
 
-    let extended: SnapshotSummary = raw_success_json(
+    let extended: Snapshot = raw_success_json(
         harness
             .raw_client
             .post(format!("{snapshots_url}/{snapshot_id}/extend"))
@@ -2329,11 +2330,11 @@ async fn raw_success_bytes(request: reqwest::RequestBuilder, label: &str) -> Byt
 
 async fn assert_raw_status_error(response: reqwest::Response, expected: &ErrorStatusExpected) {
     assert_eq!(response.status().as_u16(), expected.status);
-    let error: ApiError = response.json().await.expect("decode API error envelope");
+    let error: ErrorResponse = response.json().await.expect("decode API error envelope");
     assert_eq!(error.code, expected.code);
 }
 
-fn assert_api_error(error: &ClientError, expected: &ErrorStatusExpected) {
+fn assert_error_response(error: &ClientError, expected: &ErrorStatusExpected) {
     match error {
         ClientError::Api { status, code, .. } => {
             assert_eq!(*status, expected.status);

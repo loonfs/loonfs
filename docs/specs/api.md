@@ -117,7 +117,7 @@ Registered limit keys:
 | `commit.max_message_bytes` | The largest commit `message` accepted, in bytes. A longer message returns `invalid_request` before planning. |
 | `maintenance.gc.min_grace_window_ms` | The smallest `grace_window_ms` accepted on a `gc` request. A smaller value returns `invalid_request`. The value is derived from the publication budgets and the direct transfer capability lifetime, rather than tuned. |
 | `snapshot.max_ttl_ms` | The largest `ttl_ms` that snapshot create and extend requests accept. A larger value returns `invalid_request`. |
-| `snapshot.max_lifetime_ms` | The longest snapshot lifetime, measured from the time the snapshot record was created. Extending a snapshot never moves its expiry past this limit. |
+| `snapshot.max_age_ms` | The longest snapshot lifetime, measured from the time the snapshot record was created. Extending a snapshot never moves its expiry past this limit. |
 | `snapshot.max_live_per_namespace` | The largest number of live, unexpired snapshots that one namespace can have. Creating a snapshot past this limit returns `snapshot_quota_exceeded`. |
 | `query.grep.default_limit` | The number of matches per grep page when the request omits `limit`. |
 | `query.grep.max_limit` | The largest grep page limit accepted. An invalid limit is rejected with `invalid_request`. These query keys identify the operation's contract, even though grep uses the same values as standard pagination. |
@@ -549,7 +549,7 @@ Four request headers contain identity information. `Loonfs-Actor` is for attribu
 | `create_commit` | Required. Recorded as `committed_by`. | Required in an ACL namespace. |
 | `create_namespace` | Required. Recorded as `created_by`. | Not read. |
 | `fork_namespace` | Required. Recorded as `created_by`. | Optional. When it's present, an ACL source requires an administrator subject. When it's absent, the request acts as the token holder. |
-| `delete_namespace`, `create_snapshot`, `list_snapshots`, `extend_snapshot`, `delete_snapshot`, `list_changes` | Not required. | Optional, with the same administrator rule as `fork_namespace`. |
+| `delete_namespace`, `create_snapshot`, `list_snapshots`, `get_snapshot`, `extend_snapshot`, `delete_snapshot`, `list_changes` | Not required. | Optional, with the same administrator rule as `fork_namespace`. |
 | Path and inode reads, downloads, `list_trash`, `grep`, and upload-session operations | Not required. | Required in an ACL namespace. |
 | `run_maintenance` | Required by `recover_administrator`, which records it as `committed_by` on the recovery commit. Other jobs don't record it, but they still reject a malformed value. | Not read. |
 | `get_capabilities`, `get_namespace`, the other maintenance operations, and the health, readiness, and metrics routes | Not read. | Not read. |
@@ -568,7 +568,7 @@ Header names are case-insensitive, and HTTP/2 sends them in lowercase. Retries a
 
 ### 5.2 Commit responses and safe retry
 
-Every successful commit returns a `Commit` with its `namespace_id`, `commit_id`, and `committed_seq`. The response also includes `committed_by`, `committed_at_ms`, the optional `message`, and `events`. These values match the change feed, including values such as newly created inode IDs. If the caller omits an optional `commit_id`, the response includes a generated ID.
+Every successful commit returns a `Commit` with its `namespace_id`, `commit_id`, and `committed_seq`. The response also includes `committed_by`, `committed_at_ms`, the optional `message`, and `events`. These values match the change feed, including values such as newly created inode IDs.
 
 To retry a commit, a client resubmits the same request with the same `commit_id`:
 
@@ -625,7 +625,6 @@ The blocking Rust client automatically retries operations labeled `idempotent` o
 - checkpoint create
 - maintenance
 - grep index collection
-- store probe
 
 The client also makes one attempt for a presigned direct PUT.
 
@@ -696,7 +695,7 @@ The server rejects a request body that contains an unknown field, at any level o
 
 Response bodies follow the opposite rule. A client MUST keep working against a server newer than itself, so it MUST tolerate response fields it doesn't recognize (see [Writer and client requirements](#72-writer-and-client-requirements)).
 
-The exception is `ContentRef` and `Checksum`, which are closed shapes in both requests and responses. A response never adds a field to either shape. A new content strategy is added as a new `kind` value, and a new checksum algorithm as a new `algorithm` value, so both schemas are `additionalProperties: false` in responses too. An unknown content kind fails to decode, and so does an unknown checksum algorithm. [Strict decoding and evolution](format.md#123-strict-decoding-and-evolution) states the same rules and extends them to durable shapes.
+The exceptions are `ContentRef`, `Checksum`, and `ContentToken`, which are closed shapes in both requests and responses. A response never adds a field to any of them. A new content strategy is added as a new `kind` value, and a new checksum algorithm as a new `algorithm` value, so the `ContentRef` and `Checksum` schemas are `additionalProperties: false` in responses too. `ContentToken` is closed because the server mints it and the client sends it back unchanged, so new information goes inside its opaque `token` string. An unknown content kind fails to decode, and so does an unknown checksum algorithm. [Strict decoding and evolution](format.md#123-strict-decoding-and-evolution) states the same rules and extends them to durable shapes.
 
 The server also rejects unknown query parameters. For example, `DELETE /v0/namespaces/{ns}?expected_head_sq=418` (a misspelling of `expected_head_seq`) returns 400 `invalid_request`, instead of deleting the namespace without the intended precondition. A route that declares no query parameters rejects every query parameter. `GET /health`, `GET /readiness`, and `GET /metrics` are exceptions, because probes and scrapers might append their own parameters.
 
@@ -710,7 +709,7 @@ Every operation includes an `x-loonfs-retry` value for generated SDKs. The value
 - `replayable`: repeating the request returns the original result. A repeated commit is replayed by its `commit_id`, and a repeated upload completion returns the first completion's result.
 - `not_idempotent`: a generated client makes one automatic attempt and leaves recovery to the application.
 
-The following table lists every v0 operation, with its retry class and representative HTTP shape.
+The following table lists v0 operations, with their retry classes and representative HTTP routes.
 
 | Purpose | Operation ID | Retry class | Representative HTTP shape |
 | --- | --- | --- | --- |
@@ -725,12 +724,12 @@ The following table lists every v0 operation, with its retry class and represent
 | List directory children by inode | `list_inode_children` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/children?limit=100&cursor=...&include_attributes=true&snapshot_id=...` (`include_attributes` is optional and defaults to `false`, and `snapshot_id` is optional) |
 | List file revisions by path | `list_file_revisions` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | List file revisions by inode | `list_file_revisions_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
-| Read current or prior file content by path | `get_file_bytes` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&snapshot_id=...` (`revision_no` and `snapshot_id` are optional and mutually exclusive) |
-| Read current file content by inode | `get_file_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/content?snapshot_id=...` (`snapshot_id` is optional) |
-| Read prior file content by inode | `get_file_revision_bytes_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
+| Read current or prior file content by path | `get_file_content` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&snapshot_id=...` (`revision_no` and `snapshot_id` are optional and mutually exclusive) |
+| Read current file content by inode | `get_file_content_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/content?snapshot_id=...` (`snapshot_id` is optional) |
+| Read prior file content by inode | `get_file_revision_content_by_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
 | Start a download by path | `create_download` | `idempotent` | `POST /v0/namespaces/{ns}/filesystem/downloads` with body fields `path`, optional `revision_no`, optional `snapshot_id`, and optional `start_offset` (`snapshot_id` can't be combined with `revision_no`, and `start_offset` defaults to 0) |
-| Start a current download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads?snapshot_id=...&start_offset=...` with no body (`snapshot_id` and `start_offset` are optional) |
-| Start a revision download by inode | `create_revision_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads?start_offset=...` with no body (`start_offset` is optional) |
+| Start a current download by inode | `create_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` with optional body fields `snapshot_id` and `start_offset` (`start_offset` defaults to 0) |
+| Start a revision download by inode | `create_revision_download_by_inode` | `idempotent` | `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads` with the optional body field `start_offset` (defaults to 0) |
 | List recoverable deletions | `list_trash` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Create a commit | `create_commit` | `replayable` | `POST /v0/namespaces/{ns}/commits`. Requires the `Loonfs-Actor` header. |
 | Create an upload session | `create_upload` | `not_idempotent` | `POST /v0/namespaces/{ns}/uploads`. Returns the open session. |
@@ -742,6 +741,7 @@ The following table lists every v0 operation, with its retry class and represent
 | Read committed changes | `list_changes` | `idempotent` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100&snapshot_id=...` (`snapshot_id` is optional) |
 | Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`. Requires `name` and `ttl_ms`. |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
+| Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (a missing ID returns `snapshot_not_found`, and an expired snapshot returns `snapshot_gone`) |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and clamps the expiry to the lifetime ceiling. |
 | Delete a snapshot | `delete_snapshot` | `not_idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin, and a missing ID returns `snapshot_not_found`) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header. |
@@ -749,13 +749,13 @@ The following table lists every v0 operation, with its retry class and represent
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | Create a checkpoint | `create_checkpoint` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/checkpoints`. Requires `name`, and accepts `ttl_ms`. |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
+| Read a checkpoint | `get_checkpoint` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (returns any pin the listing returns, and a missing ID returns `checkpoint_not_found`) |
 | Delete a checkpoint | `delete_checkpoint` | `not_idempotent` | `DELETE /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (deletes the pin, and a missing ID, or the ID of a snapshot or fork pin, returns `checkpoint_not_found`) |
 | Run one maintenance job | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs`. The body identifies one job with `kind`. |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`. Requires the `query.grep` feature and an active index. |
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
 | Enable the grep index | `enable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/enable` (idempotent) |
 | Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/disable` (idempotent) |
-| Test object storage | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe` with body `{}` |
 | Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#614-get-metrics).) |
 
 ### Maintenance runs
@@ -777,7 +777,7 @@ The status, enable, and disable routes all return the same flat grep index objec
 For example:
 
 ```json
-{"namespace_id":"demo","status":"active","built_through_seq":12,"next_run_no":3,"reorganize_pending":false}
+{"namespace_id":"demo","status":"active","built_through_seq":12,"next_event_index":0,"next_run_no":3,"reorganize_pending":false}
 ```
 
 ```json
@@ -821,7 +821,7 @@ In a `metadata` result, `compaction.outcome` reports the bounded compaction step
 | `outcome` | Means |
 | --- | --- |
 | `not_needed` | No bounded merge is due. |
-| `unit_published` | This run published one bounded merge. |
+| `bounded_merge_published` | This run published one bounded merge. |
 | `metadata_compaction_required` | A family group's window is too large for one bounded merge. The caller runs the `metadata_compaction` job instead, which compacts the group by streaming. |
 | `manifest_advanced` | Another publisher changed the current manifest first. The segments this run wrote stay unreferenced, and a later GC pass can delete them. |
 | `fenced` | A newer runtime has the compactor epoch. |
@@ -929,6 +929,8 @@ Deleting a checkpoint removes its pin record and returns the addressed namespace
 
 A missing ID, including the ID of a checkpoint that was already deleted, returns `checkpoint_not_found`.
 
+`GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` returns one existing checkpoint, as the same object the listing returns for it, including an expired record that collection hasn't deleted. A missing ID returns `checkpoint_not_found`.
+
 `limit` follows the advertised pagination limits, and the response leaves out `next_cursor` after the final page. Cursors are opaque and tied to this namespace and operation, so clients should pass them back unchanged. A namespace-scoped cursor from another namespace returns `invalid_request`.
 
 The checkpoint listing is live, not a point-in-time view. Checkpoints that are created, deleted, or collected while a client is paging can change later pages.
@@ -937,9 +939,9 @@ An expired user pin stays listed and readable until GC deletes it, after its exp
 
 ### Snapshots
 
-A snapshot is a time-bounded view of a namespace. Its `snapshot_id` is its pin ID, and its `captured_seq` is the namespace sequence it captured. A create request requires `name` and `ttl_ms`, and the TTL can't exceed `snapshot.max_ttl_ms` or `snapshot.max_lifetime_ms`.
+A snapshot is a time-bounded view of a namespace. Its `snapshot_id` is its pin ID, and its `captured_seq` is the namespace sequence it captured. A create request requires `name` and `ttl_ms`, and the TTL can't exceed `snapshot.max_ttl_ms` or `snapshot.max_age_ms`.
 
-An extension measures its requested TTL from the server's current time, and it never moves the expiry more than `snapshot.max_lifetime_ms` past the record's `created_at_ms`. A namespace can have at most `snapshot.max_live_per_namespace` live snapshots.
+An extension measures its requested TTL from the server's current time, and it never moves the expiry more than `snapshot.max_age_ms` past the record's `created_at_ms`. A namespace can have at most `snapshot.max_live_per_namespace` live snapshots.
 
 To enforce that limit when it creates a snapshot, the server:
 
@@ -951,37 +953,17 @@ Two requests that race at the limit can both be refused.
 
 The snapshot listing returns snapshot-owned pins whose lifetimes haven't expired, and it leaves out expired snapshots and pins with other owners. (The maintenance checkpoint listing, by contrast, shows expired records until collection deletes them.) Deleting a snapshot removes its pin, and a second delete returns `snapshot_not_found`.
 
-In an ACL namespace, creating, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
+`GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one live snapshot, as the same object the listing returns. A missing ID, or the ID of a pin with another owner, returns `snapshot_not_found`, and an expired snapshot returns `snapshot_gone`.
 
-The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path download request includes it in its body, and the inode download request includes it as a query parameter. File content and download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision routes identify their revision in the route, so they reject `snapshot_id` with the same `invalid_request` error. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
+In an ACL namespace, creating, retrieving, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
+
+The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path and inode download requests include it in their bodies. File content and download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision routes identify their revision in the route, so they reject `snapshot_id` with `invalid_request`. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
 
 When an embedded read sets `snapshot_id` in its options, the read opens a read view of that snapshot, as the HTTP request does. A read view of a snapshot accepts options that refer to the same snapshot, and it rejects any other snapshot ID with `invalid_request`.
 
 An embedded caller can also open a read view of a checkpoint. A directory cursor from a read view of a checkpoint or snapshot identifies that pin. A read view of the same checkpoint or snapshot can resume the cursor, and a live listing or any other read view rejects it with `invalid_request`.
 
 A snapshot read requires a live snapshot. A read of a missing snapshot, including one that was deleted, returns `snapshot_not_found`. A read of an expired snapshot returns `snapshot_gone` while its pin still exists. In neither case does the read fall back to the current namespace state.
-
-### Store contract probe
-
-The store probe tests whether the configured object store meets the provider contract that the storage format depends on (see [Object-storage requirements](format.md#3-object-storage-requirements)), and it reports the result of each check. The contract covers create-if-absent, compare-and-swap, read-after-write visibility, prefix listing, and ranged reads. A probe writes and deletes objects, so LoonFS doesn't run one at startup or on a schedule. A probe runs only when an operator requests one.
-
-Every object a probe run writes is stored under `probe-runs/{run_id}/`. That prefix isn't a durable object family, so garbage collection never lists it, and no namespace state can be reached from it. The run's last check deletes those objects and confirms that the prefix is empty, so a probe that completes leaves nothing behind. A probe that doesn't finish leaves orphaned objects under that prefix, which nothing reads.
-
-The response includes the `run_id` that the server generated, and one entry for each check, in the order the checks ran. Each entry identifies the check and its `outcome`:
-
-| `outcome` | Means |
-| --- | --- |
-| `passed` | The store behaved as the contract requires. |
-| `unsupported` | The store reports that it can't perform this operation at all. Only checks of the optional capabilities report this outcome, and a deployment that needs neither optional capability is unaffected. |
-| `failed` | The store did something the contract forbids, or the operation failed outright. The entry's `message` says what was expected and what happened instead. |
-
-A failed check is reported in the response body, not as an error. A probe that runs to completion returns 200, whatever it found. The server returns the error envelope only for an unauthorized request or a malformed body. A failed check doesn't end the run, so one probe reports the result of every check, not just the first problem it found.
-
-A probe's result doesn't determine whether a deployment is trusted to serve presigned direct uploads. That trust comes from the endpoint allowlist behind the `uploads.direct_put` capability.
-
-Why does a probe with failed checks return 200? The operator asked whether the store meets the contract, and the failed checks are the answer to that question (the store is wrong), not a failure of the request.
-
-Why doesn't a passing probe make a deployment trusted for direct uploads? A probe exercises the server's own request path, and never a presigned capability that's issued to a client.
 
 ### Deleting, retaining, and reclaiming
 
@@ -2176,7 +2158,7 @@ The response contains a short-lived read capability, plus everything the reader 
 }
 ```
 
-The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`. It has no request body, it takes `start_offset` as an optional query parameter, and its response doesn't include a path:
+The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`. It takes an optional JSON body whose only field is `start_offset`, and its response doesn't include a path:
 
 ```json
 {
@@ -2204,7 +2186,7 @@ The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions
 }
 ```
 
-`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current revision of a visible file inode, and it returns the same response. It has no body. Its optional `snapshot_id` query parameter grants the revision that the snapshot captured instead, and its optional `start_offset` query parameter is the first byte to read.
+`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current revision of a visible file inode, and it returns the same response. It takes an optional JSON body with two fields: `snapshot_id` grants the revision that the snapshot captured instead, and `start_offset` is the first byte to read.
 
 The download routes use the same provider support check and the same access format. The inode revision route stays available after a rename or a deletion, as long as the revision is retained. The current inode route follows the inode across renames, and it returns `inode_not_found` once the inode is deleted.
 
@@ -2212,7 +2194,7 @@ These five properties follow from the response's shape, and clients can rely on 
 
 - **Ordered ranges.** The grant covers exactly `[start_offset, size_bytes)`, as ordered ranges. The ranges are contiguous and ascending, and their lengths add up to `size_bytes - start_offset`. Each range refers to bytes in an immutable object, so later commits and appends don't change those bytes.
 - **Signed headers.** A client sends each range's headers as given. Each range's `access.headers` includes the signed `Range` for its object. The object offset can differ from `start_offset`, which is an offset in the revision. The client sends the headers unchanged and adds no range of its own, and it checks each response's length against that range's `length`. A zero-byte revision has one range, at offset 0 with length 0, whose access signs no `Range` header, and it needs no object request.
-- **Resuming.** To resume, a client asks for a new grant. A client that has the first `n` bytes asks for a grant with `start_offset` set to `n`. An offset at or past `size_bytes` returns `invalid_request` with `param` set to `start_offset`, except offset 0 for a zero-byte revision. A client that already has every byte doesn't ask for a grant.
+- **Resuming.** To resume, a client asks for a new grant. A client that has the first `n` bytes asks for a grant with `start_offset` set to `n`. An offset at or past `size_bytes` returns `invalid_request` with `param` set to `/start_offset`, except offset 0 for a zero-byte revision. A client that already has every byte doesn't ask for a grant.
 - **Verification.** The client verifies the complete file across ranges. It reads the ranges in order, and it checks the complete byte length and `content_ref.checksum`. This applies to CRC-64/NVME and CRC-32C. A resumed download includes the prefix the client already has in the same checksum. A mismatch fails the download.
 - **No object keys.** The raw object keys are never exposed. Each range includes a URL that expires, as a direct upload does.
 
@@ -2234,7 +2216,7 @@ One request operation can apply several semantic operations. For example, a put 
 {
   "namespace_id": "demo",
   "after_seq": 418,
-  "through_seq": 419,
+  "head_seq": 419,
   "changes": [
     {
       "namespace_id": "demo",

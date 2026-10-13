@@ -36,7 +36,7 @@ writer_id = "loonfs-server-1"
 allow_remote_without_tls = true
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "/var/lib/loonfs/store"
 ```
 
@@ -176,7 +176,7 @@ docker build -f crates/loonfs-server/Dockerfile -t loonfs-server:dev .
 
 ## Running it on Kubernetes
 
-Before you start, install `kubectl` and Helm. Use a cloud object store with the published chart, because the chart doesn't create persistent storage for a `local-fs` store.
+Before you start, install `kubectl` and Helm. Use a cloud object store with the published chart, because the chart doesn't create persistent storage for a `local_fs` store.
 
 Create a namespace:
 
@@ -247,15 +247,7 @@ LOONFS_AUTH_TOKEN="$LOONFS_AUTH_TOKEN" loonfs --no-input profile create remote s
 
 To check the complete network and TLS path, use the public `https://` URL instead.
 
-Check the object store:
-
-```bash
-loonfs maintenance store probe
-```
-
-`store probe` creates and removes temporary objects. It detects invalid credentials, the wrong bucket or region, and stores that don't support the operations LoonFS requires.
-
-On Kubernetes, the smoke test also checks the rollout, the probes, the object store, and a file upload and download. Install `kubectl`, `curl`, and the `loonfs` CLI, and then run:
+On Kubernetes, the smoke test checks the rollout, the health and readiness probes, and a file upload and download. Install `kubectl`, `curl`, and the `loonfs` CLI, and then run:
 
 ```bash
 export LOONFS_AUTH_TOKEN
@@ -272,7 +264,7 @@ Before you run a server in production, check this list:
 - Require an auth token.
 - Use TLS in LoonFS or in a trusted proxy.
 - Keep secrets in a secret manager or a Kubernetes Secret.
-- Keep a `local-fs` store on durable storage that uid 10001 can write to.
+- Keep a `local_fs` store on durable storage that uid 10001 can write to.
 - Configure cloud buckets to remove incomplete multipart uploads.
 - Allow at least 660 seconds for graceful shutdown.
 - Set memory and open-file limits before you enable the local cache.
@@ -290,7 +282,7 @@ The server has two unauthenticated probes and a metrics route:
 | `GET /readiness` | None | The server is accepting work. It returns 503 during shutdown. |
 | `GET /metrics` | Bearer token | Prometheus metrics for the server. |
 
-Health and readiness don't contact the object store. To check storage access, use `loonfs maintenance store probe`.
+Health and readiness don't contact the object store.
 
 When Prometheus scrapes `/metrics`, it must send the API token as `Authorization: Bearer <LOONFS_AUTH_TOKEN>`.
 

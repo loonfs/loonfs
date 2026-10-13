@@ -1,10 +1,9 @@
 //! Snapshot reads and mutations.
 
 use crate::{
-    DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result, SnapshotSummary,
-    Writable,
+    DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result, Snapshot, Writable,
 };
-use loonfs_core::CheckpointPageCursor;
+use loonfs_core::{CheckpointPageCursor, SnapshotPageCursor};
 use loonfs_types::PageRequest;
 use loonfs_types::PinId;
 use std::num::NonZeroU32;
@@ -14,8 +13,8 @@ use std::num::NonZeroU32;
 pub struct SnapshotPolicy {
     /// Largest requested lifetime from the current time.
     pub max_ttl_ms: u64,
-    /// Largest lifetime from the snapshot's creation time.
-    pub max_lifetime_ms: u64,
+    /// Largest snapshot age, measured from the snapshot's creation time.
+    pub max_age_ms: u64,
     /// Most live snapshots one namespace may hold.
     pub max_live_per_namespace: usize,
 }
@@ -24,7 +23,7 @@ impl Default for SnapshotPolicy {
     fn default() -> Self {
         Self {
             max_ttl_ms: 86_400_000,
-            max_lifetime_ms: 604_800_000,
+            max_age_ms: 604_800_000,
             max_live_per_namespace: 16,
         }
     }
@@ -36,10 +35,10 @@ impl SnapshotPolicy {
     pub fn expires_at_ms(&self, now_ms: u64, ttl_ms: u64) -> Result<u64> {
         let message = if ttl_ms == 0 || ttl_ms > self.max_ttl_ms {
             Some(format!("ttl_ms must be greater than zero and may not exceed the `snapshot.max_ttl_ms` limit of {} milliseconds", self.max_ttl_ms))
-        } else if ttl_ms > self.max_lifetime_ms {
+        } else if ttl_ms > self.max_age_ms {
             Some(format!(
-                "ttl_ms may not exceed the `snapshot.max_lifetime_ms` limit of {} milliseconds",
-                self.max_lifetime_ms
+                "ttl_ms may not exceed the `snapshot.max_age_ms` limit of {} milliseconds",
+                self.max_age_ms
             ))
         } else {
             None
@@ -58,6 +57,37 @@ impl SnapshotPolicy {
 pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, Error>;
 
 impl<M: crate::Mode> Namespace<M> {
+    /// Returns one live snapshot. A missing id returns `snapshot_not_found`,
+    /// and an expired snapshot returns `snapshot_gone`.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.get_snapshot",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "get_snapshot",
+            namespace_id = %self.namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn get_snapshot(&self, snapshot_id: &PinId) -> Result<Snapshot> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        if self.core.subject.is_some() {
+            self.core
+                .read(&self.namespace_id, |engine, context| async move {
+                    Ok(engine.ensure_administrator(&context).await?)
+                })
+                .await?;
+        }
+        self.core.record_trace_context(&tracing::Span::current());
+        self.core
+            .reader_engine(&self.namespace_id)
+            .get_snapshot(snapshot_id, self.core.now_ms())
+            .await
+            .map_err(Error::from)
+    }
+
     /// Lists live snapshots.
     pub fn list_snapshots(&self) -> SnapshotsPager {
         let reader = self.read_only();
@@ -85,7 +115,7 @@ impl<M: crate::Mode> Namespace<M> {
     )]
     async fn snapshots_page(
         &self,
-        request: PageRequest<CheckpointPageCursor>,
+        request: PageRequest<SnapshotPageCursor>,
     ) -> Result<ListSnapshotsResponse> {
         let _permit = self.core.inner.config.execution_budget.read_permit().await;
         if self.core.subject.is_some() {
@@ -98,7 +128,7 @@ impl<M: crate::Mode> Namespace<M> {
         self.core.record_trace_context(&tracing::Span::current());
         let now_ms = self.core.now_ms();
         let requested = request.limit.as_usize();
-        let mut cursor = request.cursor;
+        let mut cursor = request.cursor.map(CheckpointPageCursor::from);
         let mut snapshots = Vec::with_capacity(requested);
         let engine = self.core.reader_engine(&self.namespace_id);
         loop {
@@ -116,17 +146,17 @@ impl<M: crate::Mode> Namespace<M> {
                 .await
                 .map_err(Error::from)?;
             snapshots.extend(page.items.into_iter().filter_map(|checkpoint| {
-                SnapshotSummary::from_checkpoint(checkpoint)
-                    .filter(|snapshot| snapshot.is_live(now_ms))
+                Snapshot::from_checkpoint(checkpoint).filter(|snapshot| snapshot.is_live(now_ms))
             }));
             match page.next_cursor {
                 Some(next_cursor) if snapshots.len() < requested => cursor = Some(next_cursor),
                 next_cursor => {
+                    let next_cursor = next_cursor.map(SnapshotPageCursor::from);
                     return Ok(ListSnapshotsResponse {
                         namespace_id: self.namespace_id.clone(),
                         snapshots,
                         next_cursor: super::core::encode_next_cursor(next_cursor.as_ref())?,
-                    })
+                    });
                 }
             }
         }
@@ -164,7 +194,7 @@ impl Namespace<Writable> {
         name: &str,
         expires_at_ms: u64,
         policy: &SnapshotPolicy,
-    ) -> Result<SnapshotSummary> {
+    ) -> Result<Snapshot> {
         self.core.record_trace_context(&tracing::Span::current());
         self.ensure_administrator().await?;
         self.ensure_live_snapshot_limit(policy.max_live_per_namespace, 1)
@@ -219,7 +249,7 @@ impl Namespace<Writable> {
             live += page
                 .items
                 .into_iter()
-                .filter_map(SnapshotSummary::from_checkpoint)
+                .filter_map(Snapshot::from_checkpoint)
                 .filter(|snapshot| snapshot.is_live(now_ms))
                 .count();
             if live > max_live {
@@ -235,7 +265,7 @@ impl Namespace<Writable> {
         }
     }
 
-    /// Extends a live snapshot, capped at `policy.max_lifetime_ms` from its
+    /// Extends a live snapshot, capped at `policy.max_age_ms` from its
     /// durable creation time.
     #[tracing::instrument(
         level = "debug",
@@ -255,13 +285,13 @@ impl Namespace<Writable> {
         snapshot_id: &PinId,
         requested_expires_at_ms: u64,
         policy: &SnapshotPolicy,
-    ) -> Result<SnapshotSummary> {
+    ) -> Result<Snapshot> {
         self.ensure_administrator().await?;
         self.core.record_trace_context(&tracing::Span::current());
         let result = self
             .core
             .writer_engine(&self.mode.bits.identity, &self.namespace_id)
-            .extend_snapshot(snapshot_id, requested_expires_at_ms, policy.max_lifetime_ms)
+            .extend_snapshot(snapshot_id, requested_expires_at_ms, policy.max_age_ms)
             .await
             .map_err(Error::from);
         self.finish_namespace_mutation(result)

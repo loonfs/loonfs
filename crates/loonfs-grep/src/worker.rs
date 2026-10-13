@@ -29,7 +29,7 @@ use loonfs::{
 };
 use loonfs_objectstore::timing::MonotonicTimer;
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore};
-use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
+use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::format::segment_blocks::{
     DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_MAX_COMPACTION_INPUT_BYTES,
     DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
@@ -417,17 +417,17 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
         self.reads(namespace_id).head().await?;
         let manifest = self.manifest_state(namespace_id).await?;
-        let (lifecycle, next_run_no, reorganize_pending) = match &manifest {
+        let (status, next_run_no, reorganize_pending) = match &manifest {
             Some(manifest) => (
-                GrepIndexLifecycle::from(manifest.status()),
+                v0::GrepIndexStatus::from(manifest.status()),
                 manifest.index().next_run_no,
                 manifest.index().reorganize.is_some(),
             ),
-            None => (GrepIndexLifecycle::Disabled, RunNo(0), false),
+            None => (v0::GrepIndexStatus::Disabled, RunNo(0), false),
         };
         Ok(GrepIndex {
             namespace_id: namespace_id.clone(),
-            lifecycle,
+            status,
             next_run_no,
             reorganize_pending,
         })

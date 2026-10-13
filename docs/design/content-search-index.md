@@ -108,7 +108,7 @@ An index is in one of three lifecycle states, and the current grep manifest reco
      +-----------------------+-----------------------------------+
 ```
 
-A `next_event_index` of zero means the cursor is at a completed commit boundary. A nonzero value identifies the next event to process within `built_through_seq`, so that commit is only partly indexed. A consumer must not treat the sequence alone as complete coverage of that commit. The HTTP status response can leave out an event index of zero, but the durable encoding has its own rules for which fields are present.
+A `next_event_index` of zero means the cursor is at a completed commit boundary. A nonzero value identifies the next event to process within `built_through_seq`, so that commit is only partly indexed. A consumer must not treat the sequence alone as complete coverage of that commit. The HTTP status response and the durable record both include the event index, even when it's zero.
 
 One request operation can produce several change events, so the event index is an offset within the commit's ordered events, not a count of request operations.
 

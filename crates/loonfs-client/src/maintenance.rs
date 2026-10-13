@@ -69,6 +69,21 @@ impl Client {
             .await
     }
 
+    /// Returns one existing checkpoint, as the listing returns it, through
+    /// the maintenance API. A missing id returns `checkpoint_not_found`.
+    pub async fn get_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+        checkpoint_id: &PinId,
+    ) -> Result<Checkpoint> {
+        let url = format!(
+            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
+            self.base_url
+        );
+        self.request_json::<(), Checkpoint>(self.get(&url), None, SendPolicy::Retry)
+            .await
+    }
+
     /// Deletes a user-owned checkpoint pin through the maintenance API.
     /// A missing id returns `checkpoint_not_found`.
     pub async fn delete_checkpoint(

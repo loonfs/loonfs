@@ -6,7 +6,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs_types::{
-    ApiError, CommitId, ErrorCode, ErrorDetails, ErrorKind, NamespaceId, NamespaceIdValidationError,
+    CommitId, ErrorCode, ErrorDetails, ErrorKind, ErrorResponse, NamespaceId,
+    NamespaceIdValidationError,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,7 +16,7 @@ pub(super) struct ServedErrorCode(pub(super) ErrorCode);
 pub(super) struct ApiResponseError {
     status: StatusCode,
     code: ErrorCode,
-    body: Box<ApiError>,
+    body: Box<ErrorResponse>,
     /// Emitted as a `Retry-After` header, for retryable capacity errors.
     retry_after_seconds: Option<u32>,
 }
@@ -24,9 +25,9 @@ pub(super) struct ApiResponseError {
 /// semantics. Composing hosts can preserve a runtime error's public details
 /// without maintaining a second error-code-to-HTTP registry. The typed code
 /// takes precedence over `body.code`; the caller supplies its correlation ID.
-pub fn api_error_response(code: ErrorCode, mut body: ApiError) -> Response {
+pub fn error_response(code: ErrorCode, mut body: ErrorResponse) -> Response {
     body.code = code.as_str().to_owned();
-    ApiResponseError::from_api_error(code, body).into_response()
+    ApiResponseError::from_error_response(code, body).into_response()
 }
 
 impl ApiResponseError {
@@ -34,7 +35,7 @@ impl ApiResponseError {
         let response = Self {
             status: status_for_core_error_code(code),
             code,
-            body: Box::new(ApiError {
+            body: Box::new(ErrorResponse {
                 code: code.as_str().to_owned(),
                 feature: None,
                 message: message.to_owned(),
@@ -80,6 +81,15 @@ impl ApiResponseError {
         }
     }
 
+    /// Reports a runtime `param` that is a field of the request body as that
+    /// field's JSON Pointer.
+    pub(super) fn with_body_field_param(mut self, field: &str) -> Self {
+        if self.body.param.as_deref() == Some(field) {
+            self.body.param = Some(format!("/{field}"));
+        }
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn message(&self) -> &str {
         &self.body.message
@@ -107,14 +117,14 @@ impl ApiResponseError {
         Self::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("namespace_id")
     }
 
-    pub(super) fn from_api_error(code: ErrorCode, body: ApiError) -> Self {
+    pub(super) fn from_error_response(code: ErrorCode, body: ErrorResponse) -> Self {
         let mut response = Self::new(code, &body.message);
         response.body = Box::new(body);
         response
     }
 
     pub(super) fn runtime(error: loonfs::Error) -> Self {
-        Self::from_api_error(error.code(), error.to_api_error())
+        Self::from_error_response(error.code(), error.to_error_response())
     }
 
     pub(super) fn runtime_for_namespace(namespace_id: &NamespaceId, error: loonfs::Error) -> Self {
@@ -238,7 +248,7 @@ mod tests {
             let bytes = axum::body::to_bytes(response.into_body(), 4096)
                 .await
                 .expect("body");
-            let error: ApiError = serde_json::from_slice(&bytes).expect("error");
+            let error: ErrorResponse = serde_json::from_slice(&bytes).expect("error");
             assert_eq!(error.code, ErrorCode::NamespaceDeleted.as_str());
             assert_eq!(
                 error.details.expect("details").namespace_id.as_ref(),
@@ -254,7 +264,7 @@ mod tests {
             body.code = "untrusted-code".into();
             body.request_id = Some("host-request".into());
             body.param = Some("path".into());
-            let response = api_error_response(code, *body);
+            let response = error_response(code, *body);
             assert_eq!(response.status(), status_for_core_error_code(code));
             assert_eq!(
                 response.headers().contains_key("retry-after"),
@@ -263,7 +273,7 @@ mod tests {
             let bytes = axum::body::to_bytes(response.into_body(), 4096)
                 .await
                 .expect("error body");
-            let body: ApiError = serde_json::from_slice(&bytes).expect("API error");
+            let body: ErrorResponse = serde_json::from_slice(&bytes).expect("API error");
             assert_eq!(body.code, code.as_str());
             assert_eq!(body.request_id.as_deref(), Some("host-request"));
             assert_eq!(body.param.as_deref(), Some("path"));

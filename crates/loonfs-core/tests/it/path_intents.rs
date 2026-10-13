@@ -282,7 +282,7 @@ async fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     revision_no: RevisionNo,
-) -> Result<loonfs_types::FileBytes, CoreError> {
+) -> Result<loonfs_core::FileBytes, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
         .read_file_revision(absolute_path, revision_no, &context, None)

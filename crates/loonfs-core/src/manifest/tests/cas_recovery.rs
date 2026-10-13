@@ -267,7 +267,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         if newer_head {
             let session = Arc::new(std::sync::Mutex::new(
                 crate::commit_engine::WriterSessionStatus::Acquired(
-                    loonfs_types::format::control::AcquiredWriter {
+                    crate::namespace::writer_epoch::AcquiredWriter {
                         writer_id: context.writer_id.clone(),
                         writer_epoch: current.state.envelope.payload().writer_epoch,
                     },
@@ -655,7 +655,7 @@ async fn a_fold_whose_manifest_put_lands_without_an_answer_reports_published() {
     store.fail_next(1);
     let folded = fold::fold_wal(&store, &namespace_id).await.expect("fold");
     assert_eq!(store.remaining(), 0);
-    assert_eq!(folded.outcome, loonfs_types::FoldWalOutcome::Published);
+    assert_eq!(folded.outcome, crate::FoldWalOutcome::Published);
     assert_eq!(
         folded.manifest_no,
         predecessor.successor().expect("next number")
@@ -896,7 +896,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     )
     .await
     .expect("change feed reloads the stale head");
-    assert_eq!(changes.through_seq, ChangeSeq(1));
+    assert_eq!(changes.head_seq, ChangeSeq(1));
     assert!(changes.changes.is_empty());
 }
 

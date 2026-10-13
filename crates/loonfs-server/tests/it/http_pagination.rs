@@ -9,8 +9,8 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::{first_page, namespace_id, page_limit};
 use loonfs_types::PageRequest;
 use loonfs_types::{
-    api::v0::FilesystemChange, ApiError, ChangeSeq, CommitId, CreateCheckpointRequest,
-    DestinationBehavior, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
+    api::v0::FilesystemChange, ChangeSeq, CommitId, CreateCheckpointRequest, DestinationBehavior,
+    ErrorResponse, ListCheckpointsResponse, ListPathEntriesResponse, RevisionNo,
     DEFAULT_MAX_PAGE_LIMIT,
 };
 use tempfile::tempdir;
@@ -144,7 +144,7 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
             .await,
     );
     // A page request holds only a valid limit, so a zero limit goes out raw.
-    let zero_limit: Result<ListCheckpointsResponse, Box<ApiError>> = get_json(
+    let zero_limit: Result<ListCheckpointsResponse, Box<ErrorResponse>> = get_json(
         &format!(
             "{}/v0/maintenance/namespaces/demo/checkpoints?limit=0",
             harness.server_url
@@ -198,14 +198,14 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
 fn get_json<T: serde::de::DeserializeOwned>(
     url: &str,
     auth_token: &str,
-) -> Result<T, Box<ApiError>> {
+) -> Result<T, Box<ErrorResponse>> {
     retry_result_on_macos_teardown_einval(|| {
         let request = raw_agent()
             .get(url)
             .set("authorization", &format!("Bearer {auth_token}"));
         match request.call() {
             Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| {
-                Box::new(ApiError {
+                Box::new(ErrorResponse {
                     code: "invalid_json".to_owned(),
                     feature: None,
                     message: err.to_string(),
@@ -215,8 +215,8 @@ fn get_json<T: serde::de::DeserializeOwned>(
                 })
             }),
             Err(ureq::Error::Status(_, response)) => Err(Box::new(
-                serde_json::from_reader::<_, ApiError>(response.into_reader()).unwrap_or_else(
-                    |err| ApiError {
+                serde_json::from_reader::<_, ErrorResponse>(response.into_reader()).unwrap_or_else(
+                    |err| ErrorResponse {
                         code: "invalid_json".to_owned(),
                         feature: None,
                         message: err.to_string(),
@@ -226,7 +226,7 @@ fn get_json<T: serde::de::DeserializeOwned>(
                     },
                 ),
             )),
-            Err(ureq::Error::Transport(error)) => Err(Box::new(ApiError {
+            Err(ureq::Error::Transport(error)) => Err(Box::new(ErrorResponse {
                 code: "transport".to_owned(),
                 feature: None,
                 message: error.to_string(),
@@ -337,7 +337,7 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
     assert_eq!(raw_first_page.entries.len(), 1);
     assert!(raw_first_page.next_cursor.is_some());
 
-    let nonnumeric_limit: Result<ListPathEntriesResponse, Box<ApiError>> = get_json(
+    let nonnumeric_limit: Result<ListPathEntriesResponse, Box<ErrorResponse>> = get_json(
         &format!(
             "{}/v0/namespaces/demo/filesystem/entries?path=/docs&limit=not-a-number",
             harness.server_url
@@ -526,7 +526,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .await
         .expect("list first changes page");
     assert_eq!(first_page.after_seq, ChangeSeq(0));
-    assert_eq!(first_page.through_seq, ChangeSeq(2));
+    assert_eq!(first_page.head_seq, ChangeSeq(3));
     assert_eq!(first_page.next_after_seq, Some(ChangeSeq(2)));
     assert_eq!(first_page.changes.len(), 2);
 
@@ -540,7 +540,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .await
         .expect("list second changes page");
     assert_eq!(second_page.after_seq, ChangeSeq(2));
-    assert_eq!(second_page.through_seq, ChangeSeq(3));
+    assert_eq!(second_page.head_seq, ChangeSeq(3));
     assert_eq!(second_page.next_after_seq, None);
     assert_eq!(
         second_page

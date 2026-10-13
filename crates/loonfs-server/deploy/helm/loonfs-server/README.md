@@ -52,26 +52,6 @@ The config then refers to them as `/etc/loonfs/gcs-service-account.json`, `/etc/
 
 `config.key` is the Secret entry that contains the TOML config, and the container reads its config from `/etc/loonfs/<key>`. The default is `config.toml`.
 
-To gate startup on a store probe, patch this optional init container into the Deployment's pod spec:
-
-```yaml
-# Use the same image as the server container.
-# initContainers:
-#   - name: probe-store
-#     image: ghcr.io/loonfs/loonfs-server:vX.Y.Z
-#     args: ["--probe-store", "--config", "/etc/loonfs/config.toml"]
-#     env:
-#       - name: AWS_REGION
-#         value: us-east-1
-#     envFrom:
-#       - secretRef:
-#           name: loonfs-server-secrets
-#     volumeMounts:
-#       - {name: config, mountPath: /etc/loonfs, readOnly: true}
-```
-
-The init container must repeat the server container's `env` and `envFrom` entries, because Kubernetes containers don't inherit each other's environment.
-
 Changing the Secret doesn't restart the pod, so restart it yourself:
 
 ```bash

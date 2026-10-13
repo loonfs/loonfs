@@ -109,9 +109,8 @@ pub use capability::{
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_GC_MIN_GRACE_WINDOW_MS,
     LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
     LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_SNAPSHOT_MAX_AGE_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE, LIMIT_SNAPSHOT_MAX_TTL_MS,
+    LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, PROTOCOL_VERSION,
 };
@@ -131,7 +130,7 @@ pub use ids::{
     generated_id, next_public_ordinal, BindingVersion, BindingVersionValidationError, ChangeSeq,
     CommitId, CommitIdValidationError, CompactorEpoch, ContentId, GeneratedIdValidationError,
     IndexSegmentId, InodeId, InodeKind, ManifestNo, MetadataCompactionId, MetadataSegmentId,
-    NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PinId,
+    NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PinId, ProbeRunId,
     PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch, WriterId,
     WriterIdValidationError, FIRST_ALLOCATABLE_INODE_ID, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
     MAX_PUBLIC_INTEGER, ROOT_INODE_ID,
@@ -141,10 +140,11 @@ pub use manifest::{MetadataFamilyGroup, NamespaceAccess};
 pub use name_policy::{name_key_for_display_name, NamespaceNaming};
 pub use options::AttributeInclusion;
 pub use pagination::{
-    decode_cursor, decode_token, encode_cursor, encode_token, DirectoryPageCursor, EffectiveLimit,
-    FileRevisionsPageCursor, GrepPageCursor, LimitError, OpaqueToken, OpaqueTokenError, Page,
-    PageCursor, PageRequest, PagedResponse, Pager, PaginationPolicy, TrashPageCursor,
-    DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
+    decode_cursor, decode_token, decode_token_bytes, encode_cursor, encode_token,
+    encode_token_bytes, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
+    GrepPageCursor, LimitError, OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest,
+    PagedResponse, Pager, PaginationPolicy, TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT,
+    DEFAULT_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES, MAX_PATH_BYTES,
@@ -160,20 +160,19 @@ pub use widths::usize_from_u64;
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `api::v0`; add here only what most consumers touch.
 pub use api::v0::{
-    AdvanceRetentionRequest, AdvanceRetentionResponse, ApiError, AttributesProjection, Checkpoint,
-    CheckpointOwnerSummary, Commit, CommitPrecondition, CommitRequest, CompactionStepOutcome,
+    AdvanceRetentionRequest, AdvanceRetentionResponse, AttributesProjection, Checkpoint,
+    CheckpointOwner, Commit, CommitPrecondition, CommitRequest, CompactionStepOutcome,
     CreateCheckpointRequest, CreateNamespaceRequest, CreateSnapshotRequest,
     DeleteCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
     DestinationPrecondition, DestinationPreconditionError, EntryInodeKind, ErrorDetails,
-    ExpectedFileState, ExtendSnapshotRequest, FileBytes, FileRevision, FilesystemOperation,
-    FoldWalOutcome, FoldWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch,
-    GrepRequest, GrepResponse, ListCheckpointsResponse, ListFileRevisionsResponse,
-    ListInodeChildrenResponse, ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse,
-    MetadataCompactionOutcome, MetadataCompactionRequest, MetadataCompactionResponse,
-    MetadataMaintenanceRequest, MetadataMaintenanceResponse, NamespaceAccessMode,
-    NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata, PathEntry, PathEntryKind,
-    PreconditionFields, RecoverAdministratorRequest, RecoverAdministratorResponse,
-    RetainedCandidates, RetainedReason, RunMaintenanceRequest, RunMaintenanceResponse,
-    SnapshotSummary, TrashEntry, WalFoldStepOutcome,
+    ErrorResponse, ExpectedFileState, ExtendSnapshotRequest, FileRevision, FilesystemOperation,
+    ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    ListPathEntriesResponse, ListSnapshotsResponse, ListTrashResponse, MetadataCompactionOutcome,
+    MetadataCompactionRequest, MetadataCompactionResponse, MetadataMaintenanceRequest,
+    MetadataMaintenanceResponse, NamespaceAccessMode, NamespaceDiagnostics, NamespaceForkBasis,
+    NamespaceMetadata, PathEntry, PathEntryKind, PreconditionFields, RecoverAdministratorRequest,
+    RecoverAdministratorResponse, RetainedCandidates, RetainedReason, RunMaintenanceRequest,
+    RunMaintenanceResponse, Snapshot, TrashEntry, WalFoldStepOutcome,
 };

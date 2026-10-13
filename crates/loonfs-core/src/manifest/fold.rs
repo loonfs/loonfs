@@ -30,12 +30,36 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
-use loonfs_types::{
-    ChangeSeq, ContentId, FoldWalOutcome, FoldWalResponse, ManifestNo, NamespaceId, RunNo,
-};
+use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
+
+/// How one WAL fold satisfied its goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldWalOutcome {
+    /// The current manifest already covered the WAL tail; nothing was published.
+    AlreadyCurrent,
+    /// This call published the next current manifest.
+    Published,
+    /// Another publisher changed the current manifest before this call could publish.
+    ManifestAdvanced,
+}
+
+/// The current manifest state after one WAL fold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldWalResponse {
+    /// Namespace whose WAL tail was folded.
+    pub namespace_id: NamespaceId,
+    /// Head sequence the fold attempted to cover.
+    pub target_head_seq: ChangeSeq,
+    /// Current manifest number after the operation.
+    pub manifest_no: ManifestNo,
+    /// Sequence covered by that manifest.
+    pub manifest_head_seq: ChangeSeq,
+    /// Whether this call published the current manifest.
+    pub outcome: FoldWalOutcome,
+}
 
 /// Manifest that covers the head after a fold attempt.
 ///

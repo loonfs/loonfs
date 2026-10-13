@@ -232,7 +232,7 @@ pub async fn app(
         serves_maintenance: config.maintenance.serves(),
         snapshot_policy: loonfs::SnapshotPolicy {
             max_ttl_ms: config.snapshot_max_ttl_ms,
-            max_lifetime_ms: config.snapshot_max_lifetime_ms,
+            max_age_ms: config.snapshot_max_age_ms,
             max_live_per_namespace: config.snapshot_max_live_per_namespace,
         },
         max_download_bytes: Some(config.max_download_bytes),
@@ -433,7 +433,7 @@ pub async fn check_config(config: &ServerConfig) -> Result<(), ServeError> {
 /// Runs the object-store contract probe against the store this config builds.
 pub async fn probe_store(config: &ServerConfig) -> Result<StoreProbeReport, ServeError> {
     let store = config.object_store()?.into_shared();
-    let run_id = loonfs_types::generated_id("probe");
+    let run_id = loonfs_types::ProbeRunId::generate();
     Ok(run_store_contract_probe(store.as_ref(), &run_id).await)
 }
 

@@ -8,7 +8,7 @@ use axum::Json;
 use loonfs_objectstore::probe::run_store_contract_probe;
 use loonfs_types::api::v0::{StoreProbeRequest, StoreProbeResponse};
 #[cfg(feature = "openapi")]
-use loonfs_types::ApiError;
+use loonfs_types::ErrorResponse;
 
 #[cfg_attr(
     feature = "openapi",
@@ -26,9 +26,9 @@ use loonfs_types::ApiError;
         request_body(content = StoreProbeRequest, description = "Probe options; send `{}` for defaults"),
         responses(
             (status = 200, description = "Probe completed; per-check outcomes are in the body", body = StoreProbeResponse),
-            (status = 400, description = "Malformed request body", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
+            (status = 400, description = "Malformed request body", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -41,7 +41,7 @@ pub(super) async fn probe_store(
     let StoreProbeRequest {} = request.unwrap_or_default();
     // The run id scopes the objects this run writes, so two probes against
     // one store never collide, and a provider's own log names the run.
-    let run_id = loonfs_types::generated_id("probe");
+    let run_id = loonfs_types::ProbeRunId::generate();
     let report = run_store_contract_probe(state.probe_store.as_ref(), &run_id).await;
     Ok(Json(report.into()))
 }

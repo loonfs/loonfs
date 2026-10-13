@@ -505,15 +505,18 @@ string_id! {
         if value.is_empty() {
             return Err(BindingVersionValidationError::new(value, "must not be empty"));
         }
-        if !value.bytes().all(is_lower_hex_byte) {
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
             return Err(BindingVersionValidationError::new(
                 value,
-                "must contain only lowercase hex characters",
+                "must contain only base64url characters, without padding",
             ));
         }
         Ok(())
     },
-    schema(pattern = r"^[0-9a-f]+$")
+    schema(pattern = r"^[A-Za-z0-9_-]+$")
 }
 
 string_id! {
@@ -625,6 +628,16 @@ string_id! {
     /// Durable id for one derived-index segment file.
     IndexSegmentId,
     prefix = "idx"
+}
+
+string_id! {
+    /// Identifies one store probe run and the objects it writes.
+    ProbeRunId,
+    prefix = "probe",
+    schema(
+        pattern = r"^probe_[0-9a-f]{32}$",
+        example = "probe_7c3e9a1f5b2d4c6e8a0f1b3d5e7c9a2b"
+    )
 }
 
 string_id! {
@@ -923,11 +936,11 @@ mod tests {
     }
 
     #[test]
-    fn binding_version_requires_nonempty_lowercase_hex() {
-        for value in ["", "abcg", "ABC", "01-23"] {
+    fn binding_version_requires_nonempty_unpadded_base64url() {
+        for value in ["", "YWJj=", "a+b", "a/b", "a.b", "a b"] {
             assert!(BindingVersion::parse(value).is_err(), "accepted {value:?}");
         }
-        for value in ["0", "0123456789abcdef"] {
+        for value in ["0", "0123456789abcdef", "AZaz09-_"] {
             assert_eq!(
                 BindingVersion::parse(value)
                     .expect("valid binding version")

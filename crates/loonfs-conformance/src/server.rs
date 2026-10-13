@@ -191,7 +191,7 @@ writer_id = "loonfs-conformance"
 max_upload_bytes = {PROXY_UPLOAD_MAX_BYTES}
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "{}"
 "#,
         store_root.display()

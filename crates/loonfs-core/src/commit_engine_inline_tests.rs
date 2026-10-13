@@ -7,7 +7,7 @@ mod retention;
 mod layouts;
 
 use super::*;
-use crate::manifest::{fold_wal, fold_wal_tail};
+use crate::manifest::{fold_wal, fold_wal_tail, FoldWalOutcome};
 use crate::path::read::load_current_metadata_view;
 use crate::storage::content::store_bytes_as_content;
 use crate::test_support::ops::create;
@@ -18,8 +18,8 @@ use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStor
 use loonfs_types::api::v0::PathEntryKind;
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalDelta, WalInlineContent};
 use loonfs_types::{
-    AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, FoldWalOutcome, InodeId,
-    RevisionNo, WriterId,
+    AbsolutePath, AttributeInclusion, ContentRef, DestinationBehavior, InodeId, RevisionNo,
+    WriterId,
 };
 
 async fn setup() -> (

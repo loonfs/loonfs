@@ -38,7 +38,9 @@ pub use self::compaction_merge::{
 };
 pub use self::compaction_step::{CompactionStepOutcome, MetadataCompactionPolicy};
 pub use self::error::ManifestLoadError;
-pub use self::fold::{fold_wal_tail, next_run_no_after, FoldedWalTail};
+pub use self::fold::{
+    fold_wal_tail, next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail,
+};
 pub use self::retention::RetentionTarget;
 pub use self::runs::{MetadataFamilyGroup, MetadataRunPolicy};
 pub use self::statistics::{

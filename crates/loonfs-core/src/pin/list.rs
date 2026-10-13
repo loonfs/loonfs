@@ -1,13 +1,13 @@
 //! Lists existing pins as checkpoints.
 
-use super::record::load_pin_at_key;
+use super::record::{load_pin, load_pin_at_key};
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::load_current_manifest;
 use futures::StreamExt;
 use loonfs_objectstore::keys::pin_prefix;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest};
+use loonfs_types::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest, PinId};
 use serde::{Deserialize, Serialize};
 
 /// Resume position for a checkpoint listing.
@@ -19,6 +19,38 @@ pub struct CheckpointPageCursor {
 
 impl PageCursor for CheckpointPageCursor {
     const KIND: &'static str = "checkpoint_inventory";
+}
+
+/// Resume position for a snapshot listing.
+///
+/// It records the same position as a [`CheckpointPageCursor`] under its own
+/// kind, so a cursor from one listing can't resume the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotPageCursor {
+    namespace_id: NamespaceId,
+    last_key: String,
+}
+
+impl PageCursor for SnapshotPageCursor {
+    const KIND: &'static str = "snapshot_inventory";
+}
+
+impl From<CheckpointPageCursor> for SnapshotPageCursor {
+    fn from(cursor: CheckpointPageCursor) -> Self {
+        Self {
+            namespace_id: cursor.namespace_id,
+            last_key: cursor.last_key,
+        }
+    }
+}
+
+impl From<SnapshotPageCursor> for CheckpointPageCursor {
+    fn from(cursor: SnapshotPageCursor) -> Self {
+        Self {
+            namespace_id: cursor.namespace_id,
+            last_key: cursor.last_key,
+        }
+    }
 }
 
 impl CheckpointPageCursor {
@@ -42,6 +74,24 @@ impl CheckpointPageCursor {
         }
         Ok(())
     }
+}
+
+/// Loads one existing pin as the checkpoint row a listing returns for it.
+/// A missing pin returns `checkpoint_not_found`.
+pub(crate) async fn get_checkpoint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    checkpoint_id: &PinId,
+) -> Result<Checkpoint> {
+    load_current_manifest(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    let loaded = load_pin(store, namespace_id, checkpoint_id)
+        .await?
+        .ok_or_else(|| CoreError::CheckpointNotFound {
+            checkpoint_id: checkpoint_id.clone(),
+        })?;
+    Ok(super::checkpoint_summary(loaded.state))
 }
 
 pub(crate) async fn list_checkpoints_page<S: ObjectStore + ?Sized>(
@@ -119,7 +169,7 @@ mod cursor_tests {
 
     #[test]
     fn cursor_decode_tolerates_additive_fields() {
-        let token = loonfs_types::format::hex::hex_encode_bytes(
+        let token = loonfs_types::encode_token_bytes(
             &serde_json::to_vec(&serde_json::json!({
                 "format_version": 1,
                 "kind": "checkpoint_inventory",
@@ -136,6 +186,66 @@ mod cursor_tests {
             cursor.last_key,
             "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json"
         );
+    }
+
+    #[test]
+    fn every_cursor_kind_matches_its_golden_bytes() {
+        use crate::test_support::assert_matches_golden_token;
+        use loonfs_types::{
+            ChangeSeq, FileRevisionsPageCursor, GrepPageCursor, InodeId, RevisionNo,
+            TrashPageCursor,
+        };
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let checkpoint = CheckpointPageCursor::after(
+            &namespace_id,
+            "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json".to_owned(),
+        );
+        let cursors = [
+            (
+                "directory.txt",
+                encode_cursor(&DirectoryPageCursor {
+                    head_seq: ChangeSeq(12),
+                    pin_id: None,
+                    directory_inode_id: InodeId(1),
+                    last_name_key: NameKey::parse("report.txt").expect("name key"),
+                }),
+            ),
+            (
+                "file_revisions.txt",
+                encode_cursor(&FileRevisionsPageCursor {
+                    head_seq: ChangeSeq(12),
+                    inode_id: InodeId(42),
+                    last_revision_no: RevisionNo(3),
+                    last_committed_seq: ChangeSeq(9),
+                    last_revision_delta_index: 2,
+                }),
+            ),
+            (
+                "trash.txt",
+                encode_cursor(&TrashPageCursor {
+                    head_seq: ChangeSeq(12),
+                    last_deletion_seq: ChangeSeq(8),
+                    last_root_inode_id: InodeId(42),
+                }),
+            ),
+            (
+                "grep.txt",
+                encode_cursor(&GrepPageCursor {
+                    head_seq: ChangeSeq(12),
+                    last_inode_id: InodeId(42),
+                    last_byte_offset: 1024,
+                    fingerprint: 7,
+                }),
+            ),
+            ("checkpoint_inventory.txt", encode_cursor(&checkpoint)),
+            (
+                "snapshot_inventory.txt",
+                encode_cursor(&SnapshotPageCursor::from(checkpoint.clone())),
+            ),
+        ];
+        for (name, token) in cursors {
+            assert_matches_golden_token(name, &token.expect("encode cursor"));
+        }
     }
 
     #[test]

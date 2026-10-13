@@ -2,6 +2,8 @@
 
 use crate::capability::{LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX};
 use crate::{ChangeSeq, InodeId, NameKey, RevisionNo};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -172,7 +174,7 @@ string_cursor_response!(
 );
 string_cursor_response!(
     crate::api::v0::ListSnapshotsResponse,
-    crate::api::v0::SnapshotSummary,
+    crate::api::v0::Snapshot,
     snapshots
 );
 
@@ -218,7 +220,7 @@ impl PagedResponse for crate::api::v0::ListChangesResponse {
     }
 
     fn absorb(&mut self, mut later: Self) {
-        self.through_seq = later.through_seq;
+        self.head_seq = later.head_seq;
         self.next_after_seq = later.next_after_seq;
         self.changes.append(&mut later.changes);
     }
@@ -464,7 +466,22 @@ impl<C: PageCursor> OpaqueToken for C {
     const KIND: &'static str = C::KIND;
 }
 
-/// Encodes a value as lowercase hexadecimal JSON with a version and kind.
+/// Spells bytes in the opaque-token alphabet, unpadded base64url.
+pub fn encode_token_bytes(bytes: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Reads bytes spelled by [`encode_token_bytes`].
+///
+/// Returns [`OpaqueTokenError::InvalidEncoding`] for padding, a character
+/// outside the base64url alphabet, or a final character with stray low bits.
+pub fn decode_token_bytes(value: &str) -> Result<Vec<u8>, OpaqueTokenError> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| OpaqueTokenError::InvalidEncoding)
+}
+
+/// Encodes a value as unpadded base64url JSON with a version and kind.
 pub fn encode_token<T: OpaqueToken>(
     token: &T,
     format_version: u8,
@@ -474,7 +491,7 @@ pub fn encode_token<T: OpaqueToken>(
         kind: T::KIND.to_owned(),
         token,
     })
-    .map(|bytes| crate::hex::hex_encode_bytes(&bytes))
+    .map(|bytes| encode_token_bytes(&bytes))
 }
 
 /// Encodes a cursor as the opaque string clients round-trip.
@@ -491,15 +508,22 @@ struct CursorHeader {
     kind: String,
 }
 
-/// Decodes a lowercase hexadecimal JSON token with the expected version and kind.
+/// Decodes an unpadded base64url JSON token with the expected version and kind.
 pub fn decode_token<T: OpaqueToken>(
     value: &str,
     supported_version: u8,
 ) -> Result<T, OpaqueTokenError> {
-    let bytes =
-        crate::hex::hex_decode_bytes(value).map_err(|_| OpaqueTokenError::InvalidEncoding)?;
-    let header: CursorHeader = serde_json::from_slice(&bytes)
-        .map_err(|error| OpaqueTokenError::InvalidJson(error.to_string()))?;
+    let bytes = decode_token_bytes(value)?;
+    let header: CursorHeader = serde_json::from_slice(&bytes).map_err(|error| {
+        // Every hex string is also base64url, so a hex token decodes here, but to
+        // bytes that are not JSON. Bytes that don't parse as JSON at all are an
+        // encoding failure; a well-formed document of the wrong shape is not.
+        if error.is_syntax() || error.is_eof() {
+            OpaqueTokenError::InvalidEncoding
+        } else {
+            OpaqueTokenError::InvalidJson(error.to_string())
+        }
+    })?;
     if header.format_version != supported_version {
         return Err(OpaqueTokenError::UnsupportedVersion {
             expected: supported_version,
@@ -526,7 +550,7 @@ pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, OpaqueTokenError> 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum OpaqueTokenError {
-    /// The token was not lowercase hexadecimal JSON.
+    /// The token was not unpadded base64url, or its bytes were not a JSON document.
     #[error("invalid opaque token encoding")]
     InvalidEncoding,
     /// The token JSON did not match the expected shape.
@@ -713,7 +737,7 @@ mod tests {
         };
 
         let encoded = encode_cursor(&cursor).expect("encode cursor");
-        let bytes = crate::hex::hex_decode_bytes(&encoded).expect("decode hex");
+        let bytes = decode_token_bytes(&encoded).expect("decode base64url");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("decode JSON");
 
         assert!(json.get("pin_id").is_none());
@@ -789,11 +813,26 @@ mod tests {
     }
 
     #[test]
-    fn malformed_cursor_is_invalid_encoding() {
-        assert_eq!(
-            decode_cursor::<DirectoryPageCursor>("not-hex"),
-            Err(OpaqueTokenError::InvalidEncoding)
-        );
+    fn a_cursor_that_is_not_unpadded_base64url_json_is_invalid_encoding() {
+        let cursor = DirectoryPageCursor {
+            head_seq: ChangeSeq(11),
+            pin_id: None,
+            directory_inode_id: InodeId(7),
+            last_name_key: NameKey::parse("plan.txt").expect("name key"),
+        };
+        let json = decode_token_bytes(&encode_cursor(&cursor).expect("encode cursor"))
+            .expect("decode base64url");
+        let padded = base64::engine::general_purpose::URL_SAFE.encode(&json);
+        assert!(padded.ends_with('='), "the sample JSON should need padding");
+        let old_hex = crate::hex::hex_encode_bytes(&json);
+
+        for value in ["not base64url!", padded.as_str(), old_hex.as_str()] {
+            assert_eq!(
+                decode_cursor::<DirectoryPageCursor>(value),
+                Err(OpaqueTokenError::InvalidEncoding),
+                "{value}"
+            );
+        }
     }
 
     #[test]
@@ -809,7 +848,7 @@ mod tests {
             },
         })
         .expect("encode cursor");
-        let encoded = crate::hex::hex_encode_bytes(&bytes);
+        let encoded = encode_token_bytes(&bytes);
 
         assert_eq!(
             decode_cursor::<DirectoryPageCursor>(&encoded),

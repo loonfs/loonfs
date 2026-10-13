@@ -55,7 +55,7 @@ fn get_readiness() {}
                        deployment's bearer token.",
         responses(
             (status = 200, description = "Prometheus text exposition", body = String),
-            (status = 401, description = "Missing or invalid bearer token", body = loonfs_types::ApiError),
+            (status = 401, description = "Missing or invalid bearer token", body = loonfs_types::ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
 )]

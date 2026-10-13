@@ -184,7 +184,7 @@ writer_id = "sweep-server"
 content_token_secret = "sweep-test-secret"
 
 [store]
-kind = "local-fs"
+kind = "local_fs"
 root = "unused"
 "#,
     )

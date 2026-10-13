@@ -13,7 +13,7 @@ use crate::{
     CreateCheckpointOptions, DeleteCheckpointResponse, ErrorCode, FoldWalOutcome, FoldWalResponse,
     ListCheckpointsResponse, MaintainMetadataOptions, MaintenanceCancellation,
     MetadataCompactionOutcome, MetadataCompactionResponse, MetadataMaintenanceResponse,
-    NamespaceId, PinId, SharedObjectStore, SnapshotSummary, WalFoldStepOutcome,
+    NamespaceId, PinId, SharedObjectStore, Snapshot, WalFoldStepOutcome,
 };
 use crate::{Error, Result};
 use loonfs_core::cache::NamespaceStorageDiagnostics;
@@ -180,9 +180,9 @@ impl Maintenance {
                 .await
                 .map_err(Error::from)?;
             for checkpoint in page.items {
-                if let loonfs_types::CheckpointOwnerSummary::User { .. } = checkpoint.owner {
+                if let loonfs_types::CheckpointOwner::User { .. } = checkpoint.owner {
                     live_checkpoints = live_checkpoints.saturating_add(1);
-                } else if SnapshotSummary::from_checkpoint(checkpoint)
+                } else if Snapshot::from_checkpoint(checkpoint)
                     .is_some_and(|snapshot| snapshot.is_live(now_ms))
                 {
                     live_snapshots = live_snapshots.saturating_add(1);
@@ -281,7 +281,8 @@ impl Maintenance {
                 options.idle_fold_after_ms == 0 || status.wal_tail_newest_commit_at_ms.is_none()
             }
             WalFoldStepOutcome::AlreadyPublished { .. }
-            | WalFoldStepOutcome::RetriesExhausted { .. } => false,
+            | WalFoldStepOutcome::RetriesExhausted { .. }
+            | WalFoldStepOutcome::Unknown => false,
         };
         Ok(MetadataStepReport {
             response,
@@ -359,7 +360,7 @@ impl Maintenance {
                 step = self.metadata_step(namespace_id, options) => step?,
             };
             let won = match step.response.compaction {
-                CompactionStepOutcome::UnitPublished {} => true,
+                CompactionStepOutcome::BoundedMergePublished {} => true,
                 CompactionStepOutcome::ManifestAdvanced {} => false,
                 CompactionStepOutcome::MetadataCompactionRequired {} => {
                     match self
@@ -372,7 +373,8 @@ impl Maintenance {
                         MetadataCompactionOutcome::Abandoned => false,
                         MetadataCompactionOutcome::NotNeeded
                         | MetadataCompactionOutcome::Cancelled
-                        | MetadataCompactionOutcome::Fenced => {
+                        | MetadataCompactionOutcome::Fenced
+                        | MetadataCompactionOutcome::Unknown => {
                             return Ok(MetadataMaintenanceOutcome::Due)
                         }
                     }
@@ -381,7 +383,9 @@ impl Maintenance {
                     return Ok(MetadataMaintenanceOutcome::Due)
                 }
                 CompactionStepOutcome::NotNeeded {} => return Ok(step.wal_fold),
-                CompactionStepOutcome::Fenced {} => return Ok(MetadataMaintenanceOutcome::Due),
+                CompactionStepOutcome::Fenced {} | CompactionStepOutcome::Unknown => {
+                    return Ok(MetadataMaintenanceOutcome::Due)
+                }
             };
             if won {
                 published_units += 1;
@@ -555,7 +559,7 @@ impl Maintenance {
                     bottom_anchored_merge_blocked,
                     "metadata compaction unit published"
                 );
-                CompactionStepOutcome::UnitPublished {}
+                CompactionStepOutcome::BoundedMergePublished {}
             }
             loonfs_core::CompactionStepOutcome::CompactionPlanned { spec, .. } => {
                 return Ok(CompactionUnitOutcome::CompactionPlanned(spec))
@@ -638,7 +642,7 @@ impl Maintenance {
                 });
             }
             CompactionUnitOutcome::CompactionPlanned(spec) => spec,
-            CompactionUnitOutcome::Concluded(CompactionStepOutcome::UnitPublished {}) => {
+            CompactionUnitOutcome::Concluded(CompactionStepOutcome::BoundedMergePublished {}) => {
                 return Ok(MetadataCompactionResponse {
                     namespace_id: namespace_id.clone(),
                     compaction: MetadataCompactionOutcome::BoundedMergePublished,
@@ -856,6 +860,34 @@ impl Maintenance {
             checkpoints: page.items,
             next_cursor: super::core::encode_next_cursor(page.next_cursor.as_ref())?,
         })
+    }
+
+    /// Returns one existing checkpoint, as the listing returns it, including
+    /// an expired checkpoint that garbage collection has not yet deleted. A
+    /// missing id returns `checkpoint_not_found`.
+    #[tracing::instrument(
+        level = "debug",
+        name = "loonfs.maintenance.get_checkpoint",
+        err(level = "debug"),
+        skip_all,
+        fields(
+            operation = "maintenance.get_checkpoint",
+            namespace_id = %namespace_id,
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
+    pub async fn get_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+        checkpoint_id: &PinId,
+    ) -> Result<Checkpoint> {
+        let _permit = self.core.inner.config.execution_budget.read_permit().await;
+        self.core.record_trace_context(&tracing::Span::current());
+        self.engine(namespace_id)
+            .get_checkpoint(checkpoint_id)
+            .await
+            .map_err(Error::from)
     }
 
     /// Deletes a user-owned pin. A missing id returns `checkpoint_not_found`.

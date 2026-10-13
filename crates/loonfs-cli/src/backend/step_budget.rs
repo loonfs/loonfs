@@ -4,7 +4,7 @@ use crate::error::CliError;
 use crate::resolve::ResolvedTarget;
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
-use loonfs_types::api::v0::GrepIndexLifecycle;
+use loonfs_types::api::v0::GrepIndexStatus;
 use loonfs_types::{ChangeSeq, NamespaceId};
 use std::future::Future;
 
@@ -18,7 +18,7 @@ impl ResolvedTarget {
         wait_for_grep_index(
             target_seq,
             budget,
-            || async { Ok(self.client.get_grep_index(namespace_id).await?.lifecycle) },
+            || async { Ok(self.client.get_grep_index(namespace_id).await?.status) },
             || async {
                 let Some(host) = &self.maintenance else {
                     rest_between_status_checks().await;
@@ -88,7 +88,7 @@ pub(super) async fn wait_for_grep_index<Read, ReadTurn, Step, StepTurn>(
 ) -> Result<GrepWaitProgress, CliError>
 where
     Read: Fn() -> ReadTurn,
-    ReadTurn: Future<Output = Result<GrepIndexLifecycle, CliError>>,
+    ReadTurn: Future<Output = Result<GrepIndexStatus, CliError>>,
     Step: Fn() -> StepTurn,
     StepTurn: Future<Output = Result<GrepWaitStepOutcome, CliError>>,
 {
@@ -108,10 +108,10 @@ where
     }
 }
 
-fn lifecycle_stopped(lifecycle: &GrepIndexLifecycle) -> bool {
+fn lifecycle_stopped(lifecycle: &GrepIndexStatus) -> bool {
     match lifecycle {
-        GrepIndexLifecycle::Disabled => true,
-        GrepIndexLifecycle::Backfilling { .. } | GrepIndexLifecycle::Active { .. } => false,
+        GrepIndexStatus::Disabled | GrepIndexStatus::Unknown => true,
+        GrepIndexStatus::Backfilling { .. } | GrepIndexStatus::Active { .. } => false,
     }
 }
 
@@ -127,7 +127,7 @@ pub(super) async fn rest_between_status_checks() {
 #[cfg(test)]
 mod tests {
     use super::{wait_for_grep_index, GrepWaitProgress, GrepWaitStepOutcome, StepBudget};
-    use loonfs_types::api::v0::GrepIndexLifecycle;
+    use loonfs_types::api::v0::GrepIndexStatus;
     use loonfs_types::ChangeSeq;
     use std::cell::Cell;
 
@@ -137,7 +137,7 @@ mod tests {
         let disabled = wait_for_grep_index(
             ChangeSeq(3),
             StepBudget::default(),
-            || async { Ok(GrepIndexLifecycle::Disabled) },
+            || async { Ok(GrepIndexStatus::Disabled) },
             || async {
                 turns.set(turns.get() + 1);
                 assert!(turns.get() < 4, "a disabled index must end the wait");
@@ -158,7 +158,7 @@ mod tests {
             ChangeSeq(3),
             StepBudget::default(),
             || async {
-                Ok(GrepIndexLifecycle::Backfilling {
+                Ok(GrepIndexStatus::Backfilling {
                     captured_seq: ChangeSeq(3),
                     cursor_inode_id: None,
                     checkpoint_id: loonfs_types::PinId::parse(

@@ -690,7 +690,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(changes_data["kind"], "changes");
         assert_eq!(changes_data["namespace_id"], "demo");
         assert_eq!(changes_data["after_seq"], 0);
-        assert_eq!(changes_data["through_seq"], 2);
+        assert_eq!(changes_data["head_seq"], 2);
         assert!(changes_data["next_after_seq"].is_null());
         let listed = changes_data["changes"].as_array().expect("json array");
         assert_eq!(listed.len(), 2);

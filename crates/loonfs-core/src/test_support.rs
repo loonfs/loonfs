@@ -13,6 +13,26 @@ pub fn observed_now() -> crate::time::Observation {
     crate::time::Observation::now(std_timer())
 }
 
+/// Compares an opaque token with its golden fixture in `tests/golden/tokens`.
+///
+/// `UPDATE_GOLDEN=1` rewrites the fixture first.
+#[cfg(test)]
+pub(crate) fn assert_matches_golden_token(name: &str, actual: &str) {
+    let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/tokens"))
+        .join(name);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::create_dir_all(path.parent().expect("fixture parent dir"))
+            .expect("create golden dir");
+        std::fs::write(&path, actual).expect("write golden fixture");
+    }
+    assert!(
+        path.exists(),
+        "golden token `{name}` is missing; run with UPDATE_GOLDEN=1 to write it"
+    );
+    let expected = std::fs::read_to_string(&path).expect("read golden token");
+    assert_eq!(expected, actual, "golden token `{name}` changed");
+}
+
 /// Builds the context a test mutation runs under: `writer_id` at `now_ms`.
 pub fn mutation_context(writer_id: &str, now_ms: u64) -> crate::MutationContext {
     crate::MutationContext {

@@ -10,8 +10,8 @@ use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput, DoctorCheck, DoctorStatus};
 use crate::config::ConfigSource;
 use crate::error::CliError;
-use loonfs_types::api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
-use loonfs_types::{AttributeValue, CheckpointOwnerSummary, GcResponse, WalFoldStepOutcome};
+use loonfs_types::api::v0::{GrepIndexStatus, StoreProbeCheckOutcome, StoreProbeCheckResult};
+use loonfs_types::{AttributeValue, CheckpointOwner, GcResponse, WalFoldStepOutcome};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -81,9 +81,9 @@ mod tests {
     }
 
     fn rendered_remote_error(server_boundary: &str) -> serde_json::Value {
-        let body: loonfs_types::ApiError =
+        let body: loonfs_types::ErrorResponse =
             serde_json::from_str(server_boundary).expect("server boundary is valid JSON");
-        let error = CliError::from(ClientError::from_api_error(400, body));
+        let error = CliError::from(ClientError::from_error_response(400, body));
         let failure = CommandFailure {
             kind: CommandKind::ConfigShow,
             profile: Some("remote".to_owned()),
@@ -131,7 +131,7 @@ mod tests {
             assert!(rendered.contains(&public_message), "{rendered}");
         }
 
-        let remote_boundary = serde_json::to_string(&loonfs_types::ApiError {
+        let remote_boundary = serde_json::to_string(&loonfs_types::ErrorResponse {
             code: loonfs_types::ErrorCode::StoragePermissionDenied
                 .as_str()
                 .to_owned(),
@@ -142,13 +142,13 @@ mod tests {
             details: None,
         })
         .expect("remote boundary serializes");
-        let body: loonfs_types::ApiError =
+        let body: loonfs_types::ErrorResponse =
             serde_json::from_str(&remote_boundary).expect("remote boundary is valid JSON");
         let remote_failure = CommandFailure {
             kind: CommandKind::ConfigShow,
             profile: Some("remote".to_owned()),
             mode: Some("remote".to_owned()),
-            error: Box::new(CliError::from(ClientError::from_api_error(503, body))),
+            error: Box::new(CliError::from(ClientError::from_error_response(503, body))),
         };
         let remote_human = human_error(&remote_failure.error, remote_failure.mode.as_deref());
         let remote_json = json_error(&remote_failure).expect("remote JSON error renders");
@@ -191,10 +191,15 @@ mod tests {
                 checks: vec![DoctorCheck {
                     name: "store_probe".to_owned(),
                     status: DoctorStatus::Failed,
-                    message: "store probe probe_poison: 4 of 4 checks failed".to_owned(),
+                    message:
+                        "store probe probe_00000000000000000000000000000001: 4 of 4 checks failed"
+                            .to_owned(),
                     request_id: None,
                     store_probe: Some(StoreProbeResponse {
-                        run_id: "probe_poison".to_owned(),
+                        run_id: loonfs_types::ProbeRunId::parse(
+                            "probe_00000000000000000000000000000001",
+                        )
+                        .expect("probe run id"),
                         checks: checks.clone(),
                     }),
                 }],
@@ -378,7 +383,7 @@ mod tests {
                     ProfileSummary {
                         name: "default".to_owned(),
                         mode: "embedded".to_owned(),
-                        store_kind: Some("local-fs".to_owned()),
+                        store_kind: Some("local_fs".to_owned()),
                     },
                     ProfileSummary {
                         name: "prod".to_owned(),
@@ -421,27 +426,27 @@ mod tests {
         for (store, location) in [
             (
                 serde_json::json!({
-                    "kind": "aws-s3", "bucket": "files", "region": "us-east-1", "force_path_style": false,
+                    "kind": "aws_s3", "bucket": "files", "region": "us-east-1", "force_path_style": false,
                     "key_prefix": "team", "credentials": {
                         "kind": "static", "access_key_id": "secret-id", "secret_access_key": "secret-key"
                     }
                 }),
-                "aws-s3, bucket files, key prefix team",
+                "aws_s3, bucket files, key prefix team",
             ),
             (
                 serde_json::json!({
-                    "kind": "cloudflare-r2", "bucket": "files", "account_id": "account",
+                    "kind": "cloudflare_r2", "bucket": "files", "account_id": "account",
                     "endpoint_url": "https://account.r2.cloudflarestorage.com",
                     "credentials": { "kind": "static", "access_key_id": "secret-id", "secret_access_key": "secret-key" }
                 }),
-                "cloudflare-r2, bucket files",
+                "cloudflare_r2, bucket files",
             ),
             (
                 serde_json::json!({
-                    "kind": "gcp-gcs", "bucket": "files", "key_prefix": "team",
-                    "credentials": { "kind": "service-account-file", "path": "/private/key.json" }
+                    "kind": "gcp_gcs", "bucket": "files", "key_prefix": "team",
+                    "credentials": { "kind": "service_account_file", "path": "/private/key.json" }
                 }),
-                "gcp-gcs, bucket files, key prefix team",
+                "gcp_gcs, bucket files, key prefix team",
             ),
         ] {
             let profile = serde_json::json!({ "mode": "embedded", "store": store });

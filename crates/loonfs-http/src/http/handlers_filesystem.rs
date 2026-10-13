@@ -26,7 +26,7 @@ use loonfs::{
     ReadOnly, ReadView, StatOptions, TraceMode,
 };
 #[cfg(feature = "openapi")]
-use loonfs_types::ApiError;
+use loonfs_types::ErrorResponse;
 // The wire commit request and the runtime's differ only by the content
 // tokens, which this handler resolves and strips; the operations inside them
 // are one type. The alias keeps the two request names readable side by side.
@@ -239,10 +239,10 @@ impl ReadTarget {
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_types::ListPathEntriesResponse),
-            (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, path, or snapshot not found", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
+            (status = 400, description = "Invalid path, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -267,7 +267,7 @@ pub(super) async fn list_path_entries(
         cursor: checked_cursor::<DirectoryPageCursor>(query.cursor)?,
     };
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let listing = target
         .list_with_options(&path, &options)
         .page(request)
@@ -297,10 +297,10 @@ pub(super) async fn list_path_entries(
         ),
         responses(
             (status = 200, description = "Authoritative path entry", body = loonfs_types::PathEntry),
-            (status = 400, description = "Invalid path, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, path, or snapshot not found", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
+            (status = 400, description = "Invalid path, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, or snapshot not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -319,7 +319,7 @@ pub(super) async fn get_path_entry(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let entry = target
         .stat_with_options(&path, &options)
         .await
@@ -334,7 +334,7 @@ pub(super) async fn get_path_entry(
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "get_file_bytes",
+        operation_id = "get_file_content",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/filesystem/content",
         tag = "filesystem",
@@ -348,16 +348,16 @@ pub(super) async fn get_path_entry(
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
-            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ApiError),
+            (status = 400, description = "Invalid path, revision, snapshot id, non-snapshot checkpoint, or revision_no combined with snapshot_id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, revision, or snapshot not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
 )]
-pub(super) async fn get_file_bytes(
+pub(super) async fn get_file_content(
     State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -372,8 +372,8 @@ pub(super) async fn get_file_bytes(
         .map(parse_revision_no)
         .transpose()?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no)?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
+    reject_snapshot_with_revision(snapshot_id.as_ref(), revision_no, "revision_no")?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
         .read_file_stream(&path, revision_no)
@@ -414,10 +414,10 @@ pub(super) async fn get_file_bytes(
         ),
         responses(
             (status = 200, description = "Recoverable deletions", body = ListTrashResponse),
-            (status = 400, description = "Invalid limit or cursor", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 400, description = "Invalid limit or cursor", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -467,10 +467,10 @@ pub(super) async fn list_trash(
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
-            (status = 400, description = "Invalid path", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or path not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 400, description = "Invalid path", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or path not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -514,13 +514,13 @@ pub(super) async fn list_file_revisions(
         request_body = CommitRequest,
         responses(
             (status = 200, description = "Commit applied", body = Commit),
-            (status = 400, description = "Invalid commit", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or path not found", body = ApiError),
-            (status = 409, description = "Operation conflict", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit, or an append carries more than 256 KiB", body = ApiError),
-            (status = 501, description = "Inline content is disabled, or an append names content with no recorded digest to continue", body = ApiError),
+            (status = 400, description = "Invalid commit", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or path not found", body = ErrorResponse),
+            (status = 409, description = "Operation conflict", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit, or an append carries more than 256 KiB", body = ErrorResponse),
+            (status = 501, description = "Inline content is disabled, or an append names content with no recorded digest to continue", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -649,11 +649,11 @@ pub(super) async fn create_commit(
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
-            (status = 400, description = "Invalid change cursor, limit, snapshot id, non-snapshot checkpoint, or after_seq above the snapshot sequence", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or snapshot not found", body = ApiError),
-            (status = 409, description = "The cursor is older than the retained change history; restart from a fresh listing or checkpoint", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
+            (status = 400, description = "Invalid change cursor, limit, snapshot id, non-snapshot checkpoint, or after_seq above the snapshot sequence", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
+            (status = 409, description = "The cursor is older than the retained change history; restart from a fresh listing or checkpoint", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -669,7 +669,7 @@ pub(super) async fn list_changes(
     let after_seq = parse_after_seq(&required_query_param(query.after_seq, "after_seq")?)?;
     let limit = effective_page_limit(query.limit)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let response = target
         .list_changes(after_seq)
         .page(PageRequest {
@@ -684,6 +684,7 @@ pub(super) async fn list_changes(
 pub(super) async fn read_target(
     namespace: Namespace<ReadOnly>,
     snapshot_id: Option<PinId>,
+    snapshot_param: &str,
 ) -> Result<ReadTarget, ApiResponseError> {
     let Some(snapshot_id) = snapshot_id else {
         return Ok(ReadTarget::Live(namespace));
@@ -694,20 +695,21 @@ pub(super) async fn read_target(
         .map(|view| ReadTarget::Snapshot(Box::new(view)))
         .map_err(|error| {
             ApiResponseError::runtime_for_namespace(namespace.id(), error)
-                .with_invalid_request_param("snapshot_id")
+                .with_invalid_request_param(snapshot_param)
         })
 }
 
 pub(super) fn reject_snapshot_with_revision(
     snapshot_id: Option<&PinId>,
     revision_no: Option<RevisionNo>,
+    param: &str,
 ) -> Result<(), ApiResponseError> {
     if snapshot_id.is_some() && revision_no.is_some() {
         return Err(ApiResponseError::new(
             ErrorCode::InvalidRequest,
             "revision_no cannot be combined with snapshot_id",
         )
-        .with_param("revision_no"));
+        .with_param(param));
     }
     Ok(())
 }

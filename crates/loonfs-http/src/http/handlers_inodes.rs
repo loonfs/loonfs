@@ -16,7 +16,7 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::{ListOptions, StatOptions};
 #[cfg(feature = "openapi")]
-use loonfs_types::ApiError;
+use loonfs_types::ErrorResponse;
 use loonfs_types::{
     public_inode_id, DirectoryPageCursor, FileRevisionsPageCursor, InodeId,
     ListFileRevisionsResponse, PageRequest,
@@ -72,10 +72,10 @@ pub(super) struct StatInodeQuery {
         ),
         responses(
             (status = 200, description = "Authoritative current inode entry", body = loonfs_types::PathEntry),
-            (status = 400, description = "Invalid inode ID, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
+            (status = 400, description = "Invalid inode ID, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -95,7 +95,7 @@ pub(super) async fn get_inode(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let entry = target
         .stat_by_inode_with_options(inode_id, &options)
         .await
@@ -139,11 +139,11 @@ pub(super) struct ListInodeChildrenQuery {
         ),
         responses(
             (status = 200, description = "One page of directory children", body = loonfs_types::ListInodeChildrenResponse),
-            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
-            (status = 409, description = "Inode is not a directory", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
+            (status = 400, description = "Invalid inode ID, limit, cursor, include_attributes, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a directory", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -163,7 +163,7 @@ pub(super) async fn list_inode_children(
         options.include_attributes = parse_include_attributes(value)?;
     }
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let listing = target
         .list_by_inode_with_options(inode_id, &options)
         .page(PageRequest {
@@ -200,11 +200,11 @@ pub(super) async fn list_inode_children(
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
-            (status = 400, description = "Invalid inode ID, limit, or cursor", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or inode not found", body = ApiError),
-            (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 400, description = "Invalid inode ID, limit, or cursor", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or inode not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -235,7 +235,7 @@ pub(super) async fn list_file_revisions_by_inode(
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "get_file_bytes_by_inode",
+        operation_id = "get_file_content_by_inode",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         tag = "inodes",
@@ -248,17 +248,17 @@ pub(super) async fn list_file_revisions_by_inode(
         ),
         responses(
             (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID, snapshot id, or non-snapshot checkpoint", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ApiError),
-            (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ApiError),
-            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ApiError),
+            (status = 400, description = "Invalid inode ID, snapshot id, or non-snapshot checkpoint", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, visible inode, or snapshot not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted or snapshot deleted or expired", body = ErrorResponse),
+            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
 )]
-pub(super) async fn get_file_bytes_by_inode(
+pub(super) async fn get_file_content_by_inode(
     State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -269,7 +269,7 @@ pub(super) async fn get_file_bytes_by_inode(
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let inode_id = parse_inode_id(&path.inode_id)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    let target = read_target(runtime.namespace(&namespace_id), snapshot_id).await?;
+    let target = read_target(runtime.namespace(&namespace_id), snapshot_id, "snapshot_id").await?;
     let permit = acquire_download_permit(&state)?;
     let stream = target
         .read_file_stream_by_inode(inode_id)
@@ -287,7 +287,7 @@ pub(super) async fn get_file_bytes_by_inode(
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "get_file_revision_bytes_by_inode",
+        operation_id = "get_file_revision_content_by_inode",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
@@ -300,17 +300,17 @@ pub(super) async fn get_file_bytes_by_inode(
         ),
         responses(
             (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
-            (status = 409, description = "Inode is not a file", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ApiError),
+            (status = 400, description = "Invalid inode ID or revision number, or a snapshot_id, which cannot be combined with a revision", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
+            (status = 409, description = "Inode is not a file", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "Content exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
 )]
-pub(super) async fn get_file_revision_bytes_by_inode(
+pub(super) async fn get_file_revision_content_by_inode(
     State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -323,7 +323,7 @@ pub(super) async fn get_file_revision_bytes_by_inode(
     let inode_id = parse_inode_id(&path.inode_id)?;
     let revision_no = parse_revision_no(&path.revision_no)?;
     let snapshot_id = parse_optional_snapshot_id(query.snapshot_id)?;
-    reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no))?;
+    reject_snapshot_with_revision(snapshot_id.as_ref(), Some(revision_no), "snapshot_id")?;
     let permit = acquire_download_permit(&state)?;
     let stream = namespace
         .read_file_revision_stream_by_inode(inode_id, revision_no)

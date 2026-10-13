@@ -117,6 +117,7 @@ pub(crate) fn gcp_gcs_with_issuers(
             key_prefix: config.key_prefix,
         },
         ConfiguredObjectStoreKind::GcpGcs,
+        ChecksumAlgorithm::Crc32c,
         io_runtime,
         signer.clone(),
         signer,

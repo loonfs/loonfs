@@ -3,6 +3,7 @@
 
 use super::error::ApiResponseError;
 use super::extractors::{missing_actor, ActorHeader, OptionalActorHeader, SubjectHeaders};
+use super::handlers_filesystem::PageQuery;
 use super::handlers_query::{grep_index_not_maintained, map_grep_error};
 use super::query_params::{
     checked_cursor, effective_page_limit, parse_path_id, parse_public_ordinal,
@@ -12,26 +13,25 @@ use axum::extract::State;
 use axum::Json;
 use loonfs::{
     AdvanceRetentionFloorOptions, CheckpointPageCursor, CreateNamespaceOptions,
-    DeleteNamespaceOptions, GcOptions, MaintainMetadataOptions,
+    DeleteNamespaceOptions, GcOptions, MaintainMetadataOptions, SnapshotPageCursor,
 };
-#[cfg(feature = "openapi")]
-use loonfs_types::ApiError;
 use loonfs_types::ChangeSeq;
+#[cfg(feature = "openapi")]
+use loonfs_types::ErrorResponse;
 use loonfs_types::{
     AccessRight, CapabilityDocument, Checkpoint, CreateCheckpointRequest, CreateNamespaceRequest,
     CreateSnapshotRequest, DeleteCheckpointResponse, DeleteSnapshotResponse, ErrorCode,
     ExtendSnapshotRequest, ForkNamespaceRequest, ListCheckpointsResponse, ListSnapshotsResponse,
     NamespaceAccess, PageRequest, PaginationPolicy, PinId, RunMaintenanceRequest,
-    RunMaintenanceResponse, SnapshotSummary, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    RunMaintenanceResponse, Snapshot, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
     API_GROUP_QUERY_V0, FEATURE_COMMIT_INLINE_CONTENT, FEATURE_DOWNLOADS_DIRECT_GET,
     FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
     LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_SNAPSHOT_MAX_LIFETIME_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE,
-    LIMIT_SNAPSHOT_MAX_TTL_MS, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    LIMIT_SNAPSHOT_MAX_AGE_MS, LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE, LIMIT_SNAPSHOT_MAX_TTL_MS,
+    LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
@@ -54,13 +54,6 @@ pub(super) struct DeleteNamespaceQuery {
     expected_head_seq: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct CheckpointPageQuery {
-    limit: Option<String>,
-    cursor: Option<String>,
-}
-
 /// The capability value for a transfer limit. The API lists these limits on
 /// every deployment, so no limit is advertised as `u64::MAX`.
 fn advertised_limit(limit: Option<u64>) -> u64 {
@@ -79,8 +72,8 @@ fn advertised_limit(limit: Option<u64>) -> u64 {
         description = "Returns a summary of supported features and limits.",
         responses(
             (status = 200, description = "Capability document", body = loonfs_types::CapabilityDocument),
-            (status = 400, description = "Unknown query parameter", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 400, description = "Unknown query parameter", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -159,8 +152,8 @@ pub(super) async fn get_capabilities(
         state.options.snapshot_policy.max_ttl_ms,
     );
     capabilities.limits.insert(
-        LIMIT_SNAPSHOT_MAX_LIFETIME_MS.to_owned(),
-        state.options.snapshot_policy.max_lifetime_ms,
+        LIMIT_SNAPSHOT_MAX_AGE_MS.to_owned(),
+        state.options.snapshot_policy.max_age_ms,
     );
     capabilities.limits.insert(
         LIMIT_SNAPSHOT_MAX_LIVE_PER_NAMESPACE.to_owned(),
@@ -223,11 +216,11 @@ pub(super) async fn get_capabilities(
         request_body = CreateNamespaceRequest,
         responses(
             (status = 200, description = "Namespace created", body = loonfs_types::NamespaceMetadata),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 409, description = "Namespace already exists", body = ApiError),
-            (status = 410, description = "Namespace id permanently deleted (namespace_deleted)", body = ApiError),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
+            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 409, description = "Namespace already exists", body = ErrorResponse),
+            (status = 410, description = "Namespace id permanently deleted (namespace_deleted)", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -279,10 +272,10 @@ pub(super) async fn create_namespace(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Namespace", body = loonfs_types::NamespaceMetadata),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -313,10 +306,10 @@ pub(super) async fn get_namespace(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Namespace diagnostics", body = loonfs_types::NamespaceDiagnostics),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -353,11 +346,11 @@ pub(super) async fn get_namespace_diagnostics(
         ),
         responses(
             (status = 200, description = "Namespace deleted", body = loonfs_types::DeleteNamespaceResponse),
-            (status = 400, description = "Invalid request", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 409, description = "Delete conflict", body = ApiError),
-            (status = 410, description = "Namespace already deleted", body = ApiError),
+            (status = 400, description = "Invalid request", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 409, description = "Delete conflict", body = ErrorResponse),
+            (status = 410, description = "Namespace already deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -411,12 +404,12 @@ fn parse_expected_head_seq(value: &str) -> Result<ChangeSeq, ApiResponseError> {
         request_body = ForkNamespaceRequest,
         responses(
             (status = 200, description = "Namespace forked", body = loonfs_types::NamespaceMetadata),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Source namespace or snapshot not found", body = ApiError),
-            (status = 409, description = "Fork conflict", body = ApiError),
-            (status = 410, description = "Source or target namespace id permanently deleted (namespace_deleted), or snapshot gone", body = ApiError),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
+            (status = 400, description = "Invalid namespace id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Source namespace or snapshot not found", body = ErrorResponse),
+            (status = 409, description = "Fork conflict", body = ErrorResponse),
+            (status = 410, description = "Source or target namespace id permanently deleted (namespace_deleted), or snapshot gone", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -461,13 +454,13 @@ pub(super) async fn fork_namespace(
         params(("namespace_id" = String, Path, description = "Namespace id")),
         request_body = CreateSnapshotRequest,
         responses(
-            (status = 200, description = "Snapshot created", body = SnapshotSummary),
-            (status = 400, description = "Invalid namespace id, name, or ttl", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 409, description = "Snapshot quota exceeded", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
+            (status = 200, description = "Snapshot created", body = Snapshot),
+            (status = 400, description = "Invalid namespace id, name, or ttl", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 409, description = "Snapshot quota exceeded", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -478,7 +471,7 @@ pub(super) async fn create_snapshot(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateSnapshotRequest>,
-) -> Result<Json<SnapshotSummary>, ApiResponseError> {
+) -> Result<Json<Snapshot>, ApiResponseError> {
     let now_ms = state.runtime.now_ms();
     let expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
     let namespace = state
@@ -522,9 +515,9 @@ pub(super) async fn create_snapshot(
         ),
         responses(
             (status = 200, description = "Live snapshots", body = ListSnapshotsResponse),
-            (status = 400, description = "Invalid namespace id, limit, or cursor", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 400, description = "Invalid namespace id, limit, or cursor", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -533,12 +526,12 @@ pub(super) async fn list_snapshots(
     State(state): State<BindingState>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppQuery(query): AppQuery<CheckpointPageQuery>,
+    AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
     let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
     let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
     let namespace = runtime.namespace(&namespace_id);
-    let cursor = checked_cursor::<CheckpointPageCursor>(query.cursor)?;
+    let cursor = checked_cursor::<SnapshotPageCursor>(query.cursor)?;
     let response = namespace
         .list_snapshots()
         .page(PageRequest {
@@ -567,12 +560,12 @@ pub(super) async fn list_snapshots(
         ),
         request_body = ExtendSnapshotRequest,
         responses(
-            (status = 200, description = "Snapshot extended", body = SnapshotSummary),
-            (status = 400, description = "Invalid id or ttl", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Snapshot not found", body = ApiError),
-            (status = 410, description = "Snapshot expired", body = ApiError),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
+            (status = 200, description = "Snapshot extended", body = Snapshot),
+            (status = 400, description = "Invalid id or ttl", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Snapshot not found", body = ErrorResponse),
+            (status = 410, description = "Snapshot expired", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -584,7 +577,7 @@ pub(super) async fn extend_snapshot(
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ExtendSnapshotRequest>,
-) -> Result<Json<SnapshotSummary>, ApiResponseError> {
+) -> Result<Json<Snapshot>, ApiResponseError> {
     let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
     let now_ms = state.runtime.now_ms();
     let requested_expires_at_ms = snapshot_expiry_from_ttl(&state, now_ms, request.ttl_ms)?;
@@ -612,6 +605,48 @@ pub(super) async fn extend_snapshot(
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
+        get,
+        operation_id = "get_snapshot",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
+        tag = "namespaces",
+        summary = "Retrieve snapshot",
+        description = "Returns one live snapshot, as the snapshot listing returns it. A missing id, or the id of a pin that isn't a snapshot, returns snapshot_not_found, and an expired snapshot returns snapshot_gone.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("snapshot_id" = loonfs_types::PinId, Path, description = "Snapshot id")
+        ),
+        responses(
+            (status = 200, description = "Live snapshot", body = Snapshot),
+            (status = 400, description = "Invalid namespace or snapshot id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
+            (status = 410, description = "Snapshot expired", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn get_snapshot(
+    State(state): State<BindingState>,
+    SubjectHeaders(subject): SubjectHeaders,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
+) -> Result<Json<Snapshot>, ApiResponseError> {
+    let snapshot_id = super::query_params::parse_snapshot_id(&snapshot_id)?;
+    let scoped_runtime = subject.map(|subject| state.runtime.with_subject(subject));
+    let runtime = scoped_runtime.as_ref().unwrap_or(&state.runtime);
+    let snapshot = runtime
+        .namespace(&namespace_id)
+        .get_snapshot(&snapshot_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    Ok(Json(snapshot))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
         delete,
         operation_id = "delete_snapshot",
         extensions(
@@ -628,9 +663,9 @@ pub(super) async fn extend_snapshot(
         ),
         responses(
             (status = 200, description = "Snapshot record deleted", body = DeleteSnapshotResponse),
-            (status = 400, description = "Invalid id or non-snapshot record", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Snapshot not found", body = ApiError),
+            (status = 400, description = "Invalid id or non-snapshot record", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Snapshot not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -690,11 +725,11 @@ fn snapshot_expiry_from_ttl(
         request_body(content = CreateCheckpointRequest, description = "Checkpoint name and optional lifetime"),
         responses(
             (status = 200, description = "The created checkpoint", body = Checkpoint),
-            (status = 400, description = "Invalid namespace id, name, or lifetime", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
+            (status = 400, description = "Invalid namespace id, name, or lifetime", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -746,9 +781,9 @@ pub(super) async fn create_checkpoint(
         ),
         responses(
             (status = 200, description = "Existing checkpoint objects", body = ListCheckpointsResponse),
-            (status = 400, description = "Invalid namespace id, limit, or cursor", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 400, description = "Invalid namespace id, limit, or cursor", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -756,7 +791,7 @@ pub(super) async fn create_checkpoint(
 pub(super) async fn list_checkpoints(
     State(state): State<BindingState>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppQuery(query): AppQuery<CheckpointPageQuery>,
+    AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
     let cursor = checked_cursor::<CheckpointPageCursor>(query.cursor)?;
     let response = state
@@ -770,6 +805,44 @@ pub(super) async fn list_checkpoints(
         .map_err(ApiResponseError::for_namespace(&namespace_id))
         .map_err(|error| error.with_invalid_request_param("cursor"))?;
     Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        operation_id = "get_checkpoint",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
+        tag = "maintenance",
+        summary = "Retrieve checkpoint",
+        description = "Returns one existing pin as the checkpoint listing returns it, including an expired pin that collection has not deleted. A missing id returns checkpoint_not_found.",
+        params(
+            ("namespace_id" = String, Path, description = "Namespace id"),
+            ("checkpoint_id" = String, Path, description = "Checkpoint id")
+        ),
+        responses(
+            (status = 200, description = "Existing checkpoint", body = Checkpoint),
+            (status = 400, description = "Invalid namespace or checkpoint id", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or checkpoint not found", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn get_checkpoint(
+    State(state): State<BindingState>,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
+    AppQuery(_): AppQuery<NoQuery>,
+) -> Result<Json<Checkpoint>, ApiResponseError> {
+    let checkpoint_id = parse_path_id::<PinId>("checkpoint_id", &checkpoint_id)?;
+    let checkpoint = state
+        .maintenance
+        .get_checkpoint(&namespace_id, &checkpoint_id)
+        .await
+        .map_err(ApiResponseError::for_namespace(&namespace_id))?;
+    Ok(Json(checkpoint))
 }
 
 #[cfg_attr(
@@ -791,9 +864,9 @@ pub(super) async fn list_checkpoints(
         ),
         responses(
             (status = 200, description = "Checkpoint pin deleted", body = DeleteCheckpointResponse),
-            (status = 400, description = "Invalid id, or the checkpoint is owned by another operation", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or checkpoint not found", body = ApiError),
+            (status = 400, description = "Invalid id, or the checkpoint is owned by another operation", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace or checkpoint not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -835,12 +908,12 @@ pub(super) struct CheckpointPathParams {
         request_body(content = RunMaintenanceRequest, description = "The maintenance job to run"),
         responses(
             (status = 200, description = "Maintenance job completed", body = RunMaintenanceResponse),
-            (status = 400, description = "Invalid namespace id or options", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ApiError),
-            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
+            (status = 400, description = "Invalid namespace id or options", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
+            (status = 501, description = "This deployment does not maintain the grep index", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )

@@ -11,6 +11,7 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::acquire_writer;
+use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitIntent, FilesystemOperation};
 use crate::protocol::{
@@ -23,7 +24,6 @@ use crate::wal::settle_publish_attempt;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::api::v0::Commit;
-use loonfs_types::format::control::AcquiredWriter;
 use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
@@ -838,7 +838,7 @@ impl NamespaceCommitEngine {
         let since = match (folded, &mut self.publish_tail) {
             (Some(folded), Some(position))
                 if fold_observed.is_some()
-                    && folded.response.outcome == loonfs_types::FoldWalOutcome::Published =>
+                    && folded.response.outcome == crate::FoldWalOutcome::Published =>
             {
                 position.reanchor_after_fold(folded.basis.clone())
             }

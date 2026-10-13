@@ -4,7 +4,7 @@ use super::fixtures::{test_app, test_options, TestAppOptions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::{ApiError, ErrorCode};
+use loonfs_types::{ErrorCode, ErrorResponse};
 use tempfile::tempdir;
 use tower::ServiceExt as _;
 
@@ -67,7 +67,7 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
-        let error: ApiError = serde_json::from_slice(&body).expect("error");
+        let error: ErrorResponse = serde_json::from_slice(&body).expect("error");
         assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
         assert_eq!(error.param.as_deref(), Some(expected_param));
     }
@@ -86,7 +86,7 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+    let error: ErrorResponse = serde_json::from_value(json_body(response).await).expect("error");
     assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
     let response = router.oneshot(Request::builder().method("POST").uri("/v0/namespaces/demo/commits")
         .header("authorization", "Bearer test-token")
@@ -163,7 +163,8 @@ async fn every_upload_route_acts_as_the_request_subject() {
             .await
             .expect("other subject response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
-        let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+        let error: ErrorResponse =
+            serde_json::from_value(json_body(response).await).expect("error");
         assert_eq!(error.code, ErrorCode::UploadNotFound.as_str());
     }
     let response = router
@@ -213,7 +214,7 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
         .await
         .expect("partial subject response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+    let error: ErrorResponse = serde_json::from_value(json_body(response).await).expect("error");
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
     assert_eq!(error.message, "missing required header Loonfs-Principals");
     assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
@@ -241,6 +242,66 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
             .await
             .expect("snapshot response");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn retrieving_a_snapshot_in_an_acl_namespace_requires_an_administrator_subject() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, _state) = test_app(
+        test_options(&temp_dir.path().join("store"), "snapshot-retrieve-acl"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces",
+            Some(
+                r#"{"namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
+            ),
+            &[],
+        ))
+        .await
+        .expect("create namespace response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces/demo-acl/snapshots",
+            Some(r#"{"name":"pin","ttl_ms":60000}"#),
+            &[],
+        ))
+        .await
+        .expect("snapshot response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot_id = json_body(response).await["snapshot_id"]
+        .as_str()
+        .expect("snapshot id")
+        .to_owned();
+    let uri = format!("/v0/namespaces/demo-acl/snapshots/{snapshot_id}");
+
+    for (principals, status) in [
+        (Some("nobody"), StatusCode::FORBIDDEN),
+        (Some("team"), StatusCode::OK),
+        (None, StatusCode::OK),
+    ] {
+        let headers = principals.map_or_else(Vec::new, |principals| {
+            vec![
+                ("Loonfs-Subject", "usr_ada"),
+                ("Loonfs-Principal-Scope", "org"),
+                ("Loonfs-Principals", principals),
+            ]
+        });
+        let response = router
+            .clone()
+            .oneshot(request("GET", &uri, None, &headers))
+            .await
+            .expect("retrieve response");
+        assert_eq!(response.status(), status, "principals {principals:?}");
     }
 }
 
@@ -288,7 +349,8 @@ async fn an_acl_namespace_refuses_a_subject_from_another_scope() {
             .await
             .expect("wrong-scope response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+        let error: ErrorResponse =
+            serde_json::from_value(json_body(response).await).expect("error");
         assert_eq!(error.code, ErrorCode::Forbidden.as_str());
         assert_eq!(error.message, expected_message);
     }
@@ -360,7 +422,7 @@ async fn read_handlers_accept_the_subject_headers() {
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .expect("body");
-            let error: ApiError = serde_json::from_slice(&body).expect("error");
+            let error: ErrorResponse = serde_json::from_slice(&body).expect("error");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
             assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
         }
@@ -416,7 +478,7 @@ async fn an_acl_namespace_is_created_over_the_wire() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+    let error: ErrorResponse = serde_json::from_value(json_body(response).await).expect("error");
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
     assert_eq!(error.param.as_deref(), Some("/access/root_grants"));
 
@@ -521,7 +583,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
         .await
         .expect("commit response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ApiError = serde_json::from_value(json_body(response).await).expect("error");
+    let error: ErrorResponse = serde_json::from_value(json_body(response).await).expect("error");
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
 
     let namespace = namespace_reader.metadata().await.expect("namespace");

@@ -10,8 +10,8 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_types::ContentId;
 use loonfs_types::{
     api::v0::{ContentToken, CreateUploadBody},
-    AbsolutePath, ApiError, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef,
-    DestinationBehavior, ErrorCode, FilesystemOperation,
+    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef, DestinationBehavior,
+    ErrorCode, ErrorResponse, FilesystemOperation,
 };
 use serde_json::json;
 use std::io::Read as _;
@@ -37,7 +37,7 @@ fn assert_content_not_prepared_response(
                 panic!("check requires an HTTP status error");
             };
             assert_eq!(status, 409);
-            let error: ApiError =
+            let error: ErrorResponse =
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
             assert_eq!(error.message, expected_message);
@@ -479,7 +479,7 @@ async fn every_upload_session_route_requires_the_bearer_token() {
     for (method, url) in [("GET", base.clone()), ("POST", format!("{base}/abort"))] {
         match raw_agent().request(method, &url).call() {
             Err(ureq::Error::Status(401, response)) => {
-                let error: ApiError =
+                let error: ErrorResponse =
                     serde_json::from_reader(response.into_reader()).expect("decode api error");
                 assert_eq!(error.code, ErrorCode::Unauthorized.as_str());
             }

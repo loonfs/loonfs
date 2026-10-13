@@ -17,7 +17,7 @@ memory_limit_bytes = 4294967296
 #key_path = "/etc/loonfs/tls/server.key"
 
 [store]
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = "your-bucket"
 account_id = "YOUR_ACCOUNT_ID"
 endpoint_url = "https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com"

@@ -224,7 +224,7 @@ impl GrepService {
             .case_insensitive(request.case_insensitive)
             .multi_line(true)
             .build()
-            .map_err(|error| GrepError::InvalidQuery(error.to_string()))?;
+            .map_err(|error| GrepError::InvalidPattern(error.to_string()))?;
         let scope = match (&request.path_prefix, request.inode_id) {
             (Some(prefix), _) => Some(reads.resolve_path(prefix).await?),
             (None, Some(inode_id)) => Some(reads.resolve_inode(inode_id).await?),
@@ -232,7 +232,7 @@ impl GrepService {
         };
         let mut candidates = GrepCandidates::default();
         let tail_resume = match plan_pattern(&request.pattern, request.case_insensitive)
-            .map_err(GrepError::InvalidQuery)?
+            .map_err(GrepError::InvalidPattern)?
         {
             GramPlanOutcome::Indexable(plan) => {
                 candidates.indexed = indexed_candidates(

@@ -839,6 +839,7 @@ impl Client {
             }
             UploadSessionStatus::Open { .. } => "open",
             UploadSessionStatus::Aborted { .. } => "aborted",
+            UploadSessionStatus::Unknown => "unknown",
         };
         Err(ClientError::Protocol(format!(
             "completion of upload `{}` returned status `{status}`",

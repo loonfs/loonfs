@@ -34,7 +34,7 @@ The image reads its config from `/etc/loonfs/config.toml` and runs as uid 10001.
 
 ## Configuration
 
-The `config/` directory contains one example config for each object store: `local-fs`, `aws-s3`, `gcp-gcs`, and `cloudflare-r2`. Each one documents the provider credentials and the optional server settings. Copy the one for your store and edit it.
+The `config/` directory contains one example config for each object store: `local_fs`, `aws_s3`, `gcp_gcs`, and `cloudflare_r2`. Each one documents the provider credentials and the optional server settings. Copy the one for your store and edit it.
 
 To size the server's memory from one number, set the top-level `memory_limit_bytes`. If you leave it out on Linux, the server reads the limit from cgroup v2, and then from cgroup v1. If it doesn't find a finite limit, it keeps the existing defaults and logs that it's unsized. [Set one number](docs/self-hosting.md#set-one-number) shows the formula.
 

@@ -17,7 +17,7 @@ memory_limit_bytes = 4294967296
 #key_path = "/etc/loonfs/tls/server.key"
 
 [store]
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "your-bucket"
 region = "us-east-1"
 # endpoint_url is optional for AWS S3. If you set a custom endpoint with

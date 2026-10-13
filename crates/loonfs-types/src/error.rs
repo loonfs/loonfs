@@ -95,7 +95,7 @@ macro_rules! error_codes {
 
         impl<'de> serde::Deserialize<'de> for ErrorCode {
             // Strict: unknown codes fail to deserialize. Wire structs carry
-            // codes as plain strings (`ApiError::code`) precisely so unknown
+            // codes as plain strings (`ErrorResponse::code`) precisely so unknown
             // codes stay tolerated; deserialize into `ErrorCode` only where
             // strictness is intended.
             fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

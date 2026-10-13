@@ -10,9 +10,18 @@ use crate::namespace::state::NamespaceReadState;
 use crate::time::{Deadline, MonotonicTimer};
 use crate::wal::{prepare_wal_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{AcquiredWriter, WriterBlock};
-use loonfs_types::NamespaceId;
+use loonfs_types::format::control::WriterBlock;
+use loonfs_types::{NamespaceId, WriterEpoch, WriterId};
 use std::sync::Arc;
+
+/// Captures the writer identity and fencing epoch a session must retain while publishing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcquiredWriter {
+    /// Stable writer label copied into the manifest's writer block.
+    pub writer_id: WriterId,
+    /// Fencing epoch every commit publication from this session must match.
+    pub writer_epoch: WriterEpoch,
+}
 
 #[cfg(test)]
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(

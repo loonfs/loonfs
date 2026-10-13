@@ -12,7 +12,7 @@ use crate::profiles::resolve_profile;
 use crate::render::{store_probe_run_outcome, store_probe_summary_line, StoreProbeRunOutcome};
 use crate::resolve::{resolve_namespace, ResolvedTarget};
 use futures::TryStreamExt;
-use loonfs_objectstore::probe::PROBE_RUN_PREFIX;
+use loonfs_objectstore::keys::probe_runs_prefix;
 use loonfs_types::api::v0::StoreProbeResponse;
 use loonfs_types::{CapabilityDocument, PROTOCOL_VERSION};
 use std::path::Path;
@@ -335,7 +335,7 @@ async fn embedded_health_check(
         .runtime
         .object_store();
     match store
-        .list_prefix_stream(&format!("{PROBE_RUN_PREFIX}/"))
+        .list_prefix_stream(&probe_runs_prefix())
         .try_next()
         .await
     {
@@ -600,6 +600,7 @@ fn doctor_output(
 mod tests {
     use super::*;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::probe::PROBE_RUN_PREFIX;
     use loonfs_objectstore::ObjectStoreError;
     use loonfs_test_support::stores::{
         FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
@@ -646,7 +647,7 @@ mod tests {
             assert_eq!(
                 store.snapshot(),
                 vec![RecordedOperation::List {
-                    prefix: format!("{PROBE_RUN_PREFIX}/"),
+                    prefix: probe_runs_prefix(),
                 }]
             );
             if denied {
@@ -690,7 +691,8 @@ mod tests {
 
     fn probe_response(outcomes: &[StoreProbeCheckOutcome]) -> StoreProbeResponse {
         StoreProbeResponse {
-            run_id: "probe_test".to_owned(),
+            run_id: loonfs_types::ProbeRunId::parse("probe_00000000000000000000000000000001")
+                .expect("probe run id"),
             checks: outcomes
                 .iter()
                 .enumerate()
@@ -710,7 +712,7 @@ mod tests {
         assert_eq!(check.status, DoctorStatus::Failed);
         assert_eq!(
             check.message,
-            "store probe probe_test: 1 of 1 checks failed"
+            "store probe probe_00000000000000000000000000000001: 1 of 1 checks failed"
         );
         assert_eq!(check.store_probe, Some(response));
     }
@@ -725,7 +727,7 @@ mod tests {
         assert_eq!(check.status, DoctorStatus::Warning);
         assert_eq!(
             check.message,
-            "store probe probe_test: 1 of 2 checks are unsupported"
+            "store probe probe_00000000000000000000000000000001: 1 of 2 checks are unsupported"
         );
         assert_eq!(
             check.message,
@@ -737,7 +739,7 @@ mod tests {
         assert_eq!(store_probe_check(passed.clone()).status, DoctorStatus::Ok);
         assert_eq!(
             store_probe_summary_line(&passed),
-            "store probe probe_test: 1 checks passed"
+            "store probe probe_00000000000000000000000000000001: 1 checks passed"
         );
     }
 }

@@ -54,7 +54,7 @@ async fn create_direct_put_upload(
     let uri = format!("/v0/namespaces/{namespace_id}/uploads");
     let body = serde_json::json!({"mode": "direct_put", "size_bytes": 5});
     let (status, body) = send(router, Method::POST, &uri, body.to_string()).await;
-    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error body");
+    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error body");
     (status, error.code)
 }
 
@@ -368,13 +368,13 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
     .to_string();
     let (status, bytes) = send(&router, Method::POST, &uri, body.clone()).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    let error: loonfs_types::ApiError = serde_json::from_slice(&bytes).expect("fenced error");
+    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("fenced error");
     assert_eq!(error.code, ErrorCode::WriterFenced.as_str());
     assert_eq!(state.namespaces.fenced_sessions_dropped(), 1);
     assert!(state.namespaces.held_ids().is_empty());
     let (status, bytes) = send(&router, Method::POST, &uri, body.clone()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    let error: loonfs_types::ApiError = serde_json::from_slice(&bytes).expect("closing error");
+    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("closing error");
     assert_eq!(error.code, ErrorCode::WriterSessionClosed.as_str());
     assert!(state.namespaces.held_ids().is_empty());
 

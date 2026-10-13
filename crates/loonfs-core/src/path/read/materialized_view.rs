@@ -30,9 +30,9 @@ use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::api::v0::DirectoryBinding;
 use loonfs_types::{
     AbsolutePath, AccessRight, AccessRights, AttributeInclusion, AttributesProjection, ChangeSeq,
-    ContentRef, DirectoryPageCursor, DisplayName, FileBytes, FileRevision, FileRevisionsPageCursor,
-    InodeId, InodeKind, ManifestNo, NamespaceId, Page, PageRequest, PathEntry, PathEntryKind,
-    RevisionNo, TrashEntry, TrashPageCursor,
+    ContentRef, DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId,
+    InodeKind, ManifestNo, NamespaceId, Page, PageRequest, PathEntry, PathEntryKind, RevisionNo,
+    TrashEntry, TrashPageCursor,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -119,6 +119,15 @@ pub(crate) async fn load_current_metadata_view<'a, S: ObjectStore + ?Sized>(
     let basis = loaded.basis();
     let context = ReadLoadContext::pinned_head(&loaded.read_state, &basis, None, None);
     load_metadata_view(store, namespace_id, context).await
+}
+
+/// File bytes plus the metadata entry they came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBytes {
+    /// Authoritative metadata for the file that was read.
+    pub entry: PathEntry,
+    /// Validated file bytes.
+    pub bytes: Vec<u8>,
 }
 
 /// Immutable object ranges for a selected revision.

@@ -9,7 +9,7 @@ On an embedded profile, `loonfs maintenance index enable` runs its bounded index
 Requests through an embedded profile work as follows:
 
 - **Validation and errors.** Requests go through the binding's validation, error envelope, and JSON body limits. A failed request reports the binding's request ID and error details.
-- **Deadline.** The binding cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content, maintenance runs, and the store probe aren't subject to that deadline.
+- **Deadline.** The binding cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content and maintenance runs aren't subject to that deadline.
 - **Concurrency.** The binding admits at most 8 concurrent uploads and 16 concurrent downloads, the same defaults as the server.
 - **Transfer size.** The upload and download size limits are `u64::MAX`, so embedded transfers aren't limited in size.
 - **Downloads.** An interrupted embedded download starts again from the beginning. Progress for a single-file `loonfs get` counts the bytes received, but doesn't show a total.
@@ -365,14 +365,10 @@ Inspection and diagnostics
     Show the protocol version, API groups, features, and limits supported by
     the selected deployment
 
-  loonfs doctor [--profile <name>] [--namespace <name>] [--write-check]
+  loonfs doctor [--profile <name>] [--namespace <name>]
     Check the configuration, provider, connection, authentication, server
-    health, capabilities, and selected namespace. For an embedded profile,
-    the health check lists the temporary probe prefix once, inside the
-    configured key prefix, and an empty listing counts as healthy. The
-    command is read-only unless --write-check is set, which also tests the
-    object store by writing and deleting temporary objects. The command
-    prints every result and exits nonzero if a check fails
+    health, capabilities, and selected namespace. The command prints every
+    result and exits nonzero if a check fails
 
 Maintenance
   loonfs maintenance recover-administrator <principal>
@@ -413,11 +409,6 @@ Maintenance
     content prefix reports zero.
     deleted.temporary_objects counts store temporary objects older than the
     window.
-
-  loonfs maintenance store probe
-    Test the object-store operations LoonFS requires. The command creates
-    and removes temporary objects, prints each result, and exits nonzero if
-    any check fails.
 
   loonfs maintenance checkpoint create --name <label> [--ttl-ms <ms>]
     Pin the namespace's current state in a new checkpoint. Every call
@@ -514,10 +505,10 @@ Update options
   Shared:
     --key-prefix <prefix>
 
-  local-fs profile updates:
+  local_fs profile updates:
     --root <path>
 
-  aws-s3 profile updates:
+  aws_s3 profile updates:
     --bucket <name>
     --region <region>
     --credential-source <ambient|static>
@@ -527,7 +518,7 @@ Update options
     --endpoint-url <url>
     --force-path-style <true|false>
 
-  cloudflare-r2 profile updates:
+  cloudflare_r2 profile updates:
     --bucket <name>
     --account-id <id>
     --endpoint-url <url>
@@ -535,7 +526,7 @@ Update options
     --access-key-id <id>
     --secret-access-key <secret>
 
-  gcp-gcs profile updates:
+  gcp_gcs profile updates:
     --bucket <name>
     --service-account-key-path <path>
 

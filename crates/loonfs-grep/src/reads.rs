@@ -136,7 +136,7 @@ impl NamespaceReadView<'_> {
             return Ok(ListChangesResponse {
                 namespace_id: self.namespace_id().clone(),
                 after_seq,
-                through_seq: head_seq,
+                head_seq,
                 next_after_seq: None,
                 changes: Vec::new(),
             });
@@ -148,7 +148,7 @@ impl NamespaceReadView<'_> {
             .await?;
         page.changes
             .retain(|change| change.committed_seq <= head_seq);
-        page.through_seq = head_seq;
+        page.head_seq = head_seq;
         page.next_after_seq = page
             .changes
             .last()

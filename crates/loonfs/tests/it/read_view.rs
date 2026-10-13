@@ -1096,7 +1096,7 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
     let assert_rejected = |result: loonfs::Result<()>| {
         let error = result
             .expect_err("naming another snapshot is rejected")
-            .to_api_error();
+            .to_error_response();
         assert_eq!(error.code, "invalid_request");
         assert_eq!(error.param.as_deref(), Some("snapshot_id"));
     };

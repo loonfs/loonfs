@@ -102,7 +102,7 @@ func streamTestClient(t *testing.T, fixture streamCase, direct bool, content fun
 		case strings.HasSuffix(r.URL.Path, "/capabilities"):
 			json.NewEncoder(w).Encode(map[string]any{"protocol_version": "v0", "api_groups": []string{"filesystem/v0"}, "features": map[string]bool{"filesystem.downloads.direct_get": direct}})
 		case strings.HasSuffix(r.URL.Path, "/downloads"):
-			access := map[string]any{"kind": "presigned_url", "url": "http://objects.test/object", "method": "GET", "expires_at_ms": 2000000000000}
+			access := map[string]any{"kind": "presigned_url", "url": "http://objects.test/object", "method": "GET", "headers": map[string]string{}, "expires_at_ms": 2000000000000}
 			if fixture.Range != nil {
 				access["headers"] = map[string]string{"range": *fixture.Range}
 			}

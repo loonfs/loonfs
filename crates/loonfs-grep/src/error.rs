@@ -26,8 +26,11 @@ pub enum GrepError {
         "feature `query.grep` is enabled but its backfill has not completed on this namespace"
     )]
     Backfilling,
-    /// The pattern does not parse, or a page size is outside the pagination
-    /// contract.
+    /// The pattern does not parse as a regular expression, or it can't be
+    /// planned against the index.
+    #[error("invalid search query: {0}")]
+    InvalidPattern(String),
+    /// A page size is outside the pagination contract.
     #[error("invalid search query: {0}")]
     InvalidQuery(String),
     /// The pattern has no run of literal bytes for the trigram index, and the
@@ -93,14 +96,14 @@ impl GrepError {
     }
 
     /// Preserves public error fields for embedded and HTTP callers.
-    pub fn to_api_error(&self) -> loonfs_types::ApiError {
+    pub fn to_error_response(&self) -> loonfs_types::ErrorResponse {
         if let Self::Runtime(error) = self {
-            return error.to_api_error();
+            return error.to_error_response();
         }
-        loonfs_types::ApiError {
+        loonfs_types::ErrorResponse {
             code: self.code().as_str().to_owned(),
             message: self.public_message().into_owned(),
-            param: None,
+            param: matches!(self, Self::InvalidPattern(_)).then(|| "pattern".to_owned()),
             feature: matches!(self, Self::NotEnabled | Self::Backfilling)
                 .then(|| loonfs_types::FEATURE_QUERY_GREP.to_owned()),
             request_id: None,
@@ -117,7 +120,7 @@ impl GrepError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::NotEnabled | Self::Backfilling => ErrorCode::NotSupported,
-            Self::InvalidQuery(_) => ErrorCode::InvalidRequest,
+            Self::InvalidPattern(_) | Self::InvalidQuery(_) => ErrorCode::InvalidRequest,
             Self::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
             Self::IndexLagging { .. } => ErrorCode::IndexLagging,
             Self::StoreUnavailable { kind, .. } => loonfs::classify_store_failure(*kind),

@@ -973,7 +973,7 @@ async fn publisher_contender_waits_for_active_request_receipt() {
             commit_id,
             committed_seq: Some(ChangeSeq(1)),
             committed_fingerprint: Some(fingerprint),
-        }) if commit_id == "active" && fingerprint == active_identity.as_str()
+        }) if commit_id == "active" && fingerprint == active_identity
     ));
 }
 

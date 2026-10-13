@@ -14,7 +14,7 @@ use loonfs_grep::{
     GrepError, GrepService, GrepStepBudget, GrepWorker, NamespaceReads,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
-use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
+use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::{
     ChangeSeq, EffectiveLimit, GrepRequest, GrepResponse, NamespaceId, PaginationPolicy, RunNo,
 };
@@ -132,7 +132,7 @@ impl GrepHost {
     ) -> Result<GrepIndexStatus, GrepError> {
         loop {
             let lifecycle = self.worker.lifecycle(namespace_id).await?;
-            if GrepIndexLifecycle::from(&lifecycle).is_built_through(captured_seq) {
+            if v0::GrepIndexStatus::from(&lifecycle).is_built_through(captured_seq) {
                 return Ok(lifecycle);
             }
             match self
@@ -171,17 +171,17 @@ impl GrepHost {
         namespace_id: &NamespaceId,
     ) -> Result<GrepIndex, GrepError> {
         let manifest = self.worker.manifest_state(namespace_id).await?;
-        let (lifecycle, next_run_no, reorganize_pending) = match &manifest {
+        let (status, next_run_no, reorganize_pending) = match &manifest {
             Some(manifest) => (
-                GrepIndexLifecycle::from(manifest.status()),
+                v0::GrepIndexStatus::from(manifest.status()),
                 manifest.index().next_run_no,
                 manifest.index().reorganize.is_some(),
             ),
-            None => (GrepIndexLifecycle::Disabled, RunNo(0), false),
+            None => (v0::GrepIndexStatus::Disabled, RunNo(0), false),
         };
         Ok(GrepIndex {
             namespace_id: namespace_id.clone(),
-            lifecycle,
+            status,
             next_run_no,
             reorganize_pending,
         })

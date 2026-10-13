@@ -14,10 +14,10 @@ use loonfs_server::{
     app, AppConfig, GarbageCollection, GrepConfig, JobMode, MetadataCacheConfig, ServerConfig,
     StoreConfig,
 };
-use loonfs_types::api::v0::{GrepIndex, GrepIndexLifecycle};
+use loonfs_types::api::v0::{self, GrepIndex};
 use loonfs_types::{
-    ApiError, CapabilityDocument, ChangeSeq, GrepResponse, NamespaceId, RunMaintenanceResponse,
-    API_GROUP_QUERY_V0, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
+    CapabilityDocument, ChangeSeq, ErrorResponse, GrepResponse, NamespaceId,
+    RunMaintenanceResponse, API_GROUP_QUERY_V0, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
     LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
 };
@@ -129,7 +129,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
 
     let response = send(&router, Method::GET, &path, None).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ApiError = response_json(response).await;
+    let error: ErrorResponse = response_json(response).await;
     assert_eq!(error.code, "invalid_request");
     assert_eq!(error.param.as_deref(), Some("pattern"));
 
@@ -143,7 +143,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
             )
             .await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            let error: ApiError = response_json(response).await;
+            let error: ErrorResponse = response_json(response).await;
             assert_eq!(error.code, "invalid_request");
             assert_eq!(error.param.as_deref(), Some(name));
         }
@@ -178,7 +178,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ApiError = response_json(response).await;
+    let error: ErrorResponse = response_json(response).await;
     assert_eq!(error.code, "invalid_request");
     assert_eq!(error.param.as_deref(), Some("pattern"));
     assert!(error.message.contains("maximum is 1024 bytes"));
@@ -207,8 +207,8 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     // Before anything is enabled the status route answers honestly rather
     // than inventing a namespace-not-found.
     assert_eq!(
-        index_status(&router, &namespace_id).await.lifecycle,
-        GrepIndexLifecycle::Disabled
+        index_status(&router, &namespace_id).await.status,
+        v0::GrepIndexStatus::Disabled
     );
 
     let enabled: GrepIndex = response_json(
@@ -225,15 +225,15 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     // checkpoint captured — not a watermark it has not reached.
     assert!(
         matches!(
-            &enabled.lifecycle,
-            GrepIndexLifecycle::Backfilling {
+            &enabled.status,
+            v0::GrepIndexStatus::Backfilling {
                 captured_seq: ChangeSeq(0),
                 cursor_inode_id: None,
                 ..
             }
         ),
         "{:?}",
-        enabled.lifecycle
+        enabled.status
     );
     assert_eq!(
         server.binding.namespaces.visit_held(&namespace_id, |held| (
@@ -253,8 +253,8 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
     let active = index_status(&router, &namespace_id).await;
     assert_eq!(
-        active.lifecycle,
-        GrepIndexLifecycle::Active {
+        active.status,
+        v0::GrepIndexStatus::Active {
             built_through_seq: ChangeSeq(0),
             next_event_index: 0,
         }
@@ -272,7 +272,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         .await,
     )
     .await;
-    assert_eq!(again.lifecycle, active.lifecycle);
+    assert_eq!(again.status, active.status);
 
     // The file lands through a writer of its own, so this server holds no
     // session that saw the publish: the index stays where it was until the
@@ -322,7 +322,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
             .visit_held(&namespace_id, |held| held.index_dirty),
         Some(true)
     );
-    assert_eq!(disabled_response.lifecycle, GrepIndexLifecycle::Disabled);
+    assert_eq!(disabled_response.status, v0::GrepIndexStatus::Disabled);
     assert!(!disabled_response.reorganize_pending);
     let disabled = load_current_grep_manifest(&*store, &namespace_id, observation())
         .await
@@ -586,6 +586,39 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
 }
 
 #[tokio::test]
+async fn an_invalid_grep_pattern_reports_the_pattern_param() {
+    let temp_dir = tempdir().expect("store tempdir");
+    let (store, _writer, namespace_id) = seed_namespace(temp_dir.path(), "bad-pattern").await;
+    let worker = grep_worker(&store, "bad-pattern-grep-worker").await;
+    worker.enable(&namespace_id).await.expect("enable grep");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let (router, server) = app(
+        test_config(temp_dir.path(), JobMode::ServeOnly),
+        AppConfig::default(),
+    )
+    .await
+    .expect("build app");
+
+    let response = send(
+        &router,
+        Method::GET,
+        &format!("{}?pattern=%28", query_path(&namespace_id)),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = response_json(response).await;
+    assert_eq!(error.code, "invalid_request");
+    assert_eq!(error.param.as_deref(), Some("pattern"));
+    server
+        .runtime
+        .shutdown()
+        .await
+        .expect("settle the server writer");
+}
+
+#[tokio::test]
 async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     let temp_dir = tempdir().expect("store tempdir");
     let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "maintain-only").await;
@@ -702,8 +735,8 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     assert!(
         matches!(
-            index_status(&router, &namespace_id).await.lifecycle,
-            GrepIndexLifecycle::Backfilling { .. }
+            index_status(&router, &namespace_id).await.status,
+            v0::GrepIndexStatus::Backfilling { .. }
         ),
         "the enable published a backfill this deployment left for someone else"
     );
@@ -778,7 +811,7 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
         max_upload_bytes: 1024 * 1024,
         max_download_bytes: 1024 * 1024,
         snapshot_max_ttl_ms: 86_400_000,
-        snapshot_max_lifetime_ms: 604_800_000,
+        snapshot_max_age_ms: 604_800_000,
         snapshot_max_live_per_namespace: 16,
         max_in_flight_requests: 256,
         max_connections: 1024,
@@ -861,10 +894,10 @@ async fn assert_not_supported(
     path: &str,
     body: Option<Vec<u8>>,
     feature: &str,
-) -> ApiError {
+) -> ErrorResponse {
     let response = send(router, method, path, body).await;
     assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED, "{path}");
-    let error: ApiError = response_json(response).await;
+    let error: ErrorResponse = response_json(response).await;
     assert_eq!(error.code, "not_supported", "{path}");
     assert_eq!(error.feature.as_deref(), Some(feature), "{path}");
     error

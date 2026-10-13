@@ -235,7 +235,7 @@ async fn commit_response_from_commit_receipt<S: ObjectStore + ?Sized>(
         return Err(CoreError::CommitIdReuseConflict {
             commit_id: record.commit_id.to_string(),
             committed_seq: Some(record.committed_seq),
-            committed_fingerprint: Some(commit.semantic_commit_fingerprint.as_str().to_owned()),
+            committed_fingerprint: Some(commit.semantic_commit_fingerprint.clone()),
         });
     }
     super::changes::committed_change_from_wal_record(&view.head.namespace_id, &commit)

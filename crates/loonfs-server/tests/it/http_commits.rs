@@ -15,9 +15,8 @@ use loonfs_types::api::v0::{
 };
 use loonfs_types::{
     api::v0::{Commit, FilesystemChange},
-    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, ContentRef,
-    DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, FilesystemOperation, RevisionNo,
-    ROOT_INODE_ID,
+    AbsolutePath, ChangeSeq, CommitId, CommitRequest, ContentRef, DeleteDirectoryBehavior,
+    DestinationBehavior, ErrorCode, ErrorResponse, FilesystemOperation, RevisionNo, ROOT_INODE_ID,
 };
 use tempfile::tempdir;
 
@@ -1150,7 +1149,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
         panic!("a rejected commit body returns an HTTP status");
     };
     assert_eq!(status, 400);
-    let error: ApiError =
+    let error: ErrorResponse =
         serde_json::from_reader(response.into_reader()).expect("API error envelope");
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
 

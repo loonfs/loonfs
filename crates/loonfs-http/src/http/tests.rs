@@ -204,9 +204,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "metadata_compaction_required",
     "target_namespace_id",
     "captured_seq",
-    "through_seq",
     "ttl_ms",
-    "unit_published",
     "unrecognized_key",
     "update_access",
     "update_access_by_inode",
@@ -393,7 +391,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         precondition_index: Some(0),
         commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
         committed_seq: Some(ChangeSeq::from(1)),
-        committed_fingerprint: Some("fingerprint".to_owned()),
+        committed_fingerprint: Some(serde_json::from_str(r#""fingerprint""#).expect("fingerprint")),
         operation_index: Some(0),
         fenced_writer_epoch: Some(WriterEpoch::from(1)),
         active_writer_epoch: Some(WriterEpoch::from(2)),
@@ -752,7 +750,8 @@ async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
     let body = axum::body::to_bytes(slow.into_body(), usize::MAX)
         .await
         .expect("deadline body");
-    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("deadline envelope");
+    let error: loonfs_types::ErrorResponse =
+        serde_json::from_slice(&body).expect("deadline envelope");
     assert_eq!(error.code, ErrorCode::DeadlineExceeded.as_str());
     assert_eq!(error.request_id.as_deref(), Some(request_id.as_str()));
     assert!(error.message.contains("request_deadline_ms"));
@@ -1125,7 +1124,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
     let target = NamespacePath::parse("missing", "/notes/hello.txt").expect("target");
-    assert_api_error(
+    assert_error_response(
         harness
             .client
             .put_file_with_options(
@@ -1139,7 +1138,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
         "namespace_not_found",
         Some("namespace `missing` does not exist"),
     );
-    assert_api_error(
+    assert_error_response(
         harness
             .client
             .delete_path(&target, &loonfs_test_support::test_actor())
@@ -1149,7 +1148,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
         Some("namespace `missing` does not exist"),
     );
     let destination = NamespacePath::parse("missing", "/notes/renamed.txt").expect("target");
-    assert_api_error(
+    assert_error_response(
         harness
             .client
             .move_path_with_options(
@@ -1184,7 +1183,7 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
 
     let target = NamespacePath::parse("missing", "/").expect("target");
     let mut pager = harness.client.list(&target);
-    assert_api_error(
+    assert_error_response(
         pager.next().await.expect("a fresh pager has one page"),
         404,
         "namespace_not_found",
@@ -1202,7 +1201,7 @@ async fn http_delete_missing_path_returns_path_not_found() {
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let target = NamespacePath::parse("demo", "/missing.txt").expect("target");
-    assert_api_error(
+    assert_error_response(
         harness
             .client
             .delete_path(&target, &loonfs_test_support::test_actor())
@@ -1247,7 +1246,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let dir_target = NamespacePath::parse("demo", "/docs").expect("dir target");
-    assert_api_error(
+    assert_error_response(
         harness
             .client
             .put_file_with_options(
@@ -1264,7 +1263,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
 
     let from = NamespacePath::parse("demo", "/tmp/a.txt").expect("from");
     let to = NamespacePath::parse("demo", "/docs/a.txt").expect("to");
-    assert_api_error(
+    assert_error_response(
         harness
             .client
             .move_path_with_options(
@@ -1392,7 +1391,7 @@ async fn http_move_with_preconditions_rejects_a_bumped_destination_revision() {
         .await
         .expect("bump destination revision");
 
-    assert_api_error(
+    assert_error_response(
         harness
             .client
             .move_path_with_options(
@@ -1453,7 +1452,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         .await
         .expect("put recreates the subtree");
     let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
-    assert_api_error(
+    assert_error_response(
         harness.client.stat(&old_child).await,
         404,
         "path_not_found",
@@ -1585,7 +1584,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
             ca_cert_path: None,
         })
         .expect("valid client config");
-        assert_api_error(
+        assert_error_response(
             client.get_namespace(&namespace_id("demo")).await,
             401,
             "unauthorized",
@@ -1594,7 +1593,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
         // The checkpoint inventory names this deployment's garbage-collection
         // roots, so it answers behind the same token as everything else.
         let mut pager = client.list_checkpoints(&namespace_id("demo"));
-        assert_api_error(
+        assert_error_response(
             pager.next().await.expect("a fresh pager has one page"),
             401,
             "unauthorized",
@@ -1941,7 +1940,7 @@ async fn http_namespace_json_body_over_the_limit_answers_content_too_large() {
     let body = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .expect("response body");
-    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("API error");
+    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("API error");
     assert_eq!(error.code, ErrorCode::ContentTooLarge.as_str());
     state.runtime.shutdown().await.expect("writer shutdown");
 }
@@ -1987,7 +1986,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         )
         .await
         .expect("begin a proxied upload session");
-    assert_api_error(
+    assert_error_response(
         client
             .put_upload_content(&namespace, &session.upload_id, &[0u8; 4096])
             .await,
@@ -2340,7 +2339,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let config_for_busy = client_config.clone();
     let client = Client::new(config_for_busy).expect("valid client config");
     let target = NamespacePath::parse("demo", "/one.bin").expect("target");
-    assert_api_error(
+    assert_error_response(
         client
             .put_file_with_options(
                 &target,
@@ -2430,13 +2429,13 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let config_for_busy = client_config.clone();
     let client = Client::new(config_for_busy).expect("valid client config");
     let target = NamespacePath::parse("demo", "/note.txt").expect("target");
-    assert_api_error(
+    assert_error_response(
         client.read_file(&target).await,
         503,
         "server_busy",
         Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
     );
-    assert_api_error(
+    assert_error_response(
         client
             .read_file_revision_by_inode(
                 &namespace_id("demo"),
@@ -2621,7 +2620,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         ca_cert_path: None,
     })
     .expect("valid client config");
-    assert_api_error(
+    assert_error_response(
         client
             .read_file(&NamespacePath::parse("demo", "/big.bin").expect("target"))
             .await,
@@ -2629,7 +2628,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         "content_too_large",
         None,
     );
-    assert_api_error(
+    assert_error_response(
         client
             .read_file_revision_by_inode(
                 &namespace_id("demo"),
@@ -2924,7 +2923,7 @@ async fn delete_path_recursive(
         .unwrap_or_else(|error| panic!("delete `{absolute_path}`: {error}"));
 }
 
-fn assert_api_error<T: std::fmt::Debug>(
+fn assert_error_response<T: std::fmt::Debug>(
     result: Result<T, ClientError>,
     status: u16,
     code: &str,
@@ -3039,7 +3038,7 @@ mod direct_download {
                         "/v0/namespaces/{namespace}/inodes/ino_{}/revisions/1/downloads",
                         entry.inode_id
                     ),
-                    String::new(),
+                    "{}".to_owned(),
                 )
             };
             recording.reset();
@@ -3078,7 +3077,7 @@ mod direct_download {
                     String::from_utf8_lossy(&bytes)
                 );
                 if denied {
-                    let error: loonfs_types::ApiError =
+                    let error: loonfs_types::ErrorResponse =
                         serde_json::from_slice(&bytes).expect("error");
                     assert_eq!(error.code, ErrorCode::ContentNotMaterialized.as_str());
                     assert_eq!(recording.count(OperationSelector::Put), 0);
@@ -3145,6 +3144,8 @@ mod direct_download {
         .expect("app");
         let snapshot_id = "pin_00000000000000000001-0000000000000002";
         let route = "/v0/namespaces/demo/filesystem/downloads";
+        let inode_route = "/v0/namespaces/demo/inodes/ino_1/downloads";
+        let revision_route = "/v0/namespaces/demo/inodes/ino_1/revisions/1/downloads";
         for (uri, body, param) in [
             (
                 format!("{route}?snapshot_id={snapshot_id}"),
@@ -3154,7 +3155,27 @@ mod direct_download {
             (
                 route.to_owned(),
                 serde_json::json!({"path": "/report.txt", "revision_no": 1, "snapshot_id": snapshot_id}),
-                "revision_no",
+                "/revision_no",
+            ),
+            (
+                route.to_owned(),
+                serde_json::json!({"path": "report.txt"}),
+                "/path",
+            ),
+            (
+                format!("{inode_route}?start_offset=1"),
+                serde_json::json!({}),
+                "start_offset",
+            ),
+            (
+                inode_route.to_owned(),
+                serde_json::json!({"snapshot_id": "malformed"}),
+                "/snapshot_id",
+            ),
+            (
+                revision_route.to_owned(),
+                serde_json::json!({"snapshot_id": snapshot_id}),
+                "/snapshot_id",
             ),
         ] {
             let response = router
@@ -3175,10 +3196,167 @@ mod direct_download {
             let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .expect("response body");
-            let error: loonfs_types::ApiError = serde_json::from_slice(&bytes).expect("API error");
+            let error: loonfs_types::ErrorResponse =
+                serde_json::from_slice(&bytes).expect("API error");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
             assert_eq!(error.param.as_deref(), Some(param));
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn download_body_errors_report_json_pointer_params() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let transfers = DirectTransferIssuers {
+            get: LoopbackIssuer::at(object_base_url),
+            put: None,
+            multipart: None,
+        };
+        let client = start(temp_dir.path(), "download-pointers", Some(transfers)).await;
+        let actor = loonfs_test_support::test_actor();
+        let namespace = namespace_id("demo");
+        client
+            .create_namespace(&namespace, &actor)
+            .await
+            .expect("namespace");
+        let path = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
+        client
+            .put_file(&path, b"report", &actor)
+            .await
+            .expect("put file");
+        let inode_id = client.stat(&path).await.expect("stat").inode_id;
+        let checkpoint_id = client
+            .create_checkpoint(
+                &namespace,
+                &loonfs_types::CreateCheckpointRequest {
+                    name: "not-a-snapshot".to_owned(),
+                    ttl_ms: None,
+                },
+            )
+            .await
+            .expect("checkpoint")
+            .checkpoint_id;
+        let past_end = DownloadOptions {
+            start_offset: 99,
+            ..DownloadOptions::default()
+        };
+        let at_checkpoint = DownloadOptions {
+            snapshot_id: Some(checkpoint_id),
+            ..DownloadOptions::default()
+        };
+
+        let cases = [
+            (
+                client
+                    .create_download_with_options(&path, &past_end)
+                    .await
+                    .map(drop),
+                "/start_offset",
+            ),
+            (
+                client
+                    .create_revision_download_with_options(&path, RevisionNo(1), &at_checkpoint)
+                    .await
+                    .map(drop),
+                "/revision_no",
+            ),
+            (
+                client
+                    .create_download_by_inode_with_options(&namespace, inode_id, &past_end)
+                    .await
+                    .map(drop),
+                "/start_offset",
+            ),
+            (
+                client
+                    .create_revision_download_by_inode_with_options(
+                        &namespace,
+                        inode_id,
+                        RevisionNo(1),
+                        &past_end,
+                    )
+                    .await
+                    .map(drop),
+                "/start_offset",
+            ),
+        ];
+        for (result, expected) in cases {
+            match result {
+                Err(ClientError::Api {
+                    status,
+                    code,
+                    param,
+                    ..
+                }) => {
+                    assert_eq!((status, code.as_str()), (400, "invalid_request"));
+                    assert_eq!(param.as_deref(), Some(expected));
+                }
+                other => panic!("expected invalid_request at `{expected}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_inode_download_accepts_a_missing_body_and_rejects_a_malformed_one() {
+        use tower::ServiceExt;
+
+        let directory = tempdir().expect("tempdir");
+        let (router, state) = test_app(
+            test_options(directory.path(), "inode-download-bodies"),
+            TestAppOptions {
+                store: None,
+                direct_transfers: Some(DirectTransferIssuers {
+                    get: LoopbackIssuer::at("http://objects"),
+                    put: None,
+                    multipart: None,
+                }),
+            },
+        )
+        .await
+        .expect("app");
+        let actor = loonfs_test_support::test_actor();
+        let namespace = namespace_id("demo");
+        state
+            .runtime
+            .create_namespace(&namespace, &actor)
+            .await
+            .expect("namespace");
+        state
+            .runtime
+            .open_namespace(&namespace)
+            .expect("open namespace")
+            .put_file("/report.txt", b"report", &actor)
+            .await
+            .expect("put file");
+        let inode_id = state
+            .runtime
+            .namespace(&namespace)
+            .stat("/report.txt")
+            .await
+            .expect("stat")
+            .inode_id;
+        let inode = format!("/v0/namespaces/demo/inodes/ino_{inode_id}");
+        for uri in [
+            format!("{inode}/downloads"),
+            format!("{inode}/revisions/1/downloads"),
+        ] {
+            for (body, status) in [("", StatusCode::OK), ("{", StatusCode::BAD_REQUEST)] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri(&uri)
+                            .header("authorization", "Bearer test-token")
+                            .body(axum::body::Body::from(body))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), status, "{uri} with body {body:?}");
+            }
+        }
+        state.runtime.shutdown().await.expect("shutdown writer");
     }
 
     /// The read cap these deployments are configured with.
@@ -3482,7 +3660,7 @@ mod direct_download {
 
         // The wall the audit found: this deployment let the file exist and
         // will not proxy it back.
-        assert_api_error(
+        assert_error_response(
             client.read_file(&target).await,
             413,
             ErrorCode::ContentTooLarge.as_str(),
@@ -3515,7 +3693,7 @@ mod direct_download {
             .delete_path(&target, &loonfs_test_support::test_actor())
             .await
             .expect("delete current binding");
-        assert_api_error(
+        assert_error_response(
             client
                 .create_download_by_inode(&namespace, entry.inode_id)
                 .await,
@@ -3616,7 +3794,7 @@ mod direct_download {
                 ..
             }) => {
                 assert_eq!(code, ErrorCode::InvalidRequest.as_str());
-                assert_eq!(param.as_deref(), Some("start_offset"));
+                assert_eq!(param.as_deref(), Some("/start_offset"));
             }
             other => panic!("expected invalid_request for start_offset, got {other:?}"),
         }
@@ -4313,7 +4491,7 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
-    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error");
+    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error");
     assert_eq!(error.code, ErrorCode::StaleHead.as_str());
     let details = error.details.expect("details");
     assert_eq!(details.precondition_index, Some(0));
@@ -4366,7 +4544,7 @@ async fn scoped_commit_precondition_returns_409_with_its_index() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
-    let error: loonfs_types::ApiError = serde_json::from_slice(&body).expect("error");
+    let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error");
     assert_eq!(error.code, ErrorCode::StaleRevision.as_str());
     let details = error.details.expect("details");
     assert_eq!(details.precondition_index, Some(1));

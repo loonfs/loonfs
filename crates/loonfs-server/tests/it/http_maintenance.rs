@@ -11,12 +11,12 @@ use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{first_page, namespace_id};
 use loonfs_types::{
-    ApiError, ChangeSeq, Checkpoint, CheckpointOwnerSummary, DeleteCheckpointResponse, ManifestNo,
+    ChangeSeq, Checkpoint, CheckpointOwner, DeleteCheckpointResponse, ErrorResponse, ManifestNo,
     PinId,
 };
 use tempfile::tempdir;
 
-type ApiResult<T> = Result<T, Box<ApiError>>;
+type ApiResult<T> = Result<T, Box<ErrorResponse>>;
 
 fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<Checkpoint> {
     post_maintenance_json_body(
@@ -161,7 +161,7 @@ fn decode_maintenance_response<T: serde::de::DeserializeOwned>(
 ) -> ApiResult<T> {
     match result {
         Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| {
-            Box::new(ApiError {
+            Box::new(ErrorResponse {
                 code: "invalid_json".to_owned(),
                 feature: None,
                 message: err.to_string(),
@@ -171,18 +171,18 @@ fn decode_maintenance_response<T: serde::de::DeserializeOwned>(
             })
         }),
         Err(ureq::Error::Status(_, response)) => Err(Box::new(
-            serde_json::from_reader::<_, ApiError>(response.into_reader()).unwrap_or_else(|err| {
-                ApiError {
+            serde_json::from_reader::<_, ErrorResponse>(response.into_reader()).unwrap_or_else(
+                |err| ErrorResponse {
                     code: "invalid_json".to_owned(),
                     feature: None,
                     message: err.to_string(),
                     param: None,
                     request_id: None,
                     details: None,
-                }
-            }),
+                },
+            ),
         )),
-        Err(ureq::Error::Transport(error)) => Err(Box::new(ApiError {
+        Err(ureq::Error::Transport(error)) => Err(Box::new(ErrorResponse {
             code: "transport".to_owned(),
             feature: None,
             message: error.to_string(),
@@ -225,7 +225,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     assert!(PinId::parse(first.checkpoint_id.as_str()).is_ok());
     assert_eq!(
         first.owner,
-        CheckpointOwnerSummary::User {
+        CheckpointOwner::User {
             name: "nightly".to_owned()
         }
     );
@@ -680,7 +680,7 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
     )
     .expect("probe the configured store");
 
-    assert!(probe.run_id.starts_with("probe_"));
+    assert!(probe.run_id.as_str().starts_with("probe_"));
     assert!(!probe.checks.is_empty(), "the probe must report its work");
     let names: std::collections::BTreeSet<&str> = probe
         .checks

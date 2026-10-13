@@ -12,10 +12,10 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::read_anchor::{load_read_anchor, NamespaceReadAnchor};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
+use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::wal::ProjectedWalTail;
 use crate::wal::{replay_discovered_tail, TailChunk, ValidatedWalTail, WalObjectError};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::AcquiredWriter;
 use loonfs_types::{CommitId, NamespaceId};
 use std::sync::Arc;
 

@@ -6,10 +6,11 @@ use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::claim_compactor;
 use crate::namespace::control::CurrentManifest;
 use crate::publish::{InlineContent, WalFoldInput};
+use crate::FoldWalOutcome;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::layout::{parse_object_key, wal_no_of, DurableObjectFamily};
 use loonfs_test_support::stores::{RecordedOperation, StoreCounts};
-use loonfs_types::{CompactorEpoch, ContentId, DeleteDirectoryBehavior, FoldWalOutcome};
+use loonfs_types::{CompactorEpoch, ContentId, DeleteDirectoryBehavior};
 use std::path::Path;
 
 /// A manifest another process publishes while a fold waits at its

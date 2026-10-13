@@ -6,16 +6,16 @@ pub(crate) fn checkpoint_summary(
     let expires_at_ms = record.owner.expires_at_ms();
     let owner = match record.owner {
         loonfs_types::format::control::PinOwner::User { name, .. } => {
-            loonfs_types::CheckpointOwnerSummary::User { name }
+            loonfs_types::CheckpointOwner::User { name }
         }
         loonfs_types::format::control::PinOwner::Fork {
             target_namespace_id,
             ..
-        } => loonfs_types::CheckpointOwnerSummary::Fork {
+        } => loonfs_types::CheckpointOwner::Fork {
             target_namespace_id,
         },
         loonfs_types::format::control::PinOwner::Snapshot { name, .. } => {
-            loonfs_types::CheckpointOwnerSummary::Snapshot { name }
+            loonfs_types::CheckpointOwner::Snapshot { name }
         }
     };
     loonfs_types::Checkpoint {
@@ -33,7 +33,7 @@ pub(crate) fn checkpoint_summary(
 /// returns.
 pub(crate) fn snapshot_summary(
     record: loonfs_types::format::control::PinPayload,
-) -> loonfs_types::SnapshotSummary {
-    loonfs_types::SnapshotSummary::from_checkpoint(checkpoint_summary(record))
+) -> loonfs_types::Snapshot {
+    loonfs_types::Snapshot::from_checkpoint(checkpoint_summary(record))
         .expect("a pin created with, or loaded as, a snapshot owner should have one")
 }

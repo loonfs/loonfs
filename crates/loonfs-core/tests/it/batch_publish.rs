@@ -1001,7 +1001,7 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
             committed_fingerprint: Some(fingerprint),
         } if commit_id == "attributed-receipt"
             && committed_seq == first.committed_seq
-            && fingerprint.starts_with("v1:sha256:")
+            && fingerprint.as_str().starts_with("v1:sha256:")
     ));
 }
 
@@ -1130,7 +1130,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
             committed_fingerprint: Some(fingerprint),
         } if commit_id == "same-path-request"
             && committed_seq == Some(first.committed_seq)
-            && fingerprint.starts_with("v1:sha256:")
+            && fingerprint.as_str().starts_with("v1:sha256:")
     ));
 
     let wal_keys = data_wal_keys(&store).await;

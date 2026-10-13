@@ -12,7 +12,7 @@ use crate::time::{Deadline, MonotonicTimer};
 use loonfs_objectstore::keys::pin;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::PinOwner;
-use loonfs_types::{DeleteSnapshotResponse, NamespaceId, PinId, SnapshotSummary};
+use loonfs_types::{DeleteSnapshotResponse, NamespaceId, PinId, Snapshot};
 use std::sync::Arc;
 
 /// Resolves the read basis a live snapshot lease pins.
@@ -34,15 +34,32 @@ pub async fn load_snapshot_read_basis<S: ObjectStore + ?Sized>(
     load_checkpoint_read_basis_from_record(store, segment_cache, live_head, loaded.state).await
 }
 
+/// Loads one live snapshot. A missing pin, or a pin that isn't a snapshot,
+/// returns `snapshot_not_found`, and an expired snapshot returns
+/// `snapshot_gone`.
+pub(crate) async fn get_snapshot<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    snapshot_id: &PinId,
+    now_ms: u64,
+) -> Result<Snapshot> {
+    crate::namespace::control::load_current_manifest(store, namespace_id)
+        .await
+        .map_err(CoreError::ControlObjectLoad)?;
+    let loaded = load_owned_pin(store, namespace_id, snapshot_id, PinOwnerKind::Snapshot).await?;
+    let loaded = classify_live_snapshot(loaded, now_ms)?;
+    Ok(super::snapshot_summary(loaded.state))
+}
+
 pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     snapshot_id: &PinId,
     requested_expires_at_ms: u64,
-    max_lifetime_ms: u64,
+    max_age_ms: u64,
     context: &MutationContext,
     timer: Arc<dyn MonotonicTimer>,
-) -> Result<SnapshotSummary> {
+) -> Result<Snapshot> {
     let deadline = Deadline::start(timer);
     let object_key = pin(namespace_id, snapshot_id);
     retry_while_contended(|| async {
@@ -50,7 +67,7 @@ pub(crate) async fn extend_snapshot_expiry<S: ObjectStore + ?Sized>(
             load_owned_pin(store, namespace_id, snapshot_id, PinOwnerKind::Snapshot).await?;
         let loaded = classify_live_snapshot(loaded, context.now_at(&deadline))?;
         let mut next = loaded.state.clone();
-        let lifetime_ceiling = next.created_at_ms.saturating_add(max_lifetime_ms);
+        let lifetime_ceiling = next.created_at_ms.saturating_add(max_age_ms);
         let expires_at_ms = snapshot_expiry_mut(&mut next.owner)
             .expect("a classified snapshot should carry a snapshot owner");
         let new_expires_at_ms = requested_expires_at_ms

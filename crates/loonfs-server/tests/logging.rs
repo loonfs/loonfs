@@ -137,7 +137,7 @@ fn capture() -> &'static Capture {
     })
 }
 
-async fn request_error(router: &Router, uri: &str) -> (u16, loonfs_types::ApiError, String) {
+async fn request_error(router: &Router, uri: &str) -> (u16, loonfs_types::ErrorResponse, String) {
     request_error_with(
         router,
         Method::GET,
@@ -154,7 +154,7 @@ async fn request_error_with(
     uri: &str,
     authorization: Option<&str>,
     body: Body,
-) -> (u16, loonfs_types::ApiError, String) {
+) -> (u16, loonfs_types::ErrorResponse, String) {
     let mut request = Request::builder().method(method).uri(uri);
     if let Some(authorization) = authorization {
         request = request.header("authorization", authorization);
@@ -175,7 +175,8 @@ async fn request_error_with(
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("read API error body");
-    let body = serde_json::from_slice::<loonfs_types::ApiError>(&bytes).expect("API error body");
+    let body =
+        serde_json::from_slice::<loonfs_types::ErrorResponse>(&bytes).expect("API error body");
     assert_eq!(body.request_id.as_deref(), Some(request_id.as_str()));
     (status, body, request_id)
 }

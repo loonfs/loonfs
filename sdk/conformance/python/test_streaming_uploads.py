@@ -48,6 +48,7 @@ def test_streaming_uploads(fixture, source_type):
         "kind": "presigned_url",
         "method": "PUT",
         "url": "http://objects.test/object",
+        "headers": {},
         "expires_at_ms": 2000000000000,
     }
 

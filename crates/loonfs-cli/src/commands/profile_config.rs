@@ -473,7 +473,7 @@ fn absolute_local_root(root: &Path) -> Result<String, CliError> {
         .map_err(CliError::io)?
         .into_os_string()
         .into_string()
-        .map_err(|_| CliError::invalid_config("local-fs root is not valid UTF-8"))
+        .map_err(|_| CliError::invalid_config("local_fs root is not valid UTF-8"))
 }
 
 fn local_store(

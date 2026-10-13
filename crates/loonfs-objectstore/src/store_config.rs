@@ -4,7 +4,7 @@
 //! (`[profiles.<name>.store]`) deserialize into [`StoreConfig`], validate it
 //! with [`StoreConfig::validate`], and construct the runtime store with
 //! [`StoreConfig::configured_object_store`]. The TOML shape is kind-tagged
-//! and kebab-case. Each binary ships the examples that document it, in the
+//! and snake_case. Each binary ships the examples that document it, in the
 //! `config/` directory of its own crate.
 
 use crate::configured::{
@@ -27,7 +27,7 @@ pub const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
 
 /// AWS S3 credential source, stored separately from provider settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AwsS3Credentials {
     /// Resolves refreshable credentials through the standard AWS SDK chain.
     Ambient {},
@@ -45,7 +45,7 @@ pub enum AwsS3Credentials {
 
 /// Cloudflare R2 credential source, stored separately from provider settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CloudflareR2Credentials {
     /// Resolves S3-compatible credentials from the process environment at construction.
     Ambient {},
@@ -60,7 +60,7 @@ pub enum CloudflareR2Credentials {
 
 /// Google Cloud Storage credential source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GcpGcsCredentials {
     /// Reads one service-account JSON file for requests and direct-transfer signing.
     ///
@@ -79,7 +79,7 @@ pub enum GcpGcsCredentials {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
-    rename_all = "kebab-case",
+    rename_all = "snake_case",
     deny_unknown_fields,
     remote = "Self"
 )]
@@ -177,7 +177,7 @@ impl StoreConfig {
                 CloudflareR2Credentials::Ambient {} => "ambient",
                 CloudflareR2Credentials::Static { .. } => "static",
             }),
-            StoreConfig::GcpGcs { .. } => Some("service-account-file"),
+            StoreConfig::GcpGcs { .. } => Some("service_account_file"),
         }
     }
 
@@ -393,7 +393,7 @@ fn resolve_r2_credentials(
 
 fn missing_r2_ambient_credentials() -> ObjectStoreError {
     ObjectStoreError::Configuration(format!(
-        "cloudflare-r2 ambient credentials require non-blank `{ACCESS_KEY_ID_ENV}` and \
+        "cloudflare_r2 ambient credentials require non-blank `{ACCESS_KEY_ID_ENV}` and \
          `{SECRET_ACCESS_KEY_ENV}`; set them in the environment or configure \
          `store.credentials.kind = \"static\"`"
     ))
@@ -444,12 +444,12 @@ mod tests {
     fn parses_all_provider_kinds_and_reports_their_kind() {
         let cases: [(&str, ConfiguredObjectStoreKind); 4] = [
             (
-                "kind = \"local-fs\"\nroot = \"/tmp/store\"",
+                "kind = \"local_fs\"\nroot = \"/tmp/store\"",
                 ConfiguredObjectStoreKind::LocalFs,
             ),
             (
                 r#"
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 
@@ -462,7 +462,7 @@ secret_access_key = "secret"
             ),
             (
                 r#"
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = "bucket"
 account_id = "account"
 endpoint_url = "https://account.r2.cloudflarestorage.com"
@@ -476,11 +476,11 @@ secret_access_key = "secret"
             ),
             (
                 r#"
-kind = "gcp-gcs"
+kind = "gcp_gcs"
 bucket = "bucket"
 
 [credentials]
-kind = "service-account-file"
+kind = "service_account_file"
 path = "/tmp/service-account.json"
 "#,
                 ConfiguredObjectStoreKind::GcpGcs,
@@ -490,7 +490,23 @@ path = "/tmp/service-account.json"
         for (contents, kind) in cases {
             let config = parse(contents);
             assert_eq!(config.kind(), kind);
+            assert_eq!(
+                toml::from_str::<toml::Value>(contents).expect("toml")["kind"].as_str(),
+                Some(kind.as_str()),
+                "the label matches the config spelling"
+            );
             config.validate().expect("valid config");
+        }
+    }
+
+    #[test]
+    fn a_hyphenated_store_kind_does_not_load() {
+        for kind in ["local-fs", "aws-s3", "cloudflare-r2", "gcp-gcs"] {
+            let contents = format!("kind = \"{kind}\"\nroot = \"/tmp/store\"");
+            assert!(
+                toml::from_str::<StoreConfig>(&contents).is_err(),
+                "`{kind}` must not load"
+            );
         }
     }
 
@@ -499,7 +515,7 @@ path = "/tmp/service-account.json"
         for (contents, host) in [
             (
                 r#"
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 endpoint_url = "http://bucket.s3.amazonaws.com"
@@ -513,7 +529,7 @@ secret_access_key = "secret"
             ),
             (
                 r#"
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = "bucket"
 account_id = "account"
 endpoint_url = "http://account.r2.cloudflarestorage.com"
@@ -539,7 +555,7 @@ secret_access_key = "secret"
         // A gateway that is nobody's provider domain keeps working on http.
         parse(
             r#"
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 endpoint_url = "http://127.0.0.1:9000"
@@ -565,7 +581,7 @@ secret_access_key = "secret"
 
         let aws = parse(
             r#"
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 
@@ -586,7 +602,7 @@ kind = "ambient"
 
         let r2 = parse(
             r#"
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = "bucket"
 account_id = "account"
 endpoint_url = "https://account.r2.cloudflarestorage.com"
@@ -611,7 +627,7 @@ kind = "ambient"
             .expect_err("missing r2 ambient credentials");
         let r2_message = r2_error.to_string();
         assert!(
-            r2_message.contains("cloudflare-r2 ambient credentials"),
+            r2_message.contains("cloudflare_r2 ambient credentials"),
             "{r2_message}"
         );
         assert!(r2_message.contains("AWS_ACCESS_KEY_ID"), "{r2_message}");
@@ -622,7 +638,7 @@ kind = "ambient"
     fn validate_reports_store_rooted_field_paths() {
         let blank_bucket = parse(
             r#"
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = " "
 account_id = "account"
 endpoint_url = "https://example.com"
@@ -642,7 +658,7 @@ secret_access_key = "secret"
 
         let bad_scheme = parse(
             r#"
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 endpoint_url = "ftp://example.com"
@@ -678,7 +694,7 @@ secret_access_key = "secret"
         // store table has to fail the parse and name the offending key.
         let error = toml::from_str::<StoreConfig>(
             r#"
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 buckt = "typo"
@@ -697,7 +713,7 @@ kind = "ambient"
 
         let nested = toml::from_str::<StoreConfig>(
             r#"
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 
@@ -715,7 +731,7 @@ access_key_id = "not-allowed"
     fn debug_output_redacts_credentials() {
         let config = parse(
             r#"
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 
@@ -739,7 +755,7 @@ session_token = "debug-session-token"
     fn redacted_copy_serializes_without_credentials() {
         let config = parse(
             r#"
-kind = "cloudflare-r2"
+kind = "cloudflare_r2"
 bucket = "bucket"
 account_id = "account"
 endpoint_url = "https://account.r2.cloudflarestorage.com"
@@ -763,7 +779,7 @@ secret_access_key = "plain-secret-access-key"
     fn serialization_round_trips_the_store_table() {
         let config = parse(
             r#"
-kind = "aws-s3"
+kind = "aws_s3"
 bucket = "bucket"
 region = "us-east-1"
 key_prefix = "demo"
@@ -776,7 +792,7 @@ secret_access_key = "secret"
         );
 
         let rendered = toml::to_string_pretty(&config).expect("serialize store config");
-        assert!(rendered.contains("kind = \"aws-s3\""));
+        assert!(rendered.contains("kind = \"aws_s3\""));
         assert!(!rendered.contains("session_token"));
         assert!(!rendered.contains("endpoint_url"));
 

@@ -1,7 +1,7 @@
 //! Defines [`ClientError`], returned by asynchronous client operations.
 
 use loonfs_types::config::ConfigFieldError;
-use loonfs_types::{ApiError, ErrorCode, ErrorDetails};
+use loonfs_types::{ErrorCode, ErrorDetails, ErrorResponse};
 use thiserror::Error;
 
 /// Error returned by the asynchronous HTTP client.
@@ -74,7 +74,7 @@ pub enum ClientError {
 
 impl ClientError {
     /// Converts a decoded API error into a client error.
-    pub fn from_api_error(status: u16, body: ApiError) -> Self {
+    pub fn from_error_response(status: u16, body: ErrorResponse) -> Self {
         Self::Api {
             status,
             code: body.code,

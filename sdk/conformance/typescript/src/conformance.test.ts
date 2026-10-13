@@ -2254,7 +2254,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
         limit: 100,
         snapshot_id: snapshot.snapshot_id,
     });
-    assert.equal(feed.through_seq, expected.snapshot_head_seq);
+    assert.equal(feed.head_seq, expected.snapshot_head_seq);
     assert.equal(feed.next_after_seq, undefined);
     assert.deepEqual(
         feed.changes.map((change) => change.committed_seq),
@@ -2270,6 +2270,20 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     assert.equal(extended.captured_seq, expected.snapshot_head_seq);
     assert.equal(extended.name, request.snapshot_name);
     assert.ok(extended.expires_at_ms > snapshot.expires_at_ms);
+
+    const retrieved = await client.snapshots.retrieve({
+        namespace_id: namespaceId,
+        snapshot_id: snapshot.snapshot_id,
+    });
+    assert.equal(retrieved.snapshot_id, snapshot.snapshot_id);
+    assert.equal(retrieved.expires_at_ms, extended.expires_at_ms);
+    const checkpoint = await client.maintenance.checkpoints.retrieve({
+        namespace_id: namespaceId,
+        checkpoint_id: snapshot.snapshot_id,
+    });
+    assert.equal(checkpoint.checkpoint_id, snapshot.snapshot_id);
+    assert.equal(checkpoint.captured_seq, expected.snapshot_head_seq);
+    assert.equal(checkpoint.expires_at_ms, extended.expires_at_ms);
 
     const listed = await client.snapshots.list({ namespace_id: namespaceId });
     assert.equal(listed.response.namespace_id, namespaceId);

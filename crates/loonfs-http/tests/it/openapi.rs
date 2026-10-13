@@ -446,13 +446,13 @@ fn openapi_documents_current_server_paths() {
         paths,
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
         "post",
-        &["snapshot_id", "start_offset"],
+        &[],
     );
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         "post",
-        &["start_offset"],
+        &[],
     );
     assert_query_params(
         paths,
@@ -512,9 +512,12 @@ fn openapi_documents_current_server_paths() {
         ),
     ] {
         let inode_download = &paths[path]["post"];
-        assert!(inode_download.get("requestBody").is_none());
-        assert_eq!(inode_download["x-fern-request-name"], request_name);
-        assert!(spec["components"]["schemas"].get(request_name).is_none());
+        assert_eq!(
+            inode_download.pointer("/requestBody/content/application~1json/schema/$ref"),
+            Some(&json!(format!("#/components/schemas/{request_name}")))
+        );
+        assert!(inode_download.get("x-fern-request-name").is_none());
+        assert!(spec["components"]["schemas"].get(request_name).is_some());
     }
 
     for (path, method, parameter, schema_name) in [
@@ -590,7 +593,7 @@ fn openapi_documents_current_server_paths() {
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
             "get",
-            "get_file_bytes_by_inode",
+            "get_file_content_by_inode",
         ),
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
@@ -605,7 +608,7 @@ fn openapi_documents_current_server_paths() {
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
             "get",
-            "get_file_revision_bytes_by_inode",
+            "get_file_revision_content_by_inode",
         ),
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
@@ -1431,16 +1434,16 @@ fn openapi_names_tagged_one_of_alternatives() {
         (
             "GrepIndex",
             &[
-                "GrepIndexLifecycleDisabled",
-                "GrepIndexLifecycleBackfilling",
-                "GrepIndexLifecycleActive",
+                "GrepIndexStatusDisabled",
+                "GrepIndexStatusBackfilling",
+                "GrepIndexStatusActive",
             ][..],
         ),
         (
             "CompactionStepOutcome",
             &[
                 "CompactionStepOutcomeNotNeeded",
-                "CompactionStepOutcomeUnitPublished",
+                "CompactionStepOutcomeBoundedMergePublished",
                 "CompactionStepOutcomeMetadataCompactionRequired",
                 "CompactionStepOutcomeManifestAdvanced",
                 "CompactionStepOutcomeFenced",
