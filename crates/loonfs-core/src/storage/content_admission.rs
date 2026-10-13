@@ -10,10 +10,9 @@ use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::api::v0::ContentToken;
-use loonfs_types::format::hex::{hex_decode_bytes, hex_encode_bytes};
 use loonfs_types::{
-    decode_token, encode_token, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, OpaqueToken,
-    OpaqueTokenError, UploadId,
+    decode_token, decode_token_bytes, encode_token, encode_token_bytes, ChecksumAlgorithm,
+    ContentId, ContentRef, NamespaceId, OpaqueToken, OpaqueTokenError, UploadId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -225,7 +224,7 @@ pub fn mint_content_token(
     };
     let payload_part = encode_token(&payload, CONTENT_TOKEN_FORMAT_VERSION)
         .map_err(|error| ContentTokenError::Codec(error.to_string()))?;
-    let signature_part = hex_encode_bytes(&loonfs_objectstore::crypto::hmac_sha256(
+    let signature_part = encode_token_bytes(&loonfs_objectstore::crypto::hmac_sha256(
         secret.as_bytes(),
         payload_part.as_bytes(),
     ));
@@ -245,10 +244,14 @@ pub fn verify_content_token(
         .token
         .split_once('.')
         .ok_or(ContentTokenError::Malformed)?;
-    let actual_signature =
-        hex_decode_bytes(signature_part).map_err(|_| ContentTokenError::Malformed)?;
     let expected_signature =
         loonfs_objectstore::crypto::hmac_sha256(secret.as_bytes(), payload_part.as_bytes());
+    // A hex signature is also base64url and decodes, but to 48 bytes rather than
+    // the 32 of an HMAC-SHA256, so the length check reports it as malformed.
+    let actual_signature = decode_token_bytes(signature_part)
+        .ok()
+        .filter(|signature| signature.len() == expected_signature.len())
+        .ok_or(ContentTokenError::Malformed)?;
     if !loonfs_objectstore::crypto::constant_time_eq(&actual_signature, &expected_signature) {
         return Err(ContentTokenError::BadSignature);
     }
@@ -283,6 +286,7 @@ mod tests {
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use crate::namespace::state::NamespaceReadState;
     use loonfs_types::api::v0::ContentToken;
+    use loonfs_types::format::hex::hex_encode_bytes;
     use loonfs_types::{ContentId, ContentRef, NamespaceId};
 
     fn catalog_entry(namespace_id: NamespaceId) -> VerifiedNamespaceCatalogEntry {
@@ -359,17 +363,34 @@ mod tests {
     }
 
     #[test]
-    fn a_content_token_in_the_earlier_base64_format_is_rejected() {
+    fn a_content_token_with_a_hex_payload_or_signature_is_rejected() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
-        let token = ContentToken {
-            content_ref: fixed_content(&namespace),
-            token: "eyJ2ZXJzaW9uIjoidmN0NCIsImNvbnRlbnRfcmVmIjp7ImtpbmQiOiJibG9iX3YxIiwib3duZXJfbmFtZXNwYWNlX2lkIjoiZGVtbyIsImNvbnRlbnRfaWQiOiJjb25fMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJzaXplX2J5dGVzIjo1LCJjaGVja3N1bSI6eyJhbGdvcml0aG0iOiJjcmM2NG52bWUiLCJ2YWx1ZSI6IjMzNzc4NTcwMDY1MjQyNTcifX0sImV4cGlyZXNfYXRfbXMiOjM2MDEwMDB9.FiiwJZ3mu8b7T5ops2TFaNSTunQRlkiQrRdSgUvxn-w".to_owned(),
-        };
+        let content = fixed_content(&namespace);
+        let current =
+            mint_content_token("golden-secret", &evidence(&content), 1_000).expect("mint");
+        let (payload_part, _) = current.token.split_once('.').expect("signed token");
+        let hex_signature = hex_encode_bytes(&loonfs_objectstore::crypto::hmac_sha256(
+            b"golden-secret",
+            payload_part.as_bytes(),
+        ));
+        let earlier_hex_format = "7b22666f726d61745f76657273696f6e223a312c226b696e64223a22636f6e74656e745f746f6b656e222c22636f6e74656e745f726566223a7b226b696e64223a22626c6f625f7631222c226f776e65725f6e616d6573706163655f6964223a2264656d6f222c22636f6e74656e745f6964223a22636f6e5f3031323334353637383961626364656630313233343536373839616263646566222c2273697a655f6279746573223a352c22636865636b73756d223a7b22616c676f726974686d223a2263726336346e766d65222c2276616c7565223a2233333737383537303036353234323537227d7d2c22657870697265735f61745f6d73223a333630313030307d.95f51480abef35c6b78f8c81c182206cea93a5522e3d7af584c293c4b4a301f4";
         let catalog = catalog_entry(namespace);
-        assert_eq!(
-            verify_content_token("secret", &catalog, &token, 1_000),
-            Err(ContentTokenError::Malformed)
-        );
+
+        for token in [
+            earlier_hex_format.to_owned(),
+            format!("{payload_part}.{hex_signature}"),
+        ] {
+            let token = ContentToken {
+                content_ref: content.clone(),
+                token,
+            };
+            assert_eq!(
+                verify_content_token("golden-secret", &catalog, &token, 1_000),
+                Err(ContentTokenError::Malformed),
+                "{}",
+                token.token
+            );
+        }
     }
 
     #[test]
@@ -390,7 +411,7 @@ mod tests {
             expires_at_ms: 2_000,
         };
         let payload_part = encode_token(&payload, CONTENT_TOKEN_FORMAT_VERSION).expect("encode");
-        let signature_part = hex_encode_bytes(&loonfs_objectstore::crypto::hmac_sha256(
+        let signature_part = encode_token_bytes(&loonfs_objectstore::crypto::hmac_sha256(
             b"secret",
             payload_part.as_bytes(),
         ));

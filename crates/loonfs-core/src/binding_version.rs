@@ -16,7 +16,7 @@ pub(crate) fn encode(position: DeltaPosition, namespace_id: &NamespaceId) -> Bin
         BINDING_VERSION_FORMAT_VERSION,
     )
     .expect("binding position should contain only serializable fields");
-    BindingVersion::parse(encoded).expect("opaque token encoder should emit lowercase hex")
+    BindingVersion::parse(encoded).expect("opaque token encoder should emit base64url")
 }
 
 pub(crate) fn decode(

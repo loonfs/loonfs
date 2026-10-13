@@ -169,7 +169,7 @@ mod cursor_tests {
 
     #[test]
     fn cursor_decode_tolerates_additive_fields() {
-        let token = loonfs_types::format::hex::hex_encode_bytes(
+        let token = loonfs_types::encode_token_bytes(
             &serde_json::to_vec(&serde_json::json!({
                 "format_version": 1,
                 "kind": "checkpoint_inventory",
